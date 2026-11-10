@@ -4409,6 +4409,20 @@ mod tests {
         direct: &[&str],
         rolled: &str,
     ) -> (MarketplaceLock, MarketplaceManifest) {
+        part_beside_a_bundle_required_as(path, reg, writer, nests_before, direct, rolled, "req").await
+    }
+
+    /// [`part_beside_a_dependent_of_a_bundle`] with `y` naming the bundle `binding`, while
+    /// `pack` lists it as `req`.
+    async fn part_beside_a_bundle_required_as(
+        path: &Path,
+        reg: &MemoryRegistry,
+        writer: Option<Writer>,
+        nests_before: bool,
+        direct: &[&str],
+        rolled: &str,
+        binding: &str,
+    ) -> (MarketplaceLock, MarketplaceManifest) {
         for name in ["x", "leaving", "b", "extra"] {
             publish_skill(reg, &member(name), "v1").await;
         }
@@ -4416,7 +4430,7 @@ mod tests {
         publish_skill(reg, x2, "v2").await;
         publish_bundle(reg, REQ_ONE, &[("x", &member("x"))]).await;
         publish_bundle(reg, REQ_TWO, &[("x", x2)]).await;
-        publish_requiring_bundle(reg, &member("y"), "req", REQ_ONE).await;
+        publish_requiring_bundle(reg, &member("y"), binding, REQ_ONE).await;
         let leaving = member("leaving");
         let (bundle, skill) = (ArtifactKind::Bundle, ArtifactKind::Skill);
         if nests_before {
@@ -4450,7 +4464,7 @@ mod tests {
         let rolled_id = format!("localhost:5000/acme/req:{rolled}");
         publish_members(reg, PACK, &[(bundle, "req", &rolled_id), (skill, "leaving", &leaving)]).await;
         if rolled == "2" {
-            publish_requiring_bundle(reg, &member("y"), "req", REQ_TWO).await;
+            publish_requiring_bundle(reg, &member("y"), binding, REQ_TWO).await;
         }
         (previous, m)
     }
@@ -4546,6 +4560,77 @@ mod tests {
             resolve(&m, Some(&previous), &pick(&["pack"]), &access_over(&reg))
                 .await
                 .unwrap_or_else(|e| panic!("{label}: req:2 is the digest y's req:1 names: {e}"));
+        }
+    }
+
+    /// A held row may name the bundle it requires `other` while the pick's list names it
+    /// `req`: the edge is judged on the one bundle of its repository the pick reaches, and
+    /// refuses with 78 as an edge of the same name does.
+    #[tokio::test]
+    async fn a_pick_refuses_a_dependent_requiring_the_moved_bundle_under_another_binding() {
+        let mut missed = Vec::new();
+        for (label, writer, nests_before) in BUNDLE_WRITERS {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) =
+                part_beside_a_bundle_required_as(&path, &reg, writer, nests_before, &[], "2", "other").await;
+            let access = access_over(&reg);
+
+            let Err(err) = resolve(&m, Some(&previous), &pick(&["pack"]), &access).await else {
+                missed.push(label);
+                continue;
+            };
+            let text = err.to_string();
+            if writer.is_some() {
+                assert!(
+                    text.contains("skill 'y'") && text.contains("requires req:1"),
+                    "{label}: {text}"
+                );
+                assert!(text.contains("bundle 'req' to req:2"), "{label}: {text}");
+            }
+            assert_eq!(classified(err).exit, ExitCode::ConfigError, "{label}: {text}");
+
+            resolve(&m, Some(&previous), &update_extra(), &access)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: extra moves no bundle y requires: {e}"));
+        }
+        assert!(missed.is_empty(), "{missed:?}: y would stay beside req:2");
+    }
+
+    /// Controls for a requirement under another binding: nothing is refused where the pick's
+    /// bundle is the version the edge names, or where the pick reaches two bundles of that
+    /// repository, which name no one bundle.
+    #[tokio::test]
+    async fn a_pick_refuses_nothing_where_another_binding_names_no_one_moved_bundle() {
+        for (label, writer, nests_before) in BUNDLE_WRITERS {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) =
+                part_beside_a_bundle_required_as(&path, &reg, writer, nests_before, &[], "1", "other").await;
+
+            resolve(&m, Some(&previous), &pick(&["pack"]), &access_over(&reg))
+                .await
+                .unwrap_or_else(|e| panic!("{label}: pack lists the req:1 that y requires: {e}"));
+        }
+        for (label, writer, nests_before) in BUNDLE_WRITERS.into_iter().skip(1) {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m) =
+                part_beside_a_bundle_required_as(&path, &reg, writer, nests_before, &[], "2", "other").await;
+            let leaving = member("leaving");
+            let twice = [
+                (ArtifactKind::Bundle, "again", REQ_TWO),
+                (ArtifactKind::Bundle, "req", REQ_TWO),
+                (ArtifactKind::Skill, "leaving", &leaving),
+            ];
+            publish_members(&reg, PACK, &twice).await;
+
+            resolve(&m, Some(&previous), &pick(&["pack"]), &access_over(&reg))
+                .await
+                .unwrap_or_else(|e| panic!("{label}: pack lists req:2 under two bindings: {e}"));
         }
     }
 
