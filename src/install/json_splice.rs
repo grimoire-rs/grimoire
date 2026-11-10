@@ -207,7 +207,7 @@ pub fn upsert_member(text: &str, container: &str, member: &str, value: &serde_js
 }
 
 /// Remove `container.member` when present; a container emptied by the
-/// removal is removed too. Absent container/member is [`Splice::Unchanged`].
+/// removal is removed too, unless it still holds a comment. Absent container/member is [`Splice::Unchanged`].
 ///
 /// # Errors
 ///
@@ -234,15 +234,15 @@ pub fn remove_member(text: &str, container: &str, member: &str) -> io::Result<Sp
         return Ok(Splice::Unchanged);
     };
 
-    if inner.members.len() == 1 {
+    let siblings = inner.members.iter().map(Member::span);
+    let new_inner_text = cut_among(inner_text, siblings, existing.span());
+    if inner.members.len() == 1 && !new_inner_text.contains('/') {
         // Removing the last member: drop the whole container member so an
-        // emptied `"mcpServers": {}` husk is not left behind.
+        // emptied `"mcpServers": {}` husk is not left behind. A `/` left in
+        // the emptied container is a comment, which the user keeps.
         let siblings = root.members.iter().map(Member::span);
         return Ok(Splice::Changed(cut_among(text, siblings, container_member.span())));
     }
-
-    let siblings = inner.members.iter().map(Member::span);
-    let new_inner_text = cut_among(inner_text, siblings, existing.span());
     Ok(Splice::Changed(splice_span(
         text,
         &container_member.value,
@@ -306,7 +306,8 @@ pub fn upsert_array_element(text: &str, key: &str, element: &str) -> io::Result<
 
 /// Remove the string `element` from the array at the root member `key`;
 /// an array emptied by the removal takes its whole `key` member with it (no
-/// `"key": []` husk, mirroring [`remove_member`]'s emptied-container rule).
+/// `"key": []` husk, mirroring [`remove_member`]'s emptied-container rule)
+/// unless it still holds a comment.
 /// Absent key/element is [`Splice::Unchanged`].
 ///
 /// # Errors
@@ -335,11 +336,11 @@ pub fn remove_array_element(text: &str, key: &str, element: &str) -> io::Result<
         return Ok(Splice::Unchanged);
     };
 
-    if array.elements.len() == 1 {
+    let new_array_text = cut_among(array_text, array.elements.iter().cloned(), found.clone());
+    if array.elements.len() == 1 && !new_array_text.contains('/') {
         let siblings = root.members.iter().map(Member::span);
         return Ok(Splice::Changed(cut_among(text, siblings, key_member.span())));
     }
-    let new_array_text = cut_among(array_text, array.elements.iter().cloned(), found.clone());
     Ok(Splice::Changed(splice_span(text, &key_member.value, &new_array_text)))
 }
 
@@ -1989,6 +1990,60 @@ mod tests {
     }
 
     #[test]
+    fn remove_last_member_keeps_a_container_that_holds_a_comment() {
+        // The issue's shape, plus a comment after the member and a block comment.
+        for text in [
+            "{\n  \"mcp\": {\n    // keep this note\n    \"docs-search\": { \"type\": \"local\" }\n  }\n}\n",
+            "{\n  \"mcp\": {\n    \"docs-search\": { \"type\": \"local\" }\n    // keep this note\n  }\n}\n",
+            "{\n  \"mcp\": {\n    /* keep this note */\n    \"docs-search\": { \"type\": \"local\" }\n  }\n}\n",
+        ] {
+            let out = changed(remove_member(text, "mcp", "docs-search").unwrap());
+            let doc: serde_json::Value = parse_value(&out).expect("the result still parses");
+            assert_eq!(doc["mcp"], serde_json::json!({}), "container kept, emptied: {out}");
+            assert!(out.contains("keep this note"), "comment survives: {out}");
+            assert!(!out.contains("docs-search"), "member removed: {out}");
+        }
+    }
+
+    #[test]
+    fn remove_last_member_without_a_comment_still_drops_the_container() {
+        // A comment outside the container does not keep it.
+        let text = "{\n  // top note\n  \"mcp\": {\n    \"docs-search\": {}\n  }\n}\n";
+        let out = changed(remove_member(text, "mcp", "docs-search").unwrap());
+        assert!(!out.contains("mcp"), "emptied container removed: {out}");
+        assert!(out.contains("// top note"), "outside comment survives: {out}");
+    }
+
+    /// `(text, kept)`: the sole member goes, and the container stays exactly
+    /// when a comment is left in it. A `/` that is not a comment (CRLF, a path in
+    /// the removed value) must not decide it.
+    #[test]
+    fn remove_last_member_edge_rows() {
+        const ROWS: [(&str, bool); 5] = [
+            (
+                "{\r\n  \"mcp\": {\r\n    // note\r\n    \"d\": {}\r\n  }\r\n}\r\n",
+                true,
+            ),
+            ("{\r\n  \"mcp\": {\r\n    \"d\": {}\r\n  }\r\n}\r\n", false),
+            ("{\n  \"mcp\": {\n    /* a // b */\n    \"d\": {}\n  }\n}\n", true),
+            (
+                "{\n  \"mcp\": {\n    \"d\": {\"command\": \"/usr/bin/x\"}\n  }\n}\n",
+                false,
+            ),
+            ("{\n  \"mcp\": {\n    \"d\": {},\n    // note\n  }\n}\n", true),
+        ];
+        for (text, kept) in ROWS {
+            let out = changed(remove_member(text, "mcp", "d").unwrap());
+            let doc = parse_value(&out).unwrap_or_else(|| panic!("result does not parse: {out:?}"));
+            assert_eq!(doc.get("mcp").is_some(), kept, "{text:?} gave {out:?}");
+            if kept {
+                assert_eq!(doc["mcp"], serde_json::json!({}), "{text:?} gave {out:?}");
+                assert!(out.contains("note") || out.contains("a // b"), "{text:?} gave {out:?}");
+            }
+        }
+    }
+
+    #[test]
     fn remove_first_member_keeps_valid_json() {
         let text = "{\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"},\n    \"other\": {\"command\": \"x\"}\n  }\n}\n";
         let out = changed(remove_member(text, "mcpServers", "grim").unwrap());
@@ -2305,6 +2360,54 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(doc.get("instructions").is_none(), "no empty-array husk left: {out}");
         assert_eq!(doc["model"], "a/b");
+    }
+
+    #[test]
+    fn array_remove_last_element_keeps_an_array_that_holds_a_comment() {
+        for text in [
+            "{\n  \"instructions\": [\n    // keep this note\n    \"g.md\"\n  ]\n}\n",
+            "{\n  \"instructions\": [\n    \"g.md\"\n    // keep this note\n  ]\n}\n",
+            "{\n  \"instructions\": [\n    /* keep this note */\n    \"g.md\"\n  ]\n}\n",
+        ] {
+            let out = changed(remove_array_element(text, "instructions", "g.md").unwrap());
+            let doc: serde_json::Value = parse_value(&out).expect("the result still parses");
+            assert_eq!(doc["instructions"], serde_json::json!([]), "array kept, emptied: {out}");
+            assert!(out.contains("keep this note"), "comment survives: {out}");
+            assert!(!out.contains("g.md"), "element removed: {out}");
+            // A second pass finds nothing to remove, so `remove_every` terminates.
+            assert_eq!(
+                remove_array_element(&out, "instructions", "g.md").unwrap(),
+                Splice::Unchanged
+            );
+        }
+    }
+
+    /// The array counterpart of `remove_last_member_edge_rows`.
+    #[test]
+    fn array_remove_last_element_edge_rows() {
+        const ROWS: [(&str, bool); 5] = [
+            ("{\r\n  \"i\": [\r\n    // note\r\n    \"a/g\"\r\n  ]\r\n}\r\n", true),
+            ("{\r\n  \"i\": [\r\n    \"a/g\"\r\n  ]\r\n}\r\n", false),
+            ("{\n  \"i\": [\n    /* a // b */\n    \"a/g\"\n  ]\n}\n", true),
+            ("{\n  \"i\": [\n    \"a/g\"\n  ]\n}\n", false),
+            ("{\n  \"i\": [\n    \"a/g\",\n    // note\n  ]\n}\n", true),
+        ];
+        for (text, kept) in ROWS {
+            let out = changed(remove_array_element(text, "i", "a/g").unwrap());
+            let doc = parse_value(&out).unwrap_or_else(|| panic!("result does not parse: {out:?}"));
+            assert_eq!(doc.get("i").is_some(), kept, "{text:?} gave {out:?}");
+            if kept {
+                assert_eq!(doc["i"], serde_json::json!([]), "{text:?} gave {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn array_remove_last_element_without_a_comment_is_unchanged_by_the_comment_rule() {
+        let text = "{\n  // top note\n  \"instructions\": [\n    \"g.md\"\n  ]\n}\n";
+        let out = changed(remove_array_element(text, "instructions", "g.md").unwrap());
+        assert!(!out.contains("instructions"), "emptied array removed: {out}");
+        assert!(out.contains("// top note"), "outside comment survives: {out}");
     }
 
     #[test]
@@ -2747,6 +2850,16 @@ mod tests {
         let with_group = changed(upsert_nested_handler(CLAUDE_SETTINGS, &path, &dispatcher("run")).unwrap());
         let out = changed(remove_nested_handler(&with_group, &path, &dispatcher("run")).unwrap());
         assert_eq!(out, CLAUDE_SETTINGS);
+    }
+
+    #[test]
+    fn nested_remove_keeps_a_hooks_container_that_holds_a_comment() {
+        let path = hook_path("PreToolUse", "Bash");
+        let text = "{\n  \"hooks\": {\n    // keep this note\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"run\",\n            \"com.grimoire.managed\": \"hook-dispatcher\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
+        let out = changed(remove_nested_handler(text, &path, &dispatcher("run")).unwrap());
+        let doc: serde_json::Value = parse_value(&out).expect("the result still parses");
+        assert_eq!(doc["hooks"], serde_json::json!({}), "container kept, emptied: {out}");
+        assert!(out.contains("// keep this note"), "comment survives: {out}");
     }
 
     #[test]
