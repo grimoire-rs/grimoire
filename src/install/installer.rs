@@ -5192,7 +5192,12 @@ mod tests {
             old.exists(),
             "kept_modified: a user-edited old output is preserved, never deleted"
         );
-        assert_eq!(preserved, vec![old], "the kept file is returned for the report");
+        // The reap returns the link-resolved spelling; a temp dir can sit behind a link (macOS `/var`).
+        assert_eq!(
+            preserved,
+            vec![dunce::canonicalize(&old).unwrap()],
+            "the kept file is returned for the report"
+        );
         assert!(abandoned.is_empty());
     }
 
