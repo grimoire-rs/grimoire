@@ -1001,6 +1001,34 @@ mod tests {
         }
     }
 
+    /// The race judge and the splices read past a byte-order mark, and the
+    /// write keeps it.
+    #[test]
+    fn a_bom_prefixed_settings_file_is_judged_written_and_keeps_its_bom() {
+        let (_dir, file) = seeded(
+            JSON,
+            "\u{feff}{\"model\": \"old\", \"permissions\": {\"deny\": [\"a\"]}}\n",
+        );
+        let ops = [
+            upsert(&["model"], json!("new")),
+            add(&["permissions", "deny"], "b"),
+            drop_element(&["permissions", "deny"], "a"),
+        ];
+        let expected = [
+            holding(&["model"], json!("old")),
+            element_absent(&["permissions", "deny"], "b"),
+            element_held(&["permissions", "deny"], "a"),
+        ];
+
+        apply(&file, JSON, &ops, &expected, false).unwrap();
+
+        assert!(fs::read_to_string(&file).unwrap().starts_with('\u{feff}'));
+        assert_eq!(
+            document(JSON, &file),
+            json!({"model": "new", "permissions": {"deny": ["b"]}})
+        );
+    }
+
     #[test]
     fn a_container_grim_filled_goes_back_out() {
         for (format, text) in [(JSON, "{\"user\": 1}\n"), (TOML, "user = 1\n")] {

@@ -4100,6 +4100,32 @@ mod tests {
 
     // ── C3.9 leftover: TOML dispatch on the read side (Codex) ────────────
 
+    /// The MCP status badge and the settings-value read both see through a
+    /// byte-order mark on a Claude file.
+    #[test]
+    fn a_bom_prefixed_claude_file_is_read_for_an_mcp_entry_and_a_settings_value() {
+        use crate::install::vendor::McpConfigFormat::Json;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp = tmp.path().join(".claude.json");
+        std::fs::write(&mcp, "\u{feff}{\"mcpServers\": {\"grim\": {\"command\": \"grim\"}}}").unwrap();
+        let value = read_entry_value(&mcp, "/mcpServers/grim", ArtifactKind::Mcp, None, Json)
+            .unwrap()
+            .expect("member present past the BOM");
+        assert_eq!(value["command"], "grim");
+        assert_eq!(
+            current_entry_hash(&mcp, "/mcpServers/grim", ArtifactKind::Mcp, None, Json, &[]).unwrap(),
+            entry_value_hash(&value).unwrap()
+        );
+
+        let settings = tmp.path().join("settings.json");
+        std::fs::write(&settings, "\u{feff}{\"permissions\": {\"deny\": [\"Bash\"]}}").unwrap();
+        let deny = read_entry_value(&settings, "/permissions/deny", ArtifactKind::Settings, None, Json)
+            .unwrap()
+            .expect("settings value present past the BOM");
+        assert_eq!(deny, serde_json::json!(["Bash"]));
+    }
+
     #[test]
     fn read_entry_value_and_current_entry_hash_direct_toml() {
         use crate::install::vendor::McpConfigFormat;

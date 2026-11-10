@@ -856,6 +856,38 @@ mod tests {
     // ── Entry outputs (MCP config registrations) ─────────────────────────
 
     #[test]
+    fn uninstall_removes_a_member_from_a_bom_prefixed_file_and_keeps_the_bom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let cfg = ws.join(".claude.json");
+        std::fs::write(
+            &cfg,
+            "\u{feff}{\n  \"theme\": \"dark\",\n  \"mcpServers\": {\n    \"grim\": {\"command\": \"grim\"},\n    \"user-server\": {\"command\": \"x\"}\n  }\n}\n",
+        )
+        .unwrap();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let mut out = client_output_at(".claude.json", entry_hash(&serde_json::json!({"command": "grim"})));
+        out.entry = Some("/mcpServers/grim".to_string());
+        state.record(InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "grim".to_string(),
+            source: crate::lock::locked_source::LockedSource::Registry(pinned("mcp/grim")),
+            dev: false,
+            outputs: vec![out],
+        });
+
+        let result = uninstall(&mut state, ArtifactKind::Mcp, "grim", &roots(ws), false).unwrap();
+
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+        assert!(raw.starts_with('\u{feff}'), "the BOM survives the removal: {raw:?}");
+        let doc: serde_json::Value = serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap()).unwrap();
+        assert!(doc["mcpServers"].get("grim").is_none(), "managed entry removed");
+        assert_eq!(doc["mcpServers"]["user-server"]["command"], "x");
+        assert_eq!(doc["theme"], "dark");
+    }
+
+    #[test]
     fn uninstall_entry_output_removes_member_never_the_file() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();

@@ -638,6 +638,58 @@ mod tests {
         );
     }
 
+    const BOM: char = '\u{feff}';
+
+    #[test]
+    fn a_bom_prefixed_settings_file_keeps_its_bom_when_claude_md_excludes_is_registered() {
+        let tmp = workspace_with_support_dir(&["r"]);
+        let ws = tmp.path();
+        let mut state = state_at(ws);
+        state.record(rule_record("r", "claude", Some(".claude/rules/r")));
+        let config = ws.join(".claude").join(SETTINGS_FILE);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, format!("{BOM}{{\"theme\": \"dark\"}}\n")).unwrap();
+
+        sync_every(&state, ws, ConfigScope::Project, &[]).unwrap();
+
+        let raw = std::fs::read_to_string(&config).unwrap();
+        assert!(raw.starts_with(BOM), "the BOM survives the write: {raw:?}");
+        let parsed: serde_json::Value = serde_json::from_str(raw.strip_prefix(BOM).unwrap()).unwrap();
+        assert_eq!(parsed["claudeMdExcludes"], serde_json::json!(["**/.claude/rules/r/**"]));
+        assert_eq!(parsed["theme"], "dark");
+    }
+
+    #[test]
+    fn a_bom_prefixed_settings_file_keeps_its_bom_when_claude_md_excludes_is_removed() {
+        let tmp = workspace_with_support_dir(&["r"]);
+        let ws = tmp.path();
+        let mut state = state_at(ws);
+        state.record(rule_record("r", "claude", Some(".claude/rules/r")));
+        let config = ws.join(".claude").join(SETTINGS_FILE);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            format!("{BOM}{{\"theme\": \"dark\", \"claudeMdExcludes\": [\"**/.claude/rules/r/**\"]}}\n"),
+        )
+        .unwrap();
+
+        delete_support_dir(ws, "r");
+        state.remove(ArtifactKind::Rule, "r");
+        sync_every(
+            &state,
+            ws,
+            ConfigScope::Project,
+            &[retired("r", "claude", Some(".claude/rules/r"))],
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&config).unwrap();
+        assert!(raw.starts_with(BOM), "the BOM survives the write: {raw:?}");
+        let parsed: serde_json::Value = serde_json::from_str(raw.strip_prefix(BOM).unwrap()).unwrap();
+        assert!(parsed.get(EXCLUDES_KEY).is_none(), "{parsed}");
+        assert_eq!(parsed["theme"], "dark");
+    }
+
     #[test]
     fn uninstalling_one_of_two_rules_leaves_the_survivors_element() {
         let tmp = workspace_with_support_dir(&["alpha", "beta"]);
