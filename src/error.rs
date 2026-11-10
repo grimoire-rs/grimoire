@@ -585,6 +585,7 @@ fn unsupported_feature() -> Classification {
 fn classify_resolve(err: &ResolveError) -> Classification {
     match &err.kind {
         ResolveErrorKind::TagNotFound
+        | ResolveErrorKind::NoDescription
         | ResolveErrorKind::NotDeclared
         | ResolveErrorKind::BundleNotFound
         | ResolveErrorKind::PinnedManifestGone { .. }
@@ -1831,6 +1832,14 @@ mod tests {
     fn undeclared_name_is_79_not_found() {
         use crate::oci::ArtifactKind;
         let err = ResolveError::unidentified(ArtifactKind::Skill, "ghost", ResolveErrorKind::NotDeclared);
+        let c = classify(&anyhow::Error::from(Error::from(err)));
+        assert_eq!((c.exit, c.reason), (ExitCode::NotFound, None));
+    }
+
+    #[test]
+    fn missing_description_is_79_not_found() {
+        let id = crate::oci::Identifier::parse("ghcr.io/acme/code-review:__grimoire").unwrap();
+        let err = ResolveError::for_identifier(id, ResolveErrorKind::NoDescription);
         let c = classify(&anyhow::Error::from(Error::from(err)));
         assert_eq!((c.exit, c.reason), (ExitCode::NotFound, None));
     }

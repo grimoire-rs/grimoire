@@ -159,7 +159,7 @@ def test_per_entry_override_and_false_optout(
     # b opted out: no companion published, fetch is a clean not-found.
     miss = runner.plain("fetch", f"{registry}/skills/{b}:__grimoire", check=False)
     assert miss.returncode != 0
-    assert "not found" in miss.stderr.lower()
+    assert "no description is published for" in miss.stderr
 
 
 def test_fanout_same_companion_on_every_repo(
@@ -232,7 +232,7 @@ def test_dry_run_previews_companion_and_pushes_nothing(
     # Nothing was pushed — the companion tag must not resolve.
     miss = runner.plain("fetch", f"{registry}/skills/{name}:__grimoire", check=False)
     assert miss.returncode != 0
-    assert "not found" in miss.stderr.lower()
+    assert "no description is published for" in miss.stderr
 
 
 def test_empty_resolution_publishes_no_companion(
@@ -254,7 +254,7 @@ def test_empty_resolution_publishes_no_companion(
 
     miss = runner.plain("fetch", f"{registry}/skills/{name}:__grimoire", check=False)
     assert miss.returncode != 0
-    assert "not found" in miss.stderr.lower()
+    assert "no description is published for" in miss.stderr
 
 
 def test_companion_tag_hidden_from_describe_tags(

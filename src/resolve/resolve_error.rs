@@ -81,6 +81,9 @@ pub struct ResolveError {
     /// The `grim` the remedy names. The graph that raises the error holds no
     /// scope; [`Self::naming`] fills this in where one is known.
     pub grim: Invocation,
+    /// Set by [`Self::for_identifier`]: the failure is about an identifier whose
+    /// artifact kind is not yet known, so `Display` names no kind.
+    pub(crate) kind_unknown: bool,
 }
 
 impl ResolveError {
@@ -91,7 +94,18 @@ impl ResolveError {
             kind,
             required_by: None,
             grim: Invocation::WALKED,
+            kind_unknown: false,
         }
+    }
+
+    /// An error about `id` before its manifest has been read, so no artifact
+    /// kind is known. `Display` keeps the name and the full identifier and
+    /// leaves the kind word out; the reference's own kind is a placeholder.
+    pub fn for_identifier(id: Identifier, kind: ResolveErrorKind) -> Self {
+        let name = id.name().to_string();
+        let mut err = Self::new(ArtifactRef::registry(ArtifactKind::Skill, name, id), kind);
+        err.kind_unknown = true;
+        err
     }
 
     /// Name `grim` in this error's remedy.
@@ -166,12 +180,25 @@ impl std::fmt::Display for ResolveError {
         if self.is_unidentified() {
             return write!(f, "'{}': {}", escape_controls(&self.reference.name), self.kind);
         }
+        // The reserved companion tag is internal: name the repository instead.
+        if let (ResolveErrorKind::NoDescription, DeclaredSource::Registry(id)) = (&self.kind, &self.reference.source) {
+            return write!(f, "{} for {}", self.kind, registry_text(&id.registry_repository()));
+        }
+        let subject = if self.kind_unknown {
+            format!(
+                "'{}' ({})",
+                escape_controls(&self.reference.name),
+                escape_controls(&self.reference.source.to_string())
+            )
+        } else {
+            self.reference.to_string()
+        };
         match self.requested_digest() {
             // A digest names one manifest: no tag was asked for, so none is missing.
             Some(digest) if matches!(self.kind, ResolveErrorKind::TagNotFound) => {
-                write!(f, "{}: manifest {digest} not found", self.reference)?;
+                write!(f, "{subject}: manifest {digest} not found")?;
             }
-            _ => write!(f, "{}: {}", self.reference, self.kind)?,
+            _ => write!(f, "{subject}: {}", self.kind)?,
         }
         if let ResolveErrorKind::PinnedManifestGone { name, .. } = &self.kind {
             write!(f, "; {}", gone_pin_remedy(&self.grim, name))?;
@@ -225,6 +252,12 @@ pub enum ResolveErrorKind {
     /// the access layer). Not retried.
     #[error("tag not found")]
     TagNotFound,
+
+    /// A package has no `__grimoire` description companion. Classified like
+    /// [`Self::TagNotFound`] (79); [`ResolveError`] prints the repository, never
+    /// the reserved tag.
+    #[error("no description is published")]
+    NoDescription,
 
     /// A requested name is not declared (not a direct entry, path entry,
     /// or bundle member). Classified like [`Self::TagNotFound`] (79).
@@ -426,6 +459,35 @@ mod tests {
         assert!(s.contains("skill"));
         assert!(s.contains("code-review"));
         assert!(s.contains("tag not found"));
+    }
+
+    #[test]
+    fn for_identifier_names_the_source_and_no_kind() {
+        let tag = Identifier::parse("ghcr.io/acme/code-review:stable").unwrap();
+        let err = ResolveError::for_identifier(tag, ResolveErrorKind::TagNotFound);
+        assert_eq!(
+            err.to_string(),
+            "'code-review' (ghcr.io/acme/code-review:stable): tag not found"
+        );
+
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let pinned = Identifier::parse(&format!("ghcr.io/acme/code-review@{digest}")).unwrap();
+        let err = ResolveError::for_identifier(pinned, ResolveErrorKind::TagNotFound);
+        assert!(!err.to_string().contains("skill"), "{err}");
+        assert!(
+            err.to_string().ends_with(&format!(": manifest {digest} not found")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_missing_description_names_the_repository_and_never_the_reserved_tag() {
+        let id = Identifier::parse("ghcr.io/acme/code-review:__grimoire").unwrap();
+        let err = ResolveError::for_identifier(id, ResolveErrorKind::NoDescription);
+        assert_eq!(
+            err.to_string(),
+            "no description is published for ghcr.io/acme/code-review"
+        );
     }
 
     #[test]
