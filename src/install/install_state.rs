@@ -1851,11 +1851,16 @@ fn is_own_mcp_member(
     vendor.mcp_config_paths(&roots.workspace, scope).iter().any(|path| {
         // A vendor variable can repoint a global file between runs, and
         // `prefer_jsonc` picks by what is on disk now, so neither binds a record.
+        // The other spelling binds only a client that picks one: for the rest it
+        // names a file no harness reads.
         let same_file = scope == ConfigScope::Global
-            || out
-                .target
-                .lexical(roots)
-                .is_some_and(|here| json_spelling(&here) == json_spelling(path));
+            || out.target.lexical(roots).is_some_and(|here| {
+                if picks_json_spelling_on_disk(client) {
+                    json_spelling(&here) == json_spelling(path)
+                } else {
+                    here == *path
+                }
+            });
         same_file
             && vendor
                 .mcp_entry_for(scope, path, name, &probe)
@@ -5009,6 +5014,48 @@ mod tests {
             ),
             []
         );
+    }
+
+    /// Only a client that picks a spelling by what is on disk binds the other
+    /// one; for the rest a record naming it points at a file no harness reads.
+    #[test]
+    fn an_mcp_record_binds_the_other_spelling_only_for_a_client_that_picks_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        for (client, file, pointer) in [
+            ("claude", ".mcp.jsonc", "/mcpServers/x"),
+            ("cursor", ".cursor/mcp.jsonc", "/mcpServers/x"),
+        ] {
+            let st = reload_project(
+                ws,
+                vec![record_of(
+                    ArtifactKind::Mcp,
+                    "x",
+                    vec![member_output(client, file, pointer)],
+                )],
+            );
+            let kept = st.get(ArtifactKind::Mcp, "x").map_or(0, |record| record.outputs.len());
+            assert_eq!(kept, 0, "{client} {file}");
+        }
+        let kept = |client, file: &str, pointer: &str| {
+            let out = member_output(client, file, pointer);
+            surviving(ArtifactKind::Mcp, vec![out.clone()]) == [out]
+        };
+        assert!(kept("claude", ".mcp.json", "/mcpServers/x"));
+        assert!(kept("cursor", ".cursor/mcp.json", "/mcpServers/x"));
+        assert!(kept("opencode", "opencode.jsonc", "/mcp/x"));
+        assert!(kept("amp", ".amp/settings.jsonc", "/amp.mcpServers/x"));
+    }
+
+    /// Global scope is not narrowed by the spelling rule: a vendor variable can
+    /// repoint the file, so a record naming the other spelling is kept.
+    #[test]
+    fn a_global_mcp_record_is_kept_whichever_spelling_it_names() {
+        let output = ClientOutput {
+            entry: Some("/mcpServers/x".to_string()),
+            ..anchored("claude", PathAnchor::ClaudeUserDir, ".claude.jsonc")
+        };
+        assert_eq!(surviving_global(ArtifactKind::Mcp, output), 1);
     }
 
     /// Vendor files overlap: a settings file is an MCP surface for its own
