@@ -111,7 +111,7 @@ _AGENT = "---\nname: beta\ndescription: d\n---\nbody\n"
 
 def _release_mcp(scope: Scope, src: Path, ref: str, command: str) -> None:
     src.mkdir()
-    (src / "server.toml").write_text(_MCP.format(command=command))
+    (src / "server.toml").write_text(_MCP.format(command=command), encoding="utf-8", newline="\n")
     scope.runner.json("release", str(src / "server.toml"), ref, "--kind", "mcp")
 
 
@@ -137,12 +137,12 @@ def _mcp_pair(scope: Scope, tmp_path: Path, registry: str, unique_repo: str) -> 
         config.write(f'[mcp]\nalpha = "{ref}"\nbeta = "{ref}"\n')
 
     def entry(name: str):
-        return json.loads(scope.mcp_file.read_text())["mcpServers"].get(name)
+        return json.loads(scope.mcp_file.read_text(encoding="utf-8"))["mcpServers"].get(name)
 
     def edit(change) -> None:
-        doc = json.loads(scope.mcp_file.read_text())
+        doc = json.loads(scope.mcp_file.read_text(encoding="utf-8"))
         change(doc["mcpServers"])
-        scope.mcp_file.write_text(json.dumps(doc))
+        scope.mcp_file.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
 
     def move() -> None:
         retag(repo, "keep", tag_digest(repo, "1"))
@@ -175,9 +175,9 @@ def _file_pair(scope: Scope, kind: str, unique_repo: str) -> Pair:
     return Pair(
         beta=lambda: path.read_bytes() if footprint.exists() else None,
         delete_beta=delete,
-        edit_beta=lambda: path.write_text(_EDIT),
+        edit_beta=lambda: path.write_text(_EDIT, encoding="utf-8", newline="\n"),
         move_alpha=lambda: _move_tag(unique_repo, "alpha"),
-        alpha_moved=lambda: "alpha v2" in (root / "skills/alpha/SKILL.md").read_text(),
+        alpha_moved=lambda: "alpha v2" in (root / "skills/alpha/SKILL.md").read_text(encoding="utf-8"),
     )
 
 
@@ -205,17 +205,17 @@ def _hook_pair(scope: Scope, unique_repo: str) -> Pair:
         _drop_matcher_group(surface, "Bash")
 
     def edit() -> None:
-        doc = json.loads(surface.read_text())
+        doc = json.loads(surface.read_text(encoding="utf-8"))
         for group in doc["hooks"]["PreToolUse"]:
             group["mine"] = 1
-        surface.write_text(json.dumps(doc, indent=2))
+        surface.write_text(json.dumps(doc, indent=2), encoding="utf-8", newline="\n")
 
     return Pair(
         beta=state,
         delete_beta=delete,
         edit_beta=edit,
         move_alpha=lambda: _move_tag(unique_repo, "alpha"),
-        alpha_moved=lambda: "alpha v2" in (root / "skills/alpha/SKILL.md").read_text(),
+        alpha_moved=lambda: "alpha v2" in (root / "skills/alpha/SKILL.md").read_text(encoding="utf-8"),
     )
 
 
@@ -298,8 +298,8 @@ def test_named_update_adds_no_managed_entry_outside_its_closure(
     scope.run("lock")
     scope.run("install")
     settings = scope.skills.parent / "settings.json"
-    excluded = json.loads(settings.read_text())["claudeMdExcludes"]
-    settings.write_text(json.dumps({"mine": 1}))
+    excluded = json.loads(settings.read_text(encoding="utf-8"))["claudeMdExcludes"]
+    settings.write_text(json.dumps({"mine": 1}), encoding="utf-8", newline="\n")
     written = settings.read_bytes()
     _move_tag(unique_repo, "alpha")
 
@@ -311,7 +311,7 @@ def test_named_update_adds_no_managed_entry_outside_its_closure(
 
     scope.run("update")
 
-    assert json.loads(settings.read_text())["claudeMdExcludes"] == excluded
+    assert json.loads(settings.read_text(encoding="utf-8"))["claudeMdExcludes"] == excluded
 
 
 def test_uninstall_adds_no_managed_entry_of_another_rule(
@@ -327,7 +327,7 @@ def test_uninstall_adds_no_managed_entry_of_another_rule(
     scope.run("lock")
     scope.run("install")
     settings = scope.skills.parent / "settings.json"
-    settings.write_text(json.dumps({"mine": 1}))
+    settings.write_text(json.dumps({"mine": 1}), encoding="utf-8", newline="\n")
     written = settings.read_bytes()
 
     result = scope.run("uninstall", "skill", "alpha", check=False)
@@ -361,13 +361,13 @@ def test_modified_dependency_in_the_closure_exits_65(
     """Scoping spares unnamed bindings, not a dependency of the named one."""
     runner = _dependent_pair(grim_at, project_dir, unique_repo)
     edited = project_dir / ".claude/skills/leaf/SKILL.md"
-    edited.write_text(_EDIT)
+    edited.write_text(_EDIT, encoding="utf-8", newline="\n")
 
     result = runner.run("update", "--", "parent", format="json", check=False)
 
     assert result.returncode == 65, result.stderr
     assert _rows(result)["leaf"]["refused"] is True
-    assert edited.read_text() == _EDIT
+    assert edited.read_text(encoding="utf-8") == _EDIT
 
 
 def test_force_overrides_the_closure_only(
@@ -377,14 +377,14 @@ def test_force_overrides_the_closure_only(
     runner = _dependent_pair(grim_at, project_dir, unique_repo)
     inside = project_dir / ".claude/skills/leaf/SKILL.md"
     outside = project_dir / ".claude/skills/bystander/SKILL.md"
-    inside.write_text(_EDIT)
-    outside.write_text(_EDIT)
+    inside.write_text(_EDIT, encoding="utf-8", newline="\n")
+    outside.write_text(_EDIT, encoding="utf-8", newline="\n")
 
     result = runner.run("update", "--force", "--", "parent", format="json", check=False)
 
     assert result.returncode == 0, result.stderr
-    assert inside.read_text() != _EDIT
-    assert outside.read_text() == _EDIT
+    assert inside.read_text(encoding="utf-8") != _EDIT
+    assert outside.read_text(encoding="utf-8") == _EDIT
     assert set(_rows(result)) == {"parent", "leaf"}
 
 
@@ -395,8 +395,8 @@ def test_force_on_a_named_update_leaves_an_unnamed_edit(
     runner = _dependent_pair(grim_at, project_dir, unique_repo)
     inside = project_dir / ".claude/skills/leaf/SKILL.md"
     outside = project_dir / ".claude/skills/bystander/SKILL.md"
-    inside.write_text(_EDIT)
-    outside.write_text(_EDIT)
+    inside.write_text(_EDIT, encoding="utf-8", newline="\n")
+    outside.write_text(_EDIT, encoding="utf-8", newline="\n")
 
     refused = runner.run("update", "--", "parent", check=False)
 
@@ -407,8 +407,8 @@ def test_force_on_a_named_update_leaves_an_unnamed_edit(
     forced = runner.run("update", "--force", "--", "parent", check=False)
 
     assert forced.returncode == 0, forced.stderr
-    assert inside.read_text() != _EDIT
-    assert outside.read_text() == _EDIT
+    assert inside.read_text(encoding="utf-8") != _EDIT
+    assert outside.read_text(encoding="utf-8") == _EDIT
 
     bare = runner.run("update", check=False)
 
@@ -427,9 +427,9 @@ def test_named_update_reports_a_moved_pin_outside_its_closure(
     runner = _dependent_pair(grim_at, project_dir, unique_repo)
     lock = project_dir / "grimoire.lock"
     lock.write_text(
-        _REQUIRES_BLOCK.sub("\n", lock.read_text()).replace("/leaf:1@", "/leaf:0@")
+        _REQUIRES_BLOCK.sub("\n", lock.read_text(encoding="utf-8")).replace("/leaf:1@", "/leaf:0@"), encoding="utf-8", newline="\n"
     )
-    assert "/leaf:0@" in lock.read_text()
+    assert "/leaf:0@" in lock.read_text(encoding="utf-8")
     old = tag_digest(f"{unique_repo}/leaf", "1")
     moved = _move_tag(unique_repo, "leaf")
     installed = project_dir / ".claude/skills/leaf/SKILL.md"
@@ -441,12 +441,12 @@ def test_named_update_reports_a_moved_pin_outside_its_closure(
     assert set(rows) == {"bystander", "leaf"}, rows
     leaf = rows["leaf"]
     assert (leaf["action"], leaf["old"], leaf["new"]) == ("updated", old, moved.digest)
-    assert "leaf v1" in installed.read_text()
+    assert "leaf v1" in installed.read_text(encoding="utf-8")
     assert "outside the named closure" in result.stderr, result.stderr
 
     runner.run("install")
 
-    assert "leaf v2" in installed.read_text()
+    assert "leaf v2" in installed.read_text(encoding="utf-8")
 
 
 def test_named_update_installs_what_its_closure_gained(
@@ -552,13 +552,13 @@ def test_scoped_prune_keeps_a_modified_member(
     """
     runner, stays = _pack_with_a_stray(grim_at, project_dir, unique_repo)
     edited = project_dir / ".claude/skills/dropped/SKILL.md"
-    edited.write_text(_EDIT)
+    edited.write_text(_EDIT, encoding="utf-8", newline="\n")
     make_bundle(f"{unique_repo}/pack", [("skill", "stays", stays.fq)], tag="1")
 
     result = runner.run("update", "--", "pack", format="json", check=False)
 
     assert result.returncode == 0, result.stderr
-    assert edited.read_text() == _EDIT
+    assert edited.read_text(encoding="utf-8") == _EDIT
     assert _rows(result)["dropped"]["action"] == "kept-modified"
     assert "bare `grim update --force`" in result.stderr
 
@@ -570,8 +570,8 @@ def test_force_on_a_named_update_prunes_only_inside_its_closure(
     runner, stays = _pack_with_a_stray(grim_at, project_dir, unique_repo)
     skills = project_dir / ".claude/skills"
     stray = skills / "stray/SKILL.md"
-    (skills / "dropped/SKILL.md").write_text(_EDIT)
-    stray.write_text(_EDIT)
+    (skills / "dropped/SKILL.md").write_text(_EDIT, encoding="utf-8", newline="\n")
+    stray.write_text(_EDIT, encoding="utf-8", newline="\n")
     make_bundle(f"{unique_repo}/pack", [("skill", "stays", stays.fq)], tag="1")
 
     result = runner.run("update", "--force", "--", "pack", format="json", check=False)
@@ -579,7 +579,7 @@ def test_force_on_a_named_update_prunes_only_inside_its_closure(
     assert result.returncode == 0, result.stderr
     assert_not_exists(skills / "dropped")
     assert_path_exists(stray)
-    assert stray.read_text() == _EDIT
+    assert stray.read_text(encoding="utf-8") == _EDIT
     rows = _rows(result)
     assert rows["dropped"]["action"] == "removed", rows
     assert "stray" not in rows
@@ -600,7 +600,7 @@ def test_unscoped_update_reports_restored(
 
     assert row["action"] == "restored", row
     assert (row["old"], row["new"]) == (pinned.digest, pinned.digest), row
-    assert "pinned v1" in (project_dir / ".claude/skills/pinned/SKILL.md").read_text()
+    assert "pinned v1" in (project_dir / ".claude/skills/pinned/SKILL.md").read_text(encoding="utf-8")
 
 
 def test_named_update_never_reaps(
@@ -648,7 +648,7 @@ def test_update_names_without_a_lock(
     result = runner.run("update", "--", "named", check=False)
 
     assert result.returncode == 0, result.stderr
-    lock_text = (project_dir / "grimoire.lock").read_text()
+    lock_text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert named.digest in lock_text and bystander.digest in lock_text
     skills = project_dir / ".claude/skills"
     assert_path_exists(skills / "named")
@@ -682,13 +682,13 @@ def test_update_refuses_an_unreadable_lock(
     runner = grim_at(project_dir)
     runner.run("lock")
     lock = project_dir / "grimoire.lock"
-    lock.write_text("not a lock\n")
+    lock.write_text("not a lock\n", encoding="utf-8", newline="\n")
 
     result = runner.run("update", *names, check=False)
 
     assert result.returncode == 78, result.stderr
     assert "restore it from git" in result.stderr
-    assert lock.read_text() == "not a lock\n"
+    assert lock.read_text(encoding="utf-8") == "not a lock\n"
 
 
 @pytest.mark.parametrize(
@@ -702,7 +702,7 @@ def test_every_command_words_an_unreadable_lock_alike(
     """Each reader of the lock names the one recovery that keeps the pins."""
     alpha = _skill(unique_repo, "alpha")
     write_config(project_dir, skills={"alpha": alpha.fq})
-    (project_dir / "grimoire.lock").write_text("not a lock\n")
+    (project_dir / "grimoire.lock").write_text("not a lock\n", encoding="utf-8", newline="\n")
 
     result = grim_at(project_dir).run(*command, check=False)
 
@@ -719,7 +719,7 @@ def test_remove_words_an_unreadable_lock_alike(
     """The edit stands and the warning names the same recovery as every refusal."""
     alpha = _skill(unique_repo, "alpha")
     write_config(project_dir, skills={"alpha": alpha.fq})
-    (project_dir / "grimoire.lock").write_text("not a lock\n")
+    (project_dir / "grimoire.lock").write_text("not a lock\n", encoding="utf-8", newline="\n")
 
     result = grim_at(project_dir).run("remove", "skill", "alpha", check=False)
 
@@ -733,7 +733,7 @@ def test_a_quoted_lock_reaches_the_terminal_escaped(
     """An error quoting a lock nobody here wrote cannot drive the terminal."""
     alpha = _skill(unique_repo, "alpha")
     write_config(project_dir, skills={"alpha": alpha.fq})
-    (project_dir / "grimoire.lock").write_text('[metadata]\nlock_version = "\x1b[2J"\n')
+    (project_dir / "grimoire.lock").write_text('[metadata]\nlock_version = "\x1b[2J"\n', encoding="utf-8", newline="\n")
 
     result = grim_at(project_dir).run("update", check=False)
 
@@ -748,7 +748,7 @@ def test_a_declared_name_cannot_forge_a_log_line(
     """A key a cloned repository chose reaches a warning with its line break spelled out."""
     hook = make_hook(f"{unique_repo}/known-guard", "known-guard", tag="1")
     (project_dir / "grimoire.toml").write_text(
-        f'[hooks]\n"bad\\n ERROR grim: forged" = "{hook.fq}"\n'
+        f'[hooks]\n"bad\\n ERROR grim: forged" = "{hook.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -765,7 +765,7 @@ def _armed(runner: GrimRunner) -> set[str]:
     path = runner.grim_home / "hooks" / "dispatch.json"
     if not path.is_file():
         return set()
-    table = json.loads(path.read_text())
+    table = json.loads(path.read_text(encoding="utf-8"))
     return {
         row["artifact"] for root in table["roots"].values() for row in root["hooks"]
     }
@@ -787,14 +787,14 @@ def test_named_update_keeps_an_unnamed_config_registration(
     runner.run("lock")
     runner.run("install")
     settings = project_dir / ".claude/settings.json"
-    excludes = json.loads(settings.read_text())["claudeMdExcludes"]
+    excludes = json.loads(settings.read_text(encoding="utf-8"))["claudeMdExcludes"]
     assert excludes, "the support directory must register an exclusion"
     _move_tag(unique_repo, "carrier")
 
     result = runner.run("update", "--", "carrier", check=False)
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(settings.read_text())["claudeMdExcludes"] == excludes
+    assert json.loads(settings.read_text(encoding="utf-8"))["claudeMdExcludes"] == excludes
 
 
 @pytest.mark.skipif(os.name == "nt", reason="hook arming is POSIX-only here")
@@ -826,17 +826,17 @@ def _hook_surface(scope: Scope) -> Path:
 
 
 def _drop_matcher_group(surface: Path, matcher: str) -> None:
-    doc = json.loads(surface.read_text())
+    doc = json.loads(surface.read_text(encoding="utf-8"))
     groups = doc["hooks"]["PreToolUse"]
     doc["hooks"]["PreToolUse"] = [g for g in groups if g.get("matcher") != matcher]
-    surface.write_text(json.dumps(doc, indent=2))
+    surface.write_text(json.dumps(doc, indent=2), encoding="utf-8", newline="\n")
 
 
 def _drop_dispatch_rows(table: Path, artifact: str) -> None:
-    doc = json.loads(table.read_text())
+    doc = json.loads(table.read_text(encoding="utf-8"))
     for root in doc["roots"].values():
         root["hooks"] = [row for row in root["hooks"] if row["artifact"] != artifact]
-    table.write_text(json.dumps(doc))
+    table.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
 
 
 def _bytes_or_none(path: Path) -> bytes | None:
@@ -862,7 +862,7 @@ def _two_armed_hooks(
     (scope.config_dir / "grimoire.toml").write_text(
         "[options.experimental]\nhooks = true\n\n"
         f'[skills]\ncarrier = "{carrier.fq}"\n\n'
-        f'[hooks]\nbeta = "{beta.fq}"\ngamma = "{gamma.fq}"\n'
+        f'[hooks]\nbeta = "{beta.fq}"\ngamma = "{gamma.fq}"\n', encoding="utf-8", newline="\n"
     )
     scope.run("lock")
     if not scope.flags:
@@ -968,9 +968,9 @@ def test_uninstall_leaves_another_hooks_arming_as_it_found_it(
     result = scope.run("uninstall", "hook", "gamma", check=False)
 
     assert result.returncode == 0, result.stderr
-    groups = json.loads(surface.read_text()).get("hooks", {}).get("PreToolUse", [])
+    groups = json.loads(surface.read_text(encoding="utf-8")).get("hooks", {}).get("PreToolUse", [])
     left = ({g.get("matcher") for g in groups}, _armed(scope.runner))
-    assert left == (({"Bash"}, set()) if damage == "rows-removed" else (set(), {"beta"})), surface.read_text()
+    assert left == (({"Bash"}, set()) if damage == "rows-removed" else (set(), {"beta"})), surface.read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="hook arming is POSIX-only here")
@@ -1016,7 +1016,7 @@ def test_a_run_with_no_names_converges_what_a_named_run_left(
 
     assert result.returncode == 0, result.stderr
     assert {"beta", "gamma"} <= _armed(scope.runner), result.stderr
-    groups = json.loads(surface.read_text())["hooks"]["PreToolUse"]
+    groups = json.loads(surface.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
     assert {g["matcher"] for g in groups} == {"Bash", "Write"}, groups
 
 

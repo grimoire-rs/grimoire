@@ -82,7 +82,7 @@ def test_a_hook_free_project_never_hears_of_another_workspaces_hooks(
     other.run("hook", "allow")
     other.run("install")
     table = grim_home / "hooks" / "dispatch.json"
-    assert json.loads(table.read_text())["roots"], (
+    assert json.loads(table.read_text(encoding="utf-8"))["roots"], (
         "precondition: another workspace armed a hook"
     )
 

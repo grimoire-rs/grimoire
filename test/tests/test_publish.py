@@ -34,7 +34,7 @@ from src.registry import REGISTRY_BASE, REGISTRY_HOST, fetch_manifest, tag_diges
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _make_skill_source(project_dir: Path, name: str) -> Path:
@@ -141,7 +141,7 @@ def _write_publish_manifest(
         ]
 
     manifest_path = project_dir / "publish.toml"
-    manifest_path.write_text("\n".join(lines) + "\n")
+    manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return manifest_path
 
 
@@ -350,8 +350,8 @@ def test_publish_force_moves_existing_tag(
     # Modify SKILL.md content so the artifact layer differs on the second push
     skill_name = f"{prefix}-skill"
     skill_md = project_dir / "skills" / skill_name / "SKILL.md"
-    original = skill_md.read_text()
-    skill_md.write_text(original + "\n## Updated\n\nForce-push test modification.\n")
+    original = skill_md.read_text(encoding="utf-8")
+    skill_md.write_text(original + "\n## Updated\n\nForce-push test modification.\n", encoding="utf-8", newline="\n")
 
     # --force must push (not skip) even though version already exists
     result = runner.run(
@@ -511,8 +511,8 @@ def test_publish_channel_rerun_skips_then_force_moves(
 
     # Mutate SKILL.md content so a re-push (if it happened) would differ.
     skill_md = project_dir / "skills" / skill_name / "SKILL.md"
-    original = skill_md.read_text()
-    skill_md.write_text(original + "\n## Updated\n\nChannel rerun test modification.\n")
+    original = skill_md.read_text(encoding="utf-8")
+    skill_md.write_text(original + "\n## Updated\n\nChannel rerun test modification.\n", encoding="utf-8", newline="\n")
 
     # Re-run without --force: must skip, and the tag must stay unmoved.
     result = runner.run(
@@ -577,7 +577,7 @@ def test_publish_version_semver_cascade_and_no_cascade(
     cascade_manifest.write_text(
         f'registry = "{registry}"\n\n'
         f"[skills.{skill_name}]\n\n"
-        f"[rules.{rule_name}]\n"
+        f"[rules.{rule_name}]\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     rows = runner.json(
@@ -602,7 +602,7 @@ def test_publish_version_semver_cascade_and_no_cascade(
     plain_manifest.write_text(
         f'registry = "{registry}"\n\n'
         f"[skills.{plain_skill_name}]\n\n"
-        f"[rules.{plain_rule_name}]\n"
+        f"[rules.{plain_rule_name}]\n", encoding="utf-8", newline="\n"
     )
     rows2 = runner.json(
         "publish",
@@ -968,7 +968,7 @@ def test_publish_empty_manifest_exits_65(
     runner = grim_at(project_dir)
 
     manifest_path = project_dir / "publish.toml"
-    manifest_path.write_text(f'registry = "{registry}"\n')
+    manifest_path.write_text(f'registry = "{registry}"\n', encoding="utf-8", newline="\n")
 
     result = runner.run(
         "publish",
@@ -1023,7 +1023,7 @@ def test_publish_mid_batch_fail_fast(
         'version = "0.1.0"',
     ]
     manifest_path = project_dir / "publish.toml"
-    manifest_path.write_text("\n".join(manifest_lines) + "\n")
+    manifest_path.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8", newline="\n")
 
     result = runner.run(
         "publish",
@@ -1156,7 +1156,7 @@ def test_publish_pin_true_bundle_member_references_digest(
         "pin = true",
     ]
     manifest_path = project_dir / "publish.toml"
-    manifest_path.write_text("\n".join(manifest_lines) + "\n")
+    manifest_path.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8", newline="\n")
 
     rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
     assert len(rows) == 2, f"expected skill+bundle, got {rows}"
@@ -1214,7 +1214,7 @@ def test_publish_nested_repository_prefix(
         f'registry = "{registry}"\n'
         f'repository_prefix = "{repo_prefix}"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
 
     rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
@@ -1252,7 +1252,7 @@ def test_publish_per_entry_repository(
         f'repository_prefix = "{prefix}-ignored/prefix"\n\n'
         f"[skills.{skill_name}]\n"
         f'version = "0.1.0"\n'
-        f'repository = "{full_repo}"\n'
+        f'repository = "{full_repo}"\n', encoding="utf-8", newline="\n"
     )
 
     rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
@@ -1294,7 +1294,7 @@ def test_publish_registry_flag_prefix_nests_all_entries(
         f'version = "0.1.0"\n\n'
         f"[skills.{skill_b}]\n"
         f'version = "0.1.0"\n'
-        f'repository = "{verbatim_repo}"\n'
+        f'repository = "{verbatim_repo}"\n', encoding="utf-8", newline="\n"
     )
 
     cli_prefix = f"{prefix}-enforced/ns"
@@ -1347,7 +1347,7 @@ def test_publish_wire_shape_empty_config(
     manifest_path.write_text(
         f'registry = "{registry}"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
 
     rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
@@ -1396,7 +1396,7 @@ def test_publish_top_level_version_inherited_and_placeholder(
         f"[rules.{rule_name}]\n"
         f'version = "${{version}}"\n\n'
         f"[agents.{agent_name}]\n"
-        f'version = "0.2.0"\n'
+        f'version = "0.2.0"\n', encoding="utf-8", newline="\n"
     )
 
     rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"]
@@ -1426,7 +1426,7 @@ def test_publish_cli_version_overrides_and_strips_v_prefix(
     manifest_path.write_text(
         f'registry = "{registry}"\n'
         f'version = "0.1.0"\n\n'
-        f"[skills.{skill_name}]\n"
+        f"[skills.{skill_name}]\n", encoding="utf-8", newline="\n"
     )
 
     rows = runner.json(
@@ -1451,7 +1451,7 @@ def test_publish_custom_version_prefix(
         f'registry = "{registry}"\n'
         f'version = "release-1.2.3"\n'
         f'version_prefix = "release-"\n\n'
-        f"[skills.{skill_name}]\n"
+        f"[skills.{skill_name}]\n", encoding="utf-8", newline="\n"
     )
 
     rows = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"]
@@ -1473,7 +1473,7 @@ def test_publish_missing_version_everywhere_exits_65(
     manifest_path = project_dir / "publish.toml"
     manifest_path.write_text(
         f'registry = "{registry}"\n\n'
-        f"[skills.{skill_name}]\n"
+        f"[skills.{skill_name}]\n", encoding="utf-8", newline="\n"
     )
 
     result = runner.run(
@@ -1518,7 +1518,7 @@ def test_publish_push_registry_pushes_to_endpoint_and_bakes_pull_refs(
         f'registry = "{PULL_HOST}"\n'
         f'push_registry = "{registry}"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
 
     result = runner.run("publish", "--manifest", str(manifest_path), format="json", check=False)
@@ -1573,7 +1573,7 @@ def test_publish_push_registry_flag_overrides_manifest(
         f'registry = "{PULL_HOST}"\n'
         f'push_registry = "push-manifest.invalid"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
 
     result = runner.run(
@@ -1610,7 +1610,7 @@ def test_publish_push_registry_rerun_skip_existing(
         f'registry = "{PULL_HOST}"\n'
         f'push_registry = "{registry}"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
 
     first = runner.json("publish", "--manifest", str(manifest_path))["items"]
@@ -1650,7 +1650,7 @@ def test_publish_pin_bundle_under_push_registry_bakes_pull_member_ids(
         f'version = "0.1.0"\n\n'
         f"[bundles.{bundle_name}]\n"
         f'version = "0.1.0"\n'
-        f"pin = true\n"
+        f"pin = true\n", encoding="utf-8", newline="\n"
     )
 
     rows = runner.json("publish", "--manifest", str(manifest_path))["items"]
@@ -1686,7 +1686,7 @@ def test_publish_push_registry_invalid_value_exits_65(
             f'registry = "{registry}"\n'
             f'push_registry = "{bad}"\n\n'
             f"[skills.{skill_name}]\n"
-            f'version = "0.1.0"\n'
+            f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
         )
         result = runner.run("publish", "--manifest", str(manifest_path), check=False)
         assert result.returncode == 65, (
@@ -1698,7 +1698,7 @@ def test_publish_push_registry_invalid_value_exits_65(
     manifest_path.write_text(
         f'registry = "{registry}"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
     result = runner.run(
         "publish", "--manifest", str(manifest_path), "--push-registry", "/x", check=False
@@ -1732,7 +1732,7 @@ def test_publish_dry_run_reports_pushed_to(
         f'registry = "{PULL_HOST}"\n'
         f'push_registry = "{registry}"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
     row = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"][0]
     assert row["status"] == "dry-run"
@@ -1743,7 +1743,7 @@ def test_publish_dry_run_reports_pushed_to(
     manifest_path.write_text(
         f'registry = "{registry}"\n\n'
         f"[skills.{skill_name}]\n"
-        f'version = "0.1.0"\n'
+        f'version = "0.1.0"\n', encoding="utf-8", newline="\n"
     )
     row = runner.json("publish", "--manifest", str(manifest_path), "--dry-run")["items"][0]
     assert "pushed_to" in row, "pushed_to must always be present (additive-field policy)"

@@ -45,7 +45,7 @@ def _git_index_repo(tmp_path: Path, packages: list[dict]) -> Path:
     for pkg in packages:
         d = repo / "index" / "github.com" / "acme" / pkg["name"]
         d.mkdir(parents=True)
-        (d / "metadata.json").write_text(json.dumps(pkg))
+        (d / "metadata.json").write_text(json.dumps(pkg), encoding="utf-8", newline="\n")
     def git(*args: str) -> None:
         subprocess.run(
             ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
@@ -342,7 +342,7 @@ def test_git_index_refresh_picks_up_new_packages(grim_at, project_dir: Path, tmp
     d = repo / "index" / "github.com" / "acme" / "second"
     d.mkdir(parents=True)
     (d / "metadata.json").write_text(
-        json.dumps(package("second", "rule", "ghcr.io/acme/rules/second", "Second"))
+        json.dumps(package("second", "rule", "ghcr.io/acme/rules/second", "Second")), encoding="utf-8", newline="\n"
     )
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
@@ -375,7 +375,7 @@ def test_search_outside_project_browses_global_index_source(
         [package("outside-skill", "skill", "ghcr.io/acme/skills/outside-skill", "From the index")],
     )
     (grim_home / "grimoire.toml").write_text(
-        f'[[registries]]\nalias = "hub"\nindex = "{base}"\ndefault = true\n'
+        f'[[registries]]\nalias = "hub"\nindex = "{base}"\ndefault = true\n', encoding="utf-8", newline="\n"
     )
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -427,7 +427,7 @@ def test_index_and_registry_sources_combine(
         f'[[registries]]\n'
         f'alias = "hub"\n'
         f'index = "{base}"\n'
-        f'\n[skills]\n\n[rules]\n'
+        f'\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
 
     repos = [r.get("repo", "") for r in _search_rows(grim_at(project_dir))]
@@ -530,7 +530,7 @@ def test_browse_filter_addresses_either_candidate(
 
 
 def test_config_registry_add_index_roundtrip(grim_at, project_dir: Path) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     r = runner.run("config", "registry", "add", "hub", "--index", "https://index.grimoire.rs", check=False)
@@ -548,7 +548,7 @@ def test_config_registry_add_index_roundtrip(grim_at, project_dir: Path) -> None
 
 
 def test_config_registry_add_requires_exactly_one_source(grim_at, project_dir: Path) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     # Neither --oci nor --index: usage error 64.
@@ -565,7 +565,7 @@ def test_config_registry_add_requires_exactly_one_source(grim_at, project_dir: P
 
 
 def test_config_registry_add_rejects_bad_index_locator(grim_at, project_dir: Path) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     r = runner.run("config", "registry", "add", "hub", "--index", "ftp://nope", check=False)
     assert r.returncode == 65, f"expected 65, got {r.returncode}: {r.stderr}"
@@ -579,7 +579,7 @@ def test_config_set_index_on_oci_entry_rejected(grim_at, project_dir: Path) -> N
     keep parsing as ``oci`` (serde alias, 0.6.x back-compat).
     """
     (project_dir / "grimoire.toml").write_text(
-        '[[registries]]\nalias = "acme"\nurl = "ghcr.io/acme"\n\n[skills]\n\n[rules]\n'
+        '[[registries]]\nalias = "acme"\nurl = "ghcr.io/acme"\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     r = runner.run("config", "set", "registry.acme.index", "https://idx.example", check=False)
@@ -597,7 +597,7 @@ def test_config_file_with_oci_and_index_rejected(grim_at, project_dir: Path) -> 
         'alias = "bad"\n'
         'oci = "ghcr.io/acme"\n'
         'index = "https://idx.example"\n'
-        '\n[skills]\n\n[rules]\n'
+        '\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     r = runner.run("config", "list", check=False)
@@ -670,7 +670,7 @@ def test_install_from_http_index_lands_in_claude_config_dir(
         f"a package found through an index must install like any other; "
         f"nothing at {skill}"
     )
-    assert "name: index-installed" in skill.read_text()
+    assert "name: index-installed" in skill.read_text(encoding="utf-8")
     # The vendor override is honoured, so nothing leaked into the default tree.
     assert not (runner.home / ".claude/skills/index-installed").exists(), (
         "global skill must NOT land in default ~/.claude when CLAUDE_CONFIG_DIR is set"
@@ -690,7 +690,7 @@ def _cached_entries(grim_home: Path) -> dict:
     for cache in (grim_home / "catalog").glob("*.json"):
         if cache.name.endswith(".sync.json"):
             continue
-        entries.update(json.loads(cache.read_text()).get("entries", {}))
+        entries.update(json.loads(cache.read_text(encoding="utf-8")).get("entries", {}))
     assert entries, f"no catalog cache was written under {grim_home / 'catalog'}"
     return entries
 

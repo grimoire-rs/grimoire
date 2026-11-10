@@ -61,19 +61,19 @@ def test_make_settings_appends_a_requires_layer(registry: str, unique_repo: str)
 
 
 def test_write_config_settings_section_and_flag(tmp_path: Path) -> None:
-    plain = write_config(tmp_path, skills={"a": "r/a:1"}).read_text()
+    plain = write_config(tmp_path, skills={"a": "r/a:1"}).read_text(encoding="utf-8")
     assert "[settings]" not in plain
     assert "experimental" not in plain
 
     declared = write_config(
         tmp_path, skills={"a": "r/a:1"}, settings={"defaults": "r/d:1"}, experimental_settings=True
-    ).read_text()
+    ).read_text(encoding="utf-8")
     assert '[settings]\ndefaults = "r/d:1"' in declared
     assert "[options.experimental]\nsettings = true" in declared
     # The skill-only prefix is unchanged by the new arguments.
     assert declared.startswith(plain.split("\n[options")[0].rstrip("\n"))
 
-    off = write_config(tmp_path, experimental_settings=False).read_text()
+    off = write_config(tmp_path, experimental_settings=False).read_text(encoding="utf-8")
     assert "settings = false" in off
 
 

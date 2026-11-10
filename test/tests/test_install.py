@@ -169,7 +169,7 @@ def test_codex_only_rule_install_skips_before_fetch_when_offline_cold(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# rust\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)  # online: pins resolved
 
@@ -190,7 +190,7 @@ def test_codex_only_rule_install_skips_before_fetch_when_offline_cold(
 
 def _declare(project_dir: Path, table: str, key: str, ref: str) -> None:
     (project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["claude"]\n\n[{table}]\n"{key}" = "{ref}"\n'
+        f'[options]\nclients = ["claude"]\n\n[{table}]\n"{key}" = "{ref}"\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -261,15 +261,15 @@ def test_traversal_lock_entry_name_is_refused_with_78(
 ) -> None:
     """Issue #90: a hand-edited lock naming a traversal is refused on load
     (78, the lock tier's class) before install writes anything."""
-    (project_dir / "grimoire.toml").write_text('[options]\nclients = ["claude"]\n')
+    (project_dir / "grimoire.toml").write_text('[options]\nclients = ["claude"]\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock")
     lock = project_dir / "grimoire.lock"
     digest = "sha256:" + "a" * 64
     entry = f'skill = [{{ name = "../../../escaped", pinned = "localhost:5000/x/y@{digest}" }}]'
-    body = lock.read_text()
+    body = lock.read_text(encoding="utf-8")
     assert "skill = []" in body, body
-    lock.write_text(body.replace("skill = []", entry, 1))
+    lock.write_text(body.replace("skill = []", entry, 1), encoding="utf-8", newline="\n")
 
     result = runner.run("install", "--client", "claude", check=False)
     assert result.returncode == 78, result.stderr

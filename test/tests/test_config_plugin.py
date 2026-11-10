@@ -32,7 +32,7 @@ PLUGIN_KEYS = [
 
 
 def _plugin_table(project_dir: Path) -> dict | None:
-    return tomllib.loads((project_dir / "grimoire.toml").read_text()).get("plugin")
+    return tomllib.loads((project_dir / "grimoire.toml").read_text(encoding="utf-8")).get("plugin")
 
 
 @pytest.mark.parametrize(
@@ -77,26 +77,26 @@ def test_invalid_value_exits_65_and_leaves_the_file_unchanged(
     grim_at, project_dir: Path, key: str, value: str, reason: str
 ) -> None:
     write_config(project_dir)
-    before = (project_dir / "grimoire.toml").read_text()
+    before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     runner = grim_at(project_dir)
 
     result = runner.run("config", "set", key, value, check=False)
 
     assert result.returncode == 65, result.stderr
     assert reason in result.stderr, result.stderr
-    assert (project_dir / "grimoire.toml").read_text() == before
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == before
 
 
 def test_dry_run_writes_nothing(grim_at, project_dir: Path) -> None:
     write_config(project_dir)
-    before = (project_dir / "grimoire.toml").read_text()
+    before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     runner = grim_at(project_dir)
 
     report = runner.json("config", "set", "plugin.version", "v2.0.0", "--dry-run")
 
     assert report["dry_run"] is True
     assert report["value"] == "2.0.0"
-    assert (project_dir / "grimoire.toml").read_text() == before
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == before
     assert runner.run("config", "set", "plugin.name", "Bad", "--dry-run", check=False).returncode == 65
 
 
@@ -120,7 +120,7 @@ def test_list_all_appends_the_plugin_rows_with_metadata(grim_at, project_dir: Pa
 
 @pytest.mark.parametrize("verb", [["get"], ["set", "--dry-run"], ["unset"]])
 def test_global_scope_is_refused_with_64(grim_at, grim_home: Path, project_dir: Path, verb: list[str]) -> None:
-    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     args = ["config", "--global", verb[0], "plugin.name"]
     if verb[0] == "set":
@@ -133,7 +133,7 @@ def test_global_scope_is_refused_with_64(grim_at, grim_home: Path, project_dir: 
 
 
 def test_global_list_carries_no_plugin_rows(grim_at, grim_home: Path, project_dir: Path) -> None:
-    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     items = grim_at(project_dir).json("config", "--global", "list", "--all")["items"]
     assert not [i for i in items if i["key"].startswith("plugin.")]
 
@@ -155,12 +155,12 @@ def test_plugin_table_survives_other_writes_and_never_stales_the_lock(
     )
     cfg = write_config(project_dir, skills={"code-review": sk.fq})
     cfg.write_text(
-        cfg.read_text()
-        + '\n[plugin]\nname = "team"\nversion = "v1.0.0"\n\n[plugin.rename]\nstrip_prefix = "acme-"\n'
+        cfg.read_text(encoding="utf-8")
+        + '\n[plugin]\nname = "team"\nversion = "v1.0.0"\n\n[plugin.rename]\nstrip_prefix = "acme-"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock")
-    lock_before = (project_dir / "grimoire.lock").read_text()
+    lock_before = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
     runner.run("config", "set", "plugin.description", "Team tools")
     runner.run("config", "set", "options.show_deprecated", "true")
@@ -173,7 +173,7 @@ def test_plugin_table_survives_other_writes_and_never_stales_the_lock(
     }, "unrelated writes keep [plugin] as authored"
     rows = runner.json("install")["items"]
     assert {r["status"] for r in rows} == {"installed"}, "the lock is not stale"
-    assert (project_dir / "grimoire.lock").read_text() == lock_before
+    assert (project_dir / "grimoire.lock").read_text(encoding="utf-8") == lock_before
 
 
 def test_list_files_each_key_under_its_settings_section(grim_at, project_dir: Path) -> None:

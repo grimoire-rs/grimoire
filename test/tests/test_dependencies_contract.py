@@ -43,7 +43,7 @@ def test_golden_status_fields(grim_binary, grim_at, tmp_path: Path) -> None:
         ("project", env.project_runner, ()),
         ("global", env.global_runner, ("--global",)),
     ):
-        recorded = json.loads((FIXTURE / "provenance" / f"status.{scope}.json").read_text())
+        recorded = json.loads((FIXTURE / "provenance" / f"status.{scope}.json").read_text(encoding="utf-8"))
         want = {(i["kind"], i["name"]): i["source"] for i in recorded["items"]}
         items = runner.json("status", *args)["items"]
         assert want and items, f"{scope}: no items to check (positive control)"
@@ -76,7 +76,7 @@ def test_transitive_chain_lock_why_remove(
 
     runner.run("lock")
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     locked = set(re.findall(r'(?m)^\[\[skill\]\]\nname = "([^"]+)"', lock))
     assert locked == {"a", "b", "c"}, "the whole chain is locked from one direct entry"
 
@@ -89,8 +89,8 @@ def test_transitive_chain_lock_why_remove(
     out = runner.json("remove", "skill", "a")
 
     assert out["status"] == "removed"
-    assert "a" not in (project_dir / "grimoire.toml").read_text().split("[skills]")[-1]
-    remaining = (project_dir / "grimoire.lock").read_text()
+    assert "a" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8").split("[skills]")[-1]
+    remaining = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert not re.findall(r'(?m)^\[\[skill\]\]', remaining), (
         "b and c leave the lock with a, nothing else reaches them:\n" + remaining
     )

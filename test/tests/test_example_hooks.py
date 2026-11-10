@@ -125,12 +125,12 @@ def _rows(runner: GrimRunner) -> list[dict]:
     table = _table(runner)
     if not table.is_file():
         return []
-    document = json.loads(table.read_text())
+    document = json.loads(table.read_text(encoding="utf-8"))
     return [row for root in document["roots"].values() for row in root["hooks"]]
 
 
 def _root_token(runner: GrimRunner) -> str:
-    (token,) = json.loads(_table(runner).read_text())["roots"].keys()
+    (token,) = json.loads(_table(runner).read_text(encoding="utf-8"))["roots"].keys()
     return token
 
 
@@ -152,7 +152,7 @@ def _fire(runner: GrimRunner, event: str, payload: str, *, root: str | None = No
 
 
 def _log_lines(log: Path) -> list[str]:
-    return log.read_text().splitlines() if log.is_file() else []
+    return log.read_text(encoding="utf-8").splitlines() if log.is_file() else []
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +300,7 @@ def test_the_gatekeeper_example_leaves_an_audit_record(
 
     trail = Path(runner.grim_home) / "hooks" / "hook_audit.jsonl"
     assert trail.is_file(), f"no audit trail at {trail}"
-    records = [json.loads(line) for line in trail.read_text().splitlines() if line.strip()]
+    records = [json.loads(line) for line in trail.read_text(encoding="utf-8").splitlines() if line.strip()]
     denials = [r for r in records if r["hook_id"] == "refuse-recursive-root-delete"]
     assert denials, f"the gatekeeper's invocation was not recorded: {records}"
     assert denials[-1]["verdict"] == "deny", denials[-1]
@@ -370,7 +370,7 @@ def test_uninstalling_the_examples_disarms_them(
 
     assert _rows(runner) == [], "the dispatch rows survived uninstall"
     settings = project_dir / ".claude" / "settings.local.json"
-    registrations = json.loads(settings.read_text()).get("hooks", {}) if settings.is_file() else {}
+    registrations = json.loads(settings.read_text(encoding="utf-8")).get("hooks", {}) if settings.is_file() else {}
     assert registrations == {}, f"a client registration survived uninstall: {registrations}"
     payload_root = Path(runner.grim_home) / "hooks" / "payload"
     survivors = [p for p in payload_root.rglob("hook.toml")] if payload_root.is_dir() else []
@@ -398,7 +398,7 @@ def test_every_example_hook_is_wired_into_the_catalog() -> None:
     companion falls back to the conventional probe, which would publish the
     maintainer README to the package repository.
     """
-    manifest = tomllib.loads((CATALOG / "publish.toml").read_text())
+    manifest = tomllib.loads((CATALOG / "publish.toml").read_text(encoding="utf-8"))
     declared = set(manifest.get("hooks", {}))
     on_disk = {d.name for d in HOOKS_DIR.iterdir() if (d / "hook.toml").is_file()}
 
@@ -426,12 +426,12 @@ def test_every_example_declares_its_tier_in_its_description() -> None:
     """
     tiers = {LOGGER: "observer", GUARD: "gatekeeper"}
     for name, tier in tiers.items():
-        manifest = tomllib.loads((HOOKS_DIR / name / "hook.toml").read_text())
+        manifest = tomllib.loads((HOOKS_DIR / name / "hook.toml").read_text(encoding="utf-8"))
         description = manifest["description"]
         assert tier in description.lower(), f"{name} does not name its tier: {description}"
         assert {entry["tier"] for entry in manifest["hooks"]} == {tier}, manifest["hooks"]
 
-    guard = tomllib.loads((HOOKS_DIR / GUARD / "hook.toml").read_text())["description"]
+    guard = tomllib.loads((HOOKS_DIR / GUARD / "hook.toml").read_text(encoding="utf-8"))["description"]
     assert "NOT a security control" in guard, (
         f"the gatekeeper example must disown the security-control reading: {guard}"
     )

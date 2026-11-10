@@ -66,13 +66,13 @@ def test_plugin_flattens_dependencies(grim_at, work: Path, registry: str, unique
     root = work / "dist" / "stack.claude"
     # The exported skill and its whole closure, the transitive rule included.
     assert _skills(root) == ["a", "b", "c"]
-    assert (root / "skills" / "c" / "SKILL.md").read_text().startswith("---\nname: c\n")
+    assert (root / "skills" / "c" / "SKILL.md").read_text(encoding="utf-8").startswith("---\nname: c\n")
     members = {(m["kind"], m["name"]) for m in json.loads(result.stdout)["items"][0]["members"]}
     omitted = {(m["kind"], m["name"]) for m in json.loads(result.stdout)["items"][0]["omitted"]}
     assert ("skill", "a") in members and ("skill", "c") in members
     assert ("rule", "style") in members | omitted, "the transitive rule is a plugin member, kept or omitted for the client"
     # No dependency edge leaks into the manifest.
-    manifest = json.loads((root / ".claude-plugin" / "plugin.json").read_text())
+    manifest = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert "dependencies" not in manifest, manifest
     # Positive control: the closure is what grew the plugin — `c` alone exports just itself.
     solo = _export(runner, c.fq, "--name", "solo", "--client", "claude", "-o", "dist")
@@ -106,7 +106,7 @@ def test_shared_dependency_in_both_plugins(grim_at, work: Path, registry: str, u
     b = _dependent(unique_repo, "b", [("skill", "shared", "./shared:1")])
     (work / "marketplace.toml").write_text(
         '[marketplace]\nname = "acme"\nclients = ["claude"]\n\n[marketplace.owner]\nname = "Acme"\n\n'
-        f'[plugins.one]\ninclude = ["{a.fq}"]\n\n[plugins.two]\ninclude = ["{b.fq}"]\n'
+        f'[plugins.one]\ninclude = ["{a.fq}"]\n\n[plugins.two]\ninclude = ["{b.fq}"]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(work)
 
@@ -116,7 +116,7 @@ def test_shared_dependency_in_both_plugins(grim_at, work: Path, registry: str, u
     assert _skills(work / "claude" / "one") == ["a", "shared"]
     assert _skills(work / "claude" / "two") == ["b", "shared"]
     for plugin in ("one", "two"):
-        manifest = json.loads((work / "claude" / plugin / ".claude-plugin" / "plugin.json").read_text())
+        manifest = json.loads((work / "claude" / plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         assert "dependencies" not in manifest, manifest
 
 

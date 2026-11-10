@@ -123,7 +123,7 @@ def _replay_registry() -> None:
     layout**.  That independence is the point: a change to how grim packs an
     artifact must not be able to move these digests.
     """
-    recorded = json.loads((FIXTURE / "registry" / "pushed.json").read_text())
+    recorded = json.loads((FIXTURE / "registry" / "pushed.json").read_text(encoding="utf-8"))
     for entry in recorded:
         repo = entry["repo"]
         reg._push_blob(repo, EMPTY_CONFIG)
@@ -271,10 +271,10 @@ def test_the_declaration_hash_is_unchanged_and_still_version_1_c015(
     runner.run("lock")
     global_runner.run("lock", "--global")
 
-    expected = json.loads((FIXTURE / "golden" / "declaration_hash.json").read_text())
+    expected = json.loads((FIXTURE / "golden" / "declaration_hash.json").read_text(encoding="utf-8"))
 
     def hash_field(lock: Path, field: str) -> str:
-        for line in lock.read_text().splitlines():
+        for line in lock.read_text(encoding="utf-8").splitlines():
             if line.startswith(f"{field} ="):
                 return line.split("=", 1)[1].strip().strip('"')
         pytest.fail(f"{lock} carries no `{field}` -- the lock format changed shape")

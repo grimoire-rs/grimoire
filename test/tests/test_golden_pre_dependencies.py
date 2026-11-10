@@ -111,7 +111,7 @@ def _replay_registry() -> None:
     Independent of grim and of ``src.registry``'s packer: a change to how grim
     packs an artifact must not be able to move the digests in the golden locks.
     """
-    recorded = json.loads((FIXTURE / "registry" / "pushed.json").read_text())
+    recorded = json.loads((FIXTURE / "registry" / "pushed.json").read_text(encoding="utf-8"))
     for entry in recorded:
         repo = entry["repo"]
         reg._push_blob(repo, EMPTY_CONFIG)
@@ -167,8 +167,8 @@ def assert_pins_carry_declared_tags(lock_path: Path) -> None:
     this is what holds it. A direct entry answers to the ``grimoire.toml`` beside
     the lock, a bundle member to its ``[[bundle.member]]`` row.
     """
-    lock = tomllib.loads(lock_path.read_text())
-    config = tomllib.loads(lock_path.with_name("grimoire.toml").read_text())
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    config = tomllib.loads(lock_path.with_name("grimoire.toml").read_text(encoding="utf-8"))
     declared = {
         (member["kind"], member["name"]): member["id"]
         for bundle in lock.get("bundle", [])
@@ -313,7 +313,7 @@ def test_golden_status_sources_are_unchanged(grim_binary, grim_at, tmp_path, req
         ("project", env.project_runner, ()),
         ("global", env.global_runner, ("--global",)),
     ):
-        expected = json.loads((FIXTURE / "provenance" / f"status.{scope}.json").read_text())
+        expected = json.loads((FIXTURE / "provenance" / f"status.{scope}.json").read_text(encoding="utf-8"))
         actual = runner.json("status", *args)
         want = {(i["kind"], i["name"]): i["source"] for i in expected["items"]}
         got = {(i["kind"], i["name"]): i["source"] for i in actual["items"]}
@@ -353,14 +353,14 @@ def test_a_fresh_lock_matches_the_baseline_modulo_stamps(
     # The declaration hash is asserted by name too: the byte compare above would
     # report a moved hash as an opaque diff, and a hash change silently
     # re-resolves every existing install.
-    expected = json.loads((GOLDEN / "declaration_hash.json").read_text())
+    expected = json.loads((GOLDEN / "declaration_hash.json").read_text(encoding="utf-8"))
     for scope, lock in (("project", env.project_lock), ("global", env.global_lock)):
-        assert f'declaration_hash = "{expected[scope]}"' in lock.read_text(), (
+        assert f'declaration_hash = "{expected[scope]}"' in lock.read_text(encoding="utf-8"), (
             f"the {scope} declaration hash moved for a dependency-free project"
         )
     assert (
         f"declaration_hash_version = {expected['declaration_hash_version']}"
-        in env.project_lock.read_text()
+        in env.project_lock.read_text(encoding="utf-8")
     )
     _completed.add(request.node.name)
 
@@ -435,7 +435,7 @@ def test_remove_bundle_drops_what_the_baseline_dropped(
     env.lock_and_install()
     # Positive control: the bundle and its single-provenance member are there
     # before the remove, so the compare below is not over an empty project.
-    before = env.project_lock.read_text()
+    before = env.project_lock.read_text(encoding="utf-8")
     assert "bundled-rule" in before and "reg-bundle" in before
 
     env.project_runner.run("remove", "bundle", "reg-bundle")

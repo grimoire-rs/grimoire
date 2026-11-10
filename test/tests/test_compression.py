@@ -72,7 +72,7 @@ args = ["mcp"]
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _local_skill(root: Path, name: str = "code-review") -> Path:
@@ -310,7 +310,7 @@ def test_release_content_change_with_compression_flip_is_tag_exists(
     runner = grim_at(project_dir)
 
     existing = runner.json("release", str(skill), ref)["manifest_digest"]
-    (skill / "scripts/run.sh").write_text("echo CHANGED\n")
+    (skill / "scripts/run.sh").write_text("echo CHANGED\n", encoding="utf-8", newline="\n")
     result = runner.run(
         "release", str(skill), ref, "--compression", "gzip", check=False
     )
@@ -556,7 +556,7 @@ def test_gzip_annotation_equals_path_lock_hash_and_status_stays_installed(
     runner.run("install", "--client", "claude")
     match = re.search(
         r'^hash = "(sha256:[0-9a-f]{64})"',
-        (project_dir / "grimoire.lock").read_text(),
+        (project_dir / "grimoire.lock").read_text(encoding="utf-8"),
         re.MULTILINE,
     )
     assert match, "path entry carries a sha256 hash"
@@ -610,7 +610,7 @@ def _publish_tree(
         )
         tables += ["[mcp.demo-mcp]", "[bundles.demo-bundle]"]
     manifest = project_dir / "publish.toml"
-    manifest.write_text("\n".join(head) + "\n\n" + "\n\n".join(tables) + "\n")
+    manifest.write_text("\n".join(head) + "\n\n" + "\n\n".join(tables) + "\n", encoding="utf-8", newline="\n")
     return manifest
 
 
@@ -834,7 +834,7 @@ def test_fetch_digest_only_shape_unchanged_for_gzip(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     published = make_gzip_artifact(f"{unique_repo}/gz-demo", "skill", SKILL_FILES)
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     probe = grim_at(project_dir).json("fetch", published.fq, "--digest-only")
     assert set(probe) == {"ref", "digest"}, (
         f"no compression key on the digest probe: {probe}"
@@ -865,7 +865,7 @@ def test_fetch_zstd_layer_is_unsupported_media_type(
 def _assert_installed(project_dir: Path) -> None:
     root = project_dir / ".claude/skills/gz-demo"
     for rel, body in SKILL_FILES.items():
-        assert (root / rel.removeprefix("gz-demo/")).read_text() == body, rel
+        assert (root / rel.removeprefix("gz-demo/")).read_text(encoding="utf-8") == body, rel
 
 
 @pytest.mark.parametrize(
@@ -935,11 +935,11 @@ def test_update_across_compression_installs_new_content(
     runner.run("lock")
     runner.run("install", "--client", "claude")
     installed = project_dir / ".claude/skills/code-review/scripts/run.sh"
-    assert installed.read_text() == script.read_text()
+    assert installed.read_text(encoding="utf-8") == script.read_text(encoding="utf-8")
     previous = first["manifest_digest"]
 
     for minor, compression in enumerate(steps[1:] or steps, start=1):
-        script.write_text(f"echo v{minor}\n")
+        script.write_text(f"echo v{minor}\n", encoding="utf-8", newline="\n")
         report = runner.json(
             "release",
             str(skill),
@@ -950,8 +950,8 @@ def test_update_across_compression_installs_new_content(
         assert report["manifest_digest"] != previous
         rows = runner.json("update", "--client", "claude")["items"]
         assert [r["action"] for r in rows] == ["updated"], rows
-        assert installed.read_text() == f"echo v{minor}\n"
-        assert report["manifest_digest"] in (project_dir / "grimoire.lock").read_text()
+        assert installed.read_text(encoding="utf-8") == f"echo v{minor}\n"
+        assert report["manifest_digest"] in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
         assert runner.json("status")["items"][0]["state"] == "installed"
         previous = report["manifest_digest"]
 

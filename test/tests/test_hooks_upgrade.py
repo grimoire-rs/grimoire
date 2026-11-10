@@ -69,7 +69,7 @@ def _settings(project_dir: Path) -> Path:
 
 
 def _elements(project_dir: Path) -> list[dict]:
-    hooks = json.loads(_settings(project_dir).read_text())["hooks"]
+    hooks = json.loads(_settings(project_dir).read_text(encoding="utf-8"))["hooks"]
     return [e for groups in hooks.values() for g in groups for e in g["hooks"] if "grim-hook" in json.dumps(e)]
 
 
@@ -82,14 +82,14 @@ def _seed_old_registration(project_dir: Path, shim: Path) -> str:
         "s=$?\n"
         'case "$s" in 0) exit 0 ;; *) exit 0 ;; esac'
     )
-    settings = json.loads(_settings(project_dir).read_text())
+    settings = json.loads(_settings(project_dir).read_text(encoding="utf-8"))
     for groups in settings["hooks"].values():
         for group in groups:
             for element in group["hooks"]:
                 if "grim-hook" in json.dumps(element):
                     element.pop("args", None)
                     element["command"] = command
-    _settings(project_dir).write_text(json.dumps(settings))
+    _settings(project_dir).write_text(json.dumps(settings), encoding="utf-8", newline="\n")
     return command
 
 
@@ -106,7 +106,7 @@ def test_s003_the_old_shim_is_deleted_and_the_registration_rewritten(
     # Pre-seed the old layout: the shim, and a registration that names it.
     shim = hooks / "bin" / "grim-hook"
     shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text(OLD_SHIM)
+    shim.write_text(OLD_SHIM, encoding="utf-8", newline="\n")
     shim.chmod(0o755)
     _seed_old_registration(project_dir, shim)
 
@@ -155,7 +155,7 @@ def test_s003_a_workspace_not_revisited_keeps_its_old_registration_and_does_not_
     hooks = Path(runner_a.grim_home) / "hooks"
     shim = hooks / "bin" / "grim-hook"
     shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text(OLD_SHIM)
+    shim.write_text(OLD_SHIM, encoding="utf-8", newline="\n")
     shim.chmod(0o755)
     _seed_old_registration(project_a, shim)
     old_b = _seed_old_registration(project_b, shim)
@@ -260,11 +260,11 @@ def test_s003_a_run_outside_the_closure_rewrites_a_registration_the_old_shim_can
     else:
         recorded = tmp_path / "old" / "grim"
         recorded.parent.mkdir()
-        recorded.write_text(OLD_GRIM)
+        recorded.write_text(OLD_GRIM, encoding="utf-8", newline="\n")
         recorded.chmod(0o755)
     shim = Path(runner.grim_home) / "hooks" / "bin" / "grim-hook"
     shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text(OLD_SHIM.replace("/old/grim", str(recorded)))
+    shim.write_text(OLD_SHIM.replace("/old/grim", str(recorded)), encoding="utf-8", newline="\n")
     shim.chmod(0o755)
     _seed_old_registration(project_dir, shim)
     before = _fire(project_dir).stdout
@@ -330,17 +330,17 @@ def test_s008_a_directory_at_the_launcher_path_is_never_reaped(
     runner.run("hook", "allow")
     occupied = Path(runner.grim_home) / "hooks" / "grim-hook"
     (occupied / "payload").mkdir(parents=True)
-    (occupied / "payload" / "hook.toml").write_text("old binding\n")
+    (occupied / "payload" / "hook.toml").write_text("old binding\n", encoding="utf-8", newline="\n")
 
     install = runner.run("install", check=False)
 
     assert install.returncode == 0, install.stderr
-    assert (occupied / "payload" / "hook.toml").read_text() == "old binding\n"
+    assert (occupied / "payload" / "hook.toml").read_text(encoding="utf-8") == "old binding\n"
     assert sorted(p.name for p in occupied.iterdir()) == ["payload"]
     row = next(i for i in runner.json("status")["items"] if i["kind"] == "hook")
     assert row["state"] == "not-armed", row
     assert "something other than a file sits at the launcher's path" in install.stderr, install.stderr
-    assert not _settings(project_dir).is_file() or "grim-hook" not in _settings(project_dir).read_text()
+    assert not _settings(project_dir).is_file() or "grim-hook" not in _settings(project_dir).read_text(encoding="utf-8")
 
 
 GATEKEEPER_TOML = HOOK_TOML.replace('tier = "observer"', 'tier = "gatekeeper"')
@@ -362,7 +362,7 @@ def test_s009_a_codex_upgrade_warns_once_and_status_reports_client_trust_pending
     )
     grim_home.mkdir(parents=True, exist_ok=True)
     (grim_home / "grimoire.toml").write_text(
-        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n'
+        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
     grim.run("lock", "--global")
     first = grim.run("install", "--global", "--trust-hooks")
@@ -370,14 +370,14 @@ def test_s009_a_codex_upgrade_warns_once_and_status_reports_client_trust_pending
 
     surface = home / ".codex" / "hooks.json"
     launcher = str(grim_home / "hooks" / "grim-hook")
-    registered = surface.read_text()
+    registered = surface.read_text(encoding="utf-8")
     assert launcher in registered, registered
     # Stand in for the pre-launcher registration string Codex last approved. grim only rewrites
     # a file whose digest it recorded, so the record follows the edit.
     stale = registered.replace(launcher, "/old/grim-hook")
-    surface.write_text(stale)
+    surface.write_text(stale, encoding="utf-8", newline="\n")
     (record,) = (grim_home / "hooks" / "owned_files").iterdir()
-    record.write_text(hashlib.sha256(stale.encode()).hexdigest())
+    record.write_text(hashlib.sha256(stale.encode()).hexdigest(), encoding="utf-8", newline="\n")
 
     upgraded = grim.run("install", "--global", "--trust-hooks")
     warnings = [line for line in upgraded.stderr.splitlines() if "/hooks" in line]

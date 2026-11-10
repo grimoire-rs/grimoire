@@ -34,7 +34,7 @@ def test_lock_writes_sha256_pins(
     assert {r["name"] for r in rows} == {"code-review", "rust-style"}
     assert all(r["action"] == "locked" for r in rows)
 
-    lock_text = (project_dir / "grimoire.lock").read_text()
+    lock_text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "@sha256:" in lock_text
     assert sk.digest in lock_text
     assert ru.digest in lock_text
@@ -83,7 +83,7 @@ def test_lock_past_64_kib_stays_readable(
 
     # TOML comments: parse-inert, so only the file size changes.
     lock_path = project_dir / "grimoire.lock"
-    lock_path.write_text(lock_path.read_text() + "# pad pad pad pad pad\n" * 5000)
+    lock_path.write_text(lock_path.read_text(encoding="utf-8") + "# pad pad pad pad pad\n" * 5000, encoding="utf-8", newline="\n")
     assert lock_path.stat().st_size > 64 * 1024, "precondition: past the old cap"
 
     result = runner.run("status", check=False)
@@ -111,7 +111,7 @@ def test_tag_not_found_exits_79(
 def test_bad_config_exits_78(grim_at, project_dir: Path) -> None:
     # `surprise` is an unknown top-level field ⇒ TOML parse / schema error.
     (project_dir / "grimoire.toml").write_text(
-        'surprise = true\n[skills]\n'
+        'surprise = true\n[skills]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     result = runner.run("lock", check=False)

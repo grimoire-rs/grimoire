@@ -78,7 +78,7 @@ def test_set_get_unset_round_trip(grim_at: object, project_dir: Path) -> None:
 
     runner.run("config", "set", VENDOR_KEY, "true")
 
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.vendors.cursor]" in body, (
         f"set must persist the vendor table; config was:\n{body}"
     )
@@ -96,7 +96,7 @@ def test_set_get_unset_round_trip(grim_at: object, project_dir: Path) -> None:
     assert gone.returncode == 1, (
         f"unset key must exit 1 again, got {gone.returncode}"
     )
-    assert "[options.vendors.cursor]" not in (project_dir / "grimoire.toml").read_text(), (
+    assert "[options.vendors.cursor]" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8"), (
         "unset must remove the vendor table from the written config"
     )
 
@@ -114,7 +114,7 @@ def test_set_false_persists_as_an_explicit_opt_out(grim_at: object, project_dir:
     runner.run("config", "set", VENDOR_KEY, "true")
     runner.run("config", "set", VENDOR_KEY, "false")
 
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.vendors.cursor]" in body and "shared_skills = false" in body, (
         f"an explicit opt-out must be written; config was:\n{body}"
     )
@@ -169,12 +169,12 @@ def test_global_scope_round_trip(grim: object, grim_home: Path) -> None:
     Each command resolves exactly one scope — there is no merge — so the
     global surface needs its own coverage.
     """
-    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     runner: GrimRunner = grim  # type: ignore[assignment]
 
     runner.run("config", "--global", "set", VENDOR_KEY, "true")
 
-    body = (grim_home / "grimoire.toml").read_text()
+    body = (grim_home / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.vendors.cursor]" in body, (
         f"global set must persist the vendor table; config was:\n{body}"
     )
@@ -192,7 +192,7 @@ def test_global_scope_round_trip(grim: object, grim_home: Path) -> None:
     )
 
     runner.run("config", "--global", "unset", VENDOR_KEY)
-    assert "[options.vendors.cursor]" not in (grim_home / "grimoire.toml").read_text(), (
+    assert "[options.vendors.cursor]" not in (grim_home / "grimoire.toml").read_text(encoding="utf-8"), (
         "global unset must remove the vendor table"
     )
 
@@ -412,7 +412,7 @@ def test_shared_skills_on_a_non_pool_client_exits_65(grim_at: object, project_di
     _assert_error_envelope(as_json, "data", 65)
 
     # Nothing was written: the refusal is total, not partial.
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "vendors" not in body, f"a refused set must persist nothing; config was:\n{body}"
 
 
@@ -517,13 +517,13 @@ def test_dry_run_validates_without_writing(grim_at: object, project_dir: Path) -
     """``set --dry-run`` reports the write and leaves the config untouched."""
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
-    before = (project_dir / "grimoire.toml").read_text()
+    before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     payload = runner.json("config", "set", VENDOR_KEY, "true", "--dry-run")
     assert payload["dry_run"] is True, f"dry run must be reported; got {payload!r}"
     assert payload["key"] == VENDOR_KEY, f"key must round-trip; got {payload!r}"
 
-    assert (project_dir / "grimoire.toml").read_text() == before, (
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == before, (
         "--dry-run must not write the config file"
     )
 
@@ -563,7 +563,7 @@ def test_config_without_vendors_parses_and_stays_vendorless(
 
     # A write path (set of an unrelated key) must not invent a vendor table.
     runner.run("config", "set", "options.show_deprecated", "true")
-    assert "[options.vendors" not in cfg.read_text(), (
+    assert "[options.vendors" not in cfg.read_text(encoding="utf-8"), (
         "a config that declared no vendor table must not grow one"
     )
 
@@ -595,7 +595,7 @@ def test_vendor_table_preserved_through_add_remove_round_trip(
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
     runner.json("add", sk.fq)
 
-    after_add = (project_dir / "grimoire.toml").read_text()
+    after_add = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.vendors.cursor]" in after_add, (
         f"vendor table must survive grim add re-serialization; config was:\n{after_add}"
     )
@@ -605,7 +605,7 @@ def test_vendor_table_preserved_through_add_remove_round_trip(
 
     runner.json("remove", "skill", "vendor-options-probe")
 
-    after_remove = (project_dir / "grimoire.toml").read_text()
+    after_remove = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[options.vendors.cursor]" in after_remove, (
         f"vendor table must survive grim remove re-serialization; config was:\n{after_remove}"
     )

@@ -20,7 +20,7 @@ def _write_rule_config(project_dir: Path, rule_ref: str, clients: list[str]) -> 
     (project_dir / "grimoire.toml").write_text(
         f"[options]\nclients = [{clients_toml}]\n\n"
         "[rules]\n"
-        f'rust-style = "{rule_ref}"\n'
+        f'rust-style = "{rule_ref}"\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -30,7 +30,7 @@ def _rule_row(rows: list[dict], name: str = "rust-style") -> dict:
 
 def _recorded_clients(project_dir: Path, name: str = "rust-style") -> set[str]:
     """The client names recorded in ``.grimoire/state.json`` for ``name``."""
-    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text(encoding="utf-8"))
     for rec in state.get("records", []):
         if rec.get("name") == name:
             return {o["client"] for o in rec.get("outputs", [])}
@@ -54,7 +54,7 @@ def test_update_rewrites_lock_and_rematerializes(
     runner.run("lock", check=False)
     runner.run("install", check=False)
     installed = project_dir / ".claude/skills/code-review/SKILL.md"
-    assert installed.read_text() == "v1\n"
+    assert installed.read_text(encoding="utf-8") == "v1\n"
 
     # Publish v2 and move the floating tag onto it (rolling release).
     v2 = make_artifact(
@@ -65,8 +65,8 @@ def test_update_rewrites_lock_and_rematerializes(
 
     rows = runner.json("update")["items"]
     assert rows[0]["action"] == "updated"
-    assert installed.read_text() == "v2\n"
-    assert v2.digest in (project_dir / "grimoire.lock").read_text()
+    assert installed.read_text(encoding="utf-8") == "v2\n"
+    assert v2.digest in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def test_update_named_only_touches_that_artifact(
@@ -98,8 +98,8 @@ def test_update_named_only_touches_that_artifact(
     # A partial update carries non-named entries forward in the lock, so the
     # prune pass must not treat "b" as an orphan and delete it.
     assert all(r["action"] != "removed" for r in rows), "partial update must not prune the unnamed entry"
-    assert (project_dir / ".claude/rules/a.md").read_text() == "a2\n"
-    assert (project_dir / ".claude/rules/b.md").read_text() == "b1\n"
+    assert (project_dir / ".claude/rules/a.md").read_text(encoding="utf-8") == "a2\n"
+    assert (project_dir / ".claude/rules/b.md").read_text(encoding="utf-8") == "b1\n"
 
 
 def test_prune_of_a_zero_output_declined_record_is_clean(
@@ -114,7 +114,7 @@ def test_prune_of_a_zero_output_declined_record_is_clean(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
     rows = runner.json("install", "--client", "codex")["items"]
@@ -122,7 +122,7 @@ def test_prune_of_a_zero_output_declined_record_is_clean(
 
     # Drop the declaration and re-lock — the prune pass must reap the
     # zero-output record cleanly.
-    (project_dir / "grimoire.toml").write_text("")
+    (project_dir / "grimoire.toml").write_text("", encoding="utf-8", newline="\n")
     runner.run("lock", check=False)
     update_rows = runner.json("update")["items"]
     assert any(r["action"] == "removed" for r in update_rows), update_rows
@@ -146,7 +146,7 @@ def test_update_installs_newly_declared_rule(
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
     runner.run("install", check=False)
-    assert (project_dir / ".claude/rules/a.md").read_text() == "a1\n"
+    assert (project_dir / ".claude/rules/a.md").read_text(encoding="utf-8") == "a1\n"
 
     # Declare a second rule AND re-lock so the lock is not stale, then run a
     # full update (no names) to exercise the add path via target_lock.
@@ -172,8 +172,8 @@ def test_update_installs_newly_declared_rule(
     assert by_name["b"]["new"] is not None, "the locked rule carries a pin"
     # The addition is materialized by the update; the pre-existing rule is
     # untouched.
-    assert (project_dir / ".claude/rules/b.md").read_text() == "b1\n"
-    assert (project_dir / ".claude/rules/a.md").read_text() == "a1\n"
+    assert (project_dir / ".claude/rules/b.md").read_text(encoding="utf-8") == "b1\n"
+    assert (project_dir / ".claude/rules/a.md").read_text(encoding="utf-8") == "a1\n"
 
 
 def test_partial_update_with_stale_lock_exits_65(
@@ -257,7 +257,7 @@ def test_update_reaps_unmodified_dropped_client(
     assert _recorded_clients(project_dir) == {"claude"}, "copilot must leave the record"
 
     # State stays a valid V2 file.
-    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text(encoding="utf-8"))
     assert state["version"] == 2, state
 
 
@@ -317,7 +317,7 @@ def test_update_preserves_modified_dropped_client_then_force_reaps(
     copilot = project_dir / ".github/instructions/rust-style.instructions.md"
     assert_path_exists(copilot)
     # Hand-edit the copilot output so its content drifts from the record.
-    copilot.write_text("locally edited by the user\n")
+    copilot.write_text("locally edited by the user\n", encoding="utf-8", newline="\n")
 
     # Drop copilot from config, update WITHOUT --force: the edit is preserved.
     _write_rule_config(project_dir, ru.fq, ["claude"])
@@ -325,7 +325,7 @@ def test_update_preserves_modified_dropped_client_then_force_reaps(
     row = _rule_row(rows)
     assert row["kept_modified_clients"] == ["copilot"], row
     assert row["reaped_clients"] == [], row
-    assert copilot.read_text() == "locally edited by the user\n", "edit preserved"
+    assert copilot.read_text(encoding="utf-8") == "locally edited by the user\n", "edit preserved"
     assert "copilot" in _recorded_clients(project_dir), "kept-modified stays in state"
 
     # --force reaps even the modified output.
@@ -504,7 +504,7 @@ def test_a_config_run_names_cleanup_that_stays_in_the_named_config(
     here.run("lock")
     here.run("install")
     mine = project_dir / ".claude/skills/m/SKILL.md"
-    mine.write_text("the cwd project's own edits\n")
+    mine.write_text("the cwd project's own edits\n", encoding="utf-8", newline="\n")
 
     other = tmp_path / "other"
     (other / ".claude").mkdir(parents=True)
@@ -515,7 +515,7 @@ def test_a_config_run_names_cleanup_that_stays_in_the_named_config(
     away.run(*flag, "lock")
     away.run(*flag, "install")
     kept = other / ".claude/skills/m/SKILL.md"
-    kept.write_text("the other project's edits\n")
+    kept.write_text("the other project's edits\n", encoding="utf-8", newline="\n")
 
     retag(bundle, "keep", tag_digest(bundle, "1"))
     make_bundle(bundle, [("skill", "k", member("k"))], tag="1")
@@ -533,8 +533,8 @@ def test_a_config_run_names_cleanup_that_stays_in_the_named_config(
     followed = here.run(*argv, check=False)
 
     assert followed.returncode == 0, followed.stderr
-    assert mine.read_text() == "the cwd project's own edits\n"
-    assert 'm = "' in (project_dir / "grimoire.toml").read_text()
+    assert mine.read_text(encoding="utf-8") == "the cwd project's own edits\n"
+    assert 'm = "' in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert not kept.exists(), "the named config's kept file is the one removed"
 
 
@@ -564,7 +564,7 @@ def test_a_relative_config_remedy_still_names_that_file_from_another_directory(
     beside.run(*typed, "lock")
     beside.run(*typed, "install")
     kept = other / ".claude/skills/m/SKILL.md"
-    kept.write_text("the other project's edits\n")
+    kept.write_text("the other project's edits\n", encoding="utf-8", newline="\n")
 
     retag(bundle, "keep", tag_digest(bundle, "1"))
     make_bundle(bundle, [("skill", "k", member("k"))], tag="1")

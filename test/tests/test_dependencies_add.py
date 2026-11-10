@@ -65,7 +65,7 @@ def test_pulled_in(
     assert (_skill_dir(project_dir, "b") / "SKILL.md").is_file()
     assert (project_dir / ".claude/rules/c.md").is_file()
     # Only the typed artifact is declared.
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "b =" not in cfg and "c =" not in cfg
 
     _leaf(unique_repo, "d")
@@ -84,7 +84,7 @@ def test_add_installs_missing_locked_dependency(
     runner = grim_at(project_dir)
     # The lock already pins b; nothing is on disk.
     runner.run("add", "--no-install", a.fq)
-    assert 'name = "b"' in (project_dir / "grimoire.lock").read_text()
+    assert 'name = "b"' in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert not _skill_dir(project_dir, "b").exists()
 
     runner.run("add", a.fq)
@@ -93,7 +93,7 @@ def test_add_installs_missing_locked_dependency(
     assert (_skill_dir(project_dir, "b") / "SKILL.md").is_file(), (
         "an already-locked dependency with no files must be installed"
     )
-    assert b.digest in (project_dir / "grimoire.lock").read_text()
+    assert b.digest in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def test_transitive_chain_installs(
@@ -126,7 +126,7 @@ def test_add_force_transitive_clobber_refused(
     for name in ("a", "c"):
         mine = _skill_dir(project_dir, name)
         mine.mkdir(parents=True)
-        (mine / "SKILL.md").write_text("mine\n")
+        (mine / "SKILL.md").write_text("mine\n", encoding="utf-8", newline="\n")
 
     result = runner.run("--format", "json", "add", "--force", a.fq, check=False)
 
@@ -136,14 +136,14 @@ def test_add_force_transitive_clobber_refused(
     assert "skill 'c'" in error["message"], error
     assert "skill 'a'" not in error["message"], error
     # The typed artifact was forced; the dependency was left alone.
-    assert "mine" not in (_skill_dir(project_dir, "a") / "SKILL.md").read_text()
-    assert (_skill_dir(project_dir, "c") / "SKILL.md").read_text() == "mine\n"
+    assert "mine" not in (_skill_dir(project_dir, "a") / "SKILL.md").read_text(encoding="utf-8")
+    assert (_skill_dir(project_dir, "c") / "SKILL.md").read_text(encoding="utf-8") == "mine\n"
 
     # Positive control: install --force is the way to overwrite it.
     runner.run("install", "--force")
-    assert "mine" not in (_skill_dir(project_dir, "c") / "SKILL.md").read_text()
-    assert c.digest in (project_dir / "grimoire.lock").read_text()
-    assert b.digest in (project_dir / "grimoire.lock").read_text()
+    assert "mine" not in (_skill_dir(project_dir, "c") / "SKILL.md").read_text(encoding="utf-8")
+    assert c.digest in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
+    assert b.digest in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
 
 def test_add_force_transitive_clobber_refused_names_the_global_remedy(
@@ -156,7 +156,7 @@ def test_add_force_transitive_clobber_refused_names_the_global_remedy(
     skills = grim.home / ".claude" / "skills"
     for name in ("a", "c"):
         (skills / name).mkdir(parents=True)
-        (skills / name / "SKILL.md").write_text("mine\n", encoding="utf-8")
+        (skills / name / "SKILL.md").write_text("mine\n", encoding="utf-8", newline="\n")
 
     result = grim.run("--global", "add", "--force", a.fq, check=False)
 
@@ -186,7 +186,7 @@ def test_add_force_bundle_spares_directly_declared_nested_member(
     # `t` is only a nested member, so its untracked file is the bundle's to force.
     for name in ("s", "t"):
         _skill_dir(project_dir, name).mkdir(parents=True)
-        (_skill_dir(project_dir, name) / "SKILL.md").write_text("mine\n")
+        (_skill_dir(project_dir, name) / "SKILL.md").write_text("mine\n", encoding="utf-8", newline="\n")
     mine = _skill_dir(project_dir, "s")
 
     result = runner.run("--format", "json", "add", "--force", outer.fq, check=False)
@@ -194,8 +194,8 @@ def test_add_force_bundle_spares_directly_declared_nested_member(
     assert result.returncode == 65, result.stderr
     error = json.loads(result.stdout)["error"]
     assert error["reason"] == "untracked-destination", error
-    assert (mine / "SKILL.md").read_text() == "mine\n"
-    assert "mine" not in (_skill_dir(project_dir, "t") / "SKILL.md").read_text()
+    assert (mine / "SKILL.md").read_text(encoding="utf-8") == "mine\n"
+    assert "mine" not in (_skill_dir(project_dir, "t") / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_add_names_a_pin_it_dropped(

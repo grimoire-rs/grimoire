@@ -60,7 +60,7 @@ def _release_mcp(runner, project_dir: Path, registry: str, unique_repo: str) -> 
     src = project_dir / "src"
     src.mkdir(parents=True, exist_ok=True)
     descriptor = src / "grim-mcp.toml"
-    descriptor.write_text(MCP_DESCRIPTOR)
+    descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     return ref
@@ -87,8 +87,8 @@ def test_failed_client_keeps_sibling_client_recoverable(
     runner.run("install")
     claude_index = project_dir / ".claude/skills/code-review/SKILL.md"
     cursor_index = project_dir / ".cursor/skills/code-review/SKILL.md"
-    assert claude_index.read_text() == SKILL_V1
-    assert cursor_index.read_text() == SKILL_V1
+    assert claude_index.read_text(encoding="utf-8") == SKILL_V1
+    assert cursor_index.read_text(encoding="utf-8") == SKILL_V1
 
     write_config(project_dir, skills={"code-review": v2.fq})
     runner.run("lock")
@@ -102,7 +102,7 @@ def test_failed_client_keeps_sibling_client_recoverable(
     assert failed.returncode != 0, (
         "a client that cannot be written must still fail the command"
     )
-    assert claude_index.read_text() == SKILL_V2, (
+    assert claude_index.read_text(encoding="utf-8") == SKILL_V2, (
         "the first client was materialized before the failure; this test "
         "only means something if that actually happened"
     )
@@ -113,8 +113,8 @@ def test_failed_client_keeps_sibling_client_recoverable(
         "nothing leaves Claude looking locally modified, which refuses "
         f"every later install (rc={retry.returncode}): {retry.stderr}"
     )
-    assert claude_index.read_text() == SKILL_V2
-    assert cursor_index.read_text() == SKILL_V2
+    assert claude_index.read_text(encoding="utf-8") == SKILL_V2
+    assert cursor_index.read_text(encoding="utf-8") == SKILL_V2
 
 
 def test_mcp_refusal_leaves_every_client_config_untouched(
@@ -133,7 +133,7 @@ def test_mcp_refusal_leaves_every_client_config_untouched(
     cursor_config = project_dir / ".cursor/mcp.json"
     cursor_config.parent.mkdir(parents=True)
     cursor_config.write_text(
-        '{\n  "mcpServers": {\n    "grim-mcp": {"command": "user-owned"}\n  }\n}\n'
+        '{\n  "mcpServers": {\n    "grim-mcp": {"command": "user-owned"}\n  }\n}\n', encoding="utf-8", newline="\n"
     )
     write_config(project_dir)
     runner.json("add", "--no-install", ref)
@@ -144,13 +144,13 @@ def test_mcp_refusal_leaves_every_client_config_untouched(
         f"{result.returncode}; {result.stderr}"
     )
     assert (
-        json.loads(cursor_config.read_text())["mcpServers"]["grim-mcp"]["command"]
+        json.loads(cursor_config.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]["command"]
         == "user-owned"
     ), "the refusal must leave the hand-authored member untouched"
 
     claude_config = project_dir / ".mcp.json"
     registered = (
-        json.loads(claude_config.read_text()).get("mcpServers", {})
+        json.loads(claude_config.read_text(encoding="utf-8")).get("mcpServers", {})
         if claude_config.exists()
         else {}
     )
@@ -183,19 +183,19 @@ def test_env_aliased_root_refuses_instead_of_deleting(
     grim.env["CLAUDE_CONFIG_DIR"] = str(alt_root)
     ref = f"{registry}/{unique_repo}/code-review:1.0.0"
     grim.run("add", "--global", ref)
-    assert (alt_root / "skills/code-review/SKILL.md").read_text() == SKILL_V1
+    assert (alt_root / "skills/code-review/SKILL.md").read_text(encoding="utf-8") == SKILL_V1
 
     del grim.env["CLAUDE_CONFIG_DIR"]
     hand = grim.home / ".claude/skills/code-review/SKILL.md"
     hand.parent.mkdir(parents=True)
-    hand.write_text("# hand-authored, not grim's\n")
+    hand.write_text("# hand-authored, not grim's\n", encoding="utf-8", newline="\n")
 
     result = grim.run("install", "--global", check=False)
     assert result.returncode == 65, (
         "grim wrote nothing at the un-aliased root, so overwriting it "
         f"needs --force; got {result.returncode}: {result.stderr}"
     )
-    assert hand.read_text() == "# hand-authored, not grim's\n", (
+    assert hand.read_text(encoding="utf-8") == "# hand-authored, not grim's\n", (
         "a destination whose bytes are not the recorded ones must never "
         "be removed without --force"
     )
@@ -217,7 +217,7 @@ def test_partial_destination_file_is_never_a_permanent_wedge(
     runner.run("install")
 
     index = project_dir / ".claude/skills/code-review/SKILL.md"
-    index.write_text(SKILL_V1[: len(SKILL_V1) // 2])
+    index.write_text(SKILL_V1[: len(SKILL_V1) // 2], encoding="utf-8", newline="\n")
 
     refused = runner.run("install", check=False)
     assert refused.returncode == 65, (
@@ -230,7 +230,7 @@ def test_partial_destination_file_is_never_a_permanent_wedge(
         f"--force must always clear the refusal; got "
         f"{forced.returncode}: {forced.stderr}"
     )
-    assert index.read_text() == SKILL_V1
+    assert index.read_text(encoding="utf-8") == SKILL_V1
     row = next(
         r for r in runner.json("status")["items"] if r["name"] == "code-review"
     )

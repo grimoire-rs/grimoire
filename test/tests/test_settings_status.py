@@ -92,7 +92,7 @@ def _repin(workspace: Path, old: PublishedArtifact, new: PublishedArtifact) -> N
     lock = workspace / "grimoire.lock"
     text = lock.read_text(encoding="utf-8")
     assert old.digest in text
-    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
 
 def _file(path: Path) -> dict:
@@ -101,7 +101,7 @@ def _file(path: Path) -> dict:
 
 def _put(path: Path, values: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(values), encoding="utf-8")
+    path.write_text(json.dumps(values), encoding="utf-8", newline="\n")
 
 
 def _row(report: dict, name: str) -> dict:
@@ -132,7 +132,7 @@ def _seed_record(runner: GrimRunner, workspace: Path, keys: list[str]) -> None:
     path = Path(runner.grim_home) / "hooks" / "consent" / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {"v": 1, "workspace": str(workspace), "hooks": keys, "consented_at": "2026-08-28T10:00:00Z"}
-    path.write_text(json.dumps(record), encoding="utf-8")
+    path.write_text(json.dumps(record), encoding="utf-8", newline="\n")
 
 
 def _key(binding: str, package: PublishedArtifact) -> str:
@@ -167,7 +167,7 @@ def _path_sourced(workspace: Path) -> tuple[Path, str]:
         flags=re.MULTILINE,
     )
     assert swapped == 1, pinned
-    lock.write_text(edited, encoding="utf-8")
+    lock.write_text(edited, encoding="utf-8", newline="\n")
     return lock, pinned
 
 
@@ -501,7 +501,7 @@ def test_a_hung_tracked_probe_does_not_hold_status(git, tmp_path: Path, grim_at,
     fake = tmp_path / "fake-bin"
     fake.mkdir()
     (fake / "git").write_text(
-        f'#!/bin/sh\ncase "$*" in *ls-files*) exec sleep 60 ;; esac\nexec "{real_git}" "$@"\n', encoding="utf-8"
+        f'#!/bin/sh\ncase "$*" in *ls-files*) exec sleep 60 ;; esac\nexec "{real_git}" "$@"\n', encoding="utf-8", newline="\n"
     )
     (fake / "git").chmod(0o755)
     path = runner.env["PATH"]
@@ -613,7 +613,7 @@ def test_grim_home_refusal_reads_not_armed(
     assert warning in result.stderr
     # Malformed on purpose: status under this home must not read it.
     malformed = "this is = = not toml\n"
-    (nested / "grimoire.toml").write_text(malformed, encoding="utf-8")
+    (nested / "grimoire.toml").write_text(malformed, encoding="utf-8", newline="\n")
     report = runner.json("status")
 
     row = _row(report, "team")
@@ -631,7 +631,7 @@ def test_grim_home_refusal_reads_not_armed(
     assert len(row["outputs"]) == 1
 
     # Positive control: that same file costs a 78 under a home grim does read.
-    (Path(home) / "grimoire.toml").write_text(malformed, encoding="utf-8")
+    (Path(home) / "grimoire.toml").write_text(malformed, encoding="utf-8", newline="\n")
     assert runner.run("status", check=False).returncode == 78
 
 
@@ -952,7 +952,7 @@ def test_an_own_file_has_no_piece_detail(grim, grim_home: Path, tmp_path: Path, 
     assert row["state"] == "installed"
     assert [(output["client"], output["element"]) for output in row["outputs"]] == [("codex", None)]
 
-    rendered.write_text("hand edited\n", encoding="utf-8")
+    rendered.write_text("hand edited\n", encoding="utf-8", newline="\n")
     assert _row(grim.json("--global", "status"), "team")["state"] == "modified"
 
     rendered.unlink()
@@ -971,7 +971,7 @@ def test_a_path_source_reads_not_armed(grim_at, project_dir: Path, tmp_path: Pat
     assert _causes(row) == [("claude", "not-registered")]
 
     # Positive control: the same package under its pin reads as its lifecycle.
-    lock.write_text(pinned, encoding="utf-8")
+    lock.write_text(pinned, encoding="utf-8", newline="\n")
     assert _row(runner.json("status"), "team")["state"] == "missing"
 
 

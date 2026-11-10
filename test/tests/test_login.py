@@ -54,14 +54,14 @@ store = os.environ["DOCKER_CREDENTIAL_TEST_STORE"]
 
 def load():
     try:
-        with open(store) as fh:
+        with open(store, encoding="utf-8") as fh:
             return json.load(fh)
     except FileNotFoundError:
         return {}
 
 
 def save(data):
-    with open(store, "w") as fh:
+    with open(store, "w", encoding="utf-8", newline="\\n") as fh:
         json.dump(data, fh)
 
 
@@ -101,10 +101,10 @@ def credential_helper(tmp_path: Path, docker_config: Path) -> dict[str, str]:
     bin_dir = tmp_path / "helper-bin"
     bin_dir.mkdir()
     helper = bin_dir / "docker-credential-test"
-    helper.write_text(_MOCK_HELPER)
+    helper.write_text(_MOCK_HELPER, encoding="utf-8", newline="\n")
     helper.chmod(helper.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
-    (docker_config / "config.json").write_text(json.dumps({"credsStore": "test"}))
+    (docker_config / "config.json").write_text(json.dumps({"credsStore": "test"}), encoding="utf-8", newline="\n")
 
     store_file = tmp_path / "helper-store.json"
     return {
@@ -184,7 +184,7 @@ def _logout(
 
 def _read_config(docker_config: Path) -> dict:
     path = docker_config / "config.json"
-    return json.loads(path.read_text()) if path.exists() else {}
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +324,7 @@ def test_login_via_helper_stores_credential(grim: GrimRunner, docker_config: Pat
     )
     assert res.returncode == 0, res.stderr
     # Credential landed in the helper's backing store, NOT in plaintext auths.
-    store = json.loads(Path(credential_helper["_STORE_FILE"]).read_text())
+    store = json.loads(Path(credential_helper["_STORE_FILE"]).read_text(encoding="utf-8"))
     assert store["ghcr.io"] == {"Username": "alice", "Secret": "s3cret"}
     assert "auths" not in _read_config(docker_config)
 
@@ -340,7 +340,7 @@ def test_logout_via_helper_erases_credential(grim: GrimRunner, docker_config: Pa
     )
     res = _logout(grim, "ghcr.io", docker_config=docker_config, extra_env=credential_helper)
     assert res.returncode == 0, res.stderr
-    store = json.loads(Path(credential_helper["_STORE_FILE"]).read_text())
+    store = json.loads(Path(credential_helper["_STORE_FILE"]).read_text(encoding="utf-8"))
     assert "ghcr.io" not in store
 
 
@@ -357,7 +357,7 @@ def test_login_resolves_configured_default_registry(
     must resolve the project's ``[[registries]]`` default instead of erroring
     with "no registry given"."""
     (project_dir / "grimoire.toml").write_text(
-        '[[registries]]\noci = "registry.corp.example"\ndefault = true\n'
+        '[[registries]]\noci = "registry.corp.example"\ndefault = true\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
@@ -383,7 +383,7 @@ def test_login_resolves_registries_alias(
     substitutes that entry's url — mirroring the `alias/repo` resolution
     `add`/`search` already apply."""
     (project_dir / "grimoire.toml").write_text(
-        '[[registries]]\nalias = "corp"\noci = "registry.corp.example"\n'
+        '[[registries]]\nalias = "corp"\noci = "registry.corp.example"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
@@ -408,7 +408,7 @@ def test_logout_resolves_registries_alias(
     """``grim logout`` resolves a configured alias the same way `login` does,
     so the pair round-trips against the same credential key."""
     (project_dir / "grimoire.toml").write_text(
-        '[[registries]]\nalias = "corp"\noci = "registry.corp.example"\ndefault = true\n'
+        '[[registries]]\nalias = "corp"\noci = "registry.corp.example"\ndefault = true\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
@@ -460,7 +460,7 @@ def test_logout_resolves_a_project_alias_despite_broken_global_config(
     against whatever key `login` itself wrote.
     """
     (project_dir / "grimoire.toml").write_text(
-        '[[registries]]\nalias = "acme"\noci = "ghcr.io/acme"\ndefault = true\n'
+        '[[registries]]\nalias = "acme"\noci = "ghcr.io/acme"\ndefault = true\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -474,7 +474,7 @@ def test_logout_resolves_a_project_alias_despite_broken_global_config(
     assert len(auths) == 1, f"setup: login must store exactly one credential; got {auths}"
     key = next(iter(auths))
 
-    (grim_home / "grimoire.toml").write_text(_BROKEN_GLOBAL_CONFIG)
+    (grim_home / "grimoire.toml").write_text(_BROKEN_GLOBAL_CONFIG, encoding="utf-8", newline="\n")
 
     res = _logout(runner, "acme", docker_config=docker_config)
     assert res.returncode == 0, (
@@ -494,7 +494,7 @@ def test_login_no_registry_anywhere_is_config_error(
     """Unlike `add`/`release`, `login` must never silently substitute the
     built-in fallback registry — storing a credential the user never named
     would be a silent surprise. Nothing configured anywhere ⇒ exit 78."""
-    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.env.pop("GRIM_DEFAULT_REGISTRY", None)
 

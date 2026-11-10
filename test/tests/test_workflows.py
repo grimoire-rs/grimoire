@@ -30,7 +30,7 @@ from pathlib import Path
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _skill_md(marker: str) -> str:
@@ -74,7 +74,7 @@ def test_quickstart_walkthrough(
     assert out["status"] == "added"
     assert "@sha256:" in out["pinned"]
     installed_index = project_dir / ".claude/skills/code-review/SKILL.md"
-    assert "Code Review v1" in installed_index.read_text()
+    assert "Code Review v1" in installed_index.read_text(encoding="utf-8")
 
     # 3. A follow-up `install` is a clean no-op — already materialized.
     rows = runner.json("install")["items"]
@@ -93,7 +93,7 @@ def test_quickstart_walkthrough(
     assert by_name["code-review"]["action"] == "updated", (
         f"floating :1 must roll forward on update, got {by_name}"
     )
-    assert "Code Review v2" in installed_index.read_text()
+    assert "Code Review v2" in installed_index.read_text(encoding="utf-8")
     rows = runner.json("status")["items"]
     assert [r["state"] for r in rows] == ["installed"]
 
@@ -101,7 +101,7 @@ def test_quickstart_walkthrough(
     out = runner.json("uninstall", "skill", "code-review")
     assert out["status"] == "uninstalled"
     assert not (project_dir / ".claude/skills/code-review").exists()
-    assert "code-review" not in (project_dir / "grimoire.toml").read_text()
+    assert "code-review" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
 
 def test_quickstart_multiclient_install(

@@ -32,7 +32,7 @@ def _git_index_repo(tmp_path: Path) -> Path:
     entry = repo / "index" / "github.com" / "acme" / "tool"
     entry.mkdir(parents=True)
     (entry / "metadata.json").write_text(
-        json.dumps(package("tool", "skill", "ghcr.io/acme/skills/tool", "A tool"))
+        json.dumps(package("tool", "skill", "ghcr.io/acme/skills/tool", "A tool")), encoding="utf-8", newline="\n"
     )
     for args in (
         ["init", "-q", str(repo)],

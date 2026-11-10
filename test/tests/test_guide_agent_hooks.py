@@ -63,7 +63,7 @@ def _bound_fences(text: str) -> list[tuple[str, str]]:
 
 def _fire(project_dir: Path, runner: GrimRunner, command: str) -> subprocess.CompletedProcess[str]:
     """Run Claude's registered PreToolUse command the way Claude runs it."""
-    settings = json.loads((project_dir / ".claude" / "settings.local.json").read_text())
+    settings = json.loads((project_dir / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
     (registered,) = [
         h["command"]
         for group in settings["hooks"]["PreToolUse"]
@@ -100,8 +100,8 @@ def test_the_guide_runs_end_to_end(grim_at, project_dir: Path, registry: str, un
 
     source = project_dir / "approve-safe-commands"
     source.mkdir()
-    (source / "hook.toml").write_text(files["toml"])
-    (source / "approve.py").write_text(files["python"])
+    (source / "hook.toml").write_text(files["toml"], encoding="utf-8", newline="\n")
+    (source / "approve.py").write_text(files["python"], encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     runner.run("init")
@@ -150,5 +150,5 @@ def test_the_guide_runs_end_to_end(grim_at, project_dir: Path, registry: str, un
             assert "permissionDecision" not in unlisted.stdout, unlisted.stdout
         elif command.startswith("grim uninstall"):
             assert runner.json("hook", "list")["items"] == []
-            settings = json.loads((project_dir / ".claude" / "settings.local.json").read_text())
+            settings = json.loads((project_dir / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
             assert settings.get("hooks", {}) == {}, settings

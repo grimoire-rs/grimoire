@@ -30,8 +30,8 @@ timeout = {timeout}
 def _hook_dir(root: Path, timeout: int) -> Path:
     hook = root / "shell-guard"
     hook.mkdir()
-    (hook / "hook.toml").write_text(HOOK_TOML.format(timeout=timeout))
-    (hook / "guard.py").write_text("import sys\nsys.stdin.read()\nprint('{}')\n")
+    (hook / "hook.toml").write_text(HOOK_TOML.format(timeout=timeout), encoding="utf-8", newline="\n")
+    (hook / "guard.py").write_text("import sys\nsys.stdin.read()\nprint('{}')\n", encoding="utf-8", newline="\n")
     return hook
 
 

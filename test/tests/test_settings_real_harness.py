@@ -234,7 +234,7 @@ def test_harnesses_run_on_linux_only(
     the fixture skips and the runner refuses before anything is spawned."""
     marker = tmp_path / "ran"
     stand_in = tmp_path / "claude"
-    stand_in.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+    stand_in.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8", newline="\n")
     stand_in.chmod(0o755)
     monkeypatch.setenv(CLAUDE_VAR, str(stand_in))
     env = _harness_env(stand_in, tmp_path, {"CLAUDE_CONFIG_DIR": str(tmp_path / "claude-root")})
@@ -285,14 +285,14 @@ def test_claude_doctor_accepts_the_rendered_settings(
     # Controls first: the binary names an invalid value and a malformed file.
     bad_value = _copy_root(root, "bad-value")
     broken = {**rendered, "permissions": {**rendered["permissions"], "defaultMode": "bogus"}}
-    (bad_value / "settings.json").write_text(json.dumps(broken), encoding="utf-8")
+    (bad_value / "settings.json").write_text(json.dumps(broken), encoding="utf-8", newline="\n")
     report = _claude_doctor(claude_bin, tmp_path, bad_value)
     assert "Invalid settings" in report
     assert "permissions.defaultMode" in report
 
     malformed = _copy_root(root, "malformed")
     text = (malformed / "settings.json").read_text(encoding="utf-8")
-    (malformed / "settings.json").write_text(text[: len(text) // 2], encoding="utf-8")
+    (malformed / "settings.json").write_text(text[: len(text) // 2], encoding="utf-8", newline="\n")
     assert "Invalid or malformed JSON" in _claude_doctor(claude_bin, tmp_path, malformed)
 
     report = _claude_doctor(claude_bin, tmp_path, root)
@@ -341,14 +341,14 @@ def test_codex_loads_the_rendered_config(
     # Controls first: a bad value and a malformed file both stop the same verbs.
     bad_value = _copy_root(root, "bad-value")
     (bad_value / "config.toml").write_text(
-        config.replace('approval_policy = "never"', 'approval_policy = "bogus"'), encoding="utf-8"
+        config.replace('approval_policy = "never"', 'approval_policy = "bogus"'), encoding="utf-8", newline="\n"
     )
     refused = _codex(codex_bin, tmp_path, bad_value, ["mcp", "list"])
     assert refused.returncode != 0
     assert "approval_policy" in _output(refused)
 
     malformed = _copy_root(root, "malformed")
-    (malformed / "config.toml").write_text(config + "[tui\n", encoding="utf-8")
+    (malformed / "config.toml").write_text(config + "[tui\n", encoding="utf-8", newline="\n")
     refused = _codex(codex_bin, tmp_path, malformed, ["mcp", "list"])
     assert refused.returncode != 0
     assert "failed to load bootstrap configuration" in _output(refused)
@@ -364,7 +364,7 @@ def test_codex_loads_the_rendered_config(
     assert "Approval policy is currently never" in shown.stdout
 
     other = _copy_root(root, "other-mode")
-    (other / "config.toml").write_text(config.replace('"workspace-write"', '"read-only"'), encoding="utf-8")
+    (other / "config.toml").write_text(config.replace('"workspace-write"', '"read-only"'), encoding="utf-8", newline="\n")
     flipped = _codex(codex_bin, tmp_path, other, ["debug", "prompt-input"])
     assert "`sandbox_mode` is `read-only`" in flipped.stdout, "the read-back follows the file"
 
@@ -381,7 +381,7 @@ def test_codex_execpolicy_reads_the_rendered_rules(
         return _codex(codex_bin, tmp_path, roots["codex"], ["execpolicy", "check", *flags, *argv], flags=False)
 
     bad = tmp_path / "bad.rules"
-    bad.write_text(BAD_RULES, encoding="utf-8")
+    bad.write_text(BAD_RULES, encoding="utf-8", newline="\n")
     refused = check(bad, argv=["ls"])
     assert refused.returncode != 0
     assert "failed to parse policy" in _output(refused), "the binary reports a bad rules file"
@@ -407,7 +407,7 @@ def test_codex_execpolicy_with_a_second_bad_rules_file(
     roots = _render(grim, grim_home, tmp_path / "s", unique_repo, "codex", CODEX_DOCUMENT)
     rules = roots["codex"] / "rules" / "grim-team.rules"
     bad = tmp_path / "bad.rules"
-    bad.write_text(BAD_RULES, encoding="utf-8")
+    bad.write_text(BAD_RULES, encoding="utf-8", newline="\n")
 
     def check(*files: Path) -> subprocess.CompletedProcess[str]:
         flags = [part for file in files for part in ("--rules", str(file))]

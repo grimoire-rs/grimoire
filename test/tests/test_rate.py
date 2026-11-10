@@ -89,7 +89,7 @@ def _publish(
 ) -> None:
     """Serve an index carrying one rated and one unrated pointer."""
     (root / "all.json").write_text(
-        json.dumps([_package("rated", RATED), _package("unrated", UNRATED)])
+        json.dumps([_package("rated", RATED), _package("unrated", UNRATED)]), encoding="utf-8", newline="\n"
     )
     stats: dict = {
         "schema_version": 1,
@@ -109,12 +109,12 @@ def _publish(
                 "url": "https://github.com/acme/index/discussions/7",
             }
         }
-    (root / "stats.json").write_text(json.dumps(stats))
+    (root / "stats.json").write_text(json.dumps(stats), encoding="utf-8", newline="\n")
 
 
 def _index_config(project_dir: Path, locator: str) -> None:
     (project_dir / "grimoire.toml").write_text(
-        f'[[registries]]\nalias = "hub"\nindex = "{locator}"\ndefault = true\n\n[skills]\n\n[rules]\n'
+        f'[[registries]]\nalias = "hub"\nindex = "{locator}"\ndefault = true\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -328,7 +328,7 @@ def _votes_key(reference: str) -> str:
 
 
 def _stored_vote(runner, reference: str) -> dict:
-    stored = json.loads((Path(runner.grim_home) / "state" / "votes.json").read_text())
+    stored = json.loads((Path(runner.grim_home) / "state" / "votes.json").read_text(encoding="utf-8"))
     return stored["votes"][_votes_key(reference)]
 
 
@@ -412,7 +412,7 @@ def test_a_vote_records_the_account_id_in_votes_json(forge_project, fake_forge) 
     result = _vote(forge_project, fake_forge, "--up", stdin="ghp_x")
     assert result.returncode == 0, result.stderr
 
-    stored = json.loads(votes_file.read_text())
+    stored = json.loads(votes_file.read_text(encoding="utf-8"))
     assert stored["votes"][_votes_key(RATED)]["voted"] is True, stored
     assert _FakeForge.LOGIN not in json.dumps(stored), (
         "keyed on the immutable id, never on the renameable login"
@@ -1094,7 +1094,7 @@ def test_offline_does_not_refetch_the_stats_for_an_unrated_row(
 def _two_index_config(project_dir: Path, first: str, second: str) -> None:
     (project_dir / "grimoire.toml").write_text(
         f'[[registries]]\nalias = "hub"\nindex = "{first}"\ndefault = true\n\n'
-        f'[[registries]]\nalias = "mirror"\nindex = "{second}"\n\n[skills]\n\n[rules]\n'
+        f'[[registries]]\nalias = "mirror"\nindex = "{second}"\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -1141,7 +1141,7 @@ def _commit_pointers(repo: Path, names: list[str]) -> None:
         entry = repo / "index" / "github.com" / "acme" / name
         entry.mkdir(parents=True, exist_ok=True)
         (entry / "metadata.json").write_text(
-            json.dumps(_package(name, f"ghcr.io/acme/skills/{name}"))
+            json.dumps(_package(name, f"ghcr.io/acme/skills/{name}")), encoding="utf-8", newline="\n"
         )
     for args in (
         ["add", "-A"],
@@ -1158,7 +1158,7 @@ def test_an_unrated_git_index_row_is_not_recloned_to_look_for_stats(
     would carry the new pointer into the cache."""
     repo = _git_index_repo(tmp_path, ["unrated"])
     (project_dir / "grimoire.toml").write_text(
-        f'[[registries]]\nalias = "hub"\nindex = "{repo.as_posix()}"\ndefault = true\n\n[skills]\n\n[rules]\n'
+        f'[[registries]]\nalias = "hub"\nindex = "{repo.as_posix()}"\ndefault = true\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     _warm_catalog(runner)
@@ -1268,7 +1268,7 @@ def test_an_unknown_provider_value_never_breaks_the_catalog_build(
     and unknown top-level keys degrade the artifact to "readable, not
     writable" — they never take the whole catalog down."""
     root, base = http_index
-    (root / "all.json").write_text(json.dumps([_package("rated", RATED)]))
+    (root / "all.json").write_text(json.dumps([_package("rated", RATED)]), encoding="utf-8", newline="\n")
     (root / "stats.json").write_text(
         json.dumps(
             {
@@ -1283,7 +1283,7 @@ def test_an_unknown_provider_value_never_breaks_the_catalog_build(
                 },
                 "future_top_level_key": True,
             }
-        )
+        ), encoding="utf-8", newline="\n"
     )
     _index_config(project_dir, base)
     runner = grim_at(project_dir)

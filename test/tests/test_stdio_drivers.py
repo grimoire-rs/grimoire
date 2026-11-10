@@ -43,7 +43,7 @@ _POSIX_ONLY = pytest.mark.skipif(
 def _stand_in(tmp_path: Path, name: str, body: str) -> GrimRunner:
     """A runner whose binary is a sh script standing in for `grim mcp`."""
     script = tmp_path / name
-    script.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+    script.write_text(f"#!/bin/sh\n{body}", encoding="utf-8", newline="\n")
     script.chmod(0o755)
     home = tmp_path / f"{name}-home"
     home.mkdir()
@@ -66,7 +66,7 @@ def test_a_tool_call_slower_than_the_drain_window_is_answered(
     with serve(root, handler) as base:
         host = base.removeprefix("http://")
         (project_dir / "grimoire.toml").write_text(
-            f'[[registries]]\nalias = "stub"\noci = "{host}/grim-test/stall"\n\n[skills]\n'
+            f'[[registries]]\nalias = "stub"\noci = "{host}/grim-test/stall"\n\n[skills]\n', encoding="utf-8", newline="\n"
         )
         runner = grim_at(project_dir)
         insecure = runner.env.get("GRIM_INSECURE_REGISTRIES")
@@ -105,7 +105,7 @@ def test_a_batch_without_request_ids_closes_stdin_at_once(
     """Nothing to wait for, so stdin closes after the write: a server that
     reads to EOF before acting, as `grim mcp` does on an empty batch, would
     otherwise sit out the whole timeout."""
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     started = time.monotonic()
@@ -121,7 +121,7 @@ def test_stdin_closes_once_every_id_is_answered(
     """`grim mcp` answers `initialize` at once and then waits for stdin EOF, so
     the call returns promptly only if the driver closes stdin on the last answer
     rather than when its timeout runs out."""
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     started = time.monotonic()

@@ -42,7 +42,7 @@ def _write_config_with_clients(
     lines.append("[rules]")
     for name, ref in (rules or {}).items():
         lines.append(f'{name} = "{ref}"')
-    (project_dir / "grimoire.toml").write_text("\n".join(lines) + "\n")
+    (project_dir / "grimoire.toml").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def test_bundle_status_ignores_removed_client(
@@ -147,7 +147,7 @@ def test_install_succeeds_with_unreadable_vendor_config(
     _write_config_with_clients(project_dir, rules={"rust-style": ru.fq})
     # A config grim cannot parse — registration must be skipped, never clobbered.
     garbage = "not json at all {{{"
-    (project_dir / "opencode.json").write_text(garbage)
+    (project_dir / "opencode.json").write_text(garbage, encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     runner.run("lock", check=True)
@@ -158,7 +158,7 @@ def test_install_succeeds_with_unreadable_vendor_config(
     )
     assert (project_dir / ".opencode/rules/rust-style.md").is_file()
     # The unparseable config is never rewritten (D4: don't clobber on add).
-    assert (project_dir / "opencode.json").read_text() == garbage
+    assert (project_dir / "opencode.json").read_text(encoding="utf-8") == garbage
 
 
 def test_uninstall_tolerates_missing_target_files(

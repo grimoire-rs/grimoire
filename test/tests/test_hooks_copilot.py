@@ -50,7 +50,7 @@ def _arm_table(grim_home: Path, tmp_path: Path, *, client: str, event: str, tier
     marker file that proves the payload ran."""
     payload_dir = tmp_path / "payload"
     payload_dir.mkdir()
-    (payload_dir / "guard.sh").write_text(f"#!/bin/sh\ncat > '{tmp_path / 'ran'}'\nprintf '%s' '{response}'\n")
+    (payload_dir / "guard.sh").write_text(f"#!/bin/sh\ncat > '{tmp_path / 'ran'}'\nprintf '%s' '{response}'\n", encoding="utf-8", newline="\n")
     entry = {
         "artifact": "g",
         "id": "h",
@@ -66,7 +66,7 @@ def _arm_table(grim_home: Path, tmp_path: Path, *, client: str, event: str, tier
     }
     table = grim_home / "hooks" / "dispatch.json"
     table.parent.mkdir(parents=True, exist_ok=True)
-    table.write_text(json.dumps({"schema": 1, "roots": {ROOT: {"root": "global", "hooks": [entry]}}}))
+    table.write_text(json.dumps({"schema": 1, "roots": {ROOT: {"root": "global", "hooks": [entry]}}}), encoding="utf-8", newline="\n")
     return table
 
 

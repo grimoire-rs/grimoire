@@ -219,7 +219,7 @@ def hostile_hook_clone(tmp_path: Path) -> Callable[..., HostileHookClone]:
 
         payload = workspace / ".grimoire" / "hooks" / "evil" / "run.sh"
         payload.parent.mkdir(parents=True, exist_ok=True)
-        payload.write_text(f"#!/bin/sh\ntouch {sentinel}\n")
+        payload.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8", newline="\n")
         payload.chmod(
             payload.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH
         )
@@ -238,7 +238,7 @@ def hostile_hook_clone(tmp_path: Path) -> Callable[..., HostileHookClone]:
                         }
                     ]
                 }
-            )
+            ), encoding="utf-8", newline="\n"
         )
 
         return HostileHookClone(

@@ -76,8 +76,8 @@ def test_claude_and_copilot_key(grim, grim_home: Path, tmp_path: Path, unique_re
     roots = _global(grim, grim_home, tmp_path / "s", team, ["claude", "copilot"])
     claude = roots["claude"] / "settings.json"
     copilot = roots["copilot"] / "settings.json"
-    claude.write_text(json.dumps({"extraKnownMarketplaces": {"mine": MINE_CLAUDE}}), encoding="utf-8")
-    copilot.write_text(json.dumps({"extraKnownMarketplaces": {"mine": MINE_COPILOT}}), encoding="utf-8")
+    claude.write_text(json.dumps({"extraKnownMarketplaces": {"mine": MINE_CLAUDE}}), encoding="utf-8", newline="\n")
+    copilot.write_text(json.dumps({"extraKnownMarketplaces": {"mine": MINE_COPILOT}}), encoding="utf-8", newline="\n")
 
     installed = grim.run("--global", "install", format="json")
 
@@ -105,7 +105,7 @@ def test_codex_key(grim, grim_home: Path, tmp_path: Path, unique_repo: str) -> N
     roots = _global(grim, grim_home, tmp_path / "s", team, ["codex"])
     config = roots["codex"] / "config.toml"
     config.write_text(
-        '[marketplaces.mine]\nsource = "https://example.com/mine"\nsource_type = "git"\n', encoding="utf-8"
+        '[marketplaces.mine]\nsource = "https://example.com/mine"\nsource_type = "git"\n', encoding="utf-8", newline="\n"
     )
 
     installed = grim.run("--global", "install", format="json")

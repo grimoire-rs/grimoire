@@ -44,7 +44,7 @@ def test_fresh_partial_install_does_not_report_itself_installed(
     (project_dir / "grimoire.toml").write_text(
         '[options]\nclients = ["opencode", "claude"]\n\n'
         "[skills]\n"
-        f'code-review = "{registry}/{repo}:1.0.0"\n'
+        f'code-review = "{registry}/{repo}:1.0.0"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -88,13 +88,13 @@ def _install_adopted_mcp(runner, project_dir: Path, registry: str, unique_repo: 
     src = project_dir / "src"
     src.mkdir(parents=True, exist_ok=True)
     descriptor = src / "grim-mcp.toml"
-    descriptor.write_text(MCP_DESCRIPTOR)
+    descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
 
     config = project_dir / ".mcp.json"
-    config.write_text(ADOPTED_CONFIG)
-    (project_dir / "grimoire.toml").write_text("[skills]\n[rules]\n[agents]\n")
+    config.write_text(ADOPTED_CONFIG, encoding="utf-8", newline="\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n[rules]\n[agents]\n", encoding="utf-8", newline="\n")
     runner.json("add", "--no-install", ref)
     assert {r["status"] for r in runner.json("install")["items"]} == {"unchanged"}
     return config
@@ -113,7 +113,7 @@ def test_force_uninstall_can_remove_an_adopted_mcp_entry(
     config = _install_adopted_mcp(runner, project_dir, registry, unique_repo)
 
     runner.run("uninstall", "--force", "mcp", "grim-mcp")
-    assert "grim-mcp" not in json.loads(config.read_text()).get("mcpServers", {}), (
+    assert "grim-mcp" not in json.loads(config.read_text(encoding="utf-8")).get("mcpServers", {}), (
         "--force must be able to remove an adopted entry; nothing else can "
         "reach it after the record is gone"
     )
@@ -131,7 +131,7 @@ def test_uninstall_reports_the_adopted_entry_it_left_behind(
     config = _install_adopted_mcp(runner, project_dir, registry, unique_repo)
 
     report = runner.json("uninstall", "mcp", "grim-mcp")
-    assert "grim-mcp" in json.loads(config.read_text())["mcpServers"]
+    assert "grim-mcp" in json.loads(config.read_text(encoding="utf-8"))["mcpServers"]
     abandoned = report.get("abandoned_entries") or []
     assert any(e["pointer"].endswith("grim-mcp") for e in abandoned), (
         f"the kept entry must be reported so it is not invisible: {report}"
@@ -155,10 +155,10 @@ def test_adopted_flag_survives_a_second_install_pass(
     # reaches the write pass).
     (project_dir / ".cursor").mkdir(exist_ok=True)
     cfg = project_dir / "grimoire.toml"
-    cfg.write_text('[options]\nclients = ["claude", "cursor"]\n\n' + cfg.read_text())
+    cfg.write_text('[options]\nclients = ["claude", "cursor"]\n\n' + cfg.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
     runner.json("install")
 
-    state = json.loads((project_dir / ".grimoire/state.json").read_text())
+    state = json.loads((project_dir / ".grimoire/state.json").read_text(encoding="utf-8"))
     record = next(r for r in state["records"] if r["name"] == "grim-mcp")
     claude_out = next(o for o in record["outputs"] if o["client"] == "claude")
     assert claude_out.get("adopted") is True, (
@@ -166,6 +166,6 @@ def test_adopted_flag_survives_a_second_install_pass(
     )
 
     runner.run("uninstall", "mcp", "grim-mcp")
-    assert "grim-mcp" in json.loads(config.read_text())["mcpServers"], (
+    assert "grim-mcp" in json.loads(config.read_text(encoding="utf-8"))["mcpServers"], (
         "a re-install must not convert the user's own entry into grim's"
     )

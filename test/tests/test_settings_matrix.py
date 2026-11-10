@@ -94,11 +94,11 @@ class Fmt:
     def write(self, path: Path, doc: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         if self.name == "toml":
-            path.write_text(toml_dumps(doc), encoding="utf-8")
+            path.write_text(toml_dumps(doc), encoding="utf-8", newline="\n")
         elif self.name == "jsonc":
-            path.write_text("// mine\n" + json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            path.write_text("// mine\n" + json.dumps(doc, indent=2) + "\n", encoding="utf-8", newline="\n")
         else:
-            path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 FORMATS = {
@@ -294,7 +294,7 @@ class Rig:
         lock = self.home / "grimoire.lock"
         text = lock.read_text(encoding="utf-8")
         assert old.digest in text
-        lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+        lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
     def read(self) -> dict:
         """The file, parsed, with string lists sorted: a set has no order to assert."""
@@ -566,7 +566,7 @@ def row_6(r: Rig) -> None:
 def row_7a(r: Rig) -> None:
     cell = r.cell
     r.configure({"team": r.package("team", "a")})
-    r.path.write_text(GARBAGE[cell.fmt.name], encoding="utf-8")
+    r.path.write_text(GARBAGE[cell.fmt.name], encoding="utf-8", newline="\n")
 
     for flags in ((), ("--force",)):
         error = r.refusal(r.install(*flags, check=False), None)
@@ -586,7 +586,7 @@ def row_7b(r: Rig) -> None:
     r.configure({"team": first})
     r.install()
     assert r.records()
-    r.path.write_text(GARBAGE[cell.fmt.name], encoding="utf-8")
+    r.path.write_text(GARBAGE[cell.fmt.name], encoding="utf-8", newline="\n")
     r.repin(first, second)
 
     result = r.install()
@@ -1053,7 +1053,7 @@ def own_3d(o: Own) -> None:
 def own_4a(o: Own) -> None:
     first = own_start(o)
     o.file.parent.mkdir(exist_ok=True)
-    o.file.write_text("# mine\n", encoding="utf-8")
+    o.file.write_text("# mine\n", encoding="utf-8", newline="\n")
     error = o.refusal(o.install(check=False), "untracked-destination")
     assert [piece["pointer"] for piece in error["pieces"]] == ["/rules"]
     assert o.file.read_text(encoding="utf-8") == "# mine\n"
@@ -1061,7 +1061,7 @@ def own_4a(o: Own) -> None:
     assert o.changes(o.install("--force")) == LISTED("overwritten")
     assert o.file.read_text(encoding="utf-8") == RENDER["a"]
     # With a record: the user edits it and the lock moves.
-    o.file.write_text("# edited\n", encoding="utf-8")
+    o.file.write_text("# edited\n", encoding="utf-8", newline="\n")
     o.repin(first, o.package(RULES_B))
     o.refusal(o.install(check=False), "modified")
     assert o.file.read_text(encoding="utf-8") == "# edited\n"
@@ -1072,7 +1072,7 @@ def own_4a(o: Own) -> None:
 def own_4b(o: Own) -> None:
     first = own_start(o)
     o.install()
-    o.file.write_text("# edited\n", encoding="utf-8")
+    o.file.write_text("# edited\n", encoding="utf-8", newline="\n")
     o.repin(first, o.package(None))
     o.refusal(o.install(check=False), "modified")
     assert o.file.read_text(encoding="utf-8") == "# edited\n"
@@ -1168,7 +1168,7 @@ def test_force_replaces_only_an_empty_directory_at_an_own_file(
     own_start(o)
     o.file.mkdir(parents=True)
     keep = o.file / "mine"
-    keep.write_text("mine\n", encoding="utf-8")
+    keep.write_text("mine\n", encoding="utf-8", newline="\n")
     config = o.file.parent.parent / "config.toml"
     o.refusal(o.install(check=False), "untracked-destination")
 

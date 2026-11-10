@@ -85,7 +85,7 @@ class CastRecording:
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.to_cast())
+        path.write_text(self.to_cast(), encoding="utf-8", newline="\n")
 
 
 class CastRecorder:
@@ -424,7 +424,7 @@ def assert_tables_column_aligned(cast_path: Path) -> None:
     """
     text = "".join(
         _ANSI_RE.sub("", event[2])
-        for raw_line in cast_path.read_text().splitlines()
+        for raw_line in cast_path.read_text(encoding="utf-8").splitlines()
         if isinstance(event := json.loads(raw_line), list) and event[1] == "o"
     )
     lines = text.replace("\r\n", "\n").replace("\r", "").split("\n")

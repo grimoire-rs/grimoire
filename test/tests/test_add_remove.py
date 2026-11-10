@@ -33,7 +33,7 @@ def test_add_no_install_declares_and_locks_only(
     assert "@sha256:" in out["pinned"]
 
     # The config declares it and the lock pins it — but nothing is on disk.
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "code-review" in cfg
     assert (project_dir / "grimoire.lock").is_file()
     assert_not_exists(project_dir / ".claude/skills/code-review")
@@ -81,17 +81,17 @@ def test_add_then_remove_round_trip(
     runner = grim_at(project_dir)
 
     runner.json("add", "--no-install", ru.fq)
-    assert "rust-style" in (project_dir / "grimoire.toml").read_text()
+    assert "rust-style" in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     out = runner.json("remove", "rule", "rust-style")
     assert out["status"] == "removed"
 
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "rust-style" not in cfg
 
     # The lock no longer carries the entry and its declaration hash is
     # back in sync with the (now empty) config — install is a clean no-op.
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "rust-style" not in lock
 
 
@@ -142,7 +142,7 @@ def test_add_same_name_conflicting_reference_refuses(
 
     # The refusal must not mutate the config — vendor-a's declaration
     # survives untouched, vendor-b never lands.
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "vendor-a" in cfg
     assert "vendor-b" not in cfg
 
@@ -175,7 +175,7 @@ def test_add_repins_declared_artifact_to_new_tag(
 
     first = runner.json("add", v1.fq)
     installed = project_dir / ".claude/skills/code-review/SKILL.md"
-    assert "# CR v1" in installed.read_text()
+    assert "# CR v1" in installed.read_text(encoding="utf-8")
 
     # The re-pin: same repository, different tag. Previously exit 64.
     second = runner.json("add", v2.fq)
@@ -185,7 +185,7 @@ def test_add_repins_declared_artifact_to_new_tag(
     )
 
     # One binding, now pointing at the new tag.
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "2.0.0" in cfg
     assert "1.0.0" not in cfg
     bindings = [line for line in cfg.splitlines() if line.startswith("code-review = ")]
@@ -193,7 +193,7 @@ def test_add_repins_declared_artifact_to_new_tag(
 
     # The materialized file carries the new content — config and lock
     # assertions alone would not prove the client sees the switch.
-    assert "# CR v2" in installed.read_text()
+    assert "# CR v2" in installed.read_text(encoding="utf-8")
     cr = next(r for r in runner.json("status")["items"] if r["name"] == "code-review")
     assert cr["state"] == "installed"
 

@@ -52,7 +52,7 @@ def test_add_names_a_changed_dependency_value_as_changed(
     runner.run("add", carrier.fq)
     local = project_dir / LOCAL
     assert json.loads(local.read_text(encoding="utf-8"))["model"] == "sonnet"
-    local.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    local.write_text(json.dumps({"model": "opus"}), encoding="utf-8", newline="\n")
 
     refused = runner.run("add", "--force", other.fq, check=False)
 

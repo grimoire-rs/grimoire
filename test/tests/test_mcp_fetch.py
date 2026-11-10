@@ -119,7 +119,7 @@ def test_fetch_canonical_skill_matches_authored_bytes(
             "fetch-demo/reference/notes.md": "support notes\n",
         },
     )
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     payload = _payload(
@@ -158,7 +158,7 @@ def test_fetch_vendor_projection_matches_installed_skill_md(
         "# Projection Demo\n"
     )
     make_artifact(f"{ns}/proj-demo", "skill", {"proj-demo/SKILL.md": doc})
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     canonical = _payload(
@@ -180,7 +180,7 @@ def test_fetch_vendor_projection_matches_installed_skill_md(
     # Ground truth: the projection equals what a real install writes.
     runner.json("add", f"{REGISTRY_HOST}/{ns}/proj-demo:latest")
     runner.json("install", "--client", "claude")
-    installed = (project_dir / ".claude/skills/proj-demo/SKILL.md").read_text()
+    installed = (project_dir / ".claude/skills/proj-demo/SKILL.md").read_text(encoding="utf-8")
     assert projected["content"] == installed, (
         f"fetched projection must equal the installed SKILL.md;\n"
         f"  fetched: {projected['content']!r}\n  installed: {installed!r}"
@@ -197,7 +197,7 @@ def test_fetch_path_returns_exact_support_file(
         "skill",
         {"path-demo/SKILL.md": "---\nname: path-demo\ndescription: d\n---\n", "path-demo/run.sh": support},
     )
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     payload = _payload(
@@ -219,7 +219,7 @@ def test_fetch_truncates_oversize_file_with_marker(
     big = "x" * (_DOC_CAP + 4096)
     doc = f"---\nname: big-demo\ndescription: d\n---\n{big}\n"
     make_artifact(f"{ns}/big-demo", "skill", {"big-demo/SKILL.md": doc})
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     payload = _payload(
@@ -237,7 +237,7 @@ def test_fetch_truncates_oversize_file_with_marker(
 def test_fetch_unknown_ref_is_clean_tool_error(
     grim_at: Callable[[Path], GrimRunner], project_dir: Path, registry: str
 ) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     responses = _drive(
@@ -281,7 +281,7 @@ def test_fetch_mcp_kind_descriptor_and_vendor_pointer(
 ) -> None:
     """mcp-kind fetch returns the descriptor JSON; vendor adds the pointer."""
     ns = f"grim-test/{uuid.uuid4().hex[:12]}"
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     descriptor = project_dir / "mcp-demo.toml"
@@ -290,7 +290,7 @@ def test_fetch_mcp_kind_descriptor_and_vendor_pointer(
         "[server]\n"
         'transport = "stdio"\n'
         'command = "demo-mcp"\n'
-        'args = ["serve"]\n'
+        'args = ["serve"]\n', encoding="utf-8", newline="\n"
     )
     repo = f"{REGISTRY_HOST}/{ns}/mcp/demo"
     runner.json("release", str(descriptor), f"{repo}:1.0.0", "--kind", "mcp")
@@ -324,7 +324,7 @@ def test_fetch_offline_errors_cleanly_without_hang(
         "skill",
         {"offline-demo/SKILL.md": "---\nname: offline-demo\ndescription: d\n---\n"},
     )
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     responses = _drive(
@@ -419,7 +419,7 @@ def test_render_skill_writes_install_identical_projection(
         "skill",
         {"render-demo/SKILL.md": doc, "render-demo/scripts/run.sh": "echo hi\n"},
     )
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     dest = tmp_path / "render-out" / "nested"
@@ -444,8 +444,8 @@ def test_render_skill_writes_install_identical_projection(
     # Ground truth: byte-identical to what a real install writes.
     runner.json("add", f"{REGISTRY_HOST}/{ns}/render-demo:latest")
     runner.json("install", "--client", "claude")
-    installed = (project_dir / ".claude/skills/render-demo/SKILL.md").read_text()
-    assert rendered.read_text() == installed, (
+    installed = (project_dir / ".claude/skills/render-demo/SKILL.md").read_text(encoding="utf-8")
+    assert rendered.read_text(encoding="utf-8") == installed, (
         "grim_render output must equal the install-rendered projection"
     )
 
@@ -462,7 +462,7 @@ def test_render_rule_carries_support_dir(
             "multi-rule/examples.md": "# Examples\n",
         },
     )
-    (project_dir / "grimoire.toml").write_text("[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     dest = tmp_path / "rules-out"
@@ -497,7 +497,7 @@ def test_grim_describe_requires(
         [("mcp", "gdrive", "reg.example/gdrive:2"), ("skill", "base", "./base:1")],
     )
     make_artifact(f"{ns}/plain", "skill", {"plain/SKILL.md": "# plain\n"}, tag="1")
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     def describe(name: str) -> dict:

@@ -31,7 +31,7 @@ from src.stdio_drivers import initialize as _initialize
 def test_mcp_initialize_and_lists_read_tools(
     grim_at: Callable[[Path], GrimRunner], project_dir: Path
 ) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     responses = _drive(
@@ -55,7 +55,7 @@ def test_mcp_initialize_and_lists_read_tools(
 def test_mcp_search_tool_matches_cli_json(
     grim_at: Callable[[Path], GrimRunner], project_dir: Path
 ) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     responses = _drive(
@@ -98,7 +98,7 @@ def test_mcp_status_tool_returns_payload(
     Both the MCP server and the CLI route through ``command::status::run``,
     so they are one source of truth.
     """
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     responses = _drive(
@@ -154,7 +154,7 @@ def test_mcp_describe_tool_matches_cli_json(
         tag="latest",
         annotations={"com.grimoire.replaced-by": "ghcr.io/acme/skills/mcp-desc-2"},
     )
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     ref = f"{registry}/{repo}:latest"
 
@@ -228,7 +228,7 @@ def test_mcp_fetch_description_and_digest_only_match_cli(
         tag="latest",
     )
     make_description(repo, {"README.md": b"# Repo\n", "assets/logo.png": bytes([0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF])})
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     ref = f"{registry}/{repo}:latest"
 
@@ -282,7 +282,7 @@ def test_mcp_allow_writes_gates_grim_render(
     and enforcement cannot drift). When the tool surface changes again,
     update these sets deliberately.
     """
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     list_request = [
@@ -339,7 +339,7 @@ def test_mcp_search_ignores_agent_supplied_registry(
     to redirect the browse: the extra argument is harmlessly ignored, so the
     result is identical to a call without it.
     """
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     def _search(arguments: dict) -> dict:
@@ -381,7 +381,7 @@ def test_mcp_status_default_call_leaves_checked_false(
     off, so an existing harness that never sends it keeps behaving exactly
     as before.
     """
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     responses = _drive(
@@ -440,7 +440,7 @@ def test_mcp_status_check_true_forwards_to_command_status_run(
         f'default = true\n'
         f"\n"
         f"[skills]\n"
-        f'old-skill = "{REGISTRY_HOST}/{repo}:stable"\n'
+        f'old-skill = "{REGISTRY_HOST}/{repo}:stable"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
@@ -513,11 +513,11 @@ def test_mcp_status_config_param_redirects_scope(
     CLI's ``grim status --config B/grimoire.toml`` output — B's declared
     skill, not A's empty set.
     """
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     other = tmp_path / "other-project"
     other.mkdir()
     other_cfg = other / "grimoire.toml"
-    other_cfg.write_text(f'[skills]\nredirected = "{REGISTRY_HOST}/grim-test/redirected:latest"\n')
+    other_cfg.write_text(f'[skills]\nredirected = "{REGISTRY_HOST}/grim-test/redirected:latest"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     payload = _call_status(runner, project_dir, {"config": str(other_cfg)})
@@ -540,12 +540,12 @@ def test_mcp_status_workspace_param_walks_up(
     find B's config at the ancestor — while the server's own cwd (project A)
     declares nothing.
     """
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     other = tmp_path / "other-project"
     nested = other / "src" / "deep"
     nested.mkdir(parents=True)
     (other / "grimoire.toml").write_text(
-        f'[skills]\nwalked-up = "{REGISTRY_HOST}/grim-test/walked-up:latest"\n'
+        f'[skills]\nwalked-up = "{REGISTRY_HOST}/grim-test/walked-up:latest"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -561,9 +561,9 @@ def test_mcp_status_global_param_selects_global_scope(
     grim_at: Callable[[Path], GrimRunner], project_dir: Path, grim_home: Path
 ) -> None:
     """``{"global": true}`` selects the global scope, matching the CLI's ``--global``."""
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\nglobal-skill = "{REGISTRY_HOST}/grim-test/global-skill:latest"\n'
+        f'[skills]\nglobal-skill = "{REGISTRY_HOST}/grim-test/global-skill:latest"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -587,7 +587,7 @@ def test_mcp_launch_scope_flags_removed(
     flags must fail parse so stale harness configs surface loudly instead of
     silently pinning a scope that no longer exists.
     """
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     for flag in (["--global"], ["--config", str(project_dir / "grimoire.toml")]):
@@ -617,7 +617,7 @@ def _two_registry_config(project_dir: Path, ns1: str, ns2: str) -> None:
         f'\n'
         f'[skills]\n'
         f'\n'
-        f'[rules]\n'
+        f'[rules]\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -736,7 +736,7 @@ def test_mcp_search_partial_registry_failure_degrades(
         f'\n'
         f'[skills]\n'
         f'\n'
-        f'[rules]\n'
+        f'[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 
@@ -859,7 +859,7 @@ def test_grim_search_pages_an_oci_scope_like_the_cli(
     index) return the CLI's pages byte for byte."""
     ns = paged_namespace(150)
     (project_dir / "grimoire.toml").write_text(
-        f'[[registries]]\nalias = "reg"\noci = "{REGISTRY_HOST}/{ns}"\n\n[skills]\n\n[rules]\n'
+        f'[[registries]]\nalias = "reg"\noci = "{REGISTRY_HOST}/{ns}"\n\n[skills]\n\n[rules]\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
 

@@ -30,7 +30,7 @@ def _release_mcp(
     src = project_dir / "src"
     src.mkdir(parents=True, exist_ok=True)
     descriptor = src / f"{name}.toml"
-    descriptor.write_text(MCP_DESCRIPTOR)
+    descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/{name}:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     return ref
@@ -40,12 +40,12 @@ def _write_config(project_dir: Path, refs: dict[str, str], clients: list[str]) -
     clients_toml = ", ".join(f'"{c}"' for c in clients)
     members = "\n".join(f'{name} = "{ref}"' for name, ref in refs.items())
     (project_dir / "grimoire.toml").write_text(
-        f"[options]\nclients = [{clients_toml}]\n\n[mcp]\n{members}\n"
+        f"[options]\nclients = [{clients_toml}]\n\n[mcp]\n{members}\n", encoding="utf-8", newline="\n"
     )
 
 
 def _outputs(project_dir: Path, name: str) -> dict[str, dict]:
-    state = json.loads((project_dir / ".grimoire/state.json").read_text())
+    state = json.loads((project_dir / ".grimoire/state.json").read_text(encoding="utf-8"))
     record = next(r for r in state["records"] if r["name"] == name)
     return {o["client"]: o for o in record["outputs"]}
 
@@ -66,14 +66,14 @@ def test_dropped_client_leaves_adopted_mcp_entry(
         for name in (ADOPTED, WRITTEN)
     }
     config = project_dir / ".mcp.json"
-    config.write_text(json.dumps({"mcpServers": {ADOPTED: MEMBER}}, indent=2))
+    config.write_text(json.dumps({"mcpServers": {ADOPTED: MEMBER}}, indent=2), encoding="utf-8", newline="\n")
     _write_config(project_dir, refs, ["claude", "cursor"])
     runner.run("lock")
     runner.run("install")
 
     assert _outputs(project_dir, ADOPTED)["claude"]["adopted"] is True
     assert "adopted" not in _outputs(project_dir, WRITTEN)["claude"]
-    assert json.loads(config.read_text())["mcpServers"] == {
+    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"] == {
         ADOPTED: MEMBER,
         WRITTEN: MEMBER,
     }
@@ -81,7 +81,7 @@ def test_dropped_client_leaves_adopted_mcp_entry(
     _write_config(project_dir, refs, ["cursor"])
     rows = {r["name"]: r for r in runner.json("update")["items"]}
 
-    assert json.loads(config.read_text())["mcpServers"] == {ADOPTED: MEMBER}, (
+    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"] == {ADOPTED: MEMBER}, (
         "the reap must splice out grim's own member and leave the adopted one"
     )
     left = rows[ADOPTED]
@@ -103,7 +103,7 @@ def test_dropped_client_leaves_adopted_mcp_entry(
 
 
 def _outputs_by_file(project_dir: Path, name: str, client: str) -> dict[str, dict]:
-    state = json.loads((project_dir / ".grimoire/state.json").read_text())
+    state = json.loads((project_dir / ".grimoire/state.json").read_text(encoding="utf-8"))
     record = next(r for r in state["records"] if r["name"] == name)
     return {
         o["target"]["relative"]: o for o in record["outputs"] if o["client"] == client
@@ -111,7 +111,7 @@ def _outputs_by_file(project_dir: Path, name: str, client: str) -> dict[str, dic
 
 
 def _member(config: Path, name: str) -> dict | None:
-    document = json.loads(config.read_text())
+    document = json.loads(config.read_text(encoding="utf-8"))
     for container in ("servers", "mcpServers"):
         if name in document.get(container, {}):
             return document[container][name]
@@ -141,7 +141,7 @@ def test_dropped_client_keeps_adopted_mcp_entry_across_a_pin_roll(
     repo = f"{registry}/{unique_repo}/mcp/{ADOPTED}"
     vscode = project_dir / ".vscode" / "mcp.json"
     vscode.parent.mkdir(parents=True)
-    vscode.write_text(json.dumps({"servers": {ADOPTED: VSCODE_MEMBER}}, indent=2))
+    vscode.write_text(json.dumps({"servers": {ADOPTED: VSCODE_MEMBER}}, indent=2), encoding="utf-8", newline="\n")
     _write_config(project_dir, {ADOPTED: f"{repo}:latest"}, ["copilot", "cursor"])
     runner.run("lock")
     runner.run("install")
@@ -152,7 +152,7 @@ def test_dropped_client_keeps_adopted_mcp_entry_across_a_pin_roll(
 
     descriptor = project_dir / "src" / f"{ADOPTED}.toml"
     descriptor.write_text(
-        MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"')
+        MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"'), encoding="utf-8", newline="\n"
     )
     runner.json("release", str(descriptor), f"{repo}:2.0.0", "--kind", "mcp")
     _write_config(project_dir, {ADOPTED: f"{repo}:latest"}, ["cursor"])
@@ -202,7 +202,7 @@ def test_install_keeps_adopted_mcp_entry_of_a_dropped_client_across_a_pin_roll(
     repo = ref.rsplit(":", 1)[0]
     vscode = project_dir / ".vscode" / "mcp.json"
     vscode.parent.mkdir(parents=True)
-    vscode.write_text(json.dumps({"servers": {ADOPTED: VSCODE_MEMBER}}, indent=2))
+    vscode.write_text(json.dumps({"servers": {ADOPTED: VSCODE_MEMBER}}, indent=2), encoding="utf-8", newline="\n")
     _write_config(project_dir, {ADOPTED: ref}, ["copilot", "cursor"])
     runner.run("lock")
     runner.run("install")
@@ -210,7 +210,7 @@ def test_install_keeps_adopted_mcp_entry_of_a_dropped_client_across_a_pin_roll(
 
     descriptor = project_dir / "src" / f"{ADOPTED}.toml"
     descriptor.write_text(
-        MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"')
+        MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"'), encoding="utf-8", newline="\n"
     )
     runner.json("release", str(descriptor), f"{repo}:2.0.0", "--kind", "mcp")
     _write_config(project_dir, {ADOPTED: f"{repo}:2.0.0"}, ["cursor"])
@@ -246,7 +246,7 @@ def test_client_flag_update_at_the_same_pin_leaves_a_dropped_clients_adopted_ent
     repo = ref.rsplit(":", 1)[0]
     vscode = project_dir / ".vscode" / "mcp.json"
     vscode.parent.mkdir(parents=True)
-    vscode.write_text(json.dumps({"servers": {ADOPTED: VSCODE_MEMBER}}, indent=2))
+    vscode.write_text(json.dumps({"servers": {ADOPTED: VSCODE_MEMBER}}, indent=2), encoding="utf-8", newline="\n")
     _write_config(project_dir, {ADOPTED: ref}, ["copilot", "cursor"])
     runner.run("lock")
     runner.run("install")
@@ -254,7 +254,7 @@ def test_client_flag_update_at_the_same_pin_leaves_a_dropped_clients_adopted_ent
 
     descriptor = project_dir / "src" / f"{ADOPTED}.toml"
     descriptor.write_text(
-        MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"')
+        MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"'), encoding="utf-8", newline="\n"
     )
     runner.json("release", str(descriptor), f"{repo}:2.0.0", "--kind", "mcp")
     _write_config(project_dir, {ADOPTED: f"{repo}:2.0.0"}, ["cursor"])
@@ -276,11 +276,11 @@ def test_client_flag_update_at_the_same_pin_leaves_a_dropped_clients_adopted_ent
 
 
 def _edit_member(config: Path, name: str) -> None:
-    document = json.loads(config.read_text())
+    document = json.loads(config.read_text(encoding="utf-8"))
     for container in ("servers", "mcpServers"):
         if name in document.get(container, {}):
             document[container][name]["args"] = ["mcp", "--edited"]
-    config.write_text(json.dumps(document, indent=2))
+    config.write_text(json.dumps(document, indent=2), encoding="utf-8", newline="\n")
 
 
 @pytest.mark.parametrize("roll", [False, True], ids=["same-pin", "pin-roll"])
@@ -312,7 +312,7 @@ def test_dropped_client_keeps_its_edited_file_and_reaps_the_other(
     if roll:
         descriptor = project_dir / "src" / f"{WRITTEN}.toml"
         descriptor.write_text(
-            MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"')
+            MCP_DESCRIPTOR.replace('command = "grim"', 'command = "grim2"'), encoding="utf-8", newline="\n"
         )
         runner.json("release", str(descriptor), f"{repo}:2.0.0", "--kind", "mcp")
 

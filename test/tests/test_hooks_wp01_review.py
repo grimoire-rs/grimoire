@@ -55,7 +55,7 @@ def _dispatch_clients(grim_home: Path) -> set[str]:
     path = grim_home / "hooks" / "dispatch.json"
     if not path.is_file():
         return set()
-    table = json.loads(path.read_text())
+    table = json.loads(path.read_text(encoding="utf-8"))
     return {row["client"] for root in table["roots"].values() for row in root["hooks"]}
 
 
@@ -72,10 +72,10 @@ def test_hook_free_commands_ignore_a_malformed_global_config(grim_at, project_di
     failing after writing `grimoire.toml` and the lock."""
     skill_dir = project_dir / "skills" / "demo"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: A demo skill.\n---\n\nBody.\n")
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: A demo skill.\n---\n\nBody.\n", encoding="utf-8", newline="\n")
     write_config(project_dir)
     runner = grim_at(project_dir)
-    (Path(runner.grim_home) / "grimoire.toml").write_text(MALFORMED_GLOBAL_CONFIG)
+    (Path(runner.grim_home) / "grimoire.toml").write_text(MALFORMED_GLOBAL_CONFIG, encoding="utf-8", newline="\n")
 
     for args in (("add", "./skills/demo"), ("install",), ("update",)):
         result = runner.run(*args, check=False)
@@ -100,9 +100,9 @@ def test_a_skill_shipping_a_hook_toml_still_builds_as_a_skill(grim, tmp_path: Pa
     it did before the hook kind existed. `--kind hook` still selects the hook."""
     skill = tmp_path / "hookish"
     skill.mkdir()
-    (skill / "SKILL.md").write_text("---\nname: hookish\ndescription: Ships a stray hook.toml.\n---\n\nBody.\n")
-    (skill / "hook.toml").write_text('command = "not a hook manifest"\n')
-    (skill / ".grimignore").write_text("hook.toml\n")
+    (skill / "SKILL.md").write_text("---\nname: hookish\ndescription: Ships a stray hook.toml.\n---\n\nBody.\n", encoding="utf-8", newline="\n")
+    (skill / "hook.toml").write_text('command = "not a hook manifest"\n', encoding="utf-8", newline="\n")
+    (skill / ".grimignore").write_text("hook.toml\n", encoding="utf-8", newline="\n")
 
     report = grim.json("build", str(skill))
     assert report["kind"] == "skill", report
@@ -156,14 +156,14 @@ def test_flag_off_install_leaves_a_user_codex_hooks_file_alone(grim, registry: s
     grim did not write is the user's, so it survives byte for byte — the
     path-is-ownership model deleted it."""
     hooks_json = _codex_home(grim) / "hooks.json"
-    hooks_json.write_text(USER_CODEX_HOOKS)
+    hooks_json.write_text(USER_CODEX_HOOKS, encoding="utf-8", newline="\n")
     skill = make_artifact(f"{unique_repo}/demo", "skill", {"demo/SKILL.md": "---\nname: demo\n---\n"})
-    (Path(grim.grim_home) / "grimoire.toml").write_text(f'[skills]\ndemo = "{skill.fq}"\n')
+    (Path(grim.grim_home) / "grimoire.toml").write_text(f'[skills]\ndemo = "{skill.fq}"\n', encoding="utf-8", newline="\n")
     grim.run("lock", "--global")
 
     grim.run("install", "--global")
 
-    assert hooks_json.read_text() == USER_CODEX_HOOKS, "a user's Codex hooks.json must never be deleted"
+    assert hooks_json.read_text(encoding="utf-8") == USER_CODEX_HOOKS, "a user's Codex hooks.json must never be deleted"
 
 
 @posix_only
@@ -173,18 +173,18 @@ def test_arming_never_overwrites_a_user_codex_hooks_file(grim, registry: str, un
     and `grim status` names the cause `surface-user-owned`. Positive control:
     Claude, whose registration is a marked splice, still arms."""
     hooks_json = _codex_home(grim) / "hooks.json"
-    hooks_json.write_text(USER_CODEX_HOOKS)
+    hooks_json.write_text(USER_CODEX_HOOKS, encoding="utf-8", newline="\n")
     (Path(grim.home) / ".claude").mkdir(parents=True, exist_ok=True)
     hook = _publish_hook(unique_repo)
     grim_home = Path(grim.grim_home)
     (grim_home / "grimoire.toml").write_text(
-        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n'
+        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
     grim.run("lock", "--global")
 
     result = grim.run("install", "--global", "--trust-hooks")
 
-    assert hooks_json.read_text() == USER_CODEX_HOOKS, "a user's Codex hooks.json must never be overwritten"
+    assert hooks_json.read_text(encoding="utf-8") == USER_CODEX_HOOKS, "a user's Codex hooks.json must never be overwritten"
     assert "move that file aside" in result.stderr, result.stderr
     clients = _dispatch_clients(grim_home)
     assert "claude" in clients, f"POSITIVE CONTROL: claude must arm — {clients}"

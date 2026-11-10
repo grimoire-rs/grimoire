@@ -51,7 +51,7 @@ SANE_ENV = {"PATH": os.environ.get("PATH", "")}
 @pytest.fixture()
 def token(launcher: Path) -> str:
     """The one root token the arming install minted, read before a test replaces the table."""
-    (root,) = json.loads((launcher.parent / "dispatch.json").read_text())["roots"]
+    (root,) = json.loads((launcher.parent / "dispatch.json").read_text(encoding="utf-8"))["roots"]
     return root
 
 
@@ -76,7 +76,7 @@ def _assert_failure(result: subprocess.CompletedProcess[str], code: int) -> None
 
 
 def _claude_command(project_dir: Path) -> str:
-    settings = json.loads((project_dir / ".claude" / "settings.local.json").read_text())
+    settings = json.loads((project_dir / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
     elements = [
         e
         for groups in settings["hooks"].values()
@@ -123,11 +123,11 @@ def test_s005_the_claude_registration_fires_the_launcher(
     assert marker.exists(), (
         f"the registered command never reached the payload\n{result.stderr}"
     )
-    envelope = json.loads(marker.read_text())
+    envelope = json.loads(marker.read_text(encoding="utf-8"))
     assert envelope["client"] == "claude" and envelope["event"] == "PreToolUse", (
         envelope
     )
-    assert HOSTILE_PAYLOAD in marker.read_text(), (
+    assert HOSTILE_PAYLOAD in marker.read_text(encoding="utf-8"), (
         "the client's bytes must reach `raw` verbatim"
     )
 
@@ -168,18 +168,18 @@ def test_s005_codex_shell_form_and_copilot_exec_form_fire_the_same_launcher(
     hook = publish_hook(unique_repo)
     grim_home.mkdir(parents=True, exist_ok=True)
     (grim_home / "grimoire.toml").write_text(
-        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n'
+        f'[hooks]\nshell-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
     grim.run("lock", "--global")
     grim.run("install", "--global", "--trust-hooks")
     launcher = grim_home / "hooks" / "grim-hook"
-    (token,) = json.loads((grim_home / "hooks" / "dispatch.json").read_text())["roots"]
+    (token,) = json.loads((grim_home / "hooks" / "dispatch.json").read_text(encoding="utf-8"))["roots"]
 
-    codex = json.loads((home / ".codex" / "hooks.json").read_text())["hooks"][
+    codex = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"][
         "PreToolUse"
     ]
     codex_command = codex[0]["hooks"][0]["command"]
-    copilot = json.loads((home / ".copilot" / "hooks" / "grim.json").read_text())[
+    copilot = json.loads((home / ".copilot" / "hooks" / "grim.json").read_text(encoding="utf-8"))[
         "hooks"
     ]["PreToolUse"][0]
     assert copilot["exec"] == str(launcher) and copilot["args"] == [
@@ -211,7 +211,7 @@ def test_s005_codex_shell_form_and_copilot_exec_form_fire_the_same_launcher(
     assert exec_form.returncode == 0, exec_form.stderr
     for client, marker in markers.items():
         assert marker.exists(), f"the {client} registration never reached its payload"
-        assert json.loads(marker.read_text())["client"] == client
+        assert json.loads(marker.read_text(encoding="utf-8"))["client"] == client
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ def test_s006_a_deleted_launcher_fails_visibly_and_install_repairs_it(
         "install must rewrite the launcher"
     )
     assert runner.json("hook", "list")["launcher"]["state"] != "missing"
-    (token_after,) = json.loads((launcher.parent / "dispatch.json").read_text())[
+    (token_after,) = json.loads((launcher.parent / "dispatch.json").read_text(encoding="utf-8"))[
         "roots"
     ]
     _write_table(
@@ -373,7 +373,7 @@ def test_exit_79_when_the_table_is_absent(
 
 def _write_raw(grim_home: Path, body: str) -> Path:
     table = grim_home / "hooks" / "dispatch.json"
-    table.write_text(body)
+    table.write_text(body, encoding="utf-8", newline="\n")
     return table
 
 
@@ -563,7 +563,7 @@ def test_the_table_is_the_one_beside_the_launcher_whatever_the_cwd_and_environme
                         }
                     },
                 }
-            )
+            ), encoding="utf-8", newline="\n"
         )
 
     result = _fire(
@@ -612,7 +612,7 @@ def test_a_copy_of_the_launcher_reads_the_table_beside_the_copy(
                     }
                 },
             }
-        )
+        ), encoding="utf-8", newline="\n"
     )
 
     result = _fire(copy, token)

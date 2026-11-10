@@ -50,7 +50,7 @@ def _repin(workspace: Path, old: PublishedArtifact, new: PublishedArtifact) -> N
     lock = workspace / "grimoire.lock"
     text = lock.read_text(encoding="utf-8")
     assert old.digest in text
-    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
 
 def _file(path: Path) -> dict:
@@ -59,7 +59,7 @@ def _file(path: Path) -> dict:
 
 def _put(path: Path, values: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(values), encoding="utf-8")
+    path.write_text(json.dumps(values), encoding="utf-8", newline="\n")
 
 
 def _changes(result: CompletedProcess[str]) -> list[tuple[str, str, str | None, str]]:

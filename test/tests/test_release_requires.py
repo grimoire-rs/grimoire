@@ -225,7 +225,7 @@ def test_dependency_free_release_byte_identical(
     grim_at, tmp_path: Path, registry: str
 ) -> None:
     """The recorded 0.15.1 manifest bytes for the fixture's dependency-free skill."""
-    baseline = json.loads(BASELINE.read_text())
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     # Outside any git tree, so the manifest carries no revision/created annotation.
     src = tmp_path / "src" / baseline["source_dir_name"]
     for rel, body in baseline["source_files"].items():

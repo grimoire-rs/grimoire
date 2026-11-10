@@ -319,6 +319,7 @@ def test_old_grim_exports_a_marketplace_lock_at_its_digests(
         '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
         f"[plugins.team]\ninclude = [{includes}]\n",
         encoding="utf-8",
+        newline="\n",
     )
     current.run("update", "--marketplace", "marketplace.toml")
     lock = project_dir / "marketplace.lock"
@@ -408,7 +409,7 @@ def _lock_with_no_member_list(
             cutting = line.startswith(("[[bundle]]", "[[bundle."))
         if not cutting:
             kept.append(line)
-    _lock_path(project_dir).write_text("".join(kept), encoding="utf-8")
+    _lock_path(project_dir).write_text("".join(kept), encoding="utf-8", newline="\n")
 
 
 @pytest.mark.parametrize("binary", ["old", "current"])
@@ -476,12 +477,12 @@ def test_old_grim_refuses_the_conflict_a_current_remove_left_stale(
 def _cut_bundle_rows(project_dir: Path) -> None:
     """Cut every `[[bundle]]` table, as a lock written before member lists."""
     kept, cutting = [], False
-    for line in _lock_path(project_dir).read_text().splitlines(keepends=True):
+    for line in _lock_path(project_dir).read_text(encoding="utf-8").splitlines(keepends=True):
         if line.startswith("["):
             cutting = line.startswith(("[[bundle]]", "[[bundle."))
         if not cutting:
             kept.append(line)
-    _lock_path(project_dir).write_text("".join(kept))
+    _lock_path(project_dir).write_text("".join(kept), encoding="utf-8", newline="\n")
 
 
 def test_current_lock_keeps_a_member_old_remove_left_with_no_list(
@@ -499,7 +500,7 @@ def test_current_lock_keeps_a_member_old_remove_left_with_no_list(
     old.run("lock")
     _cut_bundle_rows(project_dir)
     old.run("remove", "skill", "leaving")
-    assert "bundle" not in tomllib.loads(_lock_path(project_dir).read_text())
+    assert "bundle" not in tomllib.loads(_lock_path(project_dir).read_text(encoding="utf-8"))
     retag(f"{unique_repo}/member", "keep", member.digest)
     moved = _skill(unique_repo, "member", "two")
     assert moved.digest != member.digest

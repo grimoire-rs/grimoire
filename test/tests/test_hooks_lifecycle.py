@@ -62,7 +62,7 @@ def _rows(runner) -> list[dict]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return []
-    return [row for root in json.loads(path.read_text())["roots"].values() for row in root["hooks"]]
+    return [row for root in json.loads(path.read_text(encoding="utf-8"))["roots"].values() for row in root["hooks"]]
 
 
 def _hook_row(report: dict) -> dict:
@@ -85,7 +85,7 @@ def _declare_globally(runner, fq: str) -> None:
     home = Path(runner.grim_home)
     home.mkdir(parents=True, exist_ok=True)
     (home / "grimoire.toml").write_text(
-        f'[hooks]\nshell-guard = "{fq}"\n\n[options.experimental]\nhooks = true\n'
+        f'[hooks]\nshell-guard = "{fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
 
 
@@ -282,7 +282,7 @@ def test_s013_a_client_with_no_hook_surface_declines_warns_and_records_nothing(
 
     # Positive control: Claude, same everything else, arms.
     config = project_dir / "grimoire.toml"
-    config.write_text(config.read_text().replace('clients = ["cursor"]', 'clients = ["claude"]'))
+    config.write_text(config.read_text(encoding="utf-8").replace('clients = ["cursor"]', 'clients = ["claude"]'), encoding="utf-8", newline="\n")
     runner.run("install", "--trust-hooks")
     assert len(_rows(runner)) == 1, "POSITIVE CONTROL FAILED: claude must arm the same artifact"
 
@@ -316,12 +316,12 @@ def test_s014_install_state_from_a_newer_grim_names_the_version_requirement(
     runner.run("install", "--trust-hooks")
 
     state_path = project_dir / ".grimoire" / "state.json"
-    state = json.loads(state_path.read_text())
+    state = json.loads(state_path.read_text(encoding="utf-8"))
     assert any(record["kind"] == "hook" for record in state["records"]), (
         "the hook must be recorded, or this proves nothing about a hooks-bearing state file"
     )
     state["version"] = 99
-    state_path.write_text(json.dumps(state))
+    state_path.write_text(json.dumps(state), encoding="utf-8", newline="\n")
 
     result = runner.run("status", check=False)
     assert result.returncode != 0, "unreadable state must not be reported as a healthy scope"

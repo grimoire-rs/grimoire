@@ -26,7 +26,7 @@ DEPRECATED = "com.grimoire.deprecated"
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 # ── 1. publish path: authored notice → annotation ──────────────────────

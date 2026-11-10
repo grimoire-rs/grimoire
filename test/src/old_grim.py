@@ -46,7 +46,7 @@ def checked_old_grim(root: Path) -> Path:
     assert version == "grim 0.15.1", f"GRIM_OLD_BIN is not 0.15.1: {version!r}"
 
     write_config(project, bundles={"b": "localhost:5000/x/b:1"})
-    (project / "grimoire.lock").write_text(_LOCK_WITH_A_LATER_FIELD, encoding="utf-8")
+    (project / "grimoire.lock").write_text(_LOCK_WITH_A_LATER_FIELD, encoding="utf-8", newline="\n")
     refused = runner.run("status", check=False)
     assert refused.returncode == 78 and "transitive" in refused.stderr, (
         "GRIM_OLD_BIN prints 0.15.1 but accepts a field added after the tag, "

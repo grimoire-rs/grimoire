@@ -75,7 +75,7 @@ def _record(kind: str, name: str, output: dict) -> dict:
 
 def _write_state(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"version": 2, "records": records}, indent=2) + "\n")
+    path.write_text(json.dumps({"version": 2, "records": records}, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def _warnings(stderr: str) -> list[str]:
@@ -83,7 +83,7 @@ def _warnings(stderr: str) -> list[str]:
 
 
 def _names(state: Path) -> set[str]:
-    return {record["name"] for record in json.loads(state.read_text())["records"]}
+    return {record["name"] for record in json.loads(state.read_text(encoding="utf-8"))["records"]}
 
 
 @pytest.mark.parametrize(
@@ -106,11 +106,11 @@ def test_outputs_outside_their_kind_are_dropped(
     The legitimate orphan beside it is the proof the run really pruned.
     """
     settings = project_dir / ".claude" / "settings.json"
-    settings.write_text(json.dumps(_SETTINGS, indent=2))
+    settings.write_text(json.dumps(_SETTINGS, indent=2), encoding="utf-8", newline="\n")
     before = settings.read_bytes()
     control = project_dir / ".claude" / "rules" / "control.md"
     control.parent.mkdir(parents=True)
-    control.write_text("# control\n")
+    control.write_text("# control\n", encoding="utf-8", newline="\n")
     state = project_dir / ".grimoire" / "state.json"
     _write_state(
         state,
@@ -171,14 +171,14 @@ def test_ordinary_mcp_record_keeps_its_outputs(
     """
     runner = grim_at(project_dir)
     descriptor = project_dir / "srv.toml"
-    descriptor.write_text(_MCP_DESCRIPTOR)
+    descriptor.write_text(_MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/srv:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     settings = project_dir / config
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(json.dumps({"userKey": True}, indent=2))
+    settings.write_text(json.dumps({"userKey": True}, indent=2), encoding="utf-8", newline="\n")
     (project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["{client}"]\n\n[mcp]\nsrv = "{ref}"\n'
+        f'[options]\nclients = ["{client}"]\n\n[mcp]\nsrv = "{ref}"\n', encoding="utf-8", newline="\n"
     )
     state = project_dir / ".grimoire" / "state.json"
 
@@ -200,11 +200,11 @@ def test_ordinary_mcp_record_keeps_its_outputs(
 
     # A dotted Amp key is one JSON member, so the pointer's parent is read whole.
     container = pointer.split("/")[1]
-    assert "srv" in json.loads(settings.read_text())[container]
+    assert "srv" in json.loads(settings.read_text(encoding="utf-8"))[container]
 
     runner.run("uninstall", "mcp", "srv")
 
-    left = json.loads(settings.read_text())
+    left = json.loads(settings.read_text(encoding="utf-8"))
     assert left["userKey"] is True
     assert "srv" not in left.get(container, {})
 
@@ -292,7 +292,7 @@ def test_every_client_keeps_what_it_installed(
         {"plain-agent.md": "---\nname: plain-agent\ndescription: d\n---\nbody\n"},
     )
     descriptor = cwd / "plain-mcp.toml"
-    descriptor.write_text(_MCP_DESCRIPTOR)
+    descriptor.write_text(_MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     mcp = f"{registry}/{unique_repo}/mcp/plain-mcp:1.0.0"
     runner.json("release", str(descriptor), mcp, "--kind", "mcp")
     write_config(

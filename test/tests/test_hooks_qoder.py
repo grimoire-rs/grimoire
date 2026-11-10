@@ -99,7 +99,7 @@ def _declare_globally(runner: GrimRunner, hooks: dict[str, str], mcp: dict[str, 
     lines += ["[options.experimental]", "hooks = true", ""]
     home = Path(runner.grim_home)
     home.mkdir(parents=True, exist_ok=True)
-    (home / "grimoire.toml").write_text("\n".join(lines))
+    (home / "grimoire.toml").write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 def _surfaces(home: Path) -> dict[str, Path]:
@@ -123,7 +123,7 @@ def _rows(runner: GrimRunner) -> list[dict]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return []
-    return [row for root in json.loads(path.read_text())["roots"].values() for row in root["hooks"]]
+    return [row for root in json.loads(path.read_text(encoding="utf-8"))["roots"].values() for row in root["hooks"]]
 
 
 def _marked(settings: dict) -> list[dict]:
@@ -139,7 +139,7 @@ def _marked(settings: dict) -> list[dict]:
 def _release_mcp(runner: GrimRunner, tmp_path: Path, registry: str, unique_repo: str) -> str:
     descriptor = tmp_path / "src" / "mcp" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True, exist_ok=True)
-    descriptor.write_text(MCP_TOML)
+    descriptor.write_text(MCP_TOML, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     return ref
@@ -172,20 +172,20 @@ def test_global_arming_across_clients(grim, registry: str, unique_repo: str) -> 
     assert sorted(r["client"] for r in _rows(grim)) == ["claude", "codex", "copilot", "qoder"], _rows(grim)
 
     surfaces = _surfaces(home)
-    qoder = json.loads(surfaces["qoder"].read_text())
+    qoder = json.loads(surfaces["qoder"].read_text(encoding="utf-8"))
     group = qoder["hooks"]["PreToolUse"][0]
     assert group["matcher"] == "Bash", qoder
     [element] = _marked(qoder)
     # C-017/C-N13 (PD-9): Qoder takes the shell form, `<abs launcher> <client>
     # <event> <root>` as one string; the root is the single opaque table key.
     launcher = Path(grim.grim_home) / "hooks" / "grim-hook"
-    (token,) = json.loads((launcher.parent / "dispatch.json").read_text())["roots"]
+    (token,) = json.loads((launcher.parent / "dispatch.json").read_text(encoding="utf-8"))["roots"]
     assert element["type"] == "command", element
     assert shlex.split(element["command"]) == [str(launcher), "qoder", "PreToolUse", token], element
     assert element["timeout"] == 5, "qoder's timeout is seconds, like claude's"
-    assert len(_marked(json.loads(surfaces["claude"].read_text()))) == 1
+    assert len(_marked(json.loads(surfaces["claude"].read_text(encoding="utf-8")))) == 1
     for client in ("codex", "copilot"):
-        assert "PreToolUse" in json.loads(surfaces[client].read_text())["hooks"], client
+        assert "PreToolUse" in json.loads(surfaces[client].read_text(encoding="utf-8"))["hooks"], client
 
     # S-002 / C-124: a second install is byte-identical — registrations, the
     # dispatch table and the launcher (same inode, no rewrite) — and says so.
@@ -219,16 +219,16 @@ def test_unparseable_surface_not_armed(grim, registry: str, unique_repo: str) ->
     _declare_globally(grim, {"shell-guard": hook.fq})
     _detect(home, ["claude", "qoder"])
     broken = _surfaces(home)["qoder"]
-    broken.write_text("{ this is not json")
+    broken.write_text("{ this is not json", encoding="utf-8", newline="\n")
     grim.run("lock", "--global")
 
     result = grim.run("install", "--global", "--trust-hooks", check=False)
     assert result.returncode == 0, result.stderr
     warnings = [line for line in result.stderr.splitlines() if "not armed for qoder" in line]
     assert len(warnings) == 1 and "shell-guard" in warnings[0], result.stderr
-    assert broken.read_text() == "{ this is not json", "an unparseable user config must never be rewritten"
+    assert broken.read_text(encoding="utf-8") == "{ this is not json", "an unparseable user config must never be rewritten"
     assert [r["client"] for r in _rows(grim)] == ["claude"], _rows(grim)
-    assert len(_marked(json.loads(_surfaces(home)["claude"].read_text()))) == 1, "POSITIVE CONTROL"
+    assert len(_marked(json.loads(_surfaces(home)["claude"].read_text(encoding="utf-8")))) == 1, "POSITIVE CONTROL"
 
     report = grim.json("install", "--global", "--trust-hooks")
     row = next(item for item in report["items"] if item["kind"] == "hook")
@@ -282,7 +282,7 @@ def test_user_hooks_and_the_mcp_entry_survive_arm_rearm_and_uninstall(
     home = Path(grim.home)
     _detect(home, ["qoder"])
     settings = _surfaces(home)["qoder"]
-    settings.write_text(USER_QODER_SETTINGS)
+    settings.write_text(USER_QODER_SETTINGS, encoding="utf-8", newline="\n")
     mcp = _release_mcp(grim, tmp_path, registry, unique_repo)
     hook = _publish_hook(unique_repo)
 
@@ -290,14 +290,14 @@ def test_user_hooks_and_the_mcp_entry_survive_arm_rearm_and_uninstall(
     _declare_globally(grim, {}, mcp={"grim-mcp": mcp})
     grim.run("lock", "--global")
     grim.json("install", "--global", "--client", "qoder")
-    baseline = json.loads(settings.read_text())
+    baseline = json.loads(settings.read_text(encoding="utf-8"))
     assert "grim-mcp" in baseline["mcpServers"], baseline
 
-    baseline_text = settings.read_text()
+    baseline_text = settings.read_text(encoding="utf-8")
     user_prefix = baseline_text[: baseline_text.index('"hooks"')]
 
     def assert_user_bytes_kept(step: str) -> None:
-        text = settings.read_text()
+        text = settings.read_text(encoding="utf-8")
         assert text.startswith(user_prefix), f"{step}: bytes outside `hooks` moved\n{text}"
         doc = json.loads(text)
         assert doc["theme"] == "dark", step
@@ -310,7 +310,7 @@ def test_user_hooks_and_the_mcp_entry_survive_arm_rearm_and_uninstall(
     _declare_globally(grim, {"shell-guard": hook.fq}, mcp={"grim-mcp": mcp})
     grim.run("lock", "--global")
     grim.json("install", "--global", "--client", "qoder", "--trust-hooks")
-    assert len(_marked(json.loads(settings.read_text()))) == 1, "the hook did not arm"
+    assert len(_marked(json.loads(settings.read_text(encoding="utf-8")))) == 1, "the hook did not arm"
     assert_user_bytes_kept("arm")
 
     armed = settings.read_bytes()
@@ -319,6 +319,6 @@ def test_user_hooks_and_the_mcp_entry_survive_arm_rearm_and_uninstall(
     assert_user_bytes_kept("re-arm")
 
     grim.json("uninstall", "--global", "hook", "shell-guard")
-    assert _marked(json.loads(settings.read_text())) == [], "uninstall left grim's element behind"
+    assert _marked(json.loads(settings.read_text(encoding="utf-8"))) == [], "uninstall left grim's element behind"
     assert_user_bytes_kept("uninstall")
-    assert settings.read_text() == baseline_text, "uninstall must restore the user's exact bytes"
+    assert settings.read_text(encoding="utf-8") == baseline_text, "uninstall must restore the user's exact bytes"

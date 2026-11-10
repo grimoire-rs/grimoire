@@ -84,7 +84,7 @@ def test_old_grim_rejects_a_lock_with_a_settings_table(old):
     (old.cwd / "grimoire.lock").write_text(
         _LOCK_HEAD
         + f'[[skill]]\nname = "a"\npinned = "{ref}"\n\n'
-        + f'[[settings]]\nname = "s"\npinned = "localhost:5000/x/s@sha256:{"2" * 64}"\n'
+        + f'[[settings]]\nname = "s"\npinned = "localhost:5000/x/s@sha256:{"2" * 64}"\n', encoding="utf-8", newline="\n"
     )
 
     result = old.run("status", check=False)
@@ -137,16 +137,16 @@ def test_old_grim_rejects_a_requires_edge_to_settings(old, registry, unique_repo
         SKILL,
         [("settings", "s", settings.fq)],
     )
-    declaration = (old.cwd / "grimoire.toml").read_text()
+    declaration = (old.cwd / "grimoire.toml").read_text(encoding="utf-8")
 
     result = old.run("add", parent.fq, "--name", "parent", check=False)
 
     assert result.returncode == 65, result.stderr
     assert "expected a single-layer artifact, manifest has 2 layers" in result.stderr
-    assert (old.cwd / "grimoire.toml").read_text() == declaration.replace(
+    assert (old.cwd / "grimoire.toml").read_text(encoding="utf-8") == declaration.replace(
         "[skills]\n", f'[skills]\nparent = "{parent.fq}"\n', 1
     )
-    lock = (old.cwd / "grimoire.lock").read_text()
+    lock = (old.cwd / "grimoire.lock").read_text(encoding="utf-8")
     assert lock.count("name = ") == 1 and f'pinned = "{parent.pinned}"' in lock, lock
     assert list((old.cwd / ".claude").iterdir()) == []
 
@@ -192,17 +192,17 @@ def test_old_grim_fails_on_a_global_state_holding_a_settings_record(old):
     """The record's kind is the cause: the same record as an mcp entry reads clean."""
     state = old.grim_home / "state" / "global.json"
     state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text(_global_state("mcp"))
+    state.write_text(_global_state("mcp"), encoding="utf-8", newline="\n")
     control = old.run("status", "--global", check=False)
     assert control.returncode == 0, f"positive control: {control.stderr}"
-    state.write_text(_global_state("settings"))
-    before = state.read_text()
+    state.write_text(_global_state("settings"), encoding="utf-8", newline="\n")
+    before = state.read_text(encoding="utf-8")
 
     result = old.run("status", "--global", check=False)
 
     assert result.returncode == 74, result.stderr
     assert "unknown variant `settings`" in result.stderr
-    assert state.read_text() == before
+    assert state.read_text(encoding="utf-8") == before
 
 
 def test_old_grim_hook_allow_drops_settings_consent_keys(old, registry, unique_repo):
@@ -212,14 +212,14 @@ def test_old_grim_hook_allow_drops_settings_consent_keys(old, registry, unique_r
     old.run("hook", "allow")
     records = list((old.grim_home / "hooks" / "consent").glob("*.json"))
     assert len(records) == 1, records
-    record = json.loads(records[0].read_text())
+    record = json.loads(records[0].read_text(encoding="utf-8"))
     hook_keys = [k for k in record["hooks"] if not k.startswith("settings:")]
     assert hook_keys, record  # positive control: allow recorded the hook
     settings_key = f"settings:s@{REGISTRY_HOST}/{unique_repo}/s"
     record["hooks"] = [*hook_keys, settings_key]
-    records[0].write_text(json.dumps(record, indent=2) + "\n")
+    records[0].write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")
 
     old.run("hook", "allow")
 
-    after = json.loads(records[0].read_text())
+    after = json.loads(records[0].read_text(encoding="utf-8"))
     assert after["hooks"] == hook_keys

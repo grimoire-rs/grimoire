@@ -40,7 +40,7 @@ def _dependent(unique_repo: str, name: str, *requires: str):
 
 
 def _lock_names(project_dir: Path) -> set[str]:
-    text = (project_dir / "grimoire.lock").read_text()
+    text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     return set(re.findall(r'(?m)^\[\[skill\]\]\nname = "([^"]+)"', text))
 
 
@@ -50,7 +50,7 @@ def _installed(project_dir: Path) -> set[str]:
 
 
 def _declared(project_dir: Path) -> set[str]:
-    text = (project_dir / "grimoire.toml").read_text()
+    text = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     skills = text.split("[skills]")[1].split("[")[0]
     return set(re.findall(r"(?m)^([\w-]+) =", skills))
 
@@ -58,7 +58,7 @@ def _declared(project_dir: Path) -> set[str]:
 def _drop_lock_entry(project_dir: Path, name: str) -> None:
     """Delete one `[[skill]]` entry and its `[[skill.requires]]` tables."""
     lock = project_dir / "grimoire.lock"
-    chunks = re.split(r"(?m)^(?=\[\[)", lock.read_text())
+    chunks = re.split(r"(?m)^(?=\[\[)", lock.read_text(encoding="utf-8"))
     kept: list[str] = []
     skipping = False
     for chunk in chunks:
@@ -68,7 +68,7 @@ def _drop_lock_entry(project_dir: Path, name: str) -> None:
             skipping = False
         if not skipping:
             kept.append(chunk)
-    lock.write_text("".join(kept))
+    lock.write_text("".join(kept), encoding="utf-8", newline="\n")
 
 
 def _tree(root: Path) -> dict[str, bytes]:
@@ -78,7 +78,7 @@ def _tree(root: Path) -> dict[str, bytes]:
 
 
 def _entry_block(project_dir: Path, name: str) -> str:
-    text = (project_dir / "grimoire.lock").read_text()
+    text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     return next(
         chunk.strip()
         for chunk in re.split(r"(?m)^(?=\[\[)", text)
@@ -219,13 +219,13 @@ def test_uninstall_dependency_only_kept(
     runner.run("install")
     everything = {"parent", "dep", "both", "member"}
     assert _installed(project_dir) == everything, "positive control"
-    lock_before = (project_dir / "grimoire.lock").read_text()
+    lock_before = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
     # Dependency-only: a remaining parent reaches it.
     kept = runner.json("uninstall", "skill", "dep")
     assert kept["status"] == "kept-by-dependency"
     assert _installed(project_dir) == everything
-    assert (project_dir / "grimoire.lock").read_text() == lock_before
+    assert (project_dir / "grimoire.lock").read_text(encoding="utf-8") == lock_before
     assert _declared(project_dir) == {"parent", "both"}
 
     # Held by a bundle: the existing literal is unchanged.

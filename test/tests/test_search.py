@@ -704,7 +704,7 @@ def test_search_offline_ignores_a_sync_sidecar_beside_the_cache(
     caches = _catalog_files(runner.grim_home)
     assert caches, "the browse must have written a catalog cache"
     for cache in caches:
-        cache.with_suffix(".sync.json").write_text("{ not json at all")
+        cache.with_suffix(".sync.json").write_text("{ not json at all", encoding="utf-8", newline="\n")
 
     offline = runner.json("search", "--offline", "--registry", locator)
 
@@ -739,7 +739,7 @@ def test_search_json_names_a_source_whose_cache_will_not_parse(
     cached = _catalog_files(runner.grim_home)
     assert cached, "the browse must have written a catalog cache"
     for f in cached:
-        f.write_text("{ not json at all")
+        f.write_text("{ not json at all", encoding="utf-8", newline="\n")
 
     result = runner.run(
         "--format", "json", "search", "--offline", "--registry", locator, check=False

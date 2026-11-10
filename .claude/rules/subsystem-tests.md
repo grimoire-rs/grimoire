@@ -21,7 +21,11 @@ Pytest (not Rust integration tests) because acceptance tests exercise the real c
 | `test/src/helpers.py` | `write_config()`, `make_bundle()`, `make_artifact()` — build + push test fixtures |
 | `test/src/assertions.py` | Cross-platform path assertion helpers |
 | `test/src/registry.py` | `PublishedArtifact` + minimal stdlib OCI client (push/fetch/retag) |
-| `test/taskfile.yml` | Task runner: `build` (internal), `default`, `quick`, `parallel`, `shard`, `floor`, `index-e2e`, `index-matrix`, `bench` |
+| `test/taskfile.yml` | Task runner: `build` (internal), `default`, `quick`, `parallel`, `shard`, `floor`, `floor:warn`, `index-e2e`, `index-matrix`, `bench` |
+
+`test/SUITE_FLOOR`, `SKIP_CEILING` and `XFAIL_CEILING` are enforced in PR CI (`task test:floor`); an unfiltered `task test:parallel` (so `task verify`) only warns about them locally through `test:floor:warn` and never fails on them.
+
+Text I/O in tests names its codec and newline: `test/tests/test_text_io_hygiene.py` fails on any bare `read_text` / `write_text` / text-mode `open` under `test/` (except `.venv/` and `data/`).
 
 ## Key Fixtures
 

@@ -270,7 +270,7 @@ def _host_managed_claude_config_dir(managed_dir: Path = _CLAUDE_MANAGED_DIR) -> 
     found = None
     for path in [managed_dir / "managed-settings.json", *drop_ins]:
         try:
-            value = json.loads(path.read_text()).get("env", {}).get("CLAUDE_CONFIG_DIR")
+            value = json.loads(path.read_text(encoding="utf-8")).get("env", {}).get("CLAUDE_CONFIG_DIR")
         except (OSError, ValueError, AttributeError):
             continue
         if isinstance(value, str) and value:

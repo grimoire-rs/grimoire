@@ -55,12 +55,12 @@ def _rows(runner) -> list[dict]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return []
-    return [row for root in json.loads(path.read_text())["roots"].values() for row in root["hooks"]]
+    return [row for root in json.loads(path.read_text(encoding="utf-8"))["roots"].values() for row in root["hooks"]]
 
 
 def _claude_marked(project_dir: Path) -> bool:
     surface = project_dir / ".claude" / "settings.local.json"
-    return surface.is_file() and MARKER_VALUE in surface.read_text()
+    return surface.is_file() and MARKER_VALUE in surface.read_text(encoding="utf-8")
 
 
 def _hook_item(runner) -> dict:
@@ -117,10 +117,10 @@ def test_c105_hook_free_global_converge_writes_nothing(grim, registry: str, uniq
     home = Path(grim.home)
     for marker in (".claude", ".codex", ".copilot", ".qoder"):
         (home / marker).mkdir(parents=True, exist_ok=True)
-    (home / ".claude" / "settings.json").write_text('{"permissions": {}}')
+    (home / ".claude" / "settings.json").write_text('{"permissions": {}}', encoding="utf-8", newline="\n")
     grim_home = Path(grim.grim_home)
     (grim_home / "grimoire.toml").write_text(
-        f'[skills]\ndemo = "{skill.fq}"\n\n[options.experimental]\nhooks = true\n'
+        f'[skills]\ndemo = "{skill.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
     grim.run("lock", "--global")
     grim.run("install", "--global", "--trust-hooks")
@@ -280,7 +280,7 @@ def test_settings_environment_variables_are_inert(
 
     runner.run("config", "set", "options.experimental.settings", "true")
     runner.run("install", "--trust-workspace")
-    assert json.loads(local.read_text())["model"] == "sonnet", (
+    assert json.loads(local.read_text(encoding="utf-8"))["model"] == "sonnet", (
         "POSITIVE CONTROL FAILED: the file flag must apply the package"
     )
 
@@ -305,7 +305,7 @@ def test_s120_remove_of_an_armed_hook_warns_and_defers_the_disarm(
     assert result.returncode == 0, result.stderr
     assert "shell-guard" in result.stderr, result.stderr
     assert "stays armed until `grim install` or `grim uninstall`" in result.stderr, result.stderr
-    assert "shell-guard" not in (project_dir / "grimoire.toml").read_text()
+    assert "shell-guard" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert _claude_marked(project_dir), "remove is not a converging seam: the element must still be there"
     assert len(_rows(runner)) == 1
 
@@ -324,15 +324,15 @@ def test_s110_a_path_source_hook_is_refused_and_writes_nothing(grim_at, project_
     `UnsupportedPathKind` (64); without `--kind`, a directory holding only
     `hook.toml` is the existing `UninferablePathKind` (64). Nothing is written."""
     write_config(project_dir)
-    config_before = (project_dir / "grimoire.toml").read_text()
+    config_before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     (project_dir / "my-hook").mkdir()
-    (project_dir / "my-hook" / "hook.toml").write_text(HOOK_TOML)
+    (project_dir / "my-hook" / "hook.toml").write_text(HOOK_TOML, encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     for args in (("add", "./my-hook", "--kind", "hook"), ("add", "./my-hook")):
         result = runner.run(*args, check=False)
         assert result.returncode == 64, f"{args}: rc={result.returncode} {result.stderr}"
-    assert (project_dir / "grimoire.toml").read_text() == config_before
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == config_before
     assert not (project_dir / "grimoire.lock").exists()
 
 
@@ -346,12 +346,12 @@ def test_s111_a_reserved_hook_binding_is_refused_by_add(
     under a valid binding adds."""
     hook = _publish_hook(unique_repo)
     write_config(project_dir)
-    config_before = (project_dir / "grimoire.toml").read_text()
+    config_before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     runner = grim_at(project_dir)
 
     refused = runner.run("add", hook.fq, "--name", "bin", check=False)
     assert refused.returncode == 64, refused.stderr
-    assert (project_dir / "grimoire.toml").read_text() == config_before
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == config_before
 
     write_config(project_dir, hooks={"bin": hook.fq})
     runner.run("config", "set", "options.experimental.hooks", "true")
@@ -367,7 +367,7 @@ def test_s111_a_reserved_hook_binding_is_refused_by_add(
 
     write_config(project_dir)
     runner.run("add", hook.fq, "--name", "guard")
-    assert "guard" in (project_dir / "grimoire.toml").read_text(), "POSITIVE CONTROL FAILED"
+    assert "guard" in (project_dir / "grimoire.toml").read_text(encoding="utf-8"), "POSITIVE CONTROL FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -386,8 +386,8 @@ def test_s112_an_unknown_lock_table_exits_78(grim_at, project_dir: Path, registr
     runner = grim_at(project_dir)
     runner.run("lock")
     lock = project_dir / "grimoire.lock"
-    assert "[[hook]]" in lock.read_text(), "precondition: the lock carries the hook table"
-    lock.write_text(lock.read_text().replace("[[hook]]", "[[hook-from-the-future]]"))
+    assert "[[hook]]" in lock.read_text(encoding="utf-8"), "precondition: the lock carries the hook table"
+    lock.write_text(lock.read_text(encoding="utf-8").replace("[[hook]]", "[[hook-from-the-future]]"), encoding="utf-8", newline="\n")
 
     result = runner.run("status", check=False)
     assert result.returncode == 78, f"rc={result.returncode} {result.stderr}"
@@ -448,7 +448,7 @@ def test_s116_pycache_is_not_drift_but_a_hook_toml_edit_is(
     (payload / "__pycache__" / "guard.cpython-313.pyc").write_bytes(b"\x00byproduct")
     assert _hook_item(runner)["state"] == "installed", _hook_item(runner)
 
-    (payload / "hook.toml").write_text(HOOK_TOML + "# hand edit\n")
+    (payload / "hook.toml").write_text(HOOK_TOML + "# hand edit\n", encoding="utf-8", newline="\n")
     assert _hook_item(runner)["state"] == "modified", _hook_item(runner)
 
     # `--trust-hooks`: the integrity gate sits after the hook gates (C-101), so
@@ -456,7 +456,7 @@ def test_s116_pycache_is_not_drift_but_a_hook_toml_edit_is(
     refused = runner.run("install", "--trust-hooks", check=False)
     assert refused.returncode == 65, f"as for skills: rc={refused.returncode} {refused.stderr}"
     assert "shell-guard" in refused.stderr, refused.stderr
-    assert (payload / "hook.toml").read_text().endswith("# hand edit\n"), "the refusal must keep the edit"
+    assert (payload / "hook.toml").read_text(encoding="utf-8").endswith("# hand edit\n"), "the refusal must keep the edit"
 
 
 @_POSIX_ONLY
@@ -478,7 +478,7 @@ def test_s116_a_real_python_run_leaves_pycache_that_is_neither_drift_nor_a_disar
     )
     grim_home = Path(runner.grim_home)
     table = grim_home / "hooks" / "dispatch.json"
-    [token] = json.loads(table.read_text())["roots"]
+    [token] = json.loads(table.read_text(encoding="utf-8"))["roots"]
     [payload] = list((grim_home / "hooks").glob("payload/*/shell-guard"))
 
     fired = run_launcher(
@@ -496,7 +496,7 @@ def test_s116_a_real_python_run_leaves_pycache_that_is_neither_drift_nor_a_disar
     assert "modified" not in again.stderr, again.stderr
     assert len(_rows(runner)) == 1 and _claude_marked(project_dir), "the byproduct must not disarm the hook"
 
-    (payload / "helper.py").write_text("X = 2\n")
+    (payload / "helper.py").write_text("X = 2\n", encoding="utf-8", newline="\n")
     assert _hook_item(runner)["state"] == "modified", "NEGATIVE CONTROL: a real source edit must still be drift"
 
 
@@ -509,7 +509,7 @@ def _hook_dir(root: Path, files: dict[str, str]) -> Path:
     hook = root / "shell-guard"
     for rel, body in {"hook.toml": HOOK_TOML, **files}.items():
         (hook / rel).parent.mkdir(parents=True, exist_ok=True)
-        (hook / rel).write_text(body)
+        (hook / rel).write_text(body, encoding="utf-8", newline="\n")
     return hook
 
 
@@ -533,14 +533,14 @@ def test_build_refuses_a_handler_that_references_an_ignored_file(
     65 at `grim build`, naming the path — never a published hook whose handler
     finds nothing at run time. Positive control: a `!` re-include builds."""
     hook = _hook_dir(project_dir, files)
-    (hook / "hook.toml").write_text(HOOK_TOML.replace('command = "python3 guard.py"', handler))
+    (hook / "hook.toml").write_text(HOOK_TOML.replace('command = "python3 guard.py"', handler), encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     refused = runner.run("build", str(hook), check=False)
     assert refused.returncode == 65, refused.stderr
     assert path in refused.stderr and ".grimignore" in refused.stderr, refused.stderr
 
-    (hook / ".grimignore").write_text(reinclude)
+    (hook / ".grimignore").write_text(reinclude, encoding="utf-8", newline="\n")
     assert runner.json("build", str(hook))["kind"] == "hook", "POSITIVE CONTROL FAILED: a re-included file must build"
 
 
@@ -555,7 +555,7 @@ def test_build_warns_when_a_hook_leaves_a_dependency_dir_behind(grim_at, project
     assert built.returncode == 0, built.stderr
     assert "node_modules" in built.stderr, built.stderr
 
-    (hook / "SKILL.md").write_text("---\nname: shell-guard\ndescription: d\n---\n")
+    (hook / "SKILL.md").write_text("---\nname: shell-guard\ndescription: d\n---\n", encoding="utf-8", newline="\n")
     skill = runner.run("build", str(hook), format="json", check=False)
     assert skill.returncode == 0 and json.loads(skill.stdout)["kind"] == "skill", skill.stderr
     assert "node_modules" not in skill.stderr, "hook-free builds must stay byte-identical (Principle 9)"

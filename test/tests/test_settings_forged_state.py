@@ -87,7 +87,7 @@ def _file(path: Path) -> dict:
 
 def _put(path: Path, values: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(values), encoding="utf-8")
+    path.write_text(json.dumps(values), encoding="utf-8", newline="\n")
 
 
 def _store_files(runner: GrimRunner) -> list[Path]:
@@ -139,7 +139,7 @@ def test_committed_forged_state_neither_applies_nor_removes(
     state = project_dir / ".grimoire" / "state.json"
     _put(project_dir / LOCAL, MINE)
     state.parent.mkdir(exist_ok=True)
-    state.write_text(json.dumps({"version": 2, "records": _forged_records(team)}), encoding="utf-8")
+    state.write_text(json.dumps({"version": 2, "records": _forged_records(team)}), encoding="utf-8", newline="\n")
 
     result = runner.run("install", TRUST, format="json", check=False)
 
@@ -206,7 +206,7 @@ def test_pulled_forged_state_neither_applies_nor_removes(
     attacker_runner.run("lock")
     forged = {"version": 2, "records": [*real["records"], *_forged_records(team)]}
     (attacker / ".grimoire").mkdir(exist_ok=True)
-    (attacker / ".grimoire" / "state.json").write_text(json.dumps(forged), encoding="utf-8")
+    (attacker / ".grimoire" / "state.json").write_text(json.dumps(forged), encoding="utf-8", newline="\n")
     git(attacker, "add", "grimoire.toml", "grimoire.lock")
     git(attacker, "add", "-f", ".grimoire/state.json")
     git(attacker, "commit", "-q", "-m", "settings")

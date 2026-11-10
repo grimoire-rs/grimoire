@@ -53,7 +53,7 @@ def _write_lock(project_dir: Path, *sections: str) -> None:
         f'declaration_hash = "{DECLARATION_HASH}"\n'
         'generated_by = "grim 0.1.0"\ngenerated_at = "2026-04-19T00:00:00Z"\n\n'
     )
-    (project_dir / "grimoire.lock").write_text(head + "".join(sections))
+    (project_dir / "grimoire.lock").write_text(head + "".join(sections), encoding="utf-8", newline="\n")
 
 
 def _why(runner, kind: str, name: str) -> dict:
@@ -116,8 +116,8 @@ def test_direct_target_includes_itself(grim_at, project_dir: Path) -> None:
 def test_pinned_null_for_path_and_local_bundle(grim_at, project_dir: Path) -> None:
     skill = project_dir / "skills" / "loc"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: loc\ndescription: Demo.\n---\nbody\n")
-    (project_dir / "grimoire.toml").write_text('[skills]\nloc = "./skills/loc"\n')
+    (skill / "SKILL.md").write_text("---\nname: loc\ndescription: Demo.\n---\nbody\n", encoding="utf-8", newline="\n")
+    (project_dir / "grimoire.toml").write_text('[skills]\nloc = "./skills/loc"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.env["GRIM_OFFLINE"] = "1"
     runner.run("lock")
@@ -129,9 +129,9 @@ def test_pinned_null_for_path_and_local_bundle(grim_at, project_dir: Path) -> No
 
     # A local (path-declared) bundle: `grim lock` cannot build one offline, so
     # the lock is written by hand. The graph must still be computable.
-    (project_dir / "stack.toml").write_text("# members live in the lock\n")
+    (project_dir / "stack.toml").write_text("# members live in the lock\n", encoding="utf-8", newline="\n")
     (project_dir / "grimoire.toml").write_text(
-        '[skills]\nloc = "./skills/loc"\n\n[bundles]\nstack = "./stack.toml"\n'
+        '[skills]\nloc = "./skills/loc"\n\n[bundles]\nstack = "./stack.toml"\n', encoding="utf-8", newline="\n"
     )
     _write_lock(
         project_dir,

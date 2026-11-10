@@ -53,14 +53,14 @@ def _dispatch_rows(runner) -> list[dict]:
     path = Path(runner.grim_home) / "hooks" / "dispatch.json"
     if not path.is_file():
         return []
-    table = json.loads(path.read_text())
+    table = json.loads(path.read_text(encoding="utf-8"))
     return [row for root in table["roots"].values() for row in root["hooks"]]
 
 
 def _managed_elements(project_dir: Path) -> list[dict]:
     """Claude's grim-owned handler elements, across every event and group."""
     path = project_dir / ".claude" / "settings.local.json"
-    hooks = (json.loads(path.read_text()) if path.is_file() else {}).get("hooks", {})
+    hooks = (json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}).get("hooks", {})
     return [
         element
         for groups in hooks.values()
@@ -79,7 +79,7 @@ def _lock_hook_names(project_dir: Path) -> list[str]:
     """
     names: list[str] = []
     in_hook = False
-    for line in (project_dir / "grimoire.lock").read_text().splitlines():
+    for line in (project_dir / "grimoire.lock").read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if stripped.startswith("[["):
             in_hook = stripped == "[[hook]]"
@@ -117,7 +117,7 @@ def test_bundle_source_with_a_hooks_table_builds(
         "summary = \"a bundle carrying a hook\"\n"
         "\n"
         "[hooks]\n"
-        f'shell-guard = "{REGISTRY_HOST}/{unique_repo}/hooks/shell-guard:1"\n'
+        f'shell-guard = "{REGISTRY_HOST}/{unique_repo}/hooks/shell-guard:1"\n', encoding="utf-8", newline="\n"
     )
 
     report = grim.json("build", "--kind", "bundle", str(src))
@@ -153,7 +153,7 @@ def test_built_bundle_layer_names_the_hook_member_last(
         f'rust-style = "{REGISTRY_HOST}/{unique_repo}/rust-style:1"\n'
         "\n"
         "[agents]\n"
-        f'reviewer = "{REGISTRY_HOST}/{unique_repo}/reviewer:1"\n'
+        f'reviewer = "{REGISTRY_HOST}/{unique_repo}/reviewer:1"\n', encoding="utf-8", newline="\n"
     )
 
     ref = f"{REGISTRY_HOST}/{unique_repo}/bundles/full-stack:1"
@@ -190,7 +190,7 @@ def test_rebuilding_a_hook_bundle_is_byte_identical(
     src.write_text(
         "[hooks]\n"
         f'b-guard = "{REGISTRY_HOST}/{unique_repo}/hooks/b:1"\n'
-        f'a-guard = "{REGISTRY_HOST}/{unique_repo}/hooks/a:1"\n'
+        f'a-guard = "{REGISTRY_HOST}/{unique_repo}/hooks/a:1"\n', encoding="utf-8", newline="\n"
     )
 
     first = grim.json("build", "--kind", "bundle", str(src))["layer_digest"]
@@ -217,12 +217,12 @@ def test_adding_a_hooks_table_leaves_the_other_members_byte_identical(
         f'rust-style = "{REGISTRY_HOST}/{unique_repo}/rust-style:1"\n'
     )
     legacy = project_dir / "legacy.toml"
-    legacy.write_text(legacy_body)
+    legacy.write_text(legacy_body, encoding="utf-8", newline="\n")
     withhook = project_dir / "withhook.toml"
     withhook.write_text(
         legacy_body
         + "\n[hooks]\n"
-        + f'shell-guard = "{REGISTRY_HOST}/{unique_repo}/hooks/shell-guard:1"\n'
+        + f'shell-guard = "{REGISTRY_HOST}/{unique_repo}/hooks/shell-guard:1"\n', encoding="utf-8", newline="\n"
     )
 
     legacy_digest = grim.json("build", "--kind", "bundle", str(legacy))["layer_digest"]
@@ -278,7 +278,7 @@ def test_add_bundle_locks_its_hook_member_with_bundle_provenance(
 
     runner.run("add", "--kind", "bundle", bundle.fq)
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert _lock_hook_names(project_dir) == ["shell-guard"], (
         f"the bundle's hook member must be locked by `add`, got lock:\n{lock}"
     )
@@ -381,7 +381,7 @@ def test_removing_the_bundle_evicts_its_hook_member(
 
     assert _lock_hook_names(project_dir) == [], (
         "the bundle's hook member must be evicted with the bundle:\n"
-        + (project_dir / "grimoire.lock").read_text()
+        + (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     )
     runner.run("install")
     assert _lock_hook_names(project_dir) == [], (
@@ -417,9 +417,9 @@ def test_a_directly_declared_hook_survives_the_bundles_removal(
 
     assert _lock_hook_names(project_dir) == ["shell-guard"], (
         "a directly-declared hook must outlive the bundle that also provided it:\n"
-        + (project_dir / "grimoire.lock").read_text()
+        + (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     )
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert f'bundle = "{REGISTRY_HOST}/{unique_repo}/bundles/guard-stack"' not in lock, (
         "the removed bundle's provenance must be gone from the surviving entry"
     )
@@ -444,5 +444,5 @@ def test_removing_a_directly_declared_hook_drops_it_from_the_lock(
 
     assert _lock_hook_names(project_dir) == [], (
         "the undeclared hook must leave the lock, or install re-arms it:\n"
-        + (project_dir / "grimoire.lock").read_text()
+        + (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     )

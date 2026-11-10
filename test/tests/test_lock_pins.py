@@ -66,7 +66,7 @@ def _add(runner, ref: PublishedArtifact, name: str, kind: str = "skill"):
 
 
 def _lock(project_dir: Path) -> dict:
-    return tomllib.loads((project_dir / "grimoire.lock").read_text())
+    return tomllib.loads((project_dir / "grimoire.lock").read_text(encoding="utf-8"))
 
 
 def _pins(project_dir: Path, kind: str = "skill") -> dict[str, str]:
@@ -74,7 +74,7 @@ def _pins(project_dir: Path, kind: str = "skill") -> dict[str, str]:
 
 
 def _installed(project_dir: Path, name: str) -> str:
-    return (project_dir / f".claude/skills/{name}/SKILL.md").read_text()
+    return (project_dir / f".claude/skills/{name}/SKILL.md").read_text(encoding="utf-8")
 
 
 def _rewrite_as_pre_change(project_dir: Path, *, edges: bool = True) -> None:
@@ -84,7 +84,7 @@ def _rewrite_as_pre_change(project_dir: Path, *, edges: bool = True) -> None:
     `edges=False` also drops `requires`, which 0.15.1 never wrote.
     """
     path = project_dir / "grimoire.lock"
-    text = _ADVISORY_TAG.sub(r"\1\2", path.read_text())
+    text = _ADVISORY_TAG.sub(r"\1\2", path.read_text(encoding="utf-8"))
     if not edges:
         text = _REQUIRES_BLOCK.sub("\n", text)
     text = re.sub(
@@ -92,7 +92,7 @@ def _rewrite_as_pre_change(project_dir: Path, *, edges: bool = True) -> None:
         f'generated_at = "{_PRE_CHANGE_GENERATED_AT}"',
         text,
     )
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8", newline="\n")
     assert not re.search(r'(?m)^pinned = "[^"]*:[^/"@]+@', text), text
     assert _lock(project_dir)["metadata"]["lock_version"] == 1
 
@@ -101,12 +101,12 @@ def _drop_bundle_rows(project_dir: Path) -> None:
     """Cut every `[[bundle]]` table, as a lock written before member lists."""
     path = project_dir / "grimoire.lock"
     kept, cutting = [], False
-    for line in path.read_text().splitlines(keepends=True):
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
         if line.startswith("["):
             cutting = line.startswith(("[[bundle]]", "[[bundle."))
         if not cutting:
             kept.append(line)
-    path.write_text("".join(kept))
+    path.write_text("".join(kept), encoding="utf-8", newline="\n")
     assert "bundle" not in _lock(project_dir)
 
 
@@ -119,7 +119,7 @@ def _rewrite_as_grim_0_3(project_dir: Path) -> None:
     _rewrite_as_pre_change(project_dir, edges=False)
     _drop_bundle_rows(project_dir)
     path = project_dir / "grimoire.lock"
-    lines, out, stamped, i = path.read_text().splitlines(), [], False, 0
+    lines, out, stamped, i = path.read_text(encoding="utf-8").splitlines(), [], False, 0
     while i < len(lines):
         if lines[i] == "[[skill.bundles]]":
             repo, tag = lines[i + 1].split('"')[1], lines[i + 2].split('"')[1]
@@ -134,7 +134,7 @@ def _rewrite_as_grim_0_3(project_dir: Path) -> None:
             stamped = False
         out.append(lines[i])
         i += 1
-    path.write_text("\n".join(out) + "\n")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
     assert all("bundles" not in row for row in _lock(project_dir)["skill"])
 
 
@@ -157,7 +157,7 @@ def test_install_state_stays_tagless(
 
     runner.run("install", "--client", "claude")
 
-    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text(encoding="utf-8"))
     assert [record["pinned"] for record in state["records"]] == [skill.pinned]
 
 
@@ -453,7 +453,7 @@ def test_hand_deleting_a_direct_line_over_a_conflict_carries(
     hand edit elsewhere, so `grim lock` carries where a fresh resolve exits 78.
     """
     runner, one, _ = _direct_over_a_conflict(grim_at, project_dir, unique_repo)
-    config = tomllib.loads((project_dir / "grimoire.toml").read_text())
+    config = tomllib.loads((project_dir / "grimoire.toml").read_text(encoding="utf-8"))
     del config["skills"]["x"]
     write_config(project_dir, skills=config["skills"])
 
@@ -836,13 +836,13 @@ def _pre_change_part(
     leaf = _skill(unique_repo, "leaf")
     parent = _dependent(unique_repo, "parent", [("skill", "leaf", "./leaf:1")])
     manifest = project_dir / "marketplace.toml"
-    manifest.write_text(f"[plugins.team]\ninclude = [{json.dumps(parent.fq)}]\n")
+    manifest.write_text(f"[plugins.team]\ninclude = [{json.dumps(parent.fq)}]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("update", "--marketplace", str(manifest))
     lock = project_dir / "marketplace.lock"
-    text = _ADVISORY_TAG.sub(r"\1\2", lock.read_text())
-    lock.write_text(text if edges else _REQUIRES_BLOCK.sub("\n", text))
-    assert ("requires" in lock.read_text()) == edges
+    text = _ADVISORY_TAG.sub(r"\1\2", lock.read_text(encoding="utf-8"))
+    lock.write_text(text if edges else _REQUIRES_BLOCK.sub("\n", text), encoding="utf-8", newline="\n")
+    assert ("requires" in lock.read_text(encoding="utf-8")) == edges
     _move_tag(unique_repo, "leaf")
     return runner, manifest, leaf, parent
 
@@ -857,7 +857,7 @@ def test_marketplace_fresh_part_keeps_a_pin_its_edge_records(
 
     result = runner.run("update", "--marketplace", str(manifest), "team:parent")
 
-    lock = (project_dir / "marketplace.lock").read_text()
+    lock = (project_dir / "marketplace.lock").read_text(encoding="utf-8")
     assert f"/leaf:1@{leaf.digest}" in lock, lock
     assert "no tag recorded" not in result.stderr, result.stderr
 
@@ -871,14 +871,14 @@ def test_marketplace_warning_names_the_part(
     )
     extra = _skill(unique_repo, "extra")
     includes = json.dumps([parent.fq, extra.fq])
-    manifest.write_text(f"[plugins.team]\ninclude = {includes}\n")
+    manifest.write_text(f"[plugins.team]\ninclude = {includes}\n", encoding="utf-8", newline="\n")
 
     result = runner.run(
         "export", "plugin", "--client", "claude", "-o", "dist", "--force", check=False
     )
 
     assert result.returncode == 0, result.stderr
-    assert f"/leaf:1@{leaf.digest}" not in (project_dir / "marketplace.lock").read_text()
+    assert f"/leaf:1@{leaf.digest}" not in (project_dir / "marketplace.lock").read_text(encoding="utf-8")
     assert "plugin 'team'" in result.stderr, result.stderr
     assert "skill 'leaf'" in result.stderr, result.stderr
     assert "no tag recorded" in result.stderr, "the warning must name the cause"
@@ -991,12 +991,12 @@ def test_lock_repacks_a_changed_path_source(
     """S-016: a path source has no tag to carry, so `grim lock` re-packs it."""
     source = project_dir / "skills" / "local" / "SKILL.md"
     source.parent.mkdir(parents=True)
-    source.write_text("---\nname: local\ndescription: d\n---\n# one\n")
-    (project_dir / "grimoire.toml").write_text('[skills]\nlocal = "./skills/local"\n')
+    source.write_text("---\nname: local\ndescription: d\n---\n# one\n", encoding="utf-8", newline="\n")
+    (project_dir / "grimoire.toml").write_text('[skills]\nlocal = "./skills/local"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock")
     before = _lock(project_dir)["skill"]
-    source.write_text("---\nname: local\ndescription: d\n---\n# two\n")
+    source.write_text("---\nname: local\ndescription: d\n---\n# two\n", encoding="utf-8", newline="\n")
     assert runner.run("install", check=False).returncode == 65
 
     runner.run("lock")
@@ -1016,13 +1016,13 @@ def test_lock_repairs_stale_dependencies(
     runner = grim_at(project_dir)
     runner.run("lock")
     lock_path = project_dir / "grimoire.lock"
-    lock_path.write_text(_REQUIRES_BLOCK.sub("\n", lock_path.read_text()))
-    assert "requires" not in lock_path.read_text()
+    lock_path.write_text(_REQUIRES_BLOCK.sub("\n", lock_path.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
+    assert "requires" not in lock_path.read_text(encoding="utf-8")
     assert runner.run("install", check=False).returncode == 65
 
     runner.run("lock")
 
-    assert 'id = "./leaf:1"' in lock_path.read_text()
+    assert 'id = "./leaf:1"' in lock_path.read_text(encoding="utf-8")
     pins = _pins(project_dir)
     assert pins["parent"].endswith(parent.digest)
     assert pins["leaf"].endswith(leaf.digest)
@@ -1051,7 +1051,7 @@ def test_shadowed_edge_does_not_answer(
         runner.run("lock")
 
     assert _pins(project_dir)["target"].endswith(new.digest)
-    lock_text = (project_dir / "grimoire.lock").read_text()
+    lock_text = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert f":2@{old.digest}" not in lock_text, (
         "tag 2 must not pair with the old digest"
     )
@@ -1214,7 +1214,7 @@ def _edit_then_hand_undo(
         q = _dependent(unique_repo, "q", [("skill", "x", two.fq)])
         write_config(project_dir, skills={"x": x.fq, "q": q.fq})
         runner.run("lock")
-        saved = config.read_text()
+        saved = config.read_text(encoding="utf-8")
         runner.run("remove", "skill", "x")
         taken = "x"
     elif shape == "stale-bundle":
@@ -1226,7 +1226,7 @@ def _edit_then_hand_undo(
         pk1 = make_bundle(f"{unique_repo}/pk", [("skill", "m", m.fq)], tag="1")
         write_config(project_dir, skills={"b": b.fq}, bundles={"pk": pk1.fq})
         runner.run("lock")
-        saved = config.read_text()
+        saved = config.read_text(encoding="utf-8")
         _drop_bundle_rows(project_dir)
         write_config(project_dir, skills={"b": b2.fq}, bundles={"pk": pk1.fq})
         runner.run("remove", "bundle", "pk")
@@ -1237,13 +1237,13 @@ def _edit_then_hand_undo(
         y = _skill(unique_repo, "y")
         write_config(project_dir, skills={"a": a1.fq, "y": y.fq})
         runner.run("lock")
-        saved = config.read_text()
+        saved = config.read_text(encoding="utf-8")
         write_config(project_dir, skills={"a": a2.fq, "y": y.fq})
         verb = "uninstall" if shape == "stale-uninstall" else "remove"
         runner.run(verb, "skill", "y")
         taken = "y"
     assert taken not in _pins(project_dir), "the fixture takes a row"
-    config.write_text(saved)
+    config.write_text(saved, encoding="utf-8", newline="\n")
     return runner, taken
 
 
@@ -1512,16 +1512,16 @@ def test_a_ghost_typed_into_the_declaration_stays_gone_after_its_uninstall(
     runner = grim_at(project_dir)
     runner.run("lock")
     runner.run("install")
-    with_ghost = (project_dir / "grimoire.lock").read_text()
+    with_ghost = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     write_config(project_dir, skills={"x": kept.fq})
     runner.run("lock")
-    proof = tomllib.loads((project_dir / "grimoire.lock").read_text())
+    proof = tomllib.loads((project_dir / "grimoire.lock").read_text(encoding="utf-8"))
     (project_dir / "grimoire.lock").write_text(
         re.sub(
             r'declaration_hash = ".*"',
             f'declaration_hash = "{proof["metadata"]["declaration_hash"]}"',
             with_ghost,
-        )
+        ), encoding="utf-8", newline="\n"
     )
     write_config(project_dir, skills={"x": kept.fq, "g": ghost.fq})
 

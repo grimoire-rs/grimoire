@@ -117,7 +117,7 @@ def _release_mcp(runner: GrimRunner, src: Path, fq: str, body: str) -> str:
     """Publish an MCP descriptor via `grim release`; returns the manifest digest."""
     path = src / f"{fq.rsplit('/', 1)[1].split(':')[0]}.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8", newline="\n")
     return runner.json("release", str(path), fq, "--kind", "mcp")["manifest_digest"]
 
 
@@ -228,7 +228,7 @@ def _manifest(root: Path) -> dict:
 
 
 def _readme(root: Path) -> str:
-    return (root / "README.md").read_text()
+    return (root / "README.md").read_text(encoding="utf-8")
 
 
 def _tree(root: Path) -> list[tuple[str, str]]:
@@ -260,13 +260,13 @@ def _write_marketplace(path: Path, plugins: dict[str, dict]) -> Path:
         if "strip_prefix" in decl:
             lines.append(f"rename = {{ strip_prefix = {json.dumps(decl['strip_prefix'])} }}")
         chunks.append("\n".join(lines) + "\n")
-    path.write_text("\n".join(chunks))
+    path.write_text("\n".join(chunks), encoding="utf-8", newline="\n")
     return path
 
 
 def _lock_part(lock_path: Path, plugin: str) -> tuple[list[dict], dict]:
     """One plugin's raw lock entries (all kinds) and its `[[plugin]]` row."""
-    lock = tomllib.loads(lock_path.read_text())
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
     entries = [dict(e, kind=k) for k in LOCK_KINDS for e in lock.get(k, []) if e.get("plugin") == plugin]
     row = next(r for r in lock.get("plugin", []) if r["name"] == plugin)
     return entries, row
@@ -359,7 +359,7 @@ def test_s002_agent_plugins_directory_for_codex(grim_at, tmp_path: Path, work: P
     assert not (root / ".claude-plugin").exists()
     assert not (root / ".mcp.json").exists()
 
-    servers = json.loads((root / "mcp.json").read_text())["mcpServers"]
+    servers = json.loads((root / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert servers == {"team-srv": {"args": ["-y", "srv"], "command": "npx", "type": "stdio"}}
     assert list(servers["team-srv"]) == sorted(servers["team-srv"]), "C-036: keys sorted"
 
@@ -473,7 +473,7 @@ def test_s004_path_source_clashing_with_bundle_member_conflicts_78(
     stack = _publish_stack(runner, tmp_path, registry, unique_repo)
     local = work / "local" / "team-plan"
     local.mkdir(parents=True)
-    (local / "SKILL.md").write_text(_skill_md("team-plan", "Local"))
+    (local / "SKILL.md").write_text(_skill_md("team-plan", "Local"), encoding="utf-8", newline="\n")
 
     result = _export(runner, stack.bundle, "./local/team-plan", "--name", "d", "--client", "claude", "-o", "dist")
     assert result.returncode == 78, result.stderr
@@ -486,7 +486,7 @@ def test_s003_single_path_ref_is_named_by_its_binding_not_its_file_stem(grim_at,
     runner = grim_at(work)
     local = work / "skills" / "team.plan"
     local.mkdir(parents=True)
-    (local / "SKILL.md").write_text(_skill_md("team.plan", "Local"))
+    (local / "SKILL.md").write_text(_skill_md("team.plan", "Local"), encoding="utf-8", newline="\n")
 
     out = _ok(_export(runner, "./skills/team.plan", "--client", "claude", "-o", "dist"))
 
@@ -517,7 +517,7 @@ def test_s005_declared_plugin_writes_lock_and_is_stable_on_rerun(
     assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
     assert out["items"][0]["version"] == doc["version"]
 
-    lock = tomllib.loads(lock_path.read_text())
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
     entries = [e for k in LOCK_KINDS for e in lock.get(k, [])]
     assert {e["name"] for e in entries} == {"team-plan", "team-review", "team-reviewer", "team-style", "team-srv"}
     assert all(e["plugin"] == "team" for e in entries), entries
@@ -558,11 +558,11 @@ def test_c010_changed_local_member_exits_65_until_update_marketplace(grim_at, wo
     runner = grim_at(work)
     local = work / "skills" / "team-plan"
     local.mkdir(parents=True)
-    (local / "SKILL.md").write_text(_skill_md("team-plan", "Original"))
+    (local / "SKILL.md").write_text(_skill_md("team-plan", "Original"), encoding="utf-8", newline="\n")
     _write_marketplace(work / "marketplace.toml", {"team": {"include": ["./skills/team-plan"]}})
     _ok(_export(runner, "--client", "claude", "-o", "dist"))
 
-    (local / "SKILL.md").write_text(_skill_md("team-plan", "Edited"))
+    (local / "SKILL.md").write_text(_skill_md("team-plan", "Edited"), encoding="utf-8", newline="\n")
     result = _export(runner, "--client", "claude", "-o", "dist", "--force")
     assert result.returncode == 65, result.stderr
     err = _error(result)
@@ -572,7 +572,7 @@ def test_c010_changed_local_member_exits_65_until_update_marketplace(grim_at, wo
 
     runner.run("update", "--marketplace", "marketplace.toml", "team:team-plan")
     _ok(_export(runner, "--client", "claude", "-o", "dist", "--force"))
-    assert "# Edited" in (work / "dist" / "team.claude" / "skills" / "team-plan" / "SKILL.md").read_text()
+    assert "# Edited" in (work / "dist" / "team.claude" / "skills" / "team-plan" / "SKILL.md").read_text(encoding="utf-8")
 
 
 # ── S-006 — Stale lock after an edit (C-004, C-033) ─────────────────────────
@@ -676,7 +676,7 @@ def test_s008_unknown_plugin_exits_79(grim_at, work: Path, registry: str, unique
 
 def test_s008_no_declared_plugins_exits_65_with_hint(grim_at, work: Path) -> None:
     runner = grim_at(work)
-    (work / "marketplace.toml").write_text("")
+    (work / "marketplace.toml").write_text("", encoding="utf-8", newline="\n")
 
     result = _export(runner, "--client", "claude")
     assert result.returncode == 65, result.stderr
@@ -696,7 +696,7 @@ def test_s008_missing_manifest_exits_65(grim_at, work: Path) -> None:
 def test_s008_bad_manifest_path_exits_65(grim_at, work: Path, name: str) -> None:
     """C-001: the path name rule is checked before reading (the file exists)."""
     runner = grim_at(work)
-    (work / name).write_text('[plugins.team]\ninclude = ["x"]\n')
+    (work / name).write_text('[plugins.team]\ninclude = ["x"]\n', encoding="utf-8", newline="\n")
 
     result = _export(runner, "--marketplace", name, "--plugin", "team", "--client", "claude")
     assert result.returncode == 65, result.stderr
@@ -713,7 +713,7 @@ def test_s008_bad_manifest_path_exits_65(grim_at, work: Path, name: str) -> None
 )
 def test_s008_usage_matrix_exits_64(grim_at, work: Path, args: tuple[str, ...]) -> None:
     runner = grim_at(work)
-    (work / "marketplace.toml").write_text('[plugins.team]\ninclude = ["localhost:5000/x/a:1"]\n')
+    (work / "marketplace.toml").write_text('[plugins.team]\ninclude = ["localhost:5000/x/a:1"]\n', encoding="utf-8", newline="\n")
 
     result = _export(runner, *args, "--client", "claude", "-o", "dist")
     assert result.returncode == 64, result.stderr
@@ -723,7 +723,7 @@ def test_s008_usage_matrix_exits_64(grim_at, work: Path, args: tuple[str, ...]) 
 def test_s008_reserved_top_level_key_exits_65(grim_at, work: Path) -> None:
     """C-001: `name`/`owner`/`description` are reserved at top level in phase 1."""
     runner = grim_at(work)
-    (work / "marketplace.toml").write_text('owner = "me"\n[plugins.team]\ninclude = ["localhost:5000/x/a:1"]\n')
+    (work / "marketplace.toml").write_text('owner = "me"\n[plugins.team]\ninclude = ["localhost:5000/x/a:1"]\n', encoding="utf-8", newline="\n")
 
     result = _export(runner, "--plugin", "team", "--client", "claude")
     assert result.returncode == 65, result.stderr
@@ -768,7 +768,7 @@ def test_s009_config_clients_drop_formatless_ones(
     runner = grim_at(work)
     _team_of_one_skill(work, registry, unique_repo)
     if clients is not None:
-        (work / "grimoire.toml").write_text(f"[options]\nclients = {clients}\n")
+        (work / "grimoire.toml").write_text(f"[options]\nclients = {clients}\n", encoding="utf-8", newline="\n")
 
     result = _export(runner, "--plugin", "team", "-o", "dist", fmt=None)
     assert result.returncode == 0, result.stderr
@@ -797,11 +797,11 @@ def test_s010_per_client_declines(grim_at, tmp_path: Path, work: Path, registry:
     # Droid hosts agents and MCP; its install translates a Claude-format
     # plugin's `agents/` and `.mcp.json`.
     assert (droid / "agents" / "team-reviewer.md").is_file()
-    assert json.loads((droid / ".mcp.json").read_text())["mcpServers"]["team-srv"]["type"] == "stdio"
+    assert json.loads((droid / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["team-srv"]["type"] == "stdio"
     assert (junie / "agents" / "team-reviewer.md").is_file()
-    assert "team-srv" in json.loads((junie / ".mcp.json").read_text())["mcpServers"]
+    assert "team-srv" in json.loads((junie / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert (claude / "agents" / "team-reviewer.md").is_file()
-    assert "team-srv" in json.loads((claude / ".mcp.json").read_text())["mcpServers"]
+    assert "team-srv" in json.loads((claude / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
     assert "Omitted for droid: rule team-style." in _readme(droid)
 
 
@@ -837,7 +837,7 @@ def test_s019b_config_clients_naming_qoder_export_a_qoder_tree(
 ) -> None:
     runner = grim_at(work)
     _team_of_one_skill(work, registry, unique_repo)
-    (work / "grimoire.toml").write_text('[options]\nclients = ["qoder"]\n')
+    (work / "grimoire.toml").write_text('[options]\nclients = ["qoder"]\n', encoding="utf-8", newline="\n")
 
     result = _export(runner, "--plugin", "team", "-o", "dist", fmt=None)
     assert result.returncode == 0, result.stderr
@@ -908,18 +908,18 @@ def test_s011_members_render_byte_equal_to_install(
         # Both directions: install writes nothing the export leaves out.
         assert _tree(root / "skills" / name) == _tree(skills_root / name), name
     # The renderer ran: the namespaced key never ships verbatim.
-    plan = (root / "skills" / "team-plan" / "SKILL.md").read_text()
+    plan = (root / "skills" / "team-plan" / "SKILL.md").read_text(encoding="utf-8")
     assert plan != PLAN_MD and "claude.user-invocable" not in plan, plan
     assert ("user-invocable: false" in plan) == (client == "claude"), plan
     if client == "claude":
         agent = root / "agents" / "team-reviewer.md"
-        assert "color: blue" in agent.read_text() and agent.read_text() != REVIEWER_MD
+        assert "color: blue" in agent.read_text(encoding="utf-8") and agent.read_text(encoding="utf-8") != REVIEWER_MD
         assert agent.read_bytes() == (project / ".claude" / "agents" / "team-reviewer.md").read_bytes()
     # C-020: the Claude family's MCP value is the client's own install entry.
     if client in ("claude", "junie"):
         mcp_file = project / (".mcp.json" if client == "claude" else ".junie/mcp/mcp.json")
-        exported = json.loads((root / ".mcp.json").read_text())["mcpServers"]
-        installed = json.loads(mcp_file.read_text())["mcpServers"]
+        exported = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+        installed = json.loads(mcp_file.read_text(encoding="utf-8"))["mcpServers"]
         assert set(exported) == {"team-srv"}
         assert exported["team-srv"] == installed["team-srv"]
 
@@ -970,10 +970,10 @@ def test_s013_strip_prefix_renames_every_member(grim_at, tmp_path: Path, work: P
 
     root = work / "dist" / "team.claude"
     assert sorted(p.name for p in (root / "skills").iterdir()) == ["plan", "review"]
-    assert "name: plan\n" in (root / "skills" / "plan" / "SKILL.md").read_text()
-    assert "name: reviewer\n" in (root / "agents" / "reviewer.md").read_text()
+    assert "name: plan\n" in (root / "skills" / "plan" / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: reviewer\n" in (root / "agents" / "reviewer.md").read_text(encoding="utf-8")
     assert not (root / "agents" / "team-reviewer.md").exists()
-    assert set(json.loads((root / ".mcp.json").read_text())["mcpServers"]) == {"srv"}
+    assert set(json.loads((root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]) == {"srv"}
 
     doc = _manifest(root)
     assert doc["version"] == f"0.0.0+{_suffix(root, '0.0.0')}"
@@ -1065,13 +1065,13 @@ def test_s017_directory_overwrite_needs_force(grim_at, tmp_path: Path, work: Pat
     stack = _publish_stack(runner, tmp_path, registry, unique_repo)
     root = work / "dist" / "team-stack.codex"
     root.mkdir(parents=True)
-    (root / "stale.txt").write_text("old tree\n")
+    (root / "stale.txt").write_text("old tree\n", encoding="utf-8", newline="\n")
     args = (stack.bundle, "--client", "codex", "-o", "dist")
 
     refused = _export(runner, *args)
     assert refused.returncode == 65, refused.stderr
     assert _error(refused)["reason"] == "untracked-destination"
-    assert (root / "stale.txt").read_text() == "old tree\n"
+    assert (root / "stale.txt").read_text(encoding="utf-8") == "old tree\n"
     assert _entries(work / "dist") == ["team-stack.codex"]
 
     _ok(_export(runner, *args, "--force"))
@@ -1096,7 +1096,7 @@ def test_s017_symlink_at_output_is_replaced_and_target_untouched(
     else:
         target = tmp_path / "target-dir"
         target.mkdir()
-        (target / "keep.txt").write_text("keep\n")
+        (target / "keep.txt").write_text("keep\n", encoding="utf-8", newline="\n")
         link = dist / f"team-stack.{client}"
     link.symlink_to(target)
     args = [stack.bundle, "--client", client, "-o", "dist", *(["--zip"] if zip_flag else [])]
@@ -1233,9 +1233,9 @@ def test_s029_hand_edited_lock_name_is_refused_78(grim_at, tmp_path: Path, work:
     _write_marketplace(work / "marketplace.toml", {"team": {"include": [stack.bundle]}})
     _ok(_export(runner, "--plugin", "team", "--client", "claude", "-o", "dist"))
     lock_path = work / "marketplace.lock"
-    text = lock_path.read_text()
+    text = lock_path.read_text(encoding="utf-8")
     assert 'name = "team-plan"' in text
-    lock_path.write_text(text.replace('name = "team-plan"', 'name = "../evil"', 1))
+    lock_path.write_text(text.replace('name = "team-plan"', 'name = "../evil"', 1), encoding="utf-8", newline="\n")
 
     result = _export(runner, "--plugin", "team", "--client", "claude", "-o", "dist2")
     assert result.returncode == 78, result.stderr
@@ -1298,7 +1298,7 @@ def test_s030_plugin_removed_from_manifest_is_dropped_from_lock(grim_at, work: P
     _write_marketplace(m, {"a": {"include": [f"{reg}/a-skill:1"]}})
     _ok(_export(runner, "--plugin", "a", "--client", "claude", "-o", "dist", "--force"))
 
-    lock = tomllib.loads(lock_path.read_text())
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
     assert [r["name"] for r in lock["plugin"]] == ["a"]
     assert not [e for k in LOCK_KINDS for e in lock.get(k, []) if e.get("plugin") == "b"]
     assert _lock_part(lock_path, "a") == a_before
@@ -1329,7 +1329,7 @@ def test_s031_agent_plugins_mcp_projection(grim_at, tmp_path: Path, work: Path, 
     assert [i["client"] for i in items] == ["agents", "cursor"], "agents is emitted though it declines MCP on install"
     for item in items:
         root = work / "dist" / f"net.{item['client']}"
-        servers = json.loads((root / "mcp.json").read_text())["mcpServers"]
+        servers = json.loads((root / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]
         assert servers == {
             "feed": {"type": "sse", "url": "https://example.com/feed"},
             "web": {"type": "streamable-http", "url": "https://example.com/web"},
@@ -1451,7 +1451,7 @@ def test_s034_declared_logo_ships_in_every_client(grim_at, work: Path, registry:
         assert (root / "assets" / "logo.svg").read_bytes() == SVG
         assert _readme(root).startswith("# team\n\n<img src=\"assets/logo.svg\" alt=\"team\" width=\"96\">\n\n")
     assert "extensions" not in _manifest(claude), "Claude plugin.json has no logo field"
-    raw = json.loads((codex / "plugin.json").read_text())
+    raw = json.loads((codex / "plugin.json").read_text(encoding="utf-8"))
     assert list(raw) == ["$schema", "name", "version", "description", "extensions"]
     assert raw["extensions"] == {"com.openai": {"interface": {"logo": "./assets/logo.svg"}}}
 
@@ -1468,7 +1468,7 @@ def test_s034_logo_flag_overrides_and_uppercase_png_is_normalized(
 
     root = work / "dist" / "a.agents"
     assert (root / "assets" / "logo.png").read_bytes() == png
-    assert json.loads((root / "plugin.json").read_text())["extensions"]["com.openai"]["interface"]["logo"] == (
+    assert json.loads((root / "plugin.json").read_text(encoding="utf-8"))["extensions"]["com.openai"]["interface"]["logo"] == (
         "./assets/logo.png"
     )
 
@@ -1517,7 +1517,7 @@ def test_s034_single_ref_falls_back_to_its_published_logo(
 
     for client in ("claude", "codex"):
         assert (work / "dist" / f"team-stack.{client}" / "assets" / "logo.svg").read_bytes() == SVG
-    raw = json.loads((work / "dist" / "team-stack.codex" / "plugin.json").read_text())
+    raw = json.loads((work / "dist" / "team-stack.codex" / "plugin.json").read_text(encoding="utf-8"))
     assert raw["extensions"]["com.openai"]["interface"]["logo"] == "./assets/logo.svg"
 
     (work / "own.png").write_bytes(b"\x89PNG own")
@@ -1550,9 +1550,9 @@ def _lock_project(
     write_config(root, skills=skills)
     config = root / "grimoire.toml"
     if plugin:
-        config.write_text(config.read_text() + f"\n[plugin]\n{plugin}")
+        config.write_text(config.read_text(encoding="utf-8") + f"\n[plugin]\n{plugin}", encoding="utf-8", newline="\n")
     if extra:
-        config.write_text(config.read_text() + extra)
+        config.write_text(config.read_text(encoding="utf-8") + extra, encoding="utf-8", newline="\n")
     runner = grim_at(root)
     runner.run("lock")
     return root, runner
@@ -1571,7 +1571,7 @@ def test_s035_project_renders_the_pins_without_resolving(
     _ok(_export(grim_at(work), f"{registry}/{repo}@{pinned}", "--name", "team", "--client", "claude", "-o", "adhoc"))
 
     root = proj / "dist" / "team.claude"
-    assert "# Pinned" in (root / "skills" / "a" / "SKILL.md").read_text(), "the lock's digest, not the moved tag"
+    assert "# Pinned" in (root / "skills" / "a" / "SKILL.md").read_text(encoding="utf-8"), "the lock's digest, not the moved tag"
     assert _tree(root) == _tree(work / "adhoc" / "team.claude"), "same bytes as an ad-hoc export of the pins"
     assert not list(proj.glob("marketplace*")), "--project writes no lock of its own"
 
@@ -1670,9 +1670,9 @@ def test_s035_project_path_names_the_project_directly(
 def test_s035_drifted_local_member_names_grim_lock(grim_at, tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     (proj / "skills" / "local").mkdir(parents=True)
-    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Local"))
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Local"), encoding="utf-8", newline="\n")
     _, runner = _lock_project(grim_at, proj, {"local": "./skills/local"}, plugin='name = "team"\n')
-    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Edited"))
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Edited"), encoding="utf-8", newline="\n")
 
     result = _export(runner, "--project", "--client", "claude", "-o", "dist")
 
@@ -1685,16 +1685,16 @@ def test_s035_drifted_member_of_a_named_config_names_that_config(grim_at, tmp_pa
     under another name, so the remedy names the config the export read."""
     proj = tmp_path / "proj"
     (proj / "skills" / "local").mkdir(parents=True)
-    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Local"))
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Local"), encoding="utf-8", newline="\n")
     write_config(proj, skills={"local": "./skills/local"})
     config = proj / "team.toml"
     (proj / "grimoire.toml").rename(config)
-    config.write_text(config.read_text() + '\n[plugin]\nname = "team"\n')
+    config.write_text(config.read_text(encoding="utf-8") + '\n[plugin]\nname = "team"\n', encoding="utf-8", newline="\n")
     away = tmp_path / "away"
     away.mkdir()
     runner = grim_at(away)
     runner.run("--config", str(config), "lock")
-    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Edited"))
+    (proj / "skills" / "local" / "SKILL.md").write_text(_skill_md("local", "Edited"), encoding="utf-8", newline="\n")
 
     result = _export(runner, "--project", str(config), "--client", "claude", "-o", "dist")
 
@@ -1720,7 +1720,7 @@ def _project_marketplace(grim_at, tmp_path: Path, work: Path, registry: str, uni
         plugin='name = "ignored"\ndescription = "Project text"\nlogo = "art/team.svg"\n',
     )
     manifest = work / "marketplace.toml"
-    manifest.write_text(f'[plugins.team]\nproject = "proj"\n{decl}')
+    manifest.write_text(f'[plugins.team]\nproject = "proj"\n{decl}', encoding="utf-8", newline="\n")
     return manifest
 
 

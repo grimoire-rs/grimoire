@@ -103,7 +103,7 @@ def _minimal_global_config(grim_home: Path) -> None:
     provides the minimal valid skeleton so tests focus on config-command
     behavior, not on config file creation.
     """
-    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
+    (grim_home / "grimoire.toml").write_text("[skills]\n\n[rules]\n", encoding="utf-8", newline="\n")
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +344,7 @@ def test_tui_sort_keys_round_trip_and_list_as_enums_with_no_default(
     runner.run("config", "set", "options.tui.sort_order", "asc")
     assert "downloads" in runner.plain("config", "get", "options.tui.sort").stdout
     assert "asc" in runner.plain("config", "get", "options.tui.sort_order").stdout
-    assert 'sort = "downloads"' in (project_dir / "grimoire.toml").read_text()
+    assert 'sort = "downloads"' in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     bad = runner.run("config", "set", "options.tui.sort", "bogus", check=False)
     assert bad.returncode == 65, f"bad enum value exits 65; got {bad.returncode}: {bad.stderr}"
@@ -577,14 +577,14 @@ def test_global_flag_writes_grim_home_config_not_project_config(
     runner.run("config", "--global", "set", "options.clients", "opencode")
 
     # Global config must contain the new value.
-    global_cfg = (grim_home / "grimoire.toml").read_text()
+    global_cfg = (grim_home / "grimoire.toml").read_text(encoding="utf-8")
     assert "opencode" in global_cfg, (
         f"$GRIM_HOME/grimoire.toml must contain the globally-set value; "
         f"got:\n{global_cfg}"
     )
 
     # Project config must be unchanged — it must NOT contain "opencode".
-    project_cfg = (project_dir / "grimoire.toml").read_text()
+    project_cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "opencode" not in project_cfg, (
         f"project grimoire.toml must not be modified by --global set; "
         f"got:\n{project_cfg}"
@@ -835,7 +835,7 @@ def test_load_clients_unknown_name_project_exits_78(
     ``test_invalid_tree_separator_is_rejected``).
     """
     (project_dir / "grimoire.toml").write_text(
-        '[options]\nclients = ["vscode"]\n'
+        '[options]\nclients = ["vscode"]\n', encoding="utf-8", newline="\n"
     )
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
@@ -860,7 +860,7 @@ def test_load_clients_duplicate_project_exits_78(
     authored array is rejected at load time, not silently de-duplicated.
     """
     (project_dir / "grimoire.toml").write_text(
-        '[options]\nclients = ["claude", "claude"]\n'
+        '[options]\nclients = ["claude", "claude"]\n', encoding="utf-8", newline="\n"
     )
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
@@ -886,7 +886,7 @@ def test_load_clients_blank_project_exits_78(
     guards unknown and duplicate entries.
     """
     (project_dir / "grimoire.toml").write_text(
-        '[options]\nclients = ["claude", ""]\n'
+        '[options]\nclients = ["claude", ""]\n', encoding="utf-8", newline="\n"
     )
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
@@ -913,7 +913,7 @@ def test_load_clients_control_char_project_exits_78_no_raw_escape(
     the user's terminal.
     """
     (project_dir / "grimoire.toml").write_text(
-        '[options]\nclients = ["\\u001b[2Jvscode"]\n'
+        '[options]\nclients = ["\\u001b[2Jvscode"]\n', encoding="utf-8", newline="\n"
     )
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
@@ -943,7 +943,7 @@ def test_load_clients_format_char_project_exits_78_no_raw_override(
     category.
     """
     (project_dir / "grimoire.toml").write_text(
-        '[options]\nclients = ["cursor\\u202Eevil"]\n'
+        '[options]\nclients = ["cursor\\u202Eevil"]\n', encoding="utf-8", newline="\n"
     )
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
@@ -975,7 +975,7 @@ def test_load_artifact_value_control_char_exits_65_no_raw_escape(
     test counts both occurrences of the escaped form.
     """
     (project_dir / "grimoire.toml").write_text(
-        '[skills]\nfoo = "\\u001b[2Jghcr.io/a/B:1"\n'
+        '[skills]\nfoo = "\\u001b[2Jghcr.io/a/B:1"\n', encoding="utf-8", newline="\n"
     )
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
@@ -1006,7 +1006,7 @@ def test_load_clients_unknown_name_global_exits_78(
     exactly as it does for the project scope.
     """
     (grim_home / "grimoire.toml").write_text(
-        '[options]\nclients = ["vscode"]\n'
+        '[options]\nclients = ["vscode"]\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
 
@@ -1400,7 +1400,7 @@ def test_concurrent_config_set_produces_valid_toml(
     assert not hard_errors, f"concurrent set commands failed unexpectedly: {hard_errors}"
 
     # The file must be valid TOML regardless of which writer won.
-    cfg_text = (project_dir / "grimoire.toml").read_text()
+    cfg_text = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     try:
         parsed = tomllib.loads(cfg_text)
     except tomllib.TOMLDecodeError as exc:
@@ -1431,16 +1431,16 @@ def test_schema_directive_survives_config_rewrites(
     through the shared write_config seam (set, unset)."""
     directive = "#:schema https://grimoire.rs/schemas/grimoire-config.schema.json"
     (project_dir / "grimoire.toml").write_text(
-        f"{directive}\n\n[skills]\n\n[rules]\n"
+        f"{directive}\n\n[skills]\n\n[rules]\n", encoding="utf-8", newline="\n"
     )
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
     runner.run("config", "set", "options.clients", "claude")
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert body.startswith(directive), f"set must keep the directive first: {body}"
 
     runner.run("config", "unset", "options.clients")
-    body = (project_dir / "grimoire.toml").read_text()
+    body = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert body.startswith(directive), f"unset must keep the directive first: {body}"
     tomllib.loads(body)  # still valid TOML
 
@@ -1619,7 +1619,7 @@ def test_search_min_relevance_above_100_in_the_file_exits_78_naming_it(
     must not degrade to browsing another registry set — and the message names
     the file the user has to fix."""
     config = project_dir / "grimoire.toml"
-    config.write_text("[options]\nsearch_min_relevance = 101\n")
+    config.write_text("[options]\nsearch_min_relevance = 101\n", encoding="utf-8", newline="\n")
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
     for args in (("--offline", "search", "x"), ("config", "get", "options.search_min_relevance")):
@@ -1643,7 +1643,7 @@ def test_search_min_relevance_rejects_a_non_percentage_at_set_with_65(
     usage), so the negative value is passed after ``--`` to reach the value
     check."""
     write_config(project_dir)
-    before = (project_dir / "grimoire.toml").read_text()
+    before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
     for value in (("--", "-1"), ("abc",)):
@@ -1653,7 +1653,7 @@ def test_search_min_relevance_rejects_a_non_percentage_at_set_with_65(
             f"got {result.returncode}; stderr: {result.stderr.strip()}"
         )
         _assert_not_a_panic(result)
-    assert (project_dir / "grimoire.toml").read_text() == before, "a rejected value writes nothing"
+    assert (project_dir / "grimoire.toml").read_text(encoding="utf-8") == before, "a rejected value writes nothing"
 
 
 def test_list_all_emits_the_fixed_keys_in_their_frozen_order(

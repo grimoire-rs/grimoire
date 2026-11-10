@@ -74,7 +74,7 @@ def armed(grim: GrimRunner, tmp_path: Path):
     )
     (grim.home / ".claude").mkdir(parents=True, exist_ok=True)
     (grim.grim_home / "grimoire.toml").write_text(
-        f'[hooks]\nslow-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n'
+        f'[hooks]\nslow-guard = "{hook.fq}"\n\n[options.experimental]\nhooks = true\n', encoding="utf-8", newline="\n"
     )
     grim.run("lock", "--global")
     grim.run("install", "--global", "--trust-hooks")

@@ -58,6 +58,7 @@ def test_a_part_stale_dependency_remedy_relocks_only_the_stale_row(
         '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
         f"[plugins.team]\ninclude = {json.dumps([p.fq, z.fq])}\n",
         encoding="utf-8",
+        newline="\n",
     )
     old = GrimRunner(old_bin, home, cwd=work)
     assert old.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0
@@ -84,7 +85,7 @@ def test_a_part_stale_dependency_remedy_relocks_only_the_stale_row(
 def _local_skill(path: Path, name: str, body: str) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: d\n---\n# {body}\n", encoding="utf-8"
+        f"---\nname: {name}\ndescription: d\n---\n# {body}\n", encoding="utf-8", newline="\n"
     )
 
 
@@ -95,7 +96,7 @@ def _drifted_local_beside_a_moved_sibling(
     z = _skill(unique_repo, "z")
     _local_skill(work / "skills" / "loc", "loc", "v1")
     (work / "marketplace.toml").write_text(
-        f"[plugins.team]\ninclude = {json.dumps(['./skills/loc', z.fq])}\n", encoding="utf-8"
+        f"[plugins.team]\ninclude = {json.dumps(['./skills/loc', z.fq])}\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(work)
     assert runner.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0
@@ -148,14 +149,14 @@ def test_a_stale_part_pick_remedy_says_the_whole_plugin_update_moves_moved_tags(
     work = tmp_path / "work"
     work.mkdir()
     manifest = work / "marketplace.toml"
-    manifest.write_text(f"[plugins.team]\ninclude = {json.dumps([a.fq, z.fq])}\n", encoding="utf-8")
+    manifest.write_text(f"[plugins.team]\ninclude = {json.dumps([a.fq, z.fq])}\n", encoding="utf-8", newline="\n")
     runner = grim_at(work)
     assert runner.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0
     written = _pins(work)
     retag(f"{unique_repo}/z", "keep", z.digest)
     moved = _skill(unique_repo, "z", "v2")
     manifest.write_text(
-        f"[plugins.team]\ninclude = {json.dumps([a.fq, z.fq, extra.fq])}\n", encoding="utf-8"
+        f"[plugins.team]\ninclude = {json.dumps([a.fq, z.fq, extra.fq])}\n", encoding="utf-8", newline="\n"
     )
 
     refused = runner.run("update", "--marketplace", "marketplace.toml", "team:a", check=False)
@@ -192,13 +193,13 @@ def test_a_stale_part_pick_remedy_refuses_with_78_where_two_bundles_then_list_di
     work = tmp_path / "work"
     work.mkdir()
     manifest = work / "marketplace.toml"
-    manifest.write_text(f"[plugins.team]\ninclude = {json.dumps([p1.fq, p2.fq])}\n", encoding="utf-8")
+    manifest.write_text(f"[plugins.team]\ninclude = {json.dumps([p1.fq, p2.fq])}\n", encoding="utf-8", newline="\n")
     runner = grim_at(work)
     assert runner.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0
     retag(f"{unique_repo}/p2", "keep", p2.digest)
     make_bundle(f"{unique_repo}/p2", [("skill", "x", x2.fq)], tag="1")
     manifest.write_text(
-        f"[plugins.team]\ninclude = {json.dumps([p1.fq, p2.fq, extra.fq])}\n", encoding="utf-8"
+        f"[plugins.team]\ninclude = {json.dumps([p1.fq, p2.fq, extra.fq])}\n", encoding="utf-8", newline="\n"
     )
     lock = work / "marketplace.lock"
     written = lock.read_text(encoding="utf-8")
@@ -240,6 +241,7 @@ def test_a_held_requirement_remedy_names_the_pick_first_and_says_what_the_whole_
         '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
         f"[plugins.team]\ninclude = {json.dumps([pack.fq, pk2.fq, z.fq])}\n",
         encoding="utf-8",
+        newline="\n",
     )
     old = GrimRunner(old_bin, home, cwd=work)
     assert old.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0
@@ -289,7 +291,7 @@ def test_a_gone_pin_remedy_says_the_whole_plugin_update_moves_moved_tags(
     work = tmp_path / "work"
     work.mkdir()
     (work / "marketplace.toml").write_text(
-        f"[plugins.team]\ninclude = {json.dumps([a.fq, z.fq, extra.fq])}\n", encoding="utf-8"
+        f"[plugins.team]\ninclude = {json.dumps([a.fq, z.fq, extra.fq])}\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(work)
     assert runner.run("update", "--marketplace", "marketplace.toml", check=False).returncode == 0

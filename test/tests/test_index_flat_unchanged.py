@@ -184,7 +184,7 @@ def flat_index(
 
 
 def _expected_rows() -> list[dict]:
-    return json.loads(EXPECTED_ROWS.read_text())
+    return json.loads(EXPECTED_ROWS.read_text(encoding="utf-8"))
 
 
 def _normalised_cache(grim_home: Path) -> str:

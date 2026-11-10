@@ -59,17 +59,17 @@ def _table(runner) -> Path:
 def _armed(runner) -> list[str]:
     if not _table(runner).is_file():
         return []
-    roots = json.loads(_table(runner).read_text())["roots"].values()
+    roots = json.loads(_table(runner).read_text(encoding="utf-8"))["roots"].values()
     return sorted(row["artifact"] for root in roots for row in root["hooks"])
 
 
 def _claude_marked(project_dir: Path) -> bool:
     surface = project_dir / ".claude" / "settings.local.json"
-    return surface.is_file() and MARKER in surface.read_text()
+    return surface.is_file() and MARKER in surface.read_text(encoding="utf-8")
 
 
 def _fire(runner, project_dir: Path, token: str, log: Path) -> list[str]:
-    log.write_text("")
+    log.write_text("", encoding="utf-8", newline="\n")
     envelope = {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
@@ -81,7 +81,7 @@ def _fire(runner, project_dir: Path, token: str, log: Path) -> list[str]:
         _table(runner).parent / "grim-hook", "claude", "PreToolUse", token, stdin=json.dumps(envelope)
     )
     assert fired.returncode == 0, fired.stderr
-    return sorted(log.read_text().split())
+    return sorted(log.read_text(encoding="utf-8").split())
 
 
 def _declared_hooks(runner) -> tuple[list[str], list[str]]:
@@ -104,7 +104,7 @@ def test_remove_then_install_disarms_the_removed_hook(
     runner.run("hook", "allow")
     runner.run("install")
     assert _armed(runner) == ["fmt-gate", "shell-guard"] and _claude_marked(project_dir), "precondition: both arm"
-    [token] = json.loads(_table(runner).read_text())["roots"]
+    [token] = json.loads(_table(runner).read_text(encoding="utf-8"))["roots"]
     assert _fire(runner, project_dir, token, log) == ["fmt-gate", "shell-guard"], "POSITIVE CONTROL: both fire"
 
     runner.run("remove", "hook", "shell-guard")
@@ -143,9 +143,9 @@ def test_a_hook_line_deleted_by_hand_disarms_after_an_offline_lock(
     runner.run("hook", "allow")
     runner.run("install")
     assert _armed(runner) == ["fmt-gate", "shell-guard"], "precondition: both arm"
-    [token] = json.loads(_table(runner).read_text())["roots"]
+    [token] = json.loads(_table(runner).read_text(encoding="utf-8"))["roots"]
     config = project_dir / "grimoire.toml"
-    config.write_text(re.sub(r"(?m)^shell-guard = .*\n", "", config.read_text()))
+    config.write_text(re.sub(r"(?m)^shell-guard = .*\n", "", config.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
     empty = tmp_path / "empty-home"
     empty.mkdir()
 

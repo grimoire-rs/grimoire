@@ -104,7 +104,7 @@ def _file(workspace: Path) -> dict:
 
 
 def _put(workspace: Path, values: dict) -> None:
-    (workspace / LOCAL).write_text(json.dumps(values), encoding="utf-8")
+    (workspace / LOCAL).write_text(json.dumps(values), encoding="utf-8", newline="\n")
 
 
 def _stored(runner: GrimRunner) -> list[Path]:
@@ -126,7 +126,7 @@ def _repin(workspace: Path, old: PublishedArtifact, new: PublishedArtifact) -> N
     lock = workspace / "grimoire.lock"
     text = lock.read_text(encoding="utf-8")
     assert old.digest in text
-    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
 
 def test_conflict_exits_78_on_install(grim_at, project_dir: Path, tmp_path: Path, unique_repo: str) -> None:
@@ -237,7 +237,7 @@ def test_required_feature_and_stale_edge_still_refuse(
         {"com.grimoire.kind": "settings", FEATURES_KEY: "future-thing"},
     )
     lock = project_dir / "grimoire.lock"
-    lock.write_text(lock.read_text().replace(stand_in.digest, future))
+    lock.write_text(lock.read_text(encoding="utf-8").replace(stand_in.digest, future), encoding="utf-8", newline="\n")
 
     # Gated, the layer is never fetched, so nothing reads the feature.
     runner.run("install", "--no-trust-workspace")
@@ -248,7 +248,7 @@ def test_required_feature_and_stale_edge_still_refuse(
     # Positive control: the failure is the package's, and the skill still landed.
     assert (project_dir / ".claude/skills/good/SKILL.md").is_file()
     # Positive control: the pin this grim can read writes the same document.
-    lock.write_text(lock.read_text().replace(future, stand_in.digest))
+    lock.write_text(lock.read_text(encoding="utf-8").replace(future, stand_in.digest), encoding="utf-8", newline="\n")
     _install(runner)
     assert _file(project_dir) == {"model": "sonnet"}
 
@@ -258,10 +258,10 @@ def test_required_feature_and_stale_edge_still_refuse(
     make_artifact(f"{unique_repo}/base", "skill", {"base/SKILL.md": BASE_DOC}, tag="1")
     runner = _armed_later(grim_at, stale, tmp_path / "s2", skill, {"dep": dependent})
     lock = stale / "grimoire.lock"
-    intact = lock.read_text()
+    intact = lock.read_text(encoding="utf-8")
     edited = REQUIRES_BLOCK.sub("", intact)
     assert edited != intact
-    lock.write_text(edited)
+    lock.write_text(edited, encoding="utf-8", newline="\n")
 
     for answer in (TRUST, "--no-trust-workspace"):
         error = _refusal(runner.run("install", answer, format="json", check=False), "stale-lock")
@@ -270,7 +270,7 @@ def test_required_feature_and_stale_edge_still_refuse(
     assert not (stale / LOCAL).exists()
 
     # Positive control: the lock as written installs.
-    lock.write_text(intact)
+    lock.write_text(intact, encoding="utf-8", newline="\n")
     runner.run("install", TRUST)
     assert (stale / ".claude/skills/good/SKILL.md").is_file()
     assert _file(stale) == {"model": "sonnet"}
@@ -496,7 +496,7 @@ def test_rule_row_7(grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
     first = _package(unique_repo, "team", {"claude": {"model": "sonnet", "language": "en"}})
     runner = _armed_later(grim_at, project_dir, tmp_path / "s", _skill(unique_repo), {"team": first})
     target = project_dir / LOCAL
-    target.write_text("{not json", encoding="utf-8")
+    target.write_text("{not json", encoding="utf-8", newline="\n")
 
     # 7a: the whole phase refuses, with no reason and no way to force it.
     for flags in ((), ("--force",)):
@@ -515,7 +515,7 @@ def test_rule_row_7(grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
     assert _file(project_dir) == {"model": "sonnet", "language": "en"}
 
     # 7b: only removals reach it, so the records go and the bytes stay.
-    target.write_text("{not json", encoding="utf-8")
+    target.write_text("{not json", encoding="utf-8", newline="\n")
     second = _package(unique_repo, "team", {"codex": {"model": "gpt"}}, tag="2")
     _repin(project_dir, first, second)
 
@@ -743,7 +743,7 @@ def test_unloadable_layer_fails_its_row_only(grim_at, project_dir: Path, tmp_pat
     )
     lock = project_dir / "grimoire.lock"
     intact = lock.read_text(encoding="utf-8")
-    lock.write_text(intact.replace(broken.digest, unreadable), encoding="utf-8")
+    lock.write_text(intact.replace(broken.digest, unreadable), encoding="utf-8", newline="\n")
 
     result = _install(runner, check=False)
 
@@ -757,6 +757,6 @@ def test_unloadable_layer_fails_its_row_only(grim_at, project_dir: Path, tmp_pat
     assert (project_dir / ".claude/skills/good/SKILL.md").is_file()
 
     # Positive control: with the layer readable both packages apply.
-    lock.write_text(intact, encoding="utf-8")
+    lock.write_text(intact, encoding="utf-8", newline="\n")
     _install(runner)
     assert _file(project_dir) == {"model": "sonnet", "language": "en"}

@@ -117,7 +117,7 @@ def _registrations(runner, project_dir: Path) -> dict[str, int]:
     counts = {}
     for path in _surfaces(runner, project_dir):
         if path.is_file():
-            n = len(_grim_elements(json.loads(path.read_text() or "{}")))
+            n = len(_grim_elements(json.loads(path.read_text(encoding="utf-8") or "{}")))
             if n:
                 counts[path.relative_to(runner.home.parent).as_posix()] = n
     return counts
@@ -149,7 +149,7 @@ def _rows(runner) -> list[dict]:
         return []
     return [
         row
-        for root in json.loads(path.read_text())["roots"].values()
+        for root in json.loads(path.read_text(encoding="utf-8"))["roots"].values()
         for row in root["hooks"]
     ]
 
@@ -367,7 +367,7 @@ def test_hook_free_upgrade_is_unchanged(grim_at, project_dir: Path) -> None:
     skill = project_dir / "skills" / "demo"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
-        "---\nname: demo\ndescription: A demo skill.\n---\n\nBody.\n"
+        "---\nname: demo\ndescription: A demo skill.\n---\n\nBody.\n", encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("init")
@@ -417,8 +417,8 @@ def test_s102_declaring_a_hook_with_the_flag_off_locks_warns_once_and_gates(
     assert result.returncode == 0
     warnings = [line for line in result.stderr.splitlines() if FLAG in line]
     assert len(warnings) == 1, result.stderr
-    assert "shell-guard" in (project_dir / "grimoire.toml").read_text()
-    assert "shell-guard" in (project_dir / "grimoire.lock").read_text()
+    assert "shell-guard" in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
+    assert "shell-guard" in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
     install = runner.run("install", format="json")
     rows = json.loads(install.stdout)["items"]

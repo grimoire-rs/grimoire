@@ -33,20 +33,20 @@ def test_modified_install_is_refused_then_forced(
     runner, installed = _install_rule(
         grim_at, project_dir, registry, unique_repo
     )
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     refused = runner.run("install", check=False)
     assert refused.returncode == 65, (
         f"modified artifact must refuse with 65, got "
         f"{refused.returncode}; {refused.stderr}"
     )
-    assert installed.read_text() == "hand edited\n", (
+    assert installed.read_text(encoding="utf-8") == "hand edited\n", (
         "a refused install must not overwrite the user's edit"
     )
 
     forced = runner.run("install", "--force", check=False)
     assert forced.returncode == 0, forced.stderr
-    assert installed.read_text().endswith("# canonical\n")
+    assert installed.read_text(encoding="utf-8").endswith("# canonical\n")
 
 
 def test_modified_add_is_refused_then_forced(
@@ -69,7 +69,7 @@ def test_modified_add_is_refused_then_forced(
     added = runner.run("add", ref, check=False)
     assert added.returncode == 0, added.stderr
     installed = project_dir / ".claude/rules/rust-style.md"
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     # Re-adding the same reference is an idempotent re-declare that reaches
     # the shared install pipeline — the integrity gate refuses it.
@@ -78,13 +78,13 @@ def test_modified_add_is_refused_then_forced(
         f"modified artifact must refuse re-add with 65, got "
         f"{refused.returncode}; {refused.stderr}"
     )
-    assert installed.read_text() == "hand edited\n", (
+    assert installed.read_text(encoding="utf-8") == "hand edited\n", (
         "a refused add must not overwrite the user's edit"
     )
 
     forced = runner.run("add", "--force", ref, check=False)
     assert forced.returncode == 0, forced.stderr
-    assert installed.read_text().endswith("# canonical\n")
+    assert installed.read_text(encoding="utf-8").endswith("# canonical\n")
 
 
 def test_status_reports_modified(
@@ -93,7 +93,7 @@ def test_status_reports_modified(
     runner, installed = _install_rule(
         grim_at, project_dir, registry, unique_repo
     )
-    installed.write_text("tampered\n")
+    installed.write_text("tampered\n", encoding="utf-8", newline="\n")
 
     rows = runner.json("status")["items"]
     row = next(r for r in rows if r["name"] == "rust-style")
@@ -115,14 +115,14 @@ def test_update_also_refuses_modified_without_force(
     runner, installed = _install_rule(
         grim_at, project_dir, registry, unique_repo
     )
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     refused = runner.run("update", check=False)
     assert refused.returncode == 65, (
         f"modified artifact must refuse update with 65, got "
         f"{refused.returncode}; {refused.stderr}"
     )
-    assert installed.read_text() == "hand edited\n", (
+    assert installed.read_text(encoding="utf-8") == "hand edited\n", (
         "a refused update must not overwrite the user's edit"
     )
 
@@ -147,7 +147,7 @@ def test_update_also_refuses_modified_without_force(
 
     forced = runner.run("update", "--force", check=False)
     assert forced.returncode == 0, forced.stderr
-    assert installed.read_text().endswith("# canonical\n")
+    assert installed.read_text(encoding="utf-8").endswith("# canonical\n")
 
 
 def test_install_refusal_message_stays_generic_no_update_wording(
@@ -166,7 +166,7 @@ def test_install_refusal_message_stays_generic_no_update_wording(
     runner, installed = _install_rule(
         grim_at, project_dir, registry, unique_repo
     )
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     refused = runner.run("install", check=False)
     assert refused.returncode == 65, refused.stderr
@@ -213,7 +213,7 @@ def test_update_refusal_still_emits_the_report_for_what_reconciled(
     runner.run("install", check=False)
 
     modified = project_dir / ".claude/rules/rust-style.md"
-    modified.write_text("hand edited\n")
+    modified.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     # Roll `other-rule`'s floating tag forward so this update pass has real
     # reconciliation work to do besides the refusal.
@@ -223,7 +223,7 @@ def test_update_refusal_still_emits_the_report_for_what_reconciled(
 
     result = runner.run("update", format="json", check=False)
     assert result.returncode == 65, result.stderr
-    assert modified.read_text() == "hand edited\n", (
+    assert modified.read_text(encoding="utf-8") == "hand edited\n", (
         "a refused update must not overwrite the user's edit"
     )
     assert result.stdout.strip(), (
@@ -235,7 +235,7 @@ def test_update_refusal_still_emits_the_report_for_what_reconciled(
     assert {"rust-style", "other-rule"} <= names, (
         f"the report must cover every artifact, not just the refused one; got {report}"
     )
-    assert other_installed.read_text() == "v2\n", (
+    assert other_installed.read_text(encoding="utf-8") == "v2\n", (
         "other-rule's reconciliation must have actually run despite the sibling refusal"
     )
 
@@ -260,7 +260,7 @@ def test_update_refusal_marks_the_row_in_json(
     runner, installed = _install_rule(
         grim_at, project_dir, registry, unique_repo
     )
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     refused = runner.run("update", format="json", check=False)
     assert refused.returncode == 65, refused.stderr
@@ -294,7 +294,7 @@ def test_update_refusal_names_the_artifact_on_stderr(
     runner, installed = _install_rule(
         grim_at, project_dir, registry, unique_repo
     )
-    installed.write_text("hand edited\n")
+    installed.write_text("hand edited\n", encoding="utf-8", newline="\n")
 
     result = runner.run("update", check=False)
     assert result.returncode == 65, result.stderr
@@ -356,7 +356,7 @@ def test_real_edit_beside_pycache_is_still_modified(
     cache = skill / "scripts/__pycache__"
     cache.mkdir()
     (cache / "foo.cpython-313.pyc").write_bytes(b"\x00bytecode")
-    (skill / "scripts/foo.py").write_text("print('edited')\n")
+    (skill / "scripts/foo.py").write_text("print('edited')\n", encoding="utf-8", newline="\n")
 
     assert _state(runner, "runner") == "modified"
     refused = runner.run("update", check=False)
@@ -389,5 +389,5 @@ def test_pycache_in_rule_support_dir_is_not_drift(
     updated = runner.run("update", check=False)
     assert updated.returncode == 0, updated.stderr
 
-    (support / "check.py").write_text("print('edited')\n")
+    (support / "check.py").write_text("print('edited')\n", encoding="utf-8", newline="\n")
     assert _state(runner, "tooling") == "modified"

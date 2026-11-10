@@ -140,7 +140,7 @@ def test_operator_vcs_override(
 def test_mcp_session_sends_one_record(
     grim_at, project_dir: Path, otlp_collector: OtlpCollector
 ) -> None:
-    (project_dir / "grimoire.toml").write_text("[skills]\n")
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
     runner = arm(grim_at(project_dir), otlp_collector)
 
     responses = _drive(

@@ -75,7 +75,7 @@ def _repin(workspace: Path, old: PublishedArtifact, new: PublishedArtifact) -> N
     lock = workspace / "grimoire.lock"
     text = lock.read_text(encoding="utf-8")
     assert old.digest in text
-    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8")
+    lock.write_text(text.replace(old.digest, new.digest), encoding="utf-8", newline="\n")
 
 
 def _file(path: Path) -> dict:
@@ -84,7 +84,7 @@ def _file(path: Path) -> dict:
 
 def _put(path: Path, values: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(values), encoding="utf-8")
+    path.write_text(json.dumps(values), encoding="utf-8", newline="\n")
 
 
 def _skill(repo: str) -> PublishedArtifact:
@@ -171,7 +171,7 @@ def test_offline_intact_is_a_no_op(grim_at, project_dir: Path, tmp_path: Path, u
     assert target.read_bytes() == held
 
     # Positive control: with a piece drifted the same state needs the layer.
-    target.write_text(json.dumps({"model": "opus"}), encoding="utf-8")
+    target.write_text(json.dumps({"model": "opus"}), encoding="utf-8", newline="\n")
     result = _offline(runner, check=False)
     assert result.returncode == 81, result.stderr
     assert _file(target) == {"model": "opus"}
@@ -671,8 +671,8 @@ def test_the_kept_value_remedy_clears_a_value_changed_outside_grim_first(
         grim_at, project_dir, tmp_path, unique_repo, beside_other=True, skills={"u": u.fq}
     )
     skill = project_dir / ".claude" / "skills" / "u" / "SKILL.md"
-    skill.write_text(skill.read_text(encoding="utf-8") + "\nmy edit\n", encoding="utf-8")
-    target.write_text(json.dumps({"model": "opus"}))
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nmy edit\n", encoding="utf-8", newline="\n")
+    target.write_text(json.dumps({"model": "opus"}), encoding="utf-8", newline="\n")
 
     result = runner.run("update", TRUST, "pack", format="json")
 
@@ -682,7 +682,7 @@ def test_the_kept_value_remedy_clears_a_value_changed_outside_grim_first(
     assert "removes those of artifacts that left the lock" in warning, warning
     printed = _printed(result.stderr, "to apply 'other'")
     assert printed == ["install", TRUST], warning
-    target.write_text(json.dumps({}))
+    target.write_text(json.dumps({}), encoding="utf-8", newline="\n")
     followed = runner.run(*printed, check=False)
     assert followed.returncode == 65, followed.stderr
     assert "skill 'u'" in followed.stderr or "/u" in followed.stderr, followed.stderr
@@ -711,13 +711,13 @@ def test_the_kept_value_remedy_says_another_edited_value_holds_the_install_back(
     assert _file(target) == {"model": "sonnet", "language": "en"}
     if left:
         config = project_dir / "grimoire.toml"
-        config.write_text(re.sub(r"(?m)^x\s*=.*\n", "", config.read_text(encoding="utf-8")), encoding="utf-8")
+        config.write_text(re.sub(r"(?m)^x\s*=.*\n", "", config.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
         runner.run("lock")
     other = _package(unique_repo, "other", {"claude": {"model": "haiku"}})
     runner.run("add", "--kind", "settings", "--name", "other", other.fq, "--no-install")
     retag(f"{unique_repo}/pack", "kept", pack.digest)
     make_bundle(f"{unique_repo}/pack", [("skill", "good", good.fq)], tag="1")
-    target.write_text(json.dumps({"model": "opus", "language": "fr"}))
+    target.write_text(json.dumps({"model": "opus", "language": "fr"}), encoding="utf-8", newline="\n")
 
     result = runner.run("update", TRUST, "pack", format="json")
 
@@ -725,11 +725,11 @@ def test_the_kept_value_remedy_says_another_edited_value_holds_the_install_back(
     assert "restore it to the value grim wrote" in warning, warning
     assert "writes no settings while it refuses any other settings value at this scope" in warning, warning
     printed = _printed(result.stderr, "to apply 'other'")
-    target.write_text(json.dumps({"language": "fr"}))
+    target.write_text(json.dumps({"language": "fr"}), encoding="utf-8", newline="\n")
     held = runner.run(*printed, check=False)
     assert held.returncode == 65, held.stderr
     assert _file(target) == {"language": "fr"}
-    target.write_text(json.dumps({"language": "en"}))
+    target.write_text(json.dumps({"language": "en"}), encoding="utf-8", newline="\n")
     runner.run(*printed)
     assert _file(target) == ({"model": "haiku"} if left else {"model": "haiku", "language": "en"})
 
@@ -790,7 +790,7 @@ def test_a_named_update_keeps_a_value_a_package_outside_it_with_an_unreadable_la
     intact = lock.read_text(encoding="utf-8")
     pinned = tag_digest(f"{unique_repo}/other", "1")
     assert pinned in intact
-    lock.write_text(intact.replace(pinned, unreadable), encoding="utf-8")
+    lock.write_text(intact.replace(pinned, unreadable), encoding="utf-8", newline="\n")
 
     result = runner.run("update", TRUST, "pack", format="json", check=False)
 
@@ -879,7 +879,7 @@ def test_dev_refresh_never_plans_settings(grim_at, project_dir: Path, tmp_path: 
     recorded = _records(runner)
     source = project_dir / "dev-skill" / "SKILL.md"
     source.parent.mkdir()
-    source.write_text("---\nname: dev-skill\ndescription: d\n---\n# One\n", encoding="utf-8")
+    source.write_text("---\nname: dev-skill\ndescription: d\n---\n# One\n", encoding="utf-8", newline="\n")
 
     runner.run("install", "./dev-skill", "--client", "claude")
 
@@ -888,7 +888,7 @@ def test_dev_refresh_never_plans_settings(grim_at, project_dir: Path, tmp_path: 
     assert target.read_bytes() == held
     assert _records(runner) == recorded
 
-    source.write_text("---\nname: dev-skill\ndescription: d\n---\n# Two\n", encoding="utf-8")
+    source.write_text("---\nname: dev-skill\ndescription: d\n---\n# Two\n", encoding="utf-8", newline="\n")
     report = runner.json("update", "--client", "claude")
 
     assert "# Two" in rendered.read_text(encoding="utf-8")
@@ -1070,7 +1070,7 @@ def test_uninstall_of_an_unreadable_file_drops_the_record(
     runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team})
     runner.run("install", TRUST)
     target = project_dir / LOCAL
-    target.write_text("{ not json", encoding="utf-8")
+    target.write_text("{ not json", encoding="utf-8", newline="\n")
 
     report = runner.json("uninstall", "settings", "team")
 
@@ -1114,7 +1114,7 @@ def test_client_added_later_gets_its_pieces(grim, grim_home: Path, tmp_path: Pat
     grim.run("--global", "install")
     codex = roots["codex"] / "config.toml"
     assert not codex.exists()
-    codex.write_text('model_reasoning_effort = "high"\n', encoding="utf-8")
+    codex.write_text('model_reasoning_effort = "high"\n', encoding="utf-8", newline="\n")
     _declare(grim_home, team, ["claude", "codex"])
 
     result = grim.run("--global", "install", format="json")
@@ -1157,7 +1157,7 @@ def test_dropped_client_reports_its_adopted_value(grim, grim_home: Path, tmp_pat
     team = _package(unique_repo, "team", {"claude": {"model": "sonnet"}, "codex": {"model": "gpt"}})
     roots = _global(grim, grim_home, tmp_path / "s", team, ["claude", "codex"])
     codex = roots["codex"] / "config.toml"
-    codex.write_text('model = "gpt"\n', encoding="utf-8")
+    codex.write_text('model = "gpt"\n', encoding="utf-8", newline="\n")
     grim.run("--global", "install")
     _declare(grim_home, team, ["claude"])
 

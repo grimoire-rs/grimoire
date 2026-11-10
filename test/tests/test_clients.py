@@ -49,7 +49,7 @@ def _build_toml(
         "[rules]\n"
         f'rust-style = "{rule_ref}"\n'
     )
-    (project_dir / "grimoire.toml").write_text(toml)
+    (project_dir / "grimoire.toml").write_text(toml, encoding="utf-8", newline="\n")
 
 
 def _publish_skill_and_rule(unique_repo: str):
@@ -202,7 +202,7 @@ def test_undetected_workspace_with_no_installable_kind_exits_78(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
@@ -257,7 +257,7 @@ def test_undetected_add_of_a_rule_exits_78_but_keeps_the_declaration(
         tag="v1",
     )
     runner = grim_at(project_dir)
-    (project_dir / "grimoire.toml").write_text("[rules]\n")
+    (project_dir / "grimoire.toml").write_text("[rules]\n", encoding="utf-8", newline="\n")
 
     result = runner.run("add", ru.fq, check=False)
     assert result.returncode == 78, f"got {result.returncode}: {result.stderr}"
@@ -267,8 +267,8 @@ def test_undetected_add_of_a_rule_exits_78_but_keeps_the_declaration(
 
     # Declared and locked despite the refusal — the recovery path is to pick
     # a client, not to re-add.
-    assert "rust-style" in (project_dir / "grimoire.toml").read_text()
-    assert "rust-style" in (project_dir / "grimoire.lock").read_text()
+    assert "rust-style" in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
+    assert "rust-style" in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     rows = runner.json("install", "--client", "claude")["items"]
     assert rows[0]["status"] == "installed", rows
     assert_path_exists(project_dir / ".claude/rules/rust-style.md")
@@ -280,8 +280,8 @@ def test_undetected_dev_install_of_a_rule_exits_78(
     """The dev-install path builds a synthetic single-entry lock and runs the
     same seam, so it refuses identically — no network, no registry."""
     src = tmp_path / "rust-style.md"
-    src.write_text("---\npaths: ['**/*.rs']\n---\n# Rust Style\n")
-    (project_dir / "grimoire.toml").write_text("[rules]\n")
+    src.write_text("---\npaths: ['**/*.rs']\n---\n# Rust Style\n", encoding="utf-8", newline="\n")
+    (project_dir / "grimoire.toml").write_text("[rules]\n", encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
 
     result = runner.run("install", str(src), "--kind", "rule", check=False)
@@ -301,7 +301,7 @@ def test_explicit_agents_client_with_only_a_rule_still_exits_zero(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
@@ -404,7 +404,7 @@ def test_reserved_namespace_key_dropped_for_own_client_warns_by_name(
         tag="stable",
     )
     (project_dir / "grimoire.toml").write_text(
-        f'[options]\nclients = ["codex"]\n\n[skills]\ncode-review = "{sk.fq}"\n'
+        f'[options]\nclients = ["codex"]\n\n[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
@@ -413,7 +413,7 @@ def test_reserved_namespace_key_dropped_for_own_client_warns_by_name(
 
     installed = project_dir / ".agents/skills/code-review/SKILL.md"
     assert_path_exists(installed)
-    assert "made-up-key" not in installed.read_text(), (
+    assert "made-up-key" not in installed.read_text(encoding="utf-8"), (
         "an unknown own-namespace key must not survive into the installed file"
     )
     assert "codex.made-up-key" in result.stderr, (
@@ -433,7 +433,7 @@ def test_client_codex_rule_only_warns_and_writes_nothing(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
@@ -490,7 +490,7 @@ def test_mixed_client_selection_stderr_stays_quiet_for_supporting_clients(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
@@ -570,7 +570,7 @@ def test_uninstall_of_a_zero_output_declined_record_is_clean(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
@@ -618,7 +618,7 @@ def test_declined_rule_vendor_warns_skips_and_uninstalls_clean(
         {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
@@ -658,7 +658,7 @@ def test_declined_agent_vendor_warns_skips_and_uninstalls_clean(
         {"my-agent.md": "---\nname: my-agent\ndescription: d\nmodel: sonnet\n---\n# my-agent\nbody\n"},
         tag="v1",
     )
-    (project_dir / "grimoire.toml").write_text(f'[agents]\nmy-agent = "{ag.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[agents]\nmy-agent = "{ag.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
@@ -722,7 +722,7 @@ def test_skills_only_client_installs_to_its_own_layout(
     rendering into the shared pool when it is not a pool client, using the
     client name as the directory, or resurrecting a deprecated dir."""
     sk = _skill_only(unique_repo)
-    (project_dir / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
@@ -741,7 +741,7 @@ def test_openclaw_project_scope_writes_nothing_and_warns(
     install must record zero outputs and touch nothing, rather than anchor a
     record at ``Workspace`` while the file lands outside the workspace."""
     sk = _skill_only(unique_repo)
-    (project_dir / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
 
@@ -765,7 +765,7 @@ def test_openclaw_global_scope_installs_to_its_own_root(
     from src.runner import GrimRunner
 
     sk = _skill_only(unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -786,7 +786,7 @@ def test_goose_global_skill_lands_in_the_shared_pool(
     from src.runner import GrimRunner
 
     sk = _skill_only(unique_repo)
-    (grim_home / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n')
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8", newline="\n")
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")
 
@@ -820,7 +820,7 @@ def _release_qoder_mcp(runner, registry: str, unique_repo: str, src: Path) -> st
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(
         'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\nargs = ["mcp"]\n'
-        "timeout = 7000\n"
+        "timeout = 7000\n", encoding="utf-8", newline="\n"
     )
     ref = f"{registry}/{unique_repo}/mcp/q-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
@@ -839,7 +839,7 @@ def test_qoder_project_install_round_trips_every_kind(
     mcp_ref = _release_qoder_mcp(runner, registry, unique_repo, tmp_path / "q_src")
     (project_dir / "grimoire.toml").write_text(
         f'[skills]\ncode-review = "{sk.fq}"\n[rules]\nrust-style = "{ru.fq}"\n'
-        f'[agents]\nmy-agent = "{ag.fq}"\n[mcp]\nq-mcp = "{mcp_ref}"\n'
+        f'[agents]\nmy-agent = "{ag.fq}"\n[mcp]\nq-mcp = "{mcp_ref}"\n', encoding="utf-8", newline="\n"
     )
     runner.run("lock", check=False)
 
@@ -849,16 +849,16 @@ def test_qoder_project_install_round_trips_every_kind(
     assert all(r["status"] == "installed" for r in rows), rows
 
     q = project_dir / ".qoder"
-    assert (q / "skills/code-review/SKILL.md").read_text() == _QODER_SKILL
-    assert (q / "rules/rust-style.md").read_text() == _QODER_RULE, "paths: is native"
-    assert (q / "agents/my-agent.md").read_text() == _QODER_AGENT
-    entry = json.loads((q / "settings.json").read_text())["mcpServers"]["q-mcp"]
+    assert (q / "skills/code-review/SKILL.md").read_text(encoding="utf-8") == _QODER_SKILL
+    assert (q / "rules/rust-style.md").read_text(encoding="utf-8") == _QODER_RULE, "paths: is native"
+    assert (q / "agents/my-agent.md").read_text(encoding="utf-8") == _QODER_AGENT
+    entry = json.loads((q / "settings.json").read_text(encoding="utf-8"))["mcpServers"]["q-mcp"]
     assert entry == {"command": "grim", "args": ["mcp"], "timeout": 7000}, entry
     assert_not_exists(project_dir / ".mcp.json")
 
     # Uninstalling the MCP server removes only grim's member, never the file.
     runner.json("uninstall", "mcp", "q-mcp")
-    assert json.loads((q / "settings.json").read_text()).get("mcpServers", {}) == {}
+    assert json.loads((q / "settings.json").read_text(encoding="utf-8")).get("mcpServers", {}) == {}
 
 
 def test_qoder_mcp_with_env_ref_is_skipped_with_a_warning(
@@ -871,18 +871,18 @@ def test_qoder_mcp_with_env_ref_is_skipped_with_a_warning(
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text(
         'description = "d"\n\n[server]\ntransport = "stdio"\ncommand = "grim"\n'
-        'env = { TOKEN = "${GITHUB_TOKEN}" }\n'
+        'env = { TOKEN = "${GITHUB_TOKEN}" }\n', encoding="utf-8", newline="\n"
     )
     ref = f"{registry}/{unique_repo}/mcp/q-env:1.0.0"
     runner = grim_at(project_dir)
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
-    (project_dir / "grimoire.toml").write_text(f'[mcp]\nq-env = "{ref}"\n')
+    (project_dir / "grimoire.toml").write_text(f'[mcp]\nq-env = "{ref}"\n', encoding="utf-8", newline="\n")
     runner.run("lock", check=False)
 
     result = runner.run("install", "--client", "claude,qoder", format="json")
     assert "skipped for qoder" in result.stderr.lower(), result.stderr
     assert_not_exists(project_dir / ".qoder/settings.json")
-    assert "q-env" in json.loads((project_dir / ".mcp.json").read_text())["mcpServers"]
+    assert "q-env" in json.loads((project_dir / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
 
 
 def test_qoder_global_install_honours_qoder_config_dir(
@@ -900,7 +900,7 @@ def test_qoder_global_install_honours_qoder_config_dir(
     mcp_ref = _release_qoder_mcp(runner, registry, unique_repo, tmp_path / "qg_src")
     (grim_home / "grimoire.toml").write_text(
         f'[skills]\ncode-review = "{sk.fq}"\n[rules]\nrust-style = "{ru.fq}"\n'
-        f'[agents]\nmy-agent = "{ag.fq}"\n[mcp]\nq-mcp = "{mcp_ref}"\n'
+        f'[agents]\nmy-agent = "{ag.fq}"\n[mcp]\nq-mcp = "{mcp_ref}"\n', encoding="utf-8", newline="\n"
     )
     runner.json("lock", "--global")
 
@@ -910,7 +910,7 @@ def test_qoder_global_install_honours_qoder_config_dir(
     assert_path_exists(qoder_dir / "skills/code-review/SKILL.md")
     assert_path_exists(qoder_dir / "rules/rust-style.md")
     assert_path_exists(qoder_dir / "agents/my-agent.md")
-    assert "q-mcp" in json.loads((qoder_dir / "settings.json").read_text())["mcpServers"]
+    assert "q-mcp" in json.loads((qoder_dir / "settings.json").read_text(encoding="utf-8"))["mcpServers"]
     assert_not_exists(qoder_dir / ".qoder")
     assert_not_exists(runner.home / ".qoder")
 
@@ -1101,7 +1101,7 @@ def test_a_malformed_global_config_is_warned_about_and_changes_no_exit(
     _build_toml(project_dir, sk.fq, ru.fq, clients=None)
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8")
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8", newline="\n")
 
     for command in ("install", "status"):
         result = runner.run(command, check=False)
@@ -1118,7 +1118,7 @@ def test_an_unknown_global_client_is_warned_about_and_the_list_ignored(
     _build_toml(project_dir, sk.fq, ru.fq, clients=None)
     runner = grim_at(project_dir)
     runner.run("lock", check=False)
-    (grim_home / "grimoire.toml").write_text(_UNKNOWN_GLOBAL_CLIENT, encoding="utf-8")
+    (grim_home / "grimoire.toml").write_text(_UNKNOWN_GLOBAL_CLIENT, encoding="utf-8", newline="\n")
 
     for command in ("install", "status"):
         result = runner.run(command, check=False)
@@ -1139,7 +1139,7 @@ def test_update_warns_once_about_a_malformed_global_config(
     write_config(project_dir, settings={"team": pkg.fq})
     runner = grim_at(project_dir)
     runner.run("lock")
-    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8")
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8", newline="\n")
 
     result = runner.run("update", check=False)
 
@@ -1156,7 +1156,7 @@ def test_search_warns_once_about_a_malformed_global_config(
     config is loaded once, so the broken file is named once."""
     write_config(project_dir)
     runner = grim_at(project_dir)
-    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8")
+    (grim_home / "grimoire.toml").write_text(_MALFORMED_GLOBAL, encoding="utf-8", newline="\n")
 
     result = runner.run("search", "--registry", f"{registry}/{unique_repo}", check=False)
 
@@ -1193,7 +1193,7 @@ def test_a_global_run_labels_its_own_client_list_global(
 
     sk = _skill_only(unique_repo)
     (grim_home / "grimoire.toml").write_text(
-        f'[options]\nclients = ["claude"]\n\n[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8"
+        f'[options]\nclients = ["claude"]\n\n[skills]\ncode-review = "{sk.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = GrimRunner(grim_binary, grim_home)
     runner.json("lock", "--global")

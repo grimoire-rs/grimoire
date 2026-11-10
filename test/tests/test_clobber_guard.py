@@ -49,7 +49,7 @@ def test_install_refuses_untracked_skill_dir(
     _setup_skill(project_dir, unique_repo)
     hand = project_dir / ".claude/skills/code-review/SKILL.md"
     hand.parent.mkdir(parents=True)
-    hand.write_text("# hand-authored, not grim's\n")
+    hand.write_text("# hand-authored, not grim's\n", encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -59,7 +59,7 @@ def test_install_refuses_untracked_skill_dir(
         f"untracked clobber must exit 65, got {result.returncode}; "
         f"{result.stderr}"
     )
-    assert hand.read_text() == "# hand-authored, not grim's\n", (
+    assert hand.read_text(encoding="utf-8") == "# hand-authored, not grim's\n", (
         "refusal must leave the hand-authored file untouched"
     )
     assert "--force" in result.stderr, (
@@ -75,13 +75,13 @@ def test_force_overwrites_untracked_and_uninstall_cleans_up(
     _setup_skill(project_dir, unique_repo)
     hand = project_dir / ".claude/skills/code-review/SKILL.md"
     hand.parent.mkdir(parents=True)
-    hand.write_text("# hand-authored, not grim's\n")
+    hand.write_text("# hand-authored, not grim's\n", encoding="utf-8", newline="\n")
 
     runner = grim_at(project_dir)
     runner.run("lock")
     rows = runner.json("install", "--force")["items"]
     assert {r["status"] for r in rows} == {"installed"}
-    assert hand.read_text() == SKILL_MD
+    assert hand.read_text(encoding="utf-8") == SKILL_MD
 
     runner.run("uninstall", "skill", "code-review")
     assert_not_exists(project_dir / ".claude/skills/code-review")
@@ -115,7 +115,7 @@ def _release_mcp(runner, project_dir: Path, registry: str, unique_repo: str) -> 
     src = project_dir / "src"
     src.mkdir(parents=True, exist_ok=True)
     descriptor = src / "grim-mcp.toml"
-    descriptor.write_text(MCP_DESCRIPTOR)
+    descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), ref, "--kind", "mcp")
     return ref
@@ -129,7 +129,7 @@ def test_mcp_install_refuses_untracked_member(
     runner = grim_at(project_dir)
     ref = _release_mcp(runner, project_dir, registry, unique_repo)
     (project_dir / ".mcp.json").write_text(
-        '{\n  "mcpServers": {\n    "grim-mcp": {"command": "user-owned"}\n  }\n}\n'
+        '{\n  "mcpServers": {\n    "grim-mcp": {"command": "user-owned"}\n  }\n}\n', encoding="utf-8", newline="\n"
     )
     write_config(project_dir)
     runner.json("add", "--no-install", ref)
@@ -139,14 +139,14 @@ def test_mcp_install_refuses_untracked_member(
         f"untracked MCP member clobber must exit 65, got "
         f"{result.returncode}; {result.stderr}"
     )
-    claude = json.loads((project_dir / ".mcp.json").read_text())
+    claude = json.loads((project_dir / ".mcp.json").read_text(encoding="utf-8"))
     assert claude["mcpServers"]["grim-mcp"]["command"] == "user-owned", (
         "refusal must leave the user's member untouched"
     )
 
     rows = runner.json("install", "--force")["items"]
     assert {r["status"] for r in rows} == {"installed"}
-    claude = json.loads((project_dir / ".mcp.json").read_text())
+    claude = json.loads((project_dir / ".mcp.json").read_text(encoding="utf-8"))
     assert claude["mcpServers"]["grim-mcp"]["command"] == "grim"
 
 

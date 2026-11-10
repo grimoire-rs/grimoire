@@ -51,6 +51,7 @@ def _shard(
     report.write_text(
         f'<?xml version="1.0"?><testsuites><testsuite name="pytest">{cases}{extra}</testsuite></testsuites>',
         encoding="utf-8",
+        newline="\n",
     )
     return report
 
@@ -71,7 +72,7 @@ def _run(
         ("SKIP_CEILING", skips),
         ("XFAIL_CEILING", xfails),
     ):
-        (limits / name).write_text(f"{value}\n", encoding="utf-8")
+        (limits / name).write_text(f"{value}\n", encoding="utf-8", newline="\n")
     return floor.main(
         [
             "--results",
@@ -198,7 +199,7 @@ def test_a_torn_shard_report_refuses_by_name(
     repo: Path, results: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (results / f"junit-{LABEL}-1-of-4.xml").write_text(
-        "<testsuites><testsuite>", encoding="utf-8"
+        "<testsuites><testsuite>", encoding="utf-8", newline="\n"
     )
 
     assert _run(repo, results, suite=6) == 1
@@ -285,7 +286,7 @@ def test_a_parked_test_marker_refuses_tracked_or_not(
 ) -> None:
     parked = repo / top / "parked.txt"
     parked.parent.mkdir()
-    parked.write_text(f"{floor.PARK_MARKER}: P1\n", encoding="utf-8")
+    parked.write_text(f"{floor.PARK_MARKER}: P1\n", encoding="utf-8", newline="\n")
 
     assert _run(repo, results) == 1
 
@@ -295,7 +296,7 @@ def test_a_parked_test_marker_refuses_tracked_or_not(
 def test_a_marker_outside_the_scanned_trees_is_not_a_park(
     repo: Path, results: Path
 ) -> None:
-    (repo / "plan.md").write_text(floor.PARK_MARKER, encoding="utf-8")
+    (repo / "plan.md").write_text(floor.PARK_MARKER, encoding="utf-8", newline="\n")
 
     assert _run(repo, results) == 0
 

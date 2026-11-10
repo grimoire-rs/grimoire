@@ -98,6 +98,7 @@ def _write_manifest(work: Path, includes: list[str]) -> None:
         '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
         f"[plugins.team]\ninclude = {json.dumps(includes)}\n",
         encoding="utf-8",
+        newline="\n",
     )
 
 
@@ -764,7 +765,7 @@ def test_a_member_pick_records_no_digest_for_a_bundle_it_did_not_select(
     by_old = _update(old, f"team:{pick}")
     assert by_old.returncode == 0, by_old.stderr
     as_old = _rows(work)
-    (work / "marketplace.lock").write_text(written, encoding="utf-8")
+    (work / "marketplace.lock").write_text(written, encoding="utf-8", newline="\n")
 
     result = _update(current, f"team:{pick}")
 

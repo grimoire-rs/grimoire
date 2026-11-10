@@ -129,7 +129,7 @@ def test_a_root_only_index_with_a_bad_blob_degrades_the_source(
     cached = [p for p in catalog.glob("*.json") if not p.name.endswith(".sync.json")]
     assert cached == [], "a refresh that never verified a blob must cache no catalog"
     (sidecar,) = catalog.glob("*.sync.json")
-    state = json.loads(sidecar.read_text())
+    state = json.loads(sidecar.read_text(encoding="utf-8"))
     assert state["root"] is None, "a blob that failed adopts no root"
     assert state["failures"] == 1
 
@@ -218,7 +218,7 @@ def _cache_file(grim_home: Path) -> Path:
 
 
 def _sidecar(grim_home: Path) -> dict:
-    return json.loads(_cache_file(grim_home).with_suffix(".sync.json").read_text())
+    return json.loads(_cache_file(grim_home).with_suffix(".sync.json").read_text(encoding="utf-8"))
 
 
 def _age_cache(grim_home: Path) -> None:
@@ -229,18 +229,18 @@ def _age_cache(grim_home: Path) -> None:
     revalidation is quiet rather than a rebuild.
     """
     cache = _cache_file(grim_home)
-    doc = json.loads(cache.read_text())
+    doc = json.loads(cache.read_text(encoding="utf-8"))
     doc["built_at"] = OLD
     data = json.dumps(doc).encode()
     cache.write_bytes(data)
     sidecar = cache.with_suffix(".sync.json")
-    state = json.loads(sidecar.read_text())
+    state = json.loads(sidecar.read_text(encoding="utf-8"))
     state.update(
         catalog_sha256=hashlib.sha256(data).hexdigest(),
         catalog_built_at=OLD,
         checked_at=OLD,
     )
-    sidecar.write_text(json.dumps(state))
+    sidecar.write_text(json.dumps(state), encoding="utf-8", newline="\n")
 
 
 def _browse(runner, *flags: str) -> dict:
@@ -317,9 +317,9 @@ def test_a_stats_blob_that_changes_nothing_leaves_the_catalog_file_alone(
     runner = grim_at(project_dir)
     search_envelope(runner)
     stats = anchored_index.root / "stats.json"
-    doc = json.loads(stats.read_text())
+    doc = json.loads(stats.read_text(encoding="utf-8"))
     doc["generated_at"] = "2026-09-01T00:00:00Z"
-    stats.write_text(json.dumps(doc))
+    stats.write_text(json.dumps(doc), encoding="utf-8", newline="\n")
     _age_cache(grim_home)
     before = _cache_file(grim_home).read_bytes()
 

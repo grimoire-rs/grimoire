@@ -985,7 +985,7 @@ def self_test(root: Path) -> None:
     ):
         fake = root / f"fake-grim-{n}"
         body = f": > empty.txt\necho '{{}}'\nexit {rc}\n"
-        fake.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+        fake.write_text(f"#!/bin/sh\n{body}", encoding="utf-8", newline="\n")
         fake.chmod(0o755)
         try:
             run_scenario(

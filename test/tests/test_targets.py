@@ -54,7 +54,7 @@ def test_install_claude_and_copilot_layouts(
     assert_path_exists(project_dir / ".github/skills/code-review/SKILL.md")
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
     assert_path_exists(instr)
-    body = instr.read_text()
+    body = instr.read_text(encoding="utf-8")
     # The file starts with YAML frontmatter whose first key is applyTo (the
     # paths→applyTo transform); the provenance comment follows the closing
     # --- fence.
@@ -82,7 +82,7 @@ def test_editing_generated_copilot_file_is_detected_as_drift(
     runner.run("install", "--client", "copilot", check=False)
 
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
-    instr.write_text("hand edited by a user\n")
+    instr.write_text("hand edited by a user\n", encoding="utf-8", newline="\n")
 
     # The integrity hash for a generated file is over its *expected*
     # bytes, so a user edit is detected exactly like a canonical file.
@@ -99,7 +99,7 @@ def test_editing_generated_copilot_file_is_detected_as_drift(
         f"install without --force must refuse generated-file drift (65), "
         f"got {refused.returncode}; {refused.stderr}"
     )
-    assert instr.read_text() == "hand edited by a user\n", (
+    assert instr.read_text(encoding="utf-8") == "hand edited by a user\n", (
         "a refused install must not overwrite the user's edit"
     )
 
@@ -109,7 +109,7 @@ def test_editing_generated_copilot_file_is_detected_as_drift(
         f"forced install must succeed, got {forced.returncode}; "
         f"{forced.stderr}"
     )
-    restored = instr.read_text()
+    restored = instr.read_text(encoding="utf-8")
     # The regenerated file starts with applyTo frontmatter (paths→applyTo
     # transform) and carries the provenance comment after the closing fence.
     assert restored.startswith("---\napplyTo:"), (
@@ -128,9 +128,9 @@ def test_copilot_regeneration_is_idempotent(
     runner.run("lock", check=False)
     runner.run("install", "--client", "copilot", check=False)
     instr = project_dir / ".github/instructions/rust-style.instructions.md"
-    first = instr.read_text()
+    first = instr.read_text(encoding="utf-8")
 
     # A second install over intact content is a no-op; the bytes are
     # byte-identical (deterministic transform).
     runner.run("install", "--client", "copilot", check=False)
-    assert instr.read_text() == first
+    assert instr.read_text(encoding="utf-8") == first

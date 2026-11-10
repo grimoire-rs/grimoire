@@ -18,7 +18,7 @@ import pytest
 
 def _write(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body)
+    p.write_text(body, encoding="utf-8", newline="\n")
 
 
 def _project(project_dir: Path) -> Path:
@@ -52,7 +52,7 @@ def test_dev_install_leaves_config_and_lock_untouched(
     rendered = project_dir / ".claude" / "skills" / "dev-skill" / "SKILL.md"
     assert rendered.is_file()
 
-    state = (project_dir / ".grimoire" / "state.json").read_text()
+    state = (project_dir / ".grimoire" / "state.json").read_text(encoding="utf-8")
     assert '"dev"' in state and "true" in state
 
 
@@ -86,7 +86,7 @@ def test_update_refreshes_drifted_dev_install(
 
     runner.run("update", "--client", "claude")
     rendered = project_dir / ".claude" / "skills" / "dev-skill" / "SKILL.md"
-    assert "# Dev v2" in rendered.read_text()
+    assert "# Dev v2" in rendered.read_text(encoding="utf-8")
     # The record survives the update (never pruned) and stays dev-marked.
     items = runner.json("status")["items"]
     dev = [e for e in items if e["name"] == "dev-skill"]
@@ -129,9 +129,9 @@ def test_global_dev_install_renders_to_native_home(
     )
     for out in outputs:
         assert out.is_file(), f"missing vendor output: {out}"
-        assert "# Global dev" in out.read_text()
+        assert "# Global dev" in out.read_text(encoding="utf-8")
 
-    state = (grim_home / "state" / "global.json").read_text()
+    state = (grim_home / "state" / "global.json").read_text(encoding="utf-8")
     assert '"dev"' in state
 
     items = runner.json("--global", "status")["items"]
@@ -249,7 +249,7 @@ def test_dev_install_state_record_has_exactly_one_dev_true_record(
     runner = _offline(grim_at(project_dir))
     runner.run("install", "./dev-skill", "--client", "claude")
 
-    state = json.loads((project_dir / ".grimoire" / "state.json").read_text())
+    state = json.loads((project_dir / ".grimoire" / "state.json").read_text(encoding="utf-8"))
     records = state["records"]
     assert len(records) == 1, f"exactly one record expected after dev-install: {records}"
     assert records[0]["name"] == "dev-skill"
@@ -279,7 +279,7 @@ def test_dev_install_name_collision_with_declared_binding_is_rejected(
     runner = _offline(grim_at(project_dir))
     runner.run("lock")
     runner.run("install", "--client", "claude")
-    cfg_before = (project_dir / "grimoire.toml").read_text()
+    cfg_before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     # A DIFFERENT local directory whose SKILL.md ALSO declares `name: foo`
     # (the skill-dir validator requires the frontmatter name to match the
@@ -295,7 +295,7 @@ def test_dev_install_name_collision_with_declared_binding_is_rejected(
     result = runner.run("install", str(colliding), "--client", "claude", check=False)
     assert result.returncode == 64, result.stderr
 
-    cfg_after = (project_dir / "grimoire.toml").read_text()
+    cfg_after = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert cfg_after == cfg_before, (
         "a rejected dev-install collision must leave the declared binding "
         f"untouched in grimoire.toml:\nbefore={cfg_before!r}\nafter={cfg_after!r}"
@@ -353,7 +353,7 @@ def test_add_declaration_after_dev_install_same_name_is_rejected(
     runner = _offline(grim_at(project_dir))
     runner.run("lock")
     runner.run("install", "./dev-skill", "--client", "claude")
-    cfg_before = (project_dir / "grimoire.toml").read_text()
+    cfg_before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     # A different local skill dir whose intrinsic name is also `dev-skill`.
     other = project_dir / "elsewhere" / "dev-skill"
@@ -365,7 +365,7 @@ def test_add_declaration_after_dev_install_same_name_is_rejected(
     result = runner.run("add", str(other), "--kind", "skill", "--no-install", check=False)
     assert result.returncode == 64, result.stderr
 
-    cfg_after = (project_dir / "grimoire.toml").read_text()
+    cfg_after = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert cfg_after == cfg_before, (
         "a declaration colliding with a dev record must be rejected, leaving "
         f"grimoire.toml untouched:\nbefore={cfg_before!r}\nafter={cfg_after!r}"
@@ -388,7 +388,7 @@ def test_dev_install_name_collision_with_declared_rule_binding_is_rejected(
     runner = _offline(grim_at(project_dir))
     runner.run("lock")
     runner.run("install", "--client", "claude")
-    cfg_before = (project_dir / "grimoire.toml").read_text()
+    cfg_before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     # A different local rule file whose stem is also `foo`.
     colliding = project_dir / "elsewhere" / "foo.md"
@@ -397,7 +397,7 @@ def test_dev_install_name_collision_with_declared_rule_binding_is_rejected(
     result = runner.run("install", str(colliding), "--client", "claude", check=False)
     assert result.returncode == 64, result.stderr
 
-    cfg_after = (project_dir / "grimoire.toml").read_text()
+    cfg_after = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert cfg_after == cfg_before, (
         "a rejected dev-install rule collision must leave the declared binding "
         f"untouched:\nbefore={cfg_before!r}\nafter={cfg_after!r}"
@@ -414,7 +414,7 @@ def test_add_declaration_aborts_on_unreadable_state(
     # state file is `Ok(empty)` and still declares fine — covered by every
     # other add test that runs without prior install state.)
     _write(project_dir / "grimoire.toml", "[skills]\n")
-    cfg_before = (project_dir / "grimoire.toml").read_text()
+    cfg_before = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
 
     # Corrupt the project install-state file.
     _write(project_dir / ".grimoire" / "state.json", "{ this is not valid json")
@@ -429,7 +429,7 @@ def test_add_declaration_aborts_on_unreadable_state(
     result = runner.run("add", str(to_add), "--kind", "skill", "--no-install", check=False)
     assert result.returncode != 0, "a corrupt state file must abort add, not fail open"
 
-    cfg_after = (project_dir / "grimoire.toml").read_text()
+    cfg_after = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert cfg_after == cfg_before, (
         "a fail-closed abort must leave grimoire.toml untouched (no declaration "
         f"written):\nbefore={cfg_before!r}\nafter={cfg_after!r}"

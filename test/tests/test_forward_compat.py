@@ -49,9 +49,9 @@ def _repin(project_dir: Path, stand_in: str, digest: str) -> None:
     earlier (or by an older grim) can carry it to `install`.
     """
     lock = project_dir / "grimoire.lock"
-    text = lock.read_text()
+    text = lock.read_text(encoding="utf-8")
     assert stand_in in text, text
-    lock.write_text(text.replace(stand_in, digest))
+    lock.write_text(text.replace(stand_in, digest), encoding="utf-8", newline="\n")
 
 
 def _assert_lock_refuses(runner, needle: str) -> None:

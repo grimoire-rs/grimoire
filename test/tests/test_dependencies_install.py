@@ -63,7 +63,7 @@ def test_a_config_install_names_its_config_in_the_stale_remedy(
     config = write_config(project_dir, skills={"dep": dep.fq})
     grim_at(project_dir).run("lock")
     lock = project_dir / "grimoire.lock"
-    lock.write_text(REQUIRES_BLOCK.sub("\n", lock.read_text()))
+    lock.write_text(REQUIRES_BLOCK.sub("\n", lock.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
     away = tmp_path / "away"
     away.mkdir()
 
@@ -87,21 +87,21 @@ def test_install_refuses_mismatched_requires(
     runner.run("lock")
     lock = project_dir / "grimoire.lock"
     # What 0.15.1 writes for the same project: the entries without their edges.
-    zero_fifteen_lock = REQUIRES_BLOCK.sub("\n", lock.read_text())
+    zero_fifteen_lock = REQUIRES_BLOCK.sub("\n", lock.read_text(encoding="utf-8"))
     assert "requires" not in zero_fifteen_lock, "a 0.15.1-style lock carries no edges"
     state_roots = (project_dir / ".grimoire", grim_home / "state", grim_home / "hooks")
     before = _snapshot(project_dir / ".claude", *state_roots)
 
     # A lock without the edge the pinned artifact declares.
-    lock.write_text(zero_fifteen_lock)
+    lock.write_text(zero_fifteen_lock, encoding="utf-8", newline="\n")
     _stale(runner.run("--format", "json", "install", check=False))
 
     # A hand-edited lock naming an edge the pinned artifact does not declare.
-    lock.write_text(zero_fifteen_lock + _lock_entry("skill", "other", "./other:1"))
+    lock.write_text(zero_fifteen_lock + _lock_entry("skill", "other", "./other:1"), encoding="utf-8", newline="\n")
     _stale(runner.run("--format", "json", "install", check=False))
 
     # The right edge with a different id is also a difference.
-    lock.write_text(zero_fifteen_lock + _lock_entry(*(EDGE[0], EDGE[1], "./base:2")))
+    lock.write_text(zero_fifteen_lock + _lock_entry(*(EDGE[0], EDGE[1], "./base:2")), encoding="utf-8", newline="\n")
     _stale(runner.run("--format", "json", "install", check=False))
 
     assert not (project_dir / ".claude/skills/dep").exists()
@@ -111,7 +111,7 @@ def test_install_refuses_mismatched_requires(
 
     # Positive control: a lock listing exactly the published edge installs,
     # and only the content layer materializes.
-    lock.write_text(zero_fifteen_lock + _lock_entry(*EDGE))
+    lock.write_text(zero_fifteen_lock + _lock_entry(*EDGE), encoding="utf-8", newline="\n")
     result = runner.run("--format", "json", "install")
     statuses = {i["name"]: i["status"] for i in json.loads(result.stdout)["items"]}
     assert statuses["dep"] == "installed", statuses

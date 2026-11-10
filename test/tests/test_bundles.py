@@ -44,7 +44,7 @@ def test_lock_expands_bundle_members(
 
     runner.run("lock")
 
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     # Both members are expanded into the lock, pinned by digest, and carry
     # bundle provenance.
     assert "code-review" in lock
@@ -225,11 +225,11 @@ def test_add_bundle_declares_and_locks(
     assert out["kind"] == "bundle"
     assert out["name"] == "stack"
 
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "[bundles]" in cfg
     assert "stack" in cfg
     # The member was expanded into the lock.
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "code-review" in lock
 
 
@@ -245,14 +245,14 @@ def test_remove_bundle_drops_members(
     write_config(project_dir, bundles={"stack": bundle.fq})
     runner = grim_at(project_dir)
     runner.run("lock")
-    assert "code-review" in (project_dir / "grimoire.lock").read_text()
+    assert "code-review" in (project_dir / "grimoire.lock").read_text(encoding="utf-8")
 
     out = runner.json("remove", "bundle", "stack")
     assert out["status"] == "removed"
 
-    cfg = (project_dir / "grimoire.toml").read_text()
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
     assert "stack" not in cfg
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "code-review" not in lock, "removing the bundle drops its members"
 
 
@@ -277,7 +277,7 @@ def test_remove_bundle_keeps_sibling_at_same_repo(
     runner.run("lock")
 
     runner.json("remove", "bundle", "stack-v1")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "skill-a" not in lock, "the removed bundle's member is dropped"
     assert "skill-b" in lock, "the sibling bundle's member at the same repo is preserved"
 
@@ -312,14 +312,14 @@ def test_remove_bundle_keeps_member_shared_with_other_bundle(
     runner.run("lock")
 
     runner.json("remove", "bundle", "a")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "only-a" not in lock, "the removed bundle's exclusive member is dropped"
     assert "shared-skill" in lock, "a member still held by another bundle survives"
     assert "only-b" in lock, "the sibling bundle's members are untouched"
 
     # Removing the LAST holder finally drops the shared member.
     runner.json("remove", "bundle", "b")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "shared-skill" not in lock, "the last holder's removal evicts the member"
     assert "only-b" not in lock
 
@@ -335,13 +335,13 @@ def test_remove_bundle_shared_member_reverse_order(
     runner.run("lock")
 
     runner.json("remove", "bundle", "b")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "only-b" not in lock, "the removed bundle's exclusive member is dropped"
     assert "shared-skill" in lock, "a member still held by another bundle survives"
     assert "only-a" in lock
 
     runner.json("remove", "bundle", "a")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "shared-skill" not in lock, "the last holder's removal evicts the member"
 
 
@@ -362,11 +362,11 @@ def test_remove_duplicate_binding_keeps_members(
     runner.run("lock")
 
     runner.json("remove", "bundle", "first")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "code-review" in lock, "members survive while a duplicate binding remains"
 
     runner.json("remove", "bundle", "second")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "code-review" not in lock, "removing the last binding evicts the members"
 
 
@@ -396,7 +396,7 @@ def test_release_bundle_pin_freezes_members(
     # Author a bundle source referencing the floating member tag, and
     # release it with --pin so the member is frozen to digest A.
     bundle_src = project_dir / "stack.toml"
-    bundle_src.write_text(f'[skills]\ncode-review = "{member.fq}"\n')
+    bundle_src.write_text(f'[skills]\ncode-review = "{member.fq}"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("release", str(bundle_src), f"{registry}/{unique_repo}/stack:1.0.0", "--pin")
 
@@ -416,7 +416,7 @@ def test_release_bundle_pin_freezes_members(
     write_config(consumer, bundles={"stack": f"{REGISTRY_HOST}/{unique_repo}/stack:1.0.0"})
     crunner = grim_at(consumer)
     crunner.run("lock")
-    lock = (consumer / "grimoire.lock").read_text()
+    lock = (consumer / "grimoire.lock").read_text(encoding="utf-8")
     assert member_v1_digest in lock, "pinned member stays frozen despite the tag move"
 
 
@@ -805,7 +805,7 @@ def test_release_bundle_with_agent_member(
     )
     bundle_src = project_dir / "stack.toml"
     bundle_src.write_text(
-        f'[skills]\ncode-review = "{sk.fq}"\n\n[agents]\nreviewer = "{agent.fq}"\n'
+        f'[skills]\ncode-review = "{sk.fq}"\n\n[agents]\nreviewer = "{agent.fq}"\n', encoding="utf-8", newline="\n"
     )
     runner = grim_at(project_dir)
     runner.run("release", str(bundle_src), f"{registry}/{unique_repo}/stack:1.0.0")
@@ -844,14 +844,14 @@ def test_release_bundle_with_mcp_member(
     # catch the missing table.
     sk = _member_skill(unique_repo, "code-review")
     descriptor = project_dir / "srv.toml"
-    descriptor.write_text(_MCP_DESCRIPTOR)
+    descriptor.write_text(_MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     mcp_ref = f"{registry}/{unique_repo}/mcp/srv:1.0.0"
     runner = grim_at(project_dir)
     runner.run("release", str(descriptor), mcp_ref, "--kind", "mcp")
 
     bundle_src = project_dir / "stack.toml"
     bundle_src.write_text(
-        f'[skills]\ncode-review = "{sk.fq}"\n\n[mcp]\nsrv = "{mcp_ref}"\n'
+        f'[skills]\ncode-review = "{sk.fq}"\n\n[mcp]\nsrv = "{mcp_ref}"\n', encoding="utf-8", newline="\n"
     )
     runner.run("release", str(bundle_src), f"{registry}/{unique_repo}/stack:1.0.0")
 
@@ -871,7 +871,7 @@ def test_release_bundle_with_mcp_member(
     crunner.run("install")
     cfg = consumer / ".mcp.json"
     assert cfg.is_file(), "the bundle's mcp member must be registered"
-    assert json.loads(cfg.read_text())["mcpServers"]["srv"]["command"] == "grim"
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["srv"]["command"] == "grim"
 
 
 def test_update_prunes_dropped_bundle_member(
@@ -907,7 +907,7 @@ def test_update_prunes_dropped_bundle_member(
     # skill-b is gone from disk and the lock; skill-a stays.
     assert_dir_exists(project_dir / ".claude/skills/skill-a")
     assert_not_exists(project_dir / ".claude/skills/skill-b")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "skill-a" in lock
     assert "skill-b" not in lock, "the dropped member leaves the lock"
 
@@ -947,7 +947,7 @@ def test_update_installs_added_bundle_member(
     assert_dir_exists(project_dir / ".claude/skills/skill-b")
     assert_path_exists(project_dir / ".claude/skills/skill-b/SKILL.md")
     assert_dir_exists(project_dir / ".claude/skills/skill-a")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "skill-a" in lock
     assert "skill-b" in lock, "the added member enters the lock"
 
@@ -995,7 +995,7 @@ def test_update_adds_and_removes_in_one_upgrade(
     assert_dir_exists(project_dir / ".claude/skills/skill-a")
     assert_dir_exists(project_dir / ".claude/skills/skill-c")
     assert_not_exists(project_dir / ".claude/skills/skill-b")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "skill-a" in lock
     assert "skill-c" in lock, "the added member enters the lock"
     assert "skill-b" not in lock, "the dropped member leaves the lock"
@@ -1024,7 +1024,7 @@ def test_update_keeps_modified_dropped_member_without_force(
 
     # Hand-edit the member, then drop it from the bundle.
     edited = project_dir / ".claude/skills/skill-b/SKILL.md"
-    edited.write_text(edited.read_text() + "\n# local edit\n")
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8", newline="\n")
     make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
 
     # A plain update preserves the modified orphan and flags it.
@@ -1032,13 +1032,13 @@ def test_update_keeps_modified_dropped_member_without_force(
     kept = next(r for r in rows if r["name"] == "skill-b")
     assert kept["action"] == "kept-modified"
     assert_path_exists(edited)
-    assert "# local edit" in edited.read_text(), "the user's edit survives"
+    assert "# local edit" in edited.read_text(encoding="utf-8"), "the user's edit survives"
 
     # The kept-modified prune must not touch the still-declared sibling:
     # skill-a's tree, its index file, and its lock entry all remain.
     assert_dir_exists(project_dir / ".claude/skills/skill-a")
     assert_path_exists(project_dir / ".claude/skills/skill-a/SKILL.md")
-    lock = (project_dir / "grimoire.lock").read_text()
+    lock = (project_dir / "grimoire.lock").read_text(encoding="utf-8")
     assert "skill-a" in lock, "the still-declared sibling stays locked"
 
 
@@ -1064,7 +1064,7 @@ def test_update_force_prunes_modified_dropped_member(
 
     # Hand-edit the member, then drop it from the bundle.
     edited = project_dir / ".claude/skills/skill-b/SKILL.md"
-    edited.write_text(edited.read_text() + "\n# local edit\n")
+    edited.write_text(edited.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8", newline="\n")
     make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
 
     # --force prunes the modified orphan despite the local edit.
@@ -1112,7 +1112,7 @@ def test_relative_members_resolve_at_install(
     )
 
     bundle_src = project_dir / "tools.toml"
-    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\ny = "./y:stable"\n')
+    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\ny = "./y:stable"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run("release", str(bundle_src), f"{registry}/{unique_repo}/bundles/tools:1.0.0")
 
@@ -1122,7 +1122,7 @@ def test_relative_members_resolve_at_install(
     crunner = grim_at(consumer)
     crunner.run("lock")
 
-    lock = (consumer / "grimoire.lock").read_text()
+    lock = (consumer / "grimoire.lock").read_text(encoding="utf-8")
     assert f"{REGISTRY_HOST}/{unique_repo}/skills/x" in lock, (
         f"../skills/x must resolve one directory up from the bundle; lock:\n{lock}"
     )
@@ -1139,7 +1139,7 @@ def test_relative_member_escape_fails_release(
     bundle_src = project_dir / "tools.toml"
     # unique_repo has 2 segments; +1 for bundles/ = dir depth 3. Five ../
     # escape the registry root.
-    bundle_src.write_text('[skills]\nx = "../../../../../skills/x:stable"\n')
+    bundle_src.write_text('[skills]\nx = "../../../../../skills/x:stable"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     result = runner.run(
         "release", str(bundle_src), f"{registry}/{unique_repo}/bundles/tools:1.0.0",
@@ -1168,7 +1168,7 @@ def test_relative_bundle_mirrored_prefix(
         )
 
     bundle_src = project_dir / "tools.toml"
-    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\n')
+    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     for prefix in ("a", "b"):
         runner.run(
@@ -1185,7 +1185,7 @@ def test_relative_bundle_mirrored_prefix(
         )
         crunner = grim_at(consumer)
         crunner.run("lock")
-        lock = (consumer / "grimoire.lock").read_text()
+        lock = (consumer / "grimoire.lock").read_text(encoding="utf-8")
         assert f"{REGISTRY_HOST}/{unique_repo}/{prefix}/skills/x" in lock, (
             f"member must follow the {prefix!r} deployment prefix; lock:\n{lock}"
         )
@@ -1209,7 +1209,7 @@ def test_release_bundle_pin_freezes_relative_member(
     digest = tag_digest(f"{unique_repo}/skills/x", "stable")
 
     bundle_src = project_dir / "tools.toml"
-    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\n')
+    bundle_src.write_text('[skills]\nx = "../skills/x:stable"\n', encoding="utf-8", newline="\n")
     runner = grim_at(project_dir)
     runner.run(
         "release", str(bundle_src),
@@ -1221,7 +1221,7 @@ def test_release_bundle_pin_freezes_relative_member(
     write_config(consumer, bundles={"tools": f"{REGISTRY_HOST}/{unique_repo}/bundles/tools:1.0.0"})
     crunner = grim_at(consumer)
     crunner.run("lock")
-    lock = (consumer / "grimoire.lock").read_text()
+    lock = (consumer / "grimoire.lock").read_text(encoding="utf-8")
     assert digest in lock, (
         f"pinned relative member must carry the frozen digest; lock:\n{lock}"
     )

@@ -79,7 +79,7 @@ def test_add_unresolvable_ref_leaves_config_and_project_intact(
 
     assert config.read_bytes() == before, (
         "a failed relock must leave grimoire.toml byte-identical; it committed "
-        f"the declaration instead:\n{config.read_text()}"
+        f"the declaration instead:\n{config.read_text(encoding="utf-8")}"
     )
 
     # The pre-existing artifact still installs — no LockStale wedge.
@@ -119,7 +119,7 @@ def test_add_bundle_installs_its_mcp_member(
 
     descriptor = project_dir / "src" / "grim-mcp.toml"
     descriptor.parent.mkdir(parents=True, exist_ok=True)
-    descriptor.write_text(MCP_DESCRIPTOR)
+    descriptor.write_text(MCP_DESCRIPTOR, encoding="utf-8", newline="\n")
     mcp_ref = f"{registry}/{unique_repo}/mcp/grim-mcp:1.0.0"
     runner.json("release", str(descriptor), mcp_ref, "--kind", "mcp")
 
@@ -142,7 +142,7 @@ def test_add_bundle_installs_its_mcp_member(
     assert (project_dir / ".claude/skills/code-review/SKILL.md").is_file()
     mcp_config = project_dir / ".mcp.json"
     assert mcp_config.is_file(), "the bundle's mcp member must be registered"
-    assert json.loads(mcp_config.read_text())["mcpServers"]["grim-mcp"]["command"] == "grim"
+    assert json.loads(mcp_config.read_text(encoding="utf-8"))["mcpServers"]["grim-mcp"]["command"] == "grim"
 
     rows = runner.json("status")["items"]
     member = next(r for r in rows if r["name"] == "grim-mcp")
@@ -201,7 +201,7 @@ def test_update_persists_records_when_prune_fails(
     finally:
         rules_dir.chmod(original_mode)
 
-    assert (project_dir / ".claude/skills/code-review/SKILL.md").read_text() == "v2\n"
+    assert (project_dir / ".claude/skills/code-review/SKILL.md").read_text(encoding="utf-8") == "v2\n"
 
     # The skill installed cleanly before the prune failed, so its record must
     # be on disk at the new hash — anything else reports false drift.

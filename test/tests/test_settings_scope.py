@@ -87,7 +87,7 @@ def _file(path: Path) -> dict:
 
 def _put(path: Path, values: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(values), encoding="utf-8")
+    path.write_text(json.dumps(values), encoding="utf-8", newline="\n")
 
 
 def _row(report: dict, name: str) -> dict:
@@ -475,7 +475,7 @@ def test_confinement_refusal_writes_nothing(
     runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team}, options=CLAUDE_ONLY)
     landing = _plant(shape, project_dir, tmp_path / "outside")
     if held is not None:
-        landing.write_text(held, encoding="utf-8")
+        landing.write_text(held, encoding="utf-8", newline="\n")
 
     result = runner.run("install", TRUST, format="json")
 
@@ -493,7 +493,7 @@ def test_confinement_refusal_writes_nothing(
     twin.mkdir()
     control = _workspace(grim_at, twin, tmp_path / "s", {"team": team}, options=CLAUDE_ONLY)
     inside = _plant("directory" if shape == "directory" else "file", twin, twin / "dotfiles")
-    inside.write_text("{}", encoding="utf-8")
+    inside.write_text("{}", encoding="utf-8", newline="\n")
     control.run("install", TRUST)
     assert _file(inside) == {"model": "sonnet"}
 
@@ -515,7 +515,7 @@ def _installed_twins(
     plain.run("install", TRUST)
     outside = tmp_path / "outside" / "settings.local.json"
     outside.parent.mkdir()
-    outside.write_text(held, encoding="utf-8")
+    outside.write_text(held, encoding="utf-8", newline="\n")
     (project_dir / LOCAL).unlink()
     (project_dir / LOCAL).symlink_to(outside)
     return linked, plain, outside
@@ -692,7 +692,7 @@ def test_codex_rules_file_lifecycle(grim, grim_home: Path, tmp_path: Path, uniqu
     assert rendered.read_text(encoding="utf-8") == RENDERED
 
     # Uninstall judges the file too: it comes out only as recorded, or forced.
-    rendered.write_text("# edited\n", encoding="utf-8")
+    rendered.write_text("# edited\n", encoding="utf-8", newline="\n")
     refused = grim.run("--global", "uninstall", "settings", "team", format="json", check=False)
     assert refused.returncode == 65, refused.stderr
     assert rendered.read_text(encoding="utf-8") == "# edited\n"
@@ -715,7 +715,7 @@ def test_codex_rules_file_adopts_what_it_would_write(grim, grim_home: Path, tmp_
     rendered = roots["codex"] / "rules" / "grim-team.rules"
     rendered.parent.mkdir()
 
-    rendered.write_text("# mine\n", encoding="utf-8")
+    rendered.write_text("# mine\n", encoding="utf-8", newline="\n")
     refused = grim.run("--global", "install", format="json", check=False)
     assert refused.returncode == 65, refused.stderr
     assert json.loads(refused.stdout)["error"]["reason"] == "untracked-destination"
