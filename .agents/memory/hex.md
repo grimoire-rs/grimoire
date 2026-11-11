@@ -45,7 +45,7 @@ preferences, not copies. Team-shared — commit it.
   Contract detail: `docs/src/content/docs/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
-  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `lock-pin-stability.md` (→ loop, 2026-11-03).
+  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `shell-activation.md` (→ architect, 2026-11-11).
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -105,6 +105,28 @@ research-axes:
   `nox-review` has no model flag and inherits that global default.
 
 ## Memory
+
+- **ADR revised once, re-validated once (2026-11-11, still Proposed):** the fix pass covered only findings that hold whether or not the background round stays. Spec re-validation: drift-row fix closed; root rule, bounded reads and stamp partly closed; one new Block (bash/zsh stamp in a shared temp directory); six Warns. All are listed in the ADR under "Unresolved review findings". No second fix pass was run: the stamp mechanism was rewritten once and came back with a new Block, so the remedy is the owner's pick.
+  **Pitfall:** a file-based change guard for bash/zsh drew a Block in both rounds; zsh can read mtimes with `zsh/stat` and needs no file.
+
+- **ADR drafted (2026-11-11, Proposed, hex-architect high, review round done, fix pass not run):**
+  `.agents/adr/adr_shell_activation.md`, from dossier `.agents/discussions/shell-activation.md`. Research=1 (PowerShell 5.1/7 hook → `research_shell_activation_powershell_hook.md`); claim diff and map in `research_shell_activation_architecture_map.md`.
+  - Panel (spec, quality, security, all opus) plus codex `gpt-6.1-sol`: 9 distinct Blocks, about 35 Warns. Five Blocks come from the hook-started background round (Windows handle inheritance, no bound on the apply, transport narrowing, environment-set insecure hosts, undefined due time). Four are independent of it (`GRIM_HOME` not validated, unbounded reads of repository files, stamp protocol, drift inputs miss the settings store).
+  - The ADR's own matrix ranks the prompt hook last; an independent re-derivation agreed. It is chosen only because the owner's decisions make it a requirement.
+  - The fix pass waits on an owner scope decision: keep the background round, or cut it and `auto` from the first version.
+  - A defect in shipped grim surfaced, independent of this ADR: credential transport for a registry that only a project file declares insecure. Recorded here by class only; it needs its own bugfix before the ADR text is published.
+  **Pitfall:** `codex exec -m gpt-6.1-sol --sandbox read-only "<prompt>" < /dev/null` completed in one run and found six Blocks no native seat had; check its stdout for `REVIEW COMPLETE`.
+  **Pitfall:** a reviewer that scores the trade-off matrix before reading the ADR's scores is what showed the matrix decides nothing.
+
+- **Discussion drained (2026-11-11, → architect):**
+  `.agents/discussions/shell-activation.md`. The feature is a shell activation line, `grim shell init <shell>` (working name), for bash, zsh, fish and PowerShell 7 and 5.1.
+  - It registers the existing static completions and installs a prompt hook. An idle prompt spawns no process, and the prompt never waits on the network.
+  - Lock drift in a project prints a notice only. Rematerializing after a checkout is a documented git-hook recipe plus a fast no-op `grim install`.
+  - Update notices are computed locally from a new per-reference cache that `grim status --check` writes. The existing tag cache under `$GRIM_HOME/tags/` stays untouched.
+  - One `options.*` key sets the mode: `none`, `notify`, `prompt`, `auto`, default `notify`. `prompt` and `auto` act on global scope only, and a project file can only narrow.
+  - Index-derived update checks are deferred until the indexer publishes a digest per tag.
+  Research: `.agents/research/research_shell_activation_*.md` (3 files).
+  **Pitfall:** the tag cache holds what the last resolving command saw, so it equals the lock pin and can never show that something newer exists.
 
 - **Active plan (2026-11-10, hex-plan high, goal loop `.agents/goals/issue-sweep.md`):**
   `.agents/plans/plan_issue_sweep.md`, State `review`, Next `/hex-finalize` (execute pass and review call 1 done 2026-11-10, two fix rounds, PD-30…PD-41; open items in the plan's § Review record), branch `hex/issue-sweep` (checkout `/home/mherwig/.herdr/worktrees/grimoire/uno`). Sixteen issues, one commit each: #342, #338, #317, #316, #315, #312, #311, #306, #305, #301, #300, #299, then #335, #333, #341, then #336. C-001…C-063, S-001…S-020, PD-1…PD-29. Spec review: approve with findings, 6 Warn, all fixed in one round. Evidence: `.agents/research/research_issue_sweep_discovery.md`, `research_claude_settings_bom.md`.
