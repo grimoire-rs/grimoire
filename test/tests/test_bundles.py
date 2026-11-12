@@ -130,6 +130,27 @@ def test_direct_declaration_wins_over_bundle(
     assert direct_member.digest in cr["pinned"]
 
 
+def test_direct_declaration_from_another_publisher_warns(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The direct declaration replaces a bundle member that another repository
+    # publishes under the same name. It wins by design, and says so.
+    bundle_member = _member_skill(f"{unique_repo}/acme", "code-review", body="bundle")
+    direct_member = _member_skill(f"{unique_repo}/other", "code-review", body="direct")
+    bundle = make_bundle(
+        f"{unique_repo}/stack",
+        [("skill", "code-review", bundle_member.fq)],
+        tag="1.0.0",
+    )
+    write_config(project_dir, bundles={"stack": bundle.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    result = runner.run("add", "--no-install", direct_member.fq)
+
+    assert "the direct declaration wins" in result.stderr
+
+
 def test_agreeing_bundles_coalesce(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

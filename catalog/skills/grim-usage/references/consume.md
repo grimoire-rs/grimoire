@@ -265,8 +265,11 @@ A dev-install refuses (exit 64) when the local artifact's own
 `(kind, name)` — a skill's frontmatter `name`, or a rule/agent file's
 stem — already matches a binding declared in `grimoire.toml`: remove the
 declaration, or dev-install the local artifact under a different name or
-`--kind`, before retrying. Confirm the current flag set with
-`grim install --help`.
+`--kind`, before retrying. A name the lock installs through a bundle or a
+dependency refuses the same way, and so does a `grim add` that would bring
+in a dev-installed name. A plain `grim install` that meets a dev record
+under a locked name exits 64 too; `--force` replaces the local copy.
+Confirm the current flag set with `grim install --help`.
 
 ## Updating
 

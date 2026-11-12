@@ -435,6 +435,18 @@ async fn install_pass<M: ArtifactMaterializer>(
         .map(|a| (a, a.kind))
         .collect();
 
+    // Ahead of the first write: past it a refused name leaves a half-applied run.
+    if let Some(row) = dev_collision(&work, state, intent, &force, target) {
+        return InstallRun {
+            items: vec![row],
+            settings: SettingsOutcome::default(),
+            abandoned: Vec::new(),
+            retained: Vec::new(),
+            halted: true,
+            kept_beside: BTreeSet::new(),
+        };
+    }
+
     // Loaded once per run for the cross-scope shadow check (one small
     // JSON read); `None` when the other scope has no readable state.
     let other_scope = other_scope_state(target, roots);
@@ -561,6 +573,43 @@ async fn install_pass<M: ArtifactMaterializer>(
         halted: false,
         kept_beside,
     }
+}
+
+/// The first work item whose record sits on the other side of the dev marker.
+///
+/// A dev install and a locked artifact share one `(kind, name)` record and one
+/// destination, so installing either over the other replaces its files without
+/// a word. Dev over dev and declared over declared are ordinary reinstalls.
+/// `--force` lets a declared install replace the dev copy. It never lets a dev
+/// install replace a locked artifact: the next declared install would refuse.
+fn dev_collision(
+    work: &[(&LockedArtifact, ArtifactKind)],
+    state: &InstallState,
+    intent: InstallIntent,
+    force: &ForceScope,
+    target: &InstallTarget,
+) -> Option<ArtifactInstall> {
+    let (artifact, kind) = work.iter().find(|(artifact, kind)| {
+        state.get(*kind, &artifact.name).is_some_and(|record| {
+            record.dev != intent.is_dev() && !(record.dev && force.overrides(*kind, &artifact.name))
+        })
+    })?;
+    let reference = ArtifactRef {
+        kind: *kind,
+        name: artifact.name.clone(),
+        source: artifact.source.to_declared(),
+    };
+    let held = if intent.is_dev() {
+        InstallErrorKind::HeldByLock
+    } else {
+        InstallErrorKind::HeldByDevInstall
+    };
+    let error = InstallError::with_reference(reference.clone(), held).naming(target.grim());
+    Some(ArtifactInstall {
+        reference,
+        target: None,
+        result: Err(error.into()),
+    })
 }
 
 /// Best-effort mid-run persist of install state, after every artifact.

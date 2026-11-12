@@ -296,6 +296,17 @@ async fn dev_install(
             )),
         )));
     }
+    // A bundle member or a dependency is in the lock, never in `scope.set`,
+    // and has no install record until its first install.
+    let locked = super::lock::load_previous(&scope.lock_path)?
+        .is_some_and(|lock| lock.iter_artifacts().any(|a| a.kind == kind && a.name == name));
+    if locked {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            crate::command::command_error::CommandError::ConfigUsage(format!(
+                "'{name}' is already installed through a bundle or a dependency; rename the local {kind} before dev-installing"
+            )),
+        )));
+    }
 
     // Record the source config-dir-relative (like `grim add`) so status
     // and update resolve it against the same anchor; an absolute CLI path

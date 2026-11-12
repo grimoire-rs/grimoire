@@ -87,6 +87,13 @@ impl std::fmt::Display for InstallError {
                 _,
             ) => write!(f, "; run {relock}"),
             (InstallErrorKind::StaleDependencies { .. }, _) => write!(f, "; run `{grim} lock`"),
+            (InstallErrorKind::HeldByDevInstall, _) => write!(f, "; rerun with --force to replace it"),
+            (InstallErrorKind::HeldByLock, Some(r)) => write!(
+                f,
+                "; rename the local {} or run `{}` first",
+                r.kind,
+                grim.uninstall("", r.kind, &r.name)
+            ),
             _ => Ok(()),
         }
     }
@@ -271,6 +278,17 @@ pub enum InstallErrorKind {
         kind: crate::oci::ArtifactKind,
         reason: String,
     },
+
+    /// A declared install met a dev-install record under the same
+    /// `(kind, name)`. [`InstallError`] prints the remedy.
+    #[error("a dev-installed local copy holds this name")]
+    HeldByDevInstall,
+
+    /// A dev-install met the record of a declared artifact, a bundle member
+    /// or a dependency under the same `(kind, name)`. [`InstallError`] prints
+    /// the remedy.
+    #[error("this name is already installed from a declared source")]
+    HeldByLock,
 }
 
 /// What a value refused for its content is: true whether grim never wrote it

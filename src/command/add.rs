@@ -210,7 +210,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // `grimoire.toml` or a bundle member, which never pass through `add`.
     refuse_bad_binding_name(kind, &name)?;
     // Keep the dev-record keyspace disjoint from declared bindings (C2).
-    reject_dev_install_collision(&scope, kind, &name)?;
+    reject_dev_install_collision(&scope, [(kind, name.as_str())])?;
 
     let mut set = scope.set.clone();
     let redeclared = declare(&mut set, kind, name.clone(), id.clone());
@@ -393,6 +393,16 @@ async fn write_config_and_relock(
             global,
         )
         .await?;
+        // The relock is what names the bundle members and dependencies an add brings.
+        let added = Added::new(
+            &scope.set,
+            previous.as_ref(),
+            &target.lock,
+            declaration.kind,
+            declaration.name,
+        );
+        let brought = added.newly.iter().map(|(kind, name)| (*kind, name.as_str()));
+        reject_dev_install_collision(scope, brought)?;
         super::grim(lock_io::save(&scope.lock_path, &target.lock, previous.as_ref()))?;
         anyhow::Ok(target)
     }
@@ -562,8 +572,8 @@ pub(crate) fn restore_config(path: &std::path::Path, original: Option<&[u8]>, gr
     }
 }
 
-/// Reject a declaration whose `(kind, name)` collides with an existing
-/// `dev:true` install record.
+/// Reject a declaration when any `(kind, name)` it declares or brings in
+/// collides with an existing `dev:true` install record.
 ///
 /// A `grim install <path>` dev-install writes an install record with no
 /// declaration, keyed by the artifact's intrinsic `(kind, name)`. Declarations
@@ -572,10 +582,9 @@ pub(crate) fn restore_config(path: &std::path::Path, original: Option<&[u8]>, gr
 /// a later uninstall would drop a binding the dev install never owned (C2, the
 /// reverse-order twin of the guard in [`crate::command::install::dev_install`]).
 /// Keeping the two keyspaces disjoint at both creation paths closes it.
-fn reject_dev_install_collision(
+fn reject_dev_install_collision<'a>(
     scope: &scope_resolution::ResolvedScope,
-    kind: ArtifactKind,
-    name: &str,
+    declared: impl IntoIterator<Item = (ArtifactKind, &'a str)>,
 ) -> anyhow::Result<()> {
     // Fail CLOSED on an unreadable/corrupt state file: swallowing the error
     // (`.ok()`) would skip the guard and re-open the very declaration-loss path
@@ -584,8 +593,10 @@ fn reject_dev_install_collision(
     // mirroring the mutating commands' `load_state` path.
     let state =
         super::grim(scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
-    let collides = state.get(kind, name).is_some_and(|record| record.dev);
-    if collides {
+    let collision = declared
+        .into_iter()
+        .find(|(kind, name)| state.get(*kind, name).is_some_and(|record| record.dev));
+    if let Some((kind, name)) = collision {
         return Err(anyhow::Error::from(crate::error::Error::from(
             CommandError::ConfigUsage(format!(
                 "'{name}' is already dev-installed as a local {kind}; run `{} uninstall {kind} {name}` or dev-install under a different name before declaring it",
@@ -639,7 +650,7 @@ async fn add_path_source(
     // refuses loudly.
     refuse_bad_binding_name(kind, &name)?;
     // Keep the dev-record keyspace disjoint from declared bindings (C2).
-    reject_dev_install_collision(scope, kind, &name)?;
+    reject_dev_install_collision(scope, [(kind, name.as_str())])?;
 
     let mut set = scope.set.clone();
     if let Some(existing) = declare(&mut set, kind, name.clone(), declared.clone())

@@ -906,6 +906,13 @@ declared binding it never actually owned, silently losing config the
 dev-install never touched. The check runs before the local path is
 installed or recorded, so the existing declaration is left untouched.
 
+The same refusal covers a name the lock installs through a bundle or a
+dependency, in both directions. A dev-install of that name exits 64. So does
+a `grim add` whose bundle members or dependencies include a dev-installed
+name, with `grimoire.toml` left as it was. A `grim install` that would write
+a locked artifact over a dev record also exits 64 and installs nothing.
+Rerun it with `--force` to replace the local copy.
+
 ## grim update {#update}
 
 `grim update [names…]` re-resolves floating tags, rolls the lock forward, and

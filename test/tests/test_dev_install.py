@@ -467,3 +467,171 @@ def test_dev_record_survives_update_prune_with_real_orphan(
     dev = [e for e in items if e["name"] == "dev-skill"]
     assert dev, "dev record must survive the prune pass"
     assert dev[0]["source"].endswith("(dev)")
+
+
+# A dev-install and an artifact the lock brings in through a bundle or a
+# dependency share one `(kind, name)` install key. Whichever ran last used to
+# replace the other, exit 0, no message.
+
+
+def _local_review(project_dir: Path) -> Path:
+    d = project_dir / "local" / "review"
+    _write(d / "SKILL.md", "---\nname: review\ndescription: Local.\n---\n# LOCAL\n")
+    return d
+
+
+def _published_review(unique_repo: str):
+    from src.helpers import make_artifact
+
+    return make_artifact(
+        f"{unique_repo}/review",
+        "skill",
+        {"review/SKILL.md": "---\nname: review\ndescription: Published.\n---\n# PUBLISHED\n"},
+        tag="1",
+    )
+
+
+def _review_bundle(unique_repo: str):
+    from src.helpers import make_bundle
+
+    member = _published_review(unique_repo)
+    return make_bundle(f"{unique_repo}/stack", [("skill", "review", member.fq)], tag="1")
+
+
+def _installed_review(project_dir: Path) -> str:
+    rendered = project_dir / ".claude" / "skills" / "review" / "SKILL.md"
+    return rendered.read_text(encoding="utf-8")
+
+
+def _dev_names(project_dir: Path) -> list[str]:
+    state = project_dir / ".grimoire" / "state.json"
+    records = json.loads(state.read_text(encoding="utf-8"))["records"]
+    # A record that is not a dev install carries no `dev` key.
+    return [r["name"] for r in records if r.get("dev")]
+
+
+def _workspace(project_dir: Path) -> None:
+    from src.helpers import write_config
+
+    write_config(project_dir)
+    # `grim add` has no --client; a client dir makes claude the detected target.
+    (project_dir / ".claude").mkdir(parents=True, exist_ok=True)
+
+
+def test_dev_install_over_bundle_member_is_rejected(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    _workspace(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("add", _review_bundle(unique_repo).fq)
+    assert "# PUBLISHED" in _installed_review(project_dir)
+
+    result = runner.run("install", str(_local_review(project_dir)), "--client", "claude", check=False)
+
+    assert result.returncode == 64, result.stderr
+    assert "# PUBLISHED" in _installed_review(project_dir)
+    assert not _dev_names(project_dir)
+
+
+def test_dev_install_over_dependency_is_rejected(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    from src.helpers import make_dependent
+
+    _workspace(project_dir)
+    _published_review(unique_repo)
+    planner = make_dependent(
+        f"{unique_repo}/planner",
+        "1",
+        "skill",
+        {"planner/SKILL.md": "---\nname: planner\ndescription: Plans.\n---\n# planner\n"},
+        [("skill", "review", "./review:1")],
+    )
+    runner = grim_at(project_dir)
+    runner.run("add", planner.fq)
+    assert "# PUBLISHED" in _installed_review(project_dir)
+
+    result = runner.run("install", str(_local_review(project_dir)), "--client", "claude", check=False)
+
+    assert result.returncode == 64, result.stderr
+    assert "# PUBLISHED" in _installed_review(project_dir)
+    assert not _dev_names(project_dir)
+
+
+def test_dev_install_over_locked_uninstalled_member_is_rejected(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The member is locked but was never installed, so no install record
+    # exists yet: the lock is the only thing that names it.
+    _workspace(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("add", "--no-install", _review_bundle(unique_repo).fq)
+
+    result = runner.run("install", str(_local_review(project_dir)), "--client", "claude", check=False)
+
+    assert result.returncode == 64, result.stderr
+    assert not (project_dir / ".claude" / "skills" / "review").exists()
+
+
+def test_add_bundle_over_dev_install_member_is_rejected(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    _workspace(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install", str(_local_review(project_dir)), "--client", "claude")
+    cfg_before = (project_dir / "grimoire.toml").read_bytes()
+    lock_before = (project_dir / "grimoire.lock").read_bytes()
+
+    result = runner.run("add", _review_bundle(unique_repo).fq, check=False)
+
+    assert result.returncode == 64, result.stderr
+    assert (project_dir / "grimoire.toml").read_bytes() == cfg_before
+    assert (project_dir / "grimoire.lock").read_bytes() == lock_before
+    assert "# LOCAL" in _installed_review(project_dir)
+
+
+def test_install_refuses_to_replace_dev_record(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # A hand-edited grimoire.toml never passes through `grim add`, so the
+    # installer itself has to refuse the replacement.
+    from src.helpers import write_config
+
+    _workspace(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("install", str(_local_review(project_dir)), "--client", "claude")
+
+    write_config(project_dir, bundles={"stack": _review_bundle(unique_repo).fq})
+    runner.run("lock")
+    result = runner.run("install", "--client", "claude", check=False)
+
+    assert result.returncode == 64, result.stderr
+    assert "# LOCAL" in _installed_review(project_dir)
+    assert _dev_names(project_dir) == ["review"]
+
+    # The refusal names its way out, and that way works.
+    assert "--force" in result.stderr
+    runner.run("install", "--client", "claude", "--force")
+    assert "# PUBLISHED" in _installed_review(project_dir)
+    assert not _dev_names(project_dir)
+
+
+def test_dev_install_over_installed_record_without_lock_entry_is_rejected(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The bundle left the lock but its member's files and record are still
+    # installed, so only the installer can see the collision.
+    from src.helpers import write_config
+
+    _workspace(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("add", _review_bundle(unique_repo).fq)
+    write_config(project_dir)
+    runner.run("lock")
+
+    result = runner.run("install", str(_local_review(project_dir)), "--client", "claude", check=False)
+
+    assert result.returncode == 64, result.stderr
+    assert "# PUBLISHED" in _installed_review(project_dir)
+    assert not _dev_names(project_dir)

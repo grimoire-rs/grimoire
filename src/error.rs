@@ -676,6 +676,8 @@ fn classify_install(err: &InstallError) -> Classification {
             ..
         } => Classification::new(ExitCode::DataError),
         InstallErrorKind::InvalidBindingName { .. } => Classification::new(ExitCode::UsageError),
+        // The code `grim add` and `grim install <path>` exit with for the same collision.
+        InstallErrorKind::HeldByDevInstall | InstallErrorKind::HeldByLock => Classification::new(ExitCode::UsageError),
     }
 }
 
@@ -1015,6 +1017,8 @@ mod tests {
                 ExitCode::UsageError,
                 None,
             ),
+            (InstallErrorKind::HeldByDevInstall, ExitCode::UsageError, None),
+            (InstallErrorKind::HeldByLock, ExitCode::UsageError, None),
         ];
         for (kind, expected_exit, expected_reason) in cases {
             let err: anyhow::Error = Error::from(InstallError::without_reference(kind)).into();
