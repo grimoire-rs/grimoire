@@ -63,6 +63,13 @@ pub struct TuiArgs {
     /// key cycles through the same orders live.
     #[arg(long, value_name = "ORDER")]
     pub sort: Option<crate::catalog::SortMode>,
+
+    /// Color theme of the browser: `terminal` follows the terminal's own
+    /// palette, any other value is a built-in theme. Overrides
+    /// `[options.tui] theme`; omitted, the configured theme applies, else
+    /// `terminal`.
+    #[arg(long, value_name = "NAME")]
+    pub theme: Option<crate::config::declaration::TuiTheme>,
 }
 
 /// Run `grim tui`.
@@ -140,6 +147,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         (Some(_), None) => crate::catalog::SortMode::natural_order(sort),
         _ => resolved_options.sort_order,
     };
+    crate::tui::theme::init(args.theme.unwrap_or(resolved_options.theme), truecolor_supported());
 
     let clients_global = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let tui_ctx = TuiContext {
@@ -288,6 +296,16 @@ fn selected_clients(
         Ok(target) => target.clients().to_vec(),
         Err(_) => crate::install::target::active_clients(workspace, scope, global_clients),
     }
+}
+
+/// Whether the terminal renders 24-bit colour. Windows consoles do but set no
+/// `COLORTERM`, so they are assumed.
+fn truecolor_supported() -> bool {
+    cfg!(windows)
+        || std::env::var("COLORTERM").is_ok_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("truecolor") || v.contains("24bit")
+        })
 }
 
 #[cfg(test)]

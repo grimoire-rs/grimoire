@@ -87,6 +87,7 @@ def test_tui_options_preserved_through_add_remove_round_trip(
         tree_separators=["/", "-"],
         sort="rating",
         sort_order="asc",
+        theme="light",
     )
 
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
@@ -110,6 +111,7 @@ def test_tui_options_preserved_through_add_remove_round_trip(
     assert 'sort = "rating"' in cfg_after_add and 'sort_order = "asc"' in cfg_after_add, (
         "the sort keys must be preserved after grim add"
     )
+    assert 'theme = "light"' in cfg_after_add, "theme must be preserved after grim add"
 
     # `grim remove` also re-writes via write_config — verify again.
     runner.json("remove", "skill", "tui-options-probe")
@@ -202,4 +204,32 @@ def test_invalid_tree_separator_is_rejected(
     assert result.returncode == 78, (
         f"invalid tree_separators entry must exit 78 (ConfigError / TreeSeparatorInvalid), "
         f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    )
+
+
+def test_tui_theme_flag_rejects_unknown_name(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``grim tui --theme bogus`` is a clap usage error (exit 64), parsed
+    before the non-TTY guard, so no terminal is needed."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    result = runner.run("tui", "--theme", "bogus", check=False)
+    assert result.returncode == 64, (
+        f"unknown theme must exit 64 (UsageError); got {result.returncode}: {result.stderr.strip()}"
+    )
+    assert "terminal" in result.stderr and "light" in result.stderr, result.stderr
+
+
+def test_unknown_tui_theme_in_config_is_rejected(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """A ``theme`` value outside the built-in set fails config parsing (78)."""
+    _write_config_with_tui(project_dir, theme="solarized")
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+    result = runner.run("status", check=False)
+    assert result.returncode == 78, (
+        f"unknown theme must exit 78 (ConfigError); got {result.returncode}: {result.stderr.strip()}"
     )

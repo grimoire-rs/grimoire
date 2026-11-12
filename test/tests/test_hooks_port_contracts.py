@@ -143,7 +143,8 @@ def test_c153_config_list_adds_the_experimental_hooks_row(grim_at, project_dir: 
     `options.search_min_relevance` and before the `plugin.*` table keys — a
     boolean defaulting to false, with the design record's description
     verbatim. `options.experimental.settings` follows at row 12, appended after
-    it. No other row is added, removed or reordered."""
+    it, and `options.tui.theme` at row 13. No other row is added, removed or
+    reordered."""
     write_config(project_dir)
     runner = grim_at(project_dir)
     items = runner.json("config", "list", "--all")["items"]
@@ -159,6 +160,7 @@ def test_c153_config_list_adds_the_experimental_hooks_row(grim_at, project_dir: 
         "options.tui.sort",
         "options.tui.sort_order",
         "options.search_min_relevance",
+        "options.tui.theme",
         "plugin.name",
         "plugin.description",
         "plugin.version",

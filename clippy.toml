@@ -1,0 +1,4 @@
+disallowed-types = [
+  { path = "ratatui::style::Color", reason = "TUI colours live in src/tui/theme.rs; use a Theme role" },
+  { path = "ratatui::style::Stylize", reason = "TUI colours live in src/tui/theme.rs; use a Theme role" },
+]

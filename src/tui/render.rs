@@ -12,13 +12,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::config::registry_resolve::RowSource;
 use crate::config::scope::Invocation;
+use crate::tui::theme::{self, ScopeTone};
 
 use super::confirm;
 use super::detail::{
@@ -726,17 +727,18 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
 ///
 /// Three tiers, so the strip answers two questions at a glance: which tab am I
 /// on, and which of the others have anything to show. Styling reuses the
-/// catalog list's own selection idiom — a dim background block plus bold cyan —
+/// catalog list's own selection idiom — the theme's selection style —
 /// rather than an underline, which renders inconsistently across terminals and
 /// reads as a link.
 fn tab_strip_line(tabs: &[(super::detail::DetailTab, bool)], active: super::detail::DetailTab) -> Line<'static> {
+    let t = theme::current();
     if tabs.is_empty() {
         // The leading rule belongs to the frame, so it takes the border colour
-        // — bundling it into the accent span painted a stray cyan dash in front
-        // of the title.
+        // — bundling it into the accent span painted a stray accent dash in
+        // front of the title.
         return Line::from(vec![
-            Span::styled("\u{2500}", Style::default().fg(Color::Blue)),
-            Span::styled("Detail", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("\u{2500}", t.border),
+            Span::styled("Detail", t.accent),
         ]);
     }
     let mut spans = Vec::with_capacity(tabs.len() * 2 + 1);
@@ -745,19 +747,16 @@ fn tab_strip_line(tabs: &[(super::detail::DetailTab, bool)], active: super::deta
         // strip starts flush against the block's corner instead of floating.
         spans.push(Span::styled(
             if i == 0 { "\u{2500}" } else { "\u{2500}\u{2500}" },
-            Style::default().fg(Color::Blue),
+            t.border,
         ));
         let style = if *tab == active {
-            Style::default()
-                .bg(Color::Indexed(236))
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            t.selection
         } else if *live {
-            Style::default().fg(Color::Gray)
+            t.tab_inactive
         } else {
             // Nothing published behind it. Still selectable — landing on it
             // says so, which beats a key that does nothing on most of a catalog.
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+            t.muted_dim
         };
         spans.push(Span::styled(format!(" {} ", tab.label()), style));
     }
@@ -776,7 +775,7 @@ fn tab_hint_line(tabs: &[(super::detail::DetailTab, bool)]) -> Line<'static> {
     }
     Line::from(Span::styled(
         format!("\u{2500} {TAB_HINT} \u{2500}"),
-        Style::default().fg(Color::DarkGray),
+        theme::current().muted,
     ))
 }
 
@@ -1260,7 +1259,8 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     };
     let legend_chunk = chunks[3];
 
-    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let t = theme::current();
+    let accent = t.accent;
 
     // Title row: the title stays centered; the selected clients and the
     // transient status each get only the room beside it, measured in display
@@ -1268,16 +1268,13 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     // painted over the title.
     let (clients_area, title_area, status_area) = title_row_areas(chunks[0], model.title.width());
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            model.title.clone(),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        ))),
+        Paragraph::new(Line::from(Span::styled(model.title.clone(), t.title))),
         title_area,
     );
     f.render_widget(
         Paragraph::new(Span::styled(
             ellipsize(&model.status, status_area.width.into()),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            t.status_message,
         ))
         .alignment(Alignment::Right),
         status_area,
@@ -1285,7 +1282,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     f.render_widget(
         Paragraph::new(Span::styled(
             ellipsize(&model.clients, clients_area.width.into()),
-            Style::default().fg(Color::DarkGray),
+            t.muted,
         )),
         clients_area,
     );
@@ -1298,36 +1295,32 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
 
     // Scope box: just the active mode in caps. The toggle key lives in
     // the legend hint and the help overlay, not here.
-    let (scope_text, scope_color) = match model.scope.as_str() {
-        "project" => ("PROJECT MODE", Color::Green),
-        "global" => ("GLOBAL MODE", Color::Magenta),
-        _ => ("— no scope —", Color::DarkGray),
+    let (scope_text, scope_tone) = match model.scope.as_str() {
+        "project" => ("PROJECT MODE", ScopeTone::Project),
+        "global" => ("GLOBAL MODE", ScopeTone::Global),
+        _ => ("— no scope —", ScopeTone::None),
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             scope_text,
-            Style::default().fg(scope_color).add_modifier(Modifier::BOLD),
+            t.scope(scope_tone).add_modifier(Modifier::BOLD),
         )))
         .alignment(Alignment::Center)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(scope_color))
+                .border_style(t.scope(scope_tone))
                 .title(Span::styled("Scope", accent)),
         ),
         search_row[0],
     );
 
-    let search_style = if model.search_placeholder {
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
-    } else {
-        Style::default().fg(Color::White)
-    };
+    let search_style = if model.search_placeholder { t.hint } else { t.text };
     f.render_widget(
         Paragraph::new(Span::styled(model.search.clone(), search_style)).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
+                .border_style(t.border)
                 .title(Span::styled("Search", accent)),
         ),
         search_row[1],
@@ -1409,33 +1402,22 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             "  "
         };
         // A: registry span (flat multi-registry mode only).
-        let mut spans = vec![Span::styled(
-            mark_glyph.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )];
+        let mut spans = vec![Span::styled(mark_glyph.to_string(), t.accent)];
         if model.show_registry_column {
             // `fit`, not a pad: a label longer than the column pushed every
             // cell to its right out of alignment on that one row.
             let reg_label = fit(r.registry.as_deref().unwrap_or(""), W_REGISTRY);
-            spans.push(Span::styled(
-                format!("{reg_label}  "),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(format!("{reg_label}  "), t.column_registry));
         }
         spans.extend([
-            Span::styled(format!("{}  ", r.columns[0]), Style::default().fg(Color::White)),
-            Span::styled(
-                format!("{}  ", r.columns[1]),
-                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{}  ", r.columns[2]), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{}  ", r.columns[3]), Style::default().fg(Color::Green)),
-            Span::styled(format!("{}  ", r.columns[4]), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{}  ", r.columns[0]), t.text),
+            Span::styled(format!("{}  ", r.columns[1]), t.column_kind),
+            Span::styled(format!("{}  ", r.columns[2]), t.column_version),
+            Span::styled(format!("{}  ", r.columns[3]), t.column_rating),
+            Span::styled(format!("{}  ", r.columns[4]), t.column_downloads),
             Span::styled(
                 r.columns[5].clone(),
-                Style::default()
-                    .fg(color_for(r.status_color))
-                    .add_modifier(Modifier::BOLD),
+                t.status(r.status_color).add_modifier(Modifier::BOLD),
             ),
         ]);
         // Deprecation rides in the Status column: a space-separated yellow `†`
@@ -1444,10 +1426,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         // glyph, not `† deprecated`: the word cost every row 11 blank columns
         // of reserve. CATALOG_WIDTH reserves the glyph so the border never clips it.
         if r.deprecated {
-            spans.push(Span::styled(
-                " †".to_string(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(" †".to_string(), t.deprecated_bold));
         }
         items.push(ListItem::new(Line::from(spans)));
     }
@@ -1456,15 +1435,11 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     // spending a content row, and it is absent until the user changes it.
     let mut catalog_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue))
+        .border_style(t.border)
         .title(Span::styled("Catalog", accent));
     if !model.sort_label.is_empty() {
         catalog_block = catalog_block.title_top(
-            Line::from(Span::styled(
-                format!(" {} ", model.sort_label),
-                Style::default().fg(Color::DarkGray),
-            ))
-            .alignment(Alignment::Right),
+            Line::from(Span::styled(format!(" {} ", model.sort_label), t.muted)).alignment(Alignment::Right),
         );
     }
     let catalog_inner = catalog_block.inner(list_area);
@@ -1477,12 +1452,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     let rows_area = catalog_rows[1];
     let list = List::new(items)
         .highlight_symbol("")
-        .highlight_style(
-            Style::default()
-                .bg(Color::Indexed(236))
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(t.selection)
         // Half the viewport of padding keeps the selection centered while
         // the rows scroll under it; ratatui shrinks the padding at either end
         // so the cursor walks to the edge instead of the list over-scrolling.
@@ -1495,7 +1465,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
 
     let detail_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue))
+        .border_style(t.border)
         // The tabs ARE the pane's title: they name what is showing and sit in
         // the top border, so they cost no content row and cannot be mistaken
         // for content. A pane beside a block titled "Catalog" does not also
@@ -1509,52 +1479,29 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         .iter()
         .map(|l| match l {
             DetailLine::Blank => Line::from(""),
-            DetailLine::Identifier(s) => Line::from(Span::styled(
-                s.clone(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ))
-            .alignment(Alignment::Center),
-            DetailLine::SectionLabel(label) => Line::from(Span::styled(
-                (*label).to_string(),
-                Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED),
-            )),
+            DetailLine::Identifier(s) => Line::from(Span::styled(s.clone(), t.accent)).alignment(Alignment::Center),
+            DetailLine::SectionLabel(label) => Line::from(Span::styled((*label).to_string(), t.detail_section)),
             DetailLine::MetaEntry { label, value } => Line::from(vec![
-                Span::styled(
-                    format!("{label} "),
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(value.clone(), Style::default().fg(Color::White)),
+                Span::styled(format!("{label} "), t.detail_label),
+                Span::styled(value.clone(), t.text),
             ]),
-            DetailLine::Text(s) => Line::from(Span::styled(s.clone(), Style::default().fg(Color::White))),
+            DetailLine::Text(s) => Line::from(Span::styled(s.clone(), t.text)),
             // Companion-document lines. One style axis, so the heading ramp is
             // emphasis and color, never indentation — the pane is too narrow to
             // spend columns on nesting.
-            DetailLine::Heading { level, text } => Line::from(Span::styled(
-                text.clone(),
-                match level {
-                    1 => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    2 => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED),
-                },
-            )),
+            DetailLine::Heading { level, text } => Line::from(Span::styled(text.clone(), t.heading(*level))),
             DetailLine::Bullet(s) => Line::from(vec![
-                Span::styled(BULLET_PREFIX, Style::default().fg(Color::Blue)),
-                Span::styled(s.clone(), Style::default().fg(Color::White)),
+                Span::styled(BULLET_PREFIX, t.bullet),
+                Span::styled(s.clone(), t.text),
             ]),
-            DetailLine::Code(s) => Line::from(Span::styled(
-                format!("{CODE_PREFIX}{s}"),
-                Style::default().fg(Color::Green),
-            )),
+            DetailLine::Code(s) => Line::from(Span::styled(format!("{CODE_PREFIX}{s}"), t.code)),
             // Painted to the pane's inner width, which is why `detail_line_text`
             // measures a rule as empty: it is exactly one row, never wrapped.
             DetailLine::Rule => Line::from(Span::styled(
                 "─".repeat(usize::from(detail_area.width.saturating_sub(2))),
-                Style::default().fg(Color::DarkGray),
+                t.rule,
             )),
-            DetailLine::Notice(s) => Line::from(Span::styled(
-                s.clone(),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-            )),
+            DetailLine::Notice(s) => Line::from(Span::styled(s.clone(), t.hint)),
         })
         .collect();
     f.render_widget(
@@ -1582,13 +1529,13 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             .split(legend_chunk);
         f.render_widget(Paragraph::new(legend_line(&model.truncation_hint)), legend_row[0]);
         f.render_widget(
-            Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))).alignment(Alignment::Right),
+            Paragraph::new(Span::styled(hint, t.key_hint)).alignment(Alignment::Right),
             legend_row[1],
         );
     } else {
         // Too narrow for the glyph legend — keep only the key hint.
         f.render_widget(
-            Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))).alignment(Alignment::Right),
+            Paragraph::new(Span::styled(hint, t.key_hint)).alignment(Alignment::Right),
             legend_chunk,
         );
     }
@@ -1602,6 +1549,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     if let Some(c) = &model.confirm {
         draw_confirm(f, c);
     }
+    theme::paint_canvas(f.buffer_mut());
 }
 
 /// The batch, init or settings popup that is open: no forced action, so it
@@ -1734,19 +1682,17 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     // The action cannot be chosen while the body is unread (the forced-retry
     // dialog) or while the screen clips it: draw it dimmed, never chosen.
     let locked = !c.notice && (c.locked || layout.narrow);
-    // A solid cyan fill plus a pointer, not the list's subtle 236 background:
-    // on a popup with no other cue, a faint highlight reads as "nothing is
+    // A strong fill plus a pointer, not the list's subtle selection: on a
+    // popup with no other cue, a faint highlight reads as "nothing is
     // selected", which is exactly the doubt a confirm prompt cannot leave.
+    let t = theme::current();
     let button = |label: &str, chosen: bool, dimmed: bool| {
         let style = if chosen && !dimmed {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            t.button_selected
         } else if dimmed {
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+            t.button_dimmed
         } else {
-            Style::default().fg(Color::DarkGray)
+            t.button
         };
         Span::styled(confirm::button_label(label, chosen && !dimmed), style)
     };
@@ -1763,8 +1709,8 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         .rows
         .iter()
         .map(|row| {
-            let color = if row.message { Color::White } else { Color::DarkGray };
-            Line::from(Span::styled(row.text.clone(), Style::default().fg(color)))
+            let style = if row.message { t.text } else { t.muted };
+            Line::from(Span::styled(row.text.clone(), style))
         })
         .collect();
 
@@ -1776,17 +1722,14 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(t.border_confirm)
         .padding(Padding::new(
             confirm::PAD,
             confirm::PAD,
             confirm::PAD_ROWS,
             confirm::PAD_ROWS,
         ))
-        .title(Span::styled(
-            format!(" {} ", c.title),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(format!(" {} ", c.title), t.title));
     // The buttons keep the bottom rows of their own, so no amount of body text
     // can push the choice the user is about to confirm off the popup.
     let inner = block.inner(area);
@@ -1818,10 +1761,7 @@ fn draw_confirm(f: &mut Frame, c: &ConfirmView) {
         (false, true, false) => "↑↓ scroll · enter confirm · esc cancel",
         (false, false, false) => "enter confirm · esc cancel",
     };
-    f.render_widget(
-        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
-        hint_area,
-    );
+    f.render_widget(Paragraph::new(Span::styled(hint, t.key_hint)), hint_area);
 }
 
 /// What the key hint says while the action cannot be chosen: what unlocks it.
@@ -1838,29 +1778,24 @@ fn locked_hint(layout: &confirm::Layout) -> &'static str {
 /// A centered version-picker popup: the tag list (highest version near the
 /// top), the current pin marked, the selection highlighted.
 fn draw_picker(f: &mut Frame, p: &PickerView) {
+    let t = theme::current();
     let body: Vec<ListItem> = if p.loading {
-        vec![ListItem::new(Line::from(Span::styled(
-            "  loading versions…",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        )))]
+        vec![ListItem::new(Line::from(Span::styled("  loading versions…", t.hint)))]
     } else {
         p.tags
             .iter()
             .enumerate()
-            .map(|(i, t)| {
-                let is_pinned = p.pinned.as_deref() == Some(t.as_str());
+            .map(|(i, tag)| {
+                let is_pinned = p.pinned.as_deref() == Some(tag.as_str());
                 let mark = if is_pinned { "● " } else { "  " };
                 let style = if i == p.selected {
-                    Style::default()
-                        .bg(Color::Indexed(236))
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    t.selection
                 } else if is_pinned {
-                    Style::default().fg(Color::Green)
+                    t.pinned
                 } else {
-                    Style::default().fg(Color::White)
+                    t.text
                 };
-                ListItem::new(Line::from(Span::styled(format!("{mark}{t}"), style)))
+                ListItem::new(Line::from(Span::styled(format!("{mark}{tag}"), style)))
             })
             .collect()
     };
@@ -1870,11 +1805,8 @@ fn draw_picker(f: &mut Frame, p: &PickerView) {
         List::new(body).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(
-                    format!(" {} ", p.title),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                )),
+                .border_style(t.border_popup)
+                .title(Span::styled(format!(" {} ", p.title), t.title)),
         ),
         area,
     );
@@ -1886,10 +1818,7 @@ fn draw_picker(f: &mut Frame, p: &PickerView) {
         height: 1,
     };
     f.render_widget(
-        Paragraph::new(Span::styled(
-            "↑↓ select · enter pin · esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Paragraph::new(Span::styled("↑↓ select · enter pin · esc cancel", t.muted)),
         hint_area,
     );
 }
@@ -1904,26 +1833,21 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
     // `pending` entirely once that state shipped — a user met a `+` glyph the
     // legend directly beneath it did not explain. Deriving it means a new
     // state cannot be added without appearing here.
+    let t = theme::current();
     let mut spans: Vec<Span<'static>> = legend_entries()
         .into_iter()
         .enumerate()
         .map(|(i, (state, _))| {
             let (glyph, label, key) = status_view(state);
             let sep = if i == 0 { "" } else { "  " };
-            Span::styled(format!("{sep}{glyph} {label}"), Style::default().fg(color_for(key)))
+            Span::styled(format!("{sep}{glyph} {label}"), t.status(key))
         })
         .collect();
     // Deprecation is orthogonal to install status (no `ColorKey`); append it
-    // as a literal yellow span so the trailing `†` indicator is explained.
-    spans.push(Span::styled(
-        "  † deprecated".to_string(),
-        Style::default().fg(Color::Yellow),
-    ));
+    // with the deprecated role so the trailing `†` indicator is explained.
+    spans.push(Span::styled("  † deprecated".to_string(), t.deprecated));
     if !truncation_hint.is_empty() {
-        spans.push(Span::styled(
-            format!("   {truncation_hint}"),
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(format!("   {truncation_hint}"), t.muted));
     }
     Line::from(spans)
 }
@@ -2011,27 +1935,19 @@ fn help_lines(grim: &Invocation) -> Vec<Line<'static>> {
     // No blank separators: a blank row here pushes the last legend entry below
     // the fold of an 80×24 terminal
     // (`help_overlay_fits_all_entries_on_standard_terminal`).
-    let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(
-        "Keybindings",
-        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-    ))];
+    let t = theme::current();
+    let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled("Keybindings", t.title))];
     // Both columns are sized to their widest key plus a two-cell gutter:
     // a fixed width silently ran the longest key (`(shift) tab`,
     // `integrity-missing`) straight into its description.
     let key_w = help_entries().iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0) + 2;
     for (k, d) in help_entries() {
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {k:<key_w$}"),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(d, Style::default().fg(Color::White)),
+            Span::styled(format!("  {k:<key_w$}"), t.accent),
+            Span::styled(d, t.text),
         ]));
     }
-    lines.push(Line::from(Span::styled(
-        "Status column",
-        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-    )));
+    lines.push(Line::from(Span::styled("Status column", t.title)));
     let legend = || {
         let lifecycle = legend_entries()
             .into_iter()
@@ -2048,9 +1964,9 @@ fn help_lines(grim: &Invocation) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {glyph} {label:<label_w$}"),
-                Style::default().fg(color_for(color)).add_modifier(Modifier::BOLD),
+                t.status(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(meaning, Style::default().fg(Color::White)),
+            Span::styled(meaning, t.text),
         ]));
     }
     lines
@@ -2071,6 +1987,7 @@ fn help_overlay_height(content_lines: usize, term_height: u16) -> u16 {
 /// the full key map shows on a standard terminal; scrolls (offset `scroll`)
 /// when the terminal is too short to fit it all.
 fn draw_help(f: &mut Frame, scroll: u16, grim: &Invocation) {
+    let t = theme::current();
     let lines = help_lines(grim);
     let full = f.area();
     let height = help_overlay_height(lines.len(), full.height);
@@ -2080,11 +1997,8 @@ fn draw_help(f: &mut Frame, scroll: u16, grim: &Invocation) {
         Paragraph::new(lines).scroll((scroll, 0)).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(
-                    " help — ↑↓/j/k scroll, any key closes ",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                )),
+                .border_style(t.border_popup)
+                .title(Span::styled(" help — ↑↓/j/k scroll, any key closes ", t.title)),
         ),
         area,
     );
@@ -2132,24 +2046,6 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - pct_x) / 2),
         ])
         .split(vert[1])[1]
-}
-
-/// Map a pure [`ColorKey`] to a concrete ratatui [`Color`]. Named ANSI
-/// colors only (not 256/RGB) so they remain legible on any terminal
-/// theme; the glyph stays the primary signal regardless of palette.
-fn color_for(key: ColorKey) -> Color {
-    match key {
-        ColorKey::Installed => Color::Green,
-        ColorKey::ViaBundle => Color::Cyan,
-        ColorKey::NotInstalled => Color::DarkGray,
-        ColorKey::Outdated => Color::Yellow,
-        ColorKey::Modified => Color::Red,
-        // Advisory, not a fault: dimmer than the problem colors so a pending
-        // row reads as "there is more to install", not "something is wrong".
-        ColorKey::Pending | ColorKey::Gated => Color::Blue,
-        ColorKey::IntegrityMissing => Color::Magenta,
-        ColorKey::NotArmed | ColorKey::Stale => Color::Yellow,
-    }
 }
 
 #[cfg(test)]
@@ -2763,7 +2659,7 @@ mod tests {
         let accent_is_frame = |line: Line<'_>| {
             line.spans
                 .iter()
-                .any(|s| s.content.chars().all(|c| c == '\u{2500}') && s.style.fg == Some(Color::Cyan))
+                .any(|s| s.content.chars().all(|c| c == '\u{2500}') && s.style == theme::current().accent)
         };
         assert!(!accent_is_frame(tab_strip_line(&[], DetailTab::Overview)));
         assert!(!accent_is_frame(tab_strip_line(
@@ -3295,7 +3191,7 @@ mod tests {
     }
 
     /// The row holding both buttons, and the background of the chosen one.
-    fn button_row(buf: &ratatui::buffer::Buffer, action: &str) -> (String, Option<Color>) {
+    fn button_row(buf: &ratatui::buffer::Buffer, action: &str) -> (String, ratatui::style::Modifier) {
         let cols = buf.area.width as usize;
         let rows: Vec<&[ratatui::buffer::Cell]> = buf.content().chunks(cols).collect();
         let line = rows
@@ -3307,8 +3203,17 @@ mod tests {
             .iter()
             .find(|r| r.iter().map(|c| c.symbol()).collect::<String>() == line)
             .unwrap();
-        let chosen_bg = row.iter().find(|c| c.symbol() == "▸").map(|c| c.bg);
-        (line, chosen_bg)
+        let chosen = row
+            .iter()
+            .find(|c| c.symbol() == "▸")
+            .map(|c| c.modifier)
+            .unwrap_or_default();
+        (line, chosen)
+    }
+
+    /// Whether a cell's modifiers carry the theme's chosen-button look.
+    fn is_chosen_button(modifier: ratatui::style::Modifier) -> bool {
+        modifier.contains(theme::current().button_selected.add_modifier)
     }
 
     fn screen(buf: &ratatui::buffer::Buffer) -> String {
@@ -3340,14 +3245,17 @@ mod tests {
         for needle in ["n1-very-long", "n5-very-long", "and 1 more"] {
             assert!(shown.contains(needle), "{needle:?} must be visible:\n{shown}");
         }
-        let (line, bg) = button_row(&buf, "Uninstall");
+        let (line, chosen) = button_row(&buf, "Uninstall");
         assert!(line.contains("▸ [ Cancel ]"), "Cancel is the chosen button: {line:?}");
-        assert_eq!(bg, Some(Color::Cyan), "the chosen button is a solid cyan fill");
+        assert!(
+            is_chosen_button(chosen),
+            "the chosen button takes the theme's button_selected style"
+        );
 
         s.confirm_batch_move();
-        let (line, bg) = button_row(&draw_80x24(&s), "Uninstall");
+        let (line, chosen) = button_row(&draw_80x24(&s), "Uninstall");
         assert!(line.contains("▸ [ Uninstall ]"), "{line:?}");
-        assert_eq!(bg, Some(Color::Cyan));
+        assert!(is_chosen_button(chosen));
     }
 
     /// A project-init popup whose text is taller than the screen scrolls to its
@@ -3457,7 +3365,7 @@ mod tests {
             let x = row[..row.find(label).unwrap()].chars().count();
             buf[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())]
                 .modifier
-                .contains(Modifier::DIM)
+                .contains(theme::current().button_dimmed.add_modifier)
         };
 
         let mut s = open(80, 24);
@@ -3574,8 +3482,11 @@ mod tests {
             "the pointer must sit on {chosen:?}:\n{}",
             screen(buf)
         );
-        let bg = pointed.iter().find(|c| c.symbol() == "▸").map(|c| c.bg);
-        assert_eq!(bg, Some(Color::Cyan), "the chosen button is a solid cyan fill");
+        let chosen = pointed.iter().find(|c| c.symbol() == "▸").map(|c| c.modifier);
+        assert!(
+            chosen.is_some_and(is_chosen_button),
+            "the chosen button takes the theme's button_selected style"
+        );
     }
 
     // The regression: at 40 columns the popup was ~22 columns inside, the
@@ -3636,9 +3547,9 @@ mod tests {
             crate::tui::state::PinChanges::default(),
             std::collections::BTreeSet::new(),
         );
-        let (line, bg) = button_row(&draw_80x24(&s), "Overwrite");
+        let (line, chosen) = button_row(&draw_80x24(&s), "Overwrite");
         assert!(line.contains("▸ [ Cancel ]"), "{line:?}");
-        assert_eq!(bg, Some(Color::Cyan));
+        assert!(is_chosen_button(chosen));
     }
 
     /// A refusal taller than an 80x24 popup scrolls inside it. The text keeps
@@ -3691,9 +3602,9 @@ mod tests {
         assert_eq!(text_x - border_x - 1, usize::from(confirm::PAD), "{last}");
 
         s.confirm_force_move(1);
-        let (line, bg) = button_row(&draw_80x24(&s), "Overwrite");
+        let (line, chosen) = button_row(&draw_80x24(&s), "Overwrite");
         assert!(line.contains("▸ [ Overwrite ]"), "{line:?}");
-        assert_eq!(bg, Some(Color::Cyan));
+        assert!(is_chosen_button(chosen));
         let chars: Vec<char> = line.chars().collect();
         let (first_b, last_b) = (
             chars.iter().position(|c| *c == '[').unwrap(),

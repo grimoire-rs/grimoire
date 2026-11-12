@@ -2199,6 +2199,7 @@ fn render_config(
             expand_levels,
             sort,
             sort_order,
+            theme,
         } = &options.tui;
         out.push_str("[options.tui]\n");
         if let Some(dv) = default_view {
@@ -2223,6 +2224,9 @@ fn render_config(
         }
         if let Some(order) = sort_order {
             let _ = writeln!(out, "sort_order = \"{}\"", order.as_str());
+        }
+        if let Some(theme) = theme {
+            let _ = writeln!(out, "theme = \"{}\"", theme.as_str());
         }
         out.push('\n');
     }
@@ -4390,6 +4394,7 @@ mod tests {
                 expand_levels: Some(2),
                 sort: Some(crate::catalog::SortMode::Rating),
                 sort_order: Some(crate::catalog::SortOrder::Asc),
+                theme: Some(crate::config::declaration::TuiTheme::Light),
             },
         };
         write_config(&path, &opts, &[], &set).unwrap();
@@ -4416,6 +4421,7 @@ mod tests {
         assert_eq!(cfg.options.search_min_relevance, Some(0));
         assert_eq!(cfg.options.tui.sort, Some(crate::catalog::SortMode::Rating));
         assert_eq!(cfg.options.tui.sort_order, Some(crate::catalog::SortOrder::Asc));
+        assert_eq!(cfg.options.tui.theme, Some(crate::config::declaration::TuiTheme::Light));
     }
 
     #[test]
@@ -4479,6 +4485,7 @@ mod tests {
                 expand_levels: None,
                 sort: None,
                 sort_order: None,
+                theme: None,
             },
         };
         write_config(&path, &opts, &registries, &set).unwrap();
@@ -4528,6 +4535,7 @@ mod tests {
                 expand_levels: None,
                 sort: None,
                 sort_order: None,
+                theme: None,
             },
         };
         write_config(&path, &opts, &[], &set).unwrap();

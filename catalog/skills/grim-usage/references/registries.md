@@ -891,7 +891,9 @@ path-splitting characters are configurable via `[options.tui]` in
 `expand_levels` — how many tree levels open expanded; the `z` key folds
 between that depth and fully-expanded at runtime — and `sort` /
 `sort_order`, the order and direction the browse opens in; `--sort`
-overrides the order per run, `s`/`S` change both live. Set them with `grim
+overrides the order per run, `s`/`S` change both live — and `theme`,
+a built-in theme name (`terminal` by default);
+`--theme` overrides it per run. Set them with `grim
 config set options.tui.<key>`, see [Managing Config](#managing-config)).
 Declared local path sources and dev-installs have no registry to root
 under — they group under a top-level **Local** tree root, where install/

@@ -138,6 +138,7 @@ The supported dotted keys are:
 | `options.tui.expand_levels` | non-negative integer | How many tree levels open expanded: `1` (default when unset) shows only registry roots, `0` opens fully expanded. Non-integer or negative values exit `65`. Setting it stores the value; a subsequent `get` echoes it (unlike the default-valued keys above, an explicit value is always kept). |
 | `options.tui.sort` | `name`, `updated`, `rating` or `downloads` | The order [`grim tui`](#tui) opens in; other values exit `65`. Unset means the default kind-then-name grouping, which no listed value spells — so `list --all` reports `default: null` for this key, the one enum key with no fixed default. `--sort` overrides it per run. |
 | `options.tui.sort_order` | `asc` or `desc` | The direction that order runs in; other values exit `65`. Unset means the order's own natural direction (which depends on `sort`), so `list --all` reports `default: null` here too. |
+| `options.tui.theme` | a built-in theme name | The color theme of [`grim tui`](#tui); values outside the closed set (listed under [Choose a theme](./browse.md#themes)) exit `65`. `terminal` is the default, so `list --all` reports it as the default. `--theme` overrides it per run. |
 | `options.vendors.<name>.shared_skills` | `true` or `false` | One key per client — `<name>` must be a supported client, else the key itself is unknown and exits `64`. `true` installs that client's skills into the cross-vendor `.agents/skills` pool instead of its own directory, and is accepted only for a client that reads that pool — enabling it elsewhere exits `65`. `false` keeps the client's own directory even beside a client that writes the pool; it is stored, so a subsequent `get` prints `false`. Unset means automatic: a pool-reading client joins the pool only beside a pool writer, so `list --all` reports `default: null` for this key, and `unset` returns the client to automatic. Changing the value moves the client's skills on the next `install`/`update`; a hand-edited old copy is kept and warned about, never deleted. See [`[options.vendors]`](./configuration.md#options-vendors). |
 | `registry.<alias>.oci` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. The pre-0.7.0 field name `url` is accepted as an alias. |
 | `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `oci` (same rules mirrored); a locator matching neither transport exits `65`. |
@@ -3580,6 +3581,12 @@ Catalog title names the active one. When the browse source publishes
 below the provenance rows (`42 upvotes`); an unrated artifact simply has no
 such row, never a `0`.
 
+`--theme <name>` picks the color theme for one run and
+overrides [`options.tui.theme`](./configuration.md#options-tui). The default,
+`terminal`, draws with your terminal's own colors; every other theme is a
+fixed palette with its own background. The value set is closed, and any other
+name is a usage error. See [Choose a theme](./browse.md#themes) for all 14.
+
 **Tree view** — pressing `t` switches the catalog between flat list mode and
 a collapsible tree grouped by browse source and repository path. Rows from an
 OCI registry group under that registry (host plus configured namespace).
@@ -3647,9 +3654,9 @@ Clearing the query (`esc`) returns to the tree. Pressing `t` during a search is
 honoured and sticks. Clearing the query then leaves the view as you chose
 it.
 
-Four config fields under `[options.tui]` in `grimoire.toml` let you set
-the opening view mode, how many tree levels open expanded, and how paths are
-split into groups. See [`[options.tui]`][options-tui] for the full reference.
+Config fields under `[options.tui]` in `grimoire.toml` let you set
+the opening view mode, how many tree levels open expanded, how paths are
+split into groups, and the color theme. See [`[options.tui]`][options-tui] for the full reference.
 
 Like `grim search`, the TUI browses **every** registry declared in
 `[[registries]]`, grouping entries under one collapsible root per registry.

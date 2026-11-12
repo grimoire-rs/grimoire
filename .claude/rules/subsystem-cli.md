@@ -52,6 +52,8 @@ presentation flags (log-level / format / color) must NOT propagate.
 
 ## TUI Popups
 
+`src/tui/theme.rs` owns every TUI colour; raw `ratatui::style::Color` is banned elsewhere by `clippy.toml` `disallowed-types` and the source-scan test `no_raw_colours_outside_theme`. Fixed themes are 13-slot `Palette`s built by `from_palette`; `theme::paint_canvas` post-passes the buffer so `Clear`ed popups keep the theme background.
+
 Check every popup (`src/tui/`) for spacing, not just for content:
 
 - **Padding**: text never touches a border — pad the `Block`

@@ -42,6 +42,7 @@ pub mod markdown;
 pub mod render;
 pub mod state;
 pub mod terminal_guard;
+pub mod theme;
 pub mod tree;
 pub mod update_check;
 

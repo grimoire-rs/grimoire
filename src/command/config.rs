@@ -449,6 +449,7 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
         ConfigKey::TuiExpandLevels => options.tui.expand_levels.map(|n| n.to_string()),
         ConfigKey::TuiSort => options.tui.sort.map(|m| m.as_str().to_string()),
         ConfigKey::TuiSortOrder => options.tui.sort_order.map(|o| o.as_str().to_string()),
+        ConfigKey::TuiTheme => options.tui.theme.map(|t| t.as_str().to_string()),
         ConfigKey::SearchMinRelevance => options.search_min_relevance.map(|n| n.to_string()),
         ConfigKey::ExperimentalHooks => {
             // `false` is the default and indistinguishable from unset on disk —
@@ -798,6 +799,10 @@ fn apply_set(
                 options.tui.sort_order = Some(parse_sort_order(value_str)?);
                 Ok(value_str.to_string())
             }
+            ConfigKey::TuiTheme => {
+                options.tui.theme = Some(parse_theme(value_str)?);
+                Ok(value_str.to_string())
+            }
             ConfigKey::SearchMinRelevance => {
                 let key = "options.search_min_relevance";
                 let percent = parse_u32(value_str, key)?;
@@ -983,6 +988,7 @@ fn apply_unset(
                 ConfigKey::TuiExpandLevels => options.tui.expand_levels = None,
                 ConfigKey::TuiSort => options.tui.sort = None,
                 ConfigKey::TuiSortOrder => options.tui.sort_order = None,
+                ConfigKey::TuiTheme => options.tui.theme = None,
                 ConfigKey::SearchMinRelevance => options.search_min_relevance = None,
                 // `unset` is the other spelling of "turn hooks off", so it warns
                 // exactly as `set … false` does — clearing the key silently would
@@ -1248,6 +1254,16 @@ fn parse_sort_order(s: &str) -> anyhow::Result<crate::catalog::SortOrder> {
         super::config_value(format!(
             "invalid value for options.tui.sort_order: '{s}'; valid values: {}",
             SortOrder::VALUE_NAMES.join(", ")
+        ))
+    })
+}
+
+fn parse_theme(s: &str) -> anyhow::Result<crate::config::declaration::TuiTheme> {
+    use crate::config::declaration::TuiTheme;
+    TuiTheme::ALL.into_iter().find(|t| t.as_str() == s).ok_or_else(|| {
+        super::config_value(format!(
+            "invalid value for options.tui.theme: '{s}'; valid values: {}",
+            TuiTheme::VALUE_NAMES.join(", ")
         ))
     })
 }
@@ -2551,6 +2567,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_theme_valid_and_invalid() {
+        use crate::config::declaration::TuiTheme;
+        assert!(matches!(parse_theme("light"), Ok(TuiTheme::Light)));
+        assert!(parse_theme("Dark").is_err(), "case-sensitive, like default_view");
+        for t in TuiTheme::ALL {
+            assert_eq!(parse_theme(t.as_str()).unwrap(), t);
+        }
+        let msg = parse_theme("solarized").unwrap_err().to_string();
+        let expected = format!("valid values: {}", TuiTheme::VALUE_NAMES.join(", "));
+        assert!(msg.contains(&expected), "got: {msg}");
+        assert!(
+            msg.contains("catppuccin-mocha") && msg.contains("dracula"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn parse_default_view_valid_and_invalid() {
         use crate::config::declaration::DefaultView;
         assert!(matches!(parse_default_view("flat"), Ok(DefaultView::Flat)));
@@ -2707,8 +2740,8 @@ mod tests {
         let with_all = collect_entries(true, &options, &registries);
         assert_eq!(
             with_all.len(),
-            12,
-            "--all on empty config must emit exactly the 12 fixed keys"
+            13,
+            "--all on empty config must emit exactly the 13 fixed keys"
         );
         for e in &with_all {
             assert_eq!(

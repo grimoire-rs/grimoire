@@ -110,6 +110,103 @@ impl DefaultView {
     }
 }
 
+/// The colour theme of the catalog browser.
+///
+/// One value set on two surfaces — the `grim tui --theme` flag (clap) and the
+/// `[options.tui].theme` config key (serde, schema) — so the kebab-case name
+/// is the same string everywhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum TuiTheme {
+    /// Follow the terminal's own palette (the built-in default).
+    #[default]
+    Terminal,
+    /// Fixed palette for dark backgrounds.
+    Dark,
+    /// Fixed palette for light backgrounds.
+    Light,
+    /// Catppuccin Latte (light).
+    CatppuccinLatte,
+    /// Catppuccin Frappe (dark).
+    CatppuccinFrappe,
+    /// Catppuccin Macchiato (dark).
+    CatppuccinMacchiato,
+    /// Catppuccin Mocha (dark).
+    CatppuccinMocha,
+    /// Gruvbox (dark).
+    GruvboxDark,
+    /// Gruvbox (light).
+    GruvboxLight,
+    /// Solarized (dark).
+    SolarizedDark,
+    /// Solarized (light).
+    SolarizedLight,
+    /// Tokyo Night (dark).
+    TokyoNight,
+    /// Nord (dark).
+    Nord,
+    /// Dracula (dark).
+    Dracula,
+}
+
+impl TuiTheme {
+    /// Every declared theme, in declaration order.
+    pub const ALL: [TuiTheme; 14] = [
+        TuiTheme::Terminal,
+        TuiTheme::Dark,
+        TuiTheme::Light,
+        TuiTheme::CatppuccinLatte,
+        TuiTheme::CatppuccinFrappe,
+        TuiTheme::CatppuccinMacchiato,
+        TuiTheme::CatppuccinMocha,
+        TuiTheme::GruvboxDark,
+        TuiTheme::GruvboxLight,
+        TuiTheme::SolarizedDark,
+        TuiTheme::SolarizedLight,
+        TuiTheme::TokyoNight,
+        TuiTheme::Nord,
+        TuiTheme::Dracula,
+    ];
+
+    /// The stable kebab-case identifiers, in [`Self::ALL`] order.
+    pub const VALUE_NAMES: &'static [&'static str] = &[
+        Self::Terminal.as_str(),
+        Self::Dark.as_str(),
+        Self::Light.as_str(),
+        Self::CatppuccinLatte.as_str(),
+        Self::CatppuccinFrappe.as_str(),
+        Self::CatppuccinMacchiato.as_str(),
+        Self::CatppuccinMocha.as_str(),
+        Self::GruvboxDark.as_str(),
+        Self::GruvboxLight.as_str(),
+        Self::SolarizedDark.as_str(),
+        Self::SolarizedLight.as_str(),
+        Self::TokyoNight.as_str(),
+        Self::Nord.as_str(),
+        Self::Dracula.as_str(),
+    ];
+
+    /// The stable kebab-case identifier for this variant.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::CatppuccinLatte => "catppuccin-latte",
+            Self::CatppuccinFrappe => "catppuccin-frappe",
+            Self::CatppuccinMacchiato => "catppuccin-macchiato",
+            Self::CatppuccinMocha => "catppuccin-mocha",
+            Self::GruvboxDark => "gruvbox-dark",
+            Self::GruvboxLight => "gruvbox-light",
+            Self::SolarizedDark => "solarized-dark",
+            Self::SolarizedLight => "solarized-light",
+            Self::TokyoNight => "tokyo-night",
+            Self::Nord => "nord",
+            Self::Dracula => "dracula",
+        }
+    }
+}
+
 /// TUI-specific display options, nested under `[options.tui]`.
 ///
 /// `#[serde(deny_unknown_fields)]` so an unknown key (e.g. a typo'd field
@@ -158,6 +255,13 @@ pub struct TuiOptions {
     /// never rewritten.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<SortOrder>,
+    /// Color theme of the catalog browser. `terminal` (default) follows the
+    /// terminal's own palette; every other value is a fixed palette that
+    /// paints its own background and is approximated in 256 colors when the
+    /// terminal does not announce 24-bit color; overridden per run by
+    /// `grim tui --theme`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<TuiTheme>,
 }
 
 impl TuiOptions {
@@ -641,6 +745,20 @@ impl DesiredSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three spellings of a theme name cannot drift apart.
+    #[test]
+    fn tui_theme_spellings_agree() {
+        use clap::ValueEnum;
+        assert_eq!(TuiTheme::VALUE_NAMES.len(), TuiTheme::ALL.len());
+        for (t, name) in TuiTheme::ALL.into_iter().zip(TuiTheme::VALUE_NAMES) {
+            assert_eq!(t.as_str(), *name);
+            let json = serde_json::to_string(&t).unwrap();
+            assert_eq!(json, format!("\"{}\"", t.as_str()));
+            let clap_name = t.to_possible_value().unwrap();
+            assert_eq!(clap_name.get_name(), t.as_str());
+        }
+    }
 
     fn id(s: &str) -> DeclaredSource {
         DeclaredSource::Registry(Identifier::parse(s).expect("valid identifier"))

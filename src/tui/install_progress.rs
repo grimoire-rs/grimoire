@@ -9,7 +9,7 @@
 //! gauge dialog on the TUI terminal as each acted-on item is processed,
 //! giving `n/total` feedback (or an indeterminate "working…" frame for a
 //! single action) during that blocking window. It draws a standalone frame
-//! (a dimmed backdrop plus the dialog); the event loop repaints the full UI
+//! (just the dialog); the event loop repaints the full UI
 //! once the action returns.
 
 use std::cell::{Cell, RefCell};
@@ -19,12 +19,12 @@ use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph};
 
 use crate::cli::printer::truncate_ellipsis;
 use crate::install::progress::InstallProgress;
+use crate::tui::theme;
 
 /// The concrete terminal the TUI owns (`run()` in `app.rs`).
 type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -84,15 +84,13 @@ impl InstallProgress for InstallModal<'_> {
     }
 }
 
-/// Draw a centered modal progress dialog over a dimmed backdrop.
+/// Draw a centered modal progress dialog.
 ///
 /// `total == 0` renders an indeterminate "working…" gauge (the artifact count
 /// is not yet known, e.g. while the lock resolves). `title` is the operation
 /// verb ("Installing", "Updating").
 pub fn draw_install_progress(f: &mut Frame, position: usize, total: usize, label: &str, title: &str) {
-    // Dimmed backdrop so the box reads as a modal, not a blank screen.
-    f.render_widget(Block::default().style(Style::default().bg(Color::Black)), f.area());
-
+    let t = theme::current();
     // Reuse the overflow-safe centering helper (ratatui Layout, u32 math)
     // rather than a raw u16 multiply that overflows past ~1092 columns.
     let area = super::render::centered_area_rows(f.area(), 60, 5);
@@ -107,12 +105,12 @@ pub fn draw_install_progress(f: &mut Frame, position: usize, total: usize, label
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(t.border_popup)
         .title(Span::styled(
-            // Magenta title over a Cyan border matches the picker/help modal
-            // overlays (Cyan titles are reserved for persistent panels).
+            // Same roles as the picker/help modal overlays (the accent
+            // title colour is reserved for persistent panels).
             format!(" {title} "),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            t.title,
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -124,18 +122,16 @@ pub fn draw_install_progress(f: &mut Frame, position: usize, total: usize, label
     f.render_widget(
         Paragraph::new(Span::styled(
             truncate_ellipsis(label, inner.width as usize).into_owned(),
-            Style::default().fg(Color::White),
+            t.text,
         ))
         .alignment(Alignment::Center),
         rows[0],
     );
     f.render_widget(
-        Gauge::default()
-            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Indexed(236)))
-            .ratio(ratio)
-            .label(gauge_label),
+        Gauge::default().gauge_style(t.gauge).ratio(ratio).label(gauge_label),
         rows[1],
     );
+    theme::paint_canvas(f.buffer_mut());
 }
 
 #[cfg(test)]

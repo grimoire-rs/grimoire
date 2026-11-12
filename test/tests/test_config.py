@@ -69,6 +69,23 @@ _ALLOWED_TYPES = {"string", "boolean", "integer", "enum", "string-list", "string
 
 # The canonical ClientTarget::ALL order — every ``options.clients`` "values"
 # JSON field pins this order regardless of the order the user supplied.
+TUI_THEME_VALUES = [
+    "terminal",
+    "dark",
+    "light",
+    "catppuccin-latte",
+    "catppuccin-frappe",
+    "catppuccin-macchiato",
+    "catppuccin-mocha",
+    "gruvbox-dark",
+    "gruvbox-light",
+    "solarized-dark",
+    "solarized-light",
+    "tokyo-night",
+    "nord",
+    "dracula",
+]
+
 CLIENT_VALUE_NAMES = [
     "claude",
     "opencode",
@@ -354,6 +371,35 @@ def test_tui_sort_keys_round_trip_and_list_as_enums_with_no_default(
 
     runner.run("config", "unset", "options.tui.sort")
     gone = runner.run("config", "get", "options.tui.sort", check=False)
+    assert gone.returncode == 1, "an unset key reads as unset"
+
+
+def test_tui_theme_key_round_trips_and_lists_as_enum_defaulting_to_terminal(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """``options.tui.theme`` lists as an enum whose default is ``terminal``,
+    round-trips each built-in theme, and rejects anything else with exit 65."""
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    result = runner.run("--format", "json", "config", "list", "--all", check=False)
+    assert result.returncode == 0, result.stderr
+    theme = {i["key"]: i for i in json.loads(result.stdout)["items"]}["options.tui.theme"]
+    assert theme["type"] == "enum" and theme["values"] == TUI_THEME_VALUES
+    assert theme["default"] == "terminal", theme
+
+    for name in ("terminal", "dark", "light", "catppuccin-mocha", "solarized-light"):
+        runner.run("config", "set", "options.tui.theme", name)
+        assert name in runner.plain("config", "get", "options.tui.theme").stdout
+        assert f'theme = "{name}"' in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
+
+    bad = runner.run("config", "set", "options.tui.theme", "solarized", check=False)
+    assert bad.returncode == 65, f"bad enum value exits 65; got {bad.returncode}: {bad.stderr}"
+    assert ", ".join(TUI_THEME_VALUES) in bad.stderr, bad.stderr
+
+    runner.run("config", "unset", "options.tui.theme")
+    gone = runner.run("config", "get", "options.tui.theme", check=False)
     assert gone.returncode == 1, "an unset key reads as unset"
 
 

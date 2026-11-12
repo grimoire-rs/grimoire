@@ -41,6 +41,45 @@ set `grim status` prints. The two share `installed`, `outdated` and `modified`
 and nothing else. Every word from both is defined once at
 [artifact states](./commands.md#artifact-states).
 
+## Choose a theme {#themes}
+
+The browser ships 14 built-in themes. The value set is closed: any other name
+is rejected.
+
+| Theme value | Background | Notes |
+|---|---|---|
+| `terminal` | Your terminal's own | The default. Uses your terminal's text and background colors and its ANSI palette. Marks the selected row with one solid bar in the accent color. |
+| `dark` | Painted, neutral | Fixed 256-color palette for dark backgrounds. |
+| `light` | Painted, neutral | Fixed 256-color palette for light backgrounds. |
+| `catppuccin-latte` | Painted, light | [Catppuccin][catppuccin] light flavor. |
+| `catppuccin-frappe` | Painted, dark | Catppuccin dark flavor. |
+| `catppuccin-macchiato` | Painted, dark | Catppuccin dark flavor. |
+| `catppuccin-mocha` | Painted, dark | Catppuccin darkest flavor. |
+| `gruvbox-dark` | Painted, dark | [Gruvbox][gruvbox] dark variant. |
+| `gruvbox-light` | Painted, light | Gruvbox light variant. |
+| `solarized-dark` | Painted, dark | [Solarized][solarized] dark variant. |
+| `solarized-light` | Painted, light | Solarized light variant. |
+| `tokyo-night` | Painted, dark | [Tokyo Night][tokyo-night]. |
+| `nord` | Painted, dark | [Nord][nord]. |
+| `dracula` | Painted, dark | [Dracula][dracula]. |
+
+`terminal` follows whatever light or dark profile your terminal uses and
+never paints a background. Every other theme is a fixed palette that paints
+its own background across the whole browser, so it looks the same on any
+terminal profile. It draws the selected row as a subtle raised bar.
+
+Pick one for a single run with `grim tui --theme nord`, or keep it with
+`grim config set options.tui.theme nord`. The flag wins over the config key.
+
+The 11 named themes use 24-bit color. When the terminal does not announce
+24-bit color, the browser approximates them with the nearest 256 colors. It
+checks that `COLORTERM` contains `truecolor` or `24bit`, and assumes Windows
+consoles support it.
+
+If `NO_COLOR` is set, the browser drops its colors. With `terminal`, the
+selected row stays bold and in reverse video. A fixed theme loses its painted
+background and its selection bar, and only bold remains.
+
 ## Key map
 
 This key map belongs to `grim tui` alone, and pressing `?` shows it inside the
@@ -171,3 +210,11 @@ path. To put a company registry beside the public one,
 read [registries](./guides/registries.md). To decide whether an artifact lands
 in one project or on the whole machine, read
 [scopes and clients](./guides/scopes-and-clients.md).
+
+<!-- external -->
+[catppuccin]: https://catppuccin.com
+[gruvbox]: https://github.com/morhetz/gruvbox
+[solarized]: https://ethanschoonover.com/solarized/
+[tokyo-night]: https://github.com/folke/tokyonight.nvim
+[nord]: https://www.nordtheme.com
+[dracula]: https://draculatheme.com

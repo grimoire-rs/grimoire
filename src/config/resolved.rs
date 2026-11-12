@@ -30,7 +30,7 @@
 //! by their consumers instead.
 
 use crate::catalog::{SortMode, SortOrder};
-use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions};
+use crate::config::declaration::{ConfigOptions, DefaultView, TuiOptions, TuiTheme};
 use crate::config::defaults;
 
 /// `[options.tui]` display options with every unset key resolved to its
@@ -61,6 +61,9 @@ pub struct ResolvedOptions {
     /// The direction that order runs in; the mode's own
     /// [`SortMode::natural_order`] when `[options.tui].sort_order` is unset.
     pub sort_order: SortOrder,
+    /// The catalog browser's color theme; the default
+    /// [`TuiTheme`] (`terminal`) when `[options.tui].theme` is unset.
+    pub theme: TuiTheme,
     /// The relevance cutoff, in percent of the best hit, every search
     /// surface applies; [`defaults::SEARCH_MIN_RELEVANCE`] when
     /// `[options].search_min_relevance` is unset. An explicit `0` is kept.
@@ -108,6 +111,7 @@ impl ConfigOptions {
             expand_levels,
             sort,
             sort_order,
+            theme,
         } = tui;
 
         ResolvedOptions {
@@ -123,6 +127,7 @@ impl ConfigOptions {
             expand_levels: (*expand_levels).unwrap_or(defaults::EXPAND_LEVELS),
             sort: *sort,
             sort_order: (*sort_order).unwrap_or(SortMode::natural_order(*sort)),
+            theme: theme.unwrap_or_default(),
             search_min_relevance: (*search_min_relevance).unwrap_or(defaults::SEARCH_MIN_RELEVANCE),
         }
     }
@@ -181,6 +186,7 @@ mod tests {
                 expand_levels: Some(3),
                 sort: Some(SortMode::Downloads),
                 sort_order: Some(SortOrder::Asc),
+                theme: Some(TuiTheme::Light),
             },
         };
 
@@ -191,6 +197,7 @@ mod tests {
         assert_eq!(resolved.expand_levels, 3);
         assert_eq!(resolved.sort, Some(SortMode::Downloads));
         assert_eq!(resolved.sort_order, SortOrder::Asc);
+        assert_eq!(resolved.theme, TuiTheme::Light);
     }
 
     #[test]

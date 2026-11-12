@@ -3,7 +3,7 @@
 
 //! The typed registry of `grim config` dotted keys.
 //!
-//! Single source of truth for the 12 fixed `options.*` keys, the 6
+//! Single source of truth for the 13 fixed `options.*` keys, the 6
 //! per-registry field names, and the per-vendor field
 //! ([`VENDOR_SHARED_SKILLS`]): their [`crate::api::ValueType`] (which
 //! carries the runtime default alongside the type), title, and
@@ -25,7 +25,7 @@
 
 use crate::api::{ConfigSection, ValueConstraints, ValueType};
 use crate::catalog::{SortMode, SortOrder};
-use crate::config::declaration::DefaultView;
+use crate::config::declaration::{DefaultView, TuiTheme};
 use crate::config::defaults;
 use crate::config::project_config::TREE_SEPARATOR_ITEM_PATTERN;
 use crate::install::client_target::ClientTarget;
@@ -50,7 +50,7 @@ pub struct KeySpec {
     pub section: ConfigSection,
 }
 
-/// The 12 fixed `options.*` config keys, in listing order.
+/// The 13 fixed `options.*` config keys, in listing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     DefaultRegistry,
@@ -65,6 +65,7 @@ pub enum ConfigKey {
     SearchMinRelevance,
     ExperimentalHooks,
     ExperimentalSettings,
+    TuiTheme,
 }
 
 impl ConfigKey {
@@ -73,7 +74,7 @@ impl ConfigKey {
     /// `clients`, `show_deprecated`, then the `tui.*` keys, then
     /// `search_min_relevance`, then the `experimental.*` keys — **append
     /// only**: consumers of `grim config list --all` may index by position.
-    pub const ALL: [ConfigKey; 12] = [
+    pub const ALL: [ConfigKey; 13] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -86,6 +87,7 @@ impl ConfigKey {
         ConfigKey::SearchMinRelevance,
         ConfigKey::ExperimentalHooks,
         ConfigKey::ExperimentalSettings,
+        ConfigKey::TuiTheme,
     ];
 
     /// This key's static metadata.
@@ -248,6 +250,17 @@ impl ConfigKey {
             constraints: None,
             section: ConfigSection::Experimental,
         };
+        const TUI_THEME: KeySpec = KeySpec {
+            key: "options.tui.theme",
+            value_type: ValueType::Enum {
+                values: TuiTheme::VALUE_NAMES,
+                default: Some(TuiTheme::Terminal.as_str()),
+            },
+            title: "Theme",
+            description: "Color theme of the catalog browser.",
+            constraints: None,
+            section: ConfigSection::Tui,
+        };
         match self {
             Self::DefaultRegistry => &DEFAULT_REGISTRY,
             Self::Clients => &CLIENTS,
@@ -261,6 +274,7 @@ impl ConfigKey {
             Self::SearchMinRelevance => &SEARCH_MIN_RELEVANCE,
             Self::ExperimentalHooks => &EXPERIMENTAL_HOOKS,
             Self::ExperimentalSettings => &EXPERIMENTAL_SETTINGS,
+            Self::TuiTheme => &TUI_THEME,
         }
     }
 
@@ -847,6 +861,7 @@ mod tests {
                 expand_levels: Some(1),
                 sort: Some(crate::catalog::SortMode::Rating),
                 sort_order: Some(crate::catalog::SortOrder::Desc),
+                theme: Some(crate::config::declaration::TuiTheme::Dark),
             },
             show_deprecated: true,
             search_min_relevance: Some(30),
@@ -1179,6 +1194,7 @@ mod tests {
                 ConfigKey::SearchMinRelevance => &config_options["properties"]["search_min_relevance"],
                 ConfigKey::ExperimentalHooks => &experimental_options["properties"]["hooks"],
                 ConfigKey::ExperimentalSettings => &experimental_options["properties"]["settings"],
+                ConfigKey::TuiTheme => &tui_options["properties"]["theme"],
             };
             assert_description_prefix(node, spec.description, spec.key);
             let type_node = unwrap_nullable(&schema, node);
@@ -1239,7 +1255,7 @@ mod tests {
     /// is the design record's text verbatim.
     #[test]
     fn c153_experimental_hooks_is_the_appended_eleventh_row() {
-        assert_eq!(ConfigKey::ALL.len(), 12);
+        assert_eq!(ConfigKey::ALL.len(), 13);
         assert_eq!(ConfigKey::ALL[9], ConfigKey::SearchMinRelevance);
         assert_eq!(ConfigKey::ALL[10], ConfigKey::ExperimentalHooks);
         let spec = ConfigKey::ExperimentalHooks.spec();
@@ -1257,7 +1273,7 @@ mod tests {
     /// the end of the fixed keys and every existing row keeps its position.
     #[test]
     fn experimental_settings_is_the_appended_twelfth_row() {
-        assert_eq!(ConfigKey::ALL.len(), 12);
+        assert_eq!(ConfigKey::ALL.len(), 13);
         assert_eq!(ConfigKey::ALL[10], ConfigKey::ExperimentalHooks);
         assert_eq!(ConfigKey::ALL[11], ConfigKey::ExperimentalSettings);
         let spec = ConfigKey::ExperimentalSettings.spec();
