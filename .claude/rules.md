@@ -31,7 +31,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Adopting a third-party library or tool | [product-tech-strategy.md](./rules/product-tech-strategy.md), `quality-{lang}.md` |
 | Starting any task (work-type routing) | [workflow-intent.md](./rules/workflow-intent.md) (global) — classifies work, checks GitHub context, routes to correct workflow |
 | Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, `/hex-architect` |
-| Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skill `bugfix` (guided, enforces failing-test-first gate) |
+| Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skill `bugfix` (guided, enforces failing-test-first gate); skill `rca` (read-only verdict on a ticket), skill `fix` (RCA, then an approved fix plan) |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
 | Documentation work | [docs-style.md](./rules/docs-style.md) (Grimoire voice), [docs-quality.md](./rules/docs-quality.md) (vendored — page declarations, the 18 blocking rules, runnable checks under `rules/docs-quality/checks/`), skill `docs` |
 | Security-sensitive change | [adr_artifact_trust_model.md](../.agents/adr/adr_artifact_trust_model.md) **first** — the trust boundary and what is out of scope; then [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
@@ -194,6 +194,8 @@ Nine rules under `.claude/rules/` come from upstream bundles: their prose is **n
 | Implementation / debugging | `builder` |
 | Test strategy | `qa-engineer` |
 | Fixing a bug (guided, failing-test-first) | `bugfix` |
+| Root cause analysis of a ticket (read-only) | `rca` |
+| Ticket to approved fix plan (RCA, then regression-test-first plan) | `fix` |
 | Planning a feature (multi-agent) | `/hex-plan` (hex bundle) |
 | Executing a feature (multi-agent) | `/hex-execute` (hex bundle) |
 | Adversarial review | `/hex-review` (hex bundle; cross-model adversary configured in `.agents/memory/hex.md`) |

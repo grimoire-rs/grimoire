@@ -221,7 +221,7 @@ Swarm memory: `.agents/memory/hex.md` (pointers + preferences). Commands: `/hex-
 
 Project-local skills in `.claude/skills/` cover solo work and this repo's
 own conventions: `/builder`, `/qa-engineer`, `/security-auditor`,
-`/code-check`, `/bugfix`, `/docs`, `/commit`, `/finalize`, `/next`,
+`/code-check`, `/bugfix`, `/rca`, `/fix`, `/docs`, `/commit`, `/finalize`, `/next`,
 `/meta-maintain-config`, `/meta-validate-context`. Full map → "Skills by
 task topic" in [.claude/rules.md](./.claude/rules.md). Check
 `.claude/skills/` before ad-hoc generation.

@@ -1048,6 +1048,10 @@ class TestAiConfigOverhaulPhase2:
         # Pure analysis / advisory — auto-invocation safe
         "bugfix": False,
         "builder": False,
+        # Adapted from ocx-sh/ocx. `rca` is read-only; `fix` stops at an
+        # approved plan.
+        "rca": False,
+        "fix": False,
         "code-check": False,
         # Vendored (grimoire-lore); edits comments, never commits.
         "code-docs-cleanup": False,
