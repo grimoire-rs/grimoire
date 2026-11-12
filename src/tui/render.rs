@@ -2238,6 +2238,50 @@ mod tests {
         );
     }
 
+    // The selection bar restyles the Status cell like the rest of the row: the
+    // terminal theme's `not-installed` DIM survived the highlight and faded it.
+    #[test]
+    fn selected_row_status_cell_takes_the_selection_style() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![row("r/alpha", ArtifactState::NotInstalled)]);
+        let model = frame(&s);
+        assert!(model.rows[0].selected, "the only row is selected");
+
+        let catalog = catalog_width(false);
+        let w = catalog + DETAIL_MIN_WIDTH + 4;
+        let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        let cells = buf
+            .content()
+            .chunks(buf.area.width as usize)
+            .map(|r| &r[..catalog as usize])
+            .find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains("r/alpha"))
+            .expect("the catalog row is rendered");
+        let symbols: Vec<&str> = cells.iter().map(|c| c.symbol()).collect();
+        let at = |text: &str| {
+            (0..symbols.len())
+                .find(|&i| symbols[i..].iter().take(text.len()).copied().collect::<String>() == text)
+                .unwrap_or_else(|| panic!("{text:?} is on the row: {symbols:?}"))
+        };
+        let name = &cells[at("r/alpha")];
+        let status = &cells[at("not-installed")];
+        assert!(
+            !status.modifier.contains(Modifier::DIM),
+            "the selected Status cell must not stay dimmed: {:?}",
+            status.modifier
+        );
+        assert_eq!(
+            (status.fg, status.bg, status.modifier),
+            (name.fg, name.bg, name.modifier),
+            "the selected Status cell must match the rest of the selection bar"
+        );
+    }
+
     // Regression: the underlined header must span the full Catalog box width —
     // the Status header reserves the deprecation-marker region, so the
     // underline reaches the box's right border instead of stopping short.

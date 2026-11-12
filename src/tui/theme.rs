@@ -172,7 +172,8 @@ pub static TERMINAL: Theme = Theme {
     border_popup: fg(Color::Cyan),
     border_confirm: fg(Color::Yellow),
     // The accent fg makes the reversed bar one colour; without it each column inverts its own.
-    selection: fg_mod(Color::Cyan, Modifier::REVERSED.union(BOLD)),
+    // Dropping DIM keeps a `not-installed` status readable on the bar.
+    selection: fg_mod(Color::Cyan, Modifier::REVERSED.union(BOLD)).remove_modifier(DIM),
     // Plain, so a locked (dimmed) button still reads differently from an unchosen one.
     button: Style::new(),
     button_selected: modifier(Modifier::REVERSED.union(BOLD)),
