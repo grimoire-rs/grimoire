@@ -877,3 +877,33 @@ def test_grim_search_pages_an_oci_scope_like_the_cli(
         seen += [r["repo"] for r in payload["items"]]
 
     assert len(seen) == 150 and len(set(seen)) == 150
+
+
+def test_mcp_search_kind_argument_filters(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, registry: str
+) -> None:
+    """``grim_search`` with ``kind: ["agent"]`` returns agents only."""
+    ns1 = f"grim-test/{uuid.uuid4().hex[:12]}"
+    ns2 = f"grim-test/{uuid.uuid4().hex[:12]}"
+
+    make_artifact(
+        f"{ns1}/mcp-kind-agent",
+        "agent",
+        {"mcp-kind-agent.md": "---\nname: mcp-kind-agent\ndescription: An agent.\nmodel: sonnet\n---\n# A\n"},
+        tag="latest",
+    )
+    make_artifact(
+        f"{ns2}/mcp-kind-rule",
+        "rule",
+        {"mcp-kind-rule.md": "---\npaths: ['**/*.rs']\n---\n# R\n"},
+        tag="latest",
+    )
+
+    _two_registry_config(project_dir, ns1, ns2)
+    runner = grim_at(project_dir)
+
+    call = _call_search(runner, project_dir, {"kind": ["agent"], "refresh": True})
+    assert call["isError"] is False, f"kind-filtered grim_search must not error, got: {call!r}"
+    rows = json.loads(call["content"][0]["text"])["items"]
+    assert rows, "the agent must be returned"
+    assert all(r["kind"] == "agent" for r in rows), rows

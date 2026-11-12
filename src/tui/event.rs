@@ -776,13 +776,18 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         // `s` steps through the browse orders, `S` runs the active one the
-        // other way — both pure state, no I/O, so neither is an action.
+        // other way, `f` cycles the kind filter — all pure state, no I/O,
+        // so none is an action.
         TuiInput::Char('s') => {
             state.cycle_sort();
             TuiAction::None
         }
         TuiInput::Char('S') => {
             state.toggle_sort_direction();
+            TuiAction::None
+        }
+        TuiInput::Char('f') => {
+            state.cycle_kind_filter();
             TuiAction::None
         }
         TuiInput::Expand => {
@@ -1652,6 +1657,19 @@ mod tests {
             Some(crate::catalog::SortMode::Name),
             "and neither touched the order"
         );
+    }
+
+    #[test]
+    fn f_cycles_the_kind_filter() {
+        let mut s = seeded();
+        assert_eq!(s.kind_filter, None);
+        assert_eq!(handle(&mut s, TuiInput::Char('f')), TuiAction::None);
+        assert!(s.kind_filter.is_some());
+        let before = s.kind_filter;
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('f')), TuiAction::None);
+        assert_eq!(s.query, "f", "f is a query character while searching");
+        assert_eq!(s.kind_filter, before);
     }
 
     #[test]

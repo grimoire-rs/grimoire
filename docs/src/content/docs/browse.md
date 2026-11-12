@@ -30,8 +30,9 @@ pane for the row you are on.
    setup instead. Press `g` and confirm to create the project config.
 
 2. Press `/` and type part of a name to narrow the list.
-3. Move to the row you want with the arrow keys.
-4. Press `i` to install it.
+3. Press `f` to show one kind at a time.
+4. Move to the row you want with the arrow keys.
+5. Press `i` to install it.
 
 The row you installed changes state in place, so you see the result without
 leaving the browser. Beside each row's tag sit its `Rating` and `Downloads`
@@ -102,6 +103,7 @@ app. The website and the VS Code extension have no key map.
 | `g` | Toggle scope between project and global. With no project config yet, it offers to create one |
 | `s` | Cycle the sort order: default, name, updated, rating, downloads. The Catalog title names the active one, and the cursor returns to the top |
 | `S` | Flip the active order between ascending and descending |
+| `f` | Cycle a kind filter through the kinds in the catalog. The Catalog title names it, and the cursor returns to the top |
 | `t` | Toggle tree and flat view |
 | `→` / `←` | Expand and collapse a group, in tree view. On a collapsed group or a leaf, `←` jumps to the parent |
 | `z` | Fold the whole tree, in tree view. Expands everything, or collapses back to the [`expand_levels`](./configuration.md#options-tui) depth |

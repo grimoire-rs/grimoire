@@ -578,7 +578,8 @@ experimental [`settings`][settings] kind, behind
 `settings` and `setting` became kind keywords like `skill` and `rule`, so
 [`grim search settings`][search] lists settings packages only. A skill named
 `vscode-settings` no longer answers the bare word. Search for
-`vscode-settings` to find it again.
+`vscode-settings` to find it again. `grim search --kind skill settings`
+([`--kind`][search]) also finds it, because `--kind` makes every query word text.
 
 ## Index refreshes add a root probe and a sync sidecar {#index-sync}
 

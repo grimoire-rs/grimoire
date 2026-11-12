@@ -760,6 +760,9 @@ and lists registry by registry. A bare kind keyword
 (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular or plural)
 filters by kind
 instead of matching as text; an empty query lists the whole catalog.
+`--kind <KIND>` / `-k` (repeatable, comma-separated; singular kind names only,
+unknown exits 64) shows only those kinds and makes every query word text, so
+`grim search --kind skill settings` finds a skill named `vscode-settings`.
 Confirm the match fields and kind-filter keywords with `grim search --help`.
 When `[[registries]]` are configured, all of them are browsed and flattened
 into one table. The catalog is cached under `$GRIM_HOME` — pass `--refresh`

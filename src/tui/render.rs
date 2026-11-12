@@ -458,6 +458,9 @@ pub struct RenderModel {
     /// The active browse order, painted into the Catalog block's top border
     /// (`sort: rating desc`); empty in the default order and direction.
     pub sort_label: String,
+    /// The `f` kind filter painted into the Catalog block's top border
+    /// (`kind: agent`); empty with no filter.
+    pub kind_label: String,
 }
 
 /// Pick the widest hint tier whose text (plus a one-cell right margin)
@@ -1191,6 +1194,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         // the tree view never needs it (registry roots are already tree nodes).
         show_registry_column: state.show_registry_column(),
         sort_label: state.sort_label(),
+        kind_label: state.kind_label(),
     }
 }
 
@@ -1430,17 +1434,23 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         }
         items.push(ListItem::new(Line::from(spans)));
     }
-    // The active order sits in the top border beside the title, the way the
-    // detail pane's tabs do: it names how the rows below are arranged without
-    // spending a content row, and it is absent until the user changes it.
+    // The active kind filter and order sit in the top border beside the title,
+    // the way the detail pane's tabs do: it names how the rows below are
+    // arranged without spending a content row, and it is absent until the user
+    // changes it.
     let mut catalog_block = Block::default()
         .borders(Borders::ALL)
         .border_style(t.border)
         .title(Span::styled("Catalog", accent));
-    if !model.sort_label.is_empty() {
-        catalog_block = catalog_block.title_top(
-            Line::from(Span::styled(format!(" {} ", model.sort_label), t.muted)).alignment(Alignment::Right),
-        );
+    let border_label = [model.kind_label.as_str(), model.sort_label.as_str()]
+        .iter()
+        .filter(|p| !p.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !border_label.is_empty() {
+        catalog_block = catalog_block
+            .title_top(Line::from(Span::styled(format!(" {border_label} "), t.muted)).alignment(Alignment::Right));
     }
     let catalog_inner = catalog_block.inner(list_area);
     f.render_widget(catalog_block, list_area);
@@ -1866,8 +1876,8 @@ fn help_entries() -> [(&'static str, &'static str); 10] {
         // 80×24 terminal, and an eleventh row overflows it.
         ("v · o", "pick a version for the row · open its repository URL"),
         (
-            "g · t · s",
-            "scope project ⇄ global · tree / flat view · sort (S flips)",
+            "g · t · s · f",
+            "scope project ⇄ global · tree / flat view · sort (S flips) · kind",
         ),
         ("→ / ←", "expand / collapse group; z folds all (tree mode)"),
         // `tab` shares this row rather than taking its own: the overlay is
@@ -5529,6 +5539,35 @@ mod spec_multi_registry_render_tests {
             "the border names the order and its direction: {:?}",
             top_border(&s)
         );
+    }
+
+    #[test]
+    fn catalog_title_shows_the_kind_filter_before_the_sort() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let drawn = |s: &TuiState| -> String {
+            let model = frame(s);
+            let w = catalog_width(false) + DETAIL_MIN_WIDTH + 4;
+            let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+            term.draw(|f| draw(f, &model)).unwrap();
+            let buf = term.backend().buffer();
+            let cols = buf.area.width as usize;
+            buf.content()
+                .chunks(cols)
+                .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+                .find(|l| l.contains("Catalog"))
+                .expect("the Catalog block is rendered")
+        };
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![row_with_reg("ghcr.io/acme", "alpha", ArtifactState::Installed)]);
+        let bare = drawn(&s);
+        assert!(!bare.contains("kind:") && !bare.contains("sort:"), "{bare:?}");
+        s.cycle_sort();
+        s.kind_filter = Some(crate::oci::ArtifactKind::Agent);
+        let text = drawn(&s);
+        assert!(text.contains("kind: agent · sort:"), "{text:?}");
     }
 
     // The two sidecar-signal columns: right-aligned counts, `-` when the

@@ -16,6 +16,7 @@ use crate::catalog::{DownloadSummary, OciMeta, SearchQuery, SortKey, SortMode, S
 use crate::command::status::SettingsArmingInputs;
 use crate::config::registry_resolve::RowSource;
 use crate::lock::effective_set::NodeKey;
+use crate::oci::ArtifactKind;
 
 use super::bundle_members::{BundleMemberCache, BundleMemberKey};
 
@@ -494,6 +495,8 @@ pub struct TuiState {
     /// screen — the default grouping, an explicit sort, or a query's
     /// relevance ranking — rather than only the explicit modes.
     pub sort_reversed: bool,
+    /// The `f` key's kind filter; `None` shows every kind.
+    pub kind_filter: Option<ArtifactKind>,
     /// Current interaction mode.
     pub mode: Mode,
     /// Whether a catalog load is in flight.
@@ -665,6 +668,7 @@ impl Default for TuiState {
             detail_scroll: 0,
             sort: None,
             sort_reversed: false,
+            kind_filter: None,
             // A sane universal default until the app reports the real
             // size (before the first key event is ever processed).
             term_size: (80, 24),
@@ -1215,9 +1219,15 @@ impl TuiState {
         if query != self.query && !query.is_empty() {
             self.status_line.clear();
         }
-        let was_ranked = SearchQuery::parse(&self.query).has_text_terms();
+        let was_ranked = self.search_query().has_text_terms();
         self.query = query;
-        let ranked = SearchQuery::parse(&self.query).has_text_terms();
+        self.refilter(was_ranked);
+    }
+
+    /// Recompute the filter after the query or the kind filter changed, moving
+    /// between the tree and the ranked flat list when `has_text_terms` flipped.
+    fn refilter(&mut self, was_ranked: bool) {
+        let ranked = self.search_query().has_text_terms();
         // A ranked result set scattered across tree groups loses its ranking
         // and its overview, so a text search shows a flat list while it
         // lasts. A kind-only filter ranks nothing and keeps the tree.
@@ -1304,6 +1314,36 @@ impl TuiState {
     pub fn toggle_sort_direction(&mut self) {
         self.sort_reversed = !self.sort_reversed;
         self.resort();
+    }
+
+    /// The `f` key: step the kind filter through the kinds present in the
+    /// rows (absent kinds are skipped) and back to none. The filter can turn a
+    /// typed kind word into text, so the tree/flat switch runs as for a query
+    /// edit. The cursor returns to the top.
+    pub fn cycle_kind_filter(&mut self) {
+        self.reset_detail_view();
+        let was_ranked = self.search_query().has_text_terms();
+        let present = |k: &ArtifactKind| self.rows.iter().any(|r| r.kind == k.kind_str());
+        let mut kinds = ArtifactKind::ALL.iter().copied().filter(|k| present(k));
+        self.kind_filter = match self.kind_filter {
+            None => kinds.next(),
+            Some(cur) => {
+                let pos = ArtifactKind::ALL.iter().position(|&k| k == cur);
+                kinds.find(|k| ArtifactKind::ALL.iter().position(|a| a == k) > pos)
+            }
+        };
+        self.refilter(was_ranked);
+        self.move_selection(i64::MIN);
+    }
+
+    /// The kind filter as the Catalog title states it, or empty with none.
+    pub fn kind_label(&self) -> String {
+        self.kind_filter
+            .map_or_else(String::new, |k| format!("kind: {}", k.kind_str()))
+    }
+
+    fn search_query(&self) -> SearchQuery {
+        SearchQuery::parse_with_kinds(&self.query, self.kind_filter.as_slice())
     }
 
     /// Re-order the loaded rows under the current `sort` / `sort_reversed`,
@@ -2362,9 +2402,10 @@ impl TuiState {
     /// search` apply identical semantics: whitespace-split AND-of-terms,
     /// **fuzzy**-matched over the repo leaf name, keywords, and kind, by
     /// **word prefix** over summary / description / namespace, plus bare
-    /// kind keywords (`skill`/`rule`/`bundle`/`agent`/`mcp` ± plural) that
-    /// filter by kind. The query is parsed once, then every row is scored
-    /// against it.
+    /// kind keywords (skill, rule, agent, bundle, mcp, hook, settings,
+    /// singular or plural) that filter by kind; with the `f` kind filter set
+    /// every query word is text. The query is parsed once, then every row is
+    /// scored against it.
     ///
     /// With a query present, `filtered` is ordered by **relevance** — fuzzy
     /// matching admits far more rows than the substring matching it
@@ -2378,7 +2419,7 @@ impl TuiState {
     /// consumes `filtered` in order, so leaves inherit this ranking within
     /// each registry root.
     fn recompute_filter(&mut self) {
-        let query = SearchQuery::parse(&self.query);
+        let query = self.search_query();
         let mut scored: Vec<(i64, usize)> = self
             .rows
             .iter()
@@ -2721,6 +2762,121 @@ mod tests {
             "a mark follows its artifact through every re-sort"
         );
         assert_eq!(s.selected, 0, "the cursor does not: a re-sort reads from the top");
+    }
+
+    fn kinded(repo: &str, kind: &str) -> TuiRow {
+        let mut r = row(repo, "d", &[], ArtifactState::NotInstalled);
+        r.kind = kind.to_string();
+        r
+    }
+
+    #[test]
+    fn kind_filter_cycles_through_present_kinds_and_back() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            kinded("r/a", "skill"),
+            kinded("r/b", "agent"),
+            kinded("r/c", "agent"),
+            kinded("r/d", "mcp"),
+        ]);
+        assert_eq!(s.kind_filter, None);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            s.cycle_kind_filter();
+            seen.push(s.kind_filter);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Some(ArtifactKind::Skill),
+                Some(ArtifactKind::Agent),
+                Some(ArtifactKind::Mcp),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn kind_filter_shows_only_that_kind() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            kinded("r/a", "skill"),
+            kinded("r/b", "agent"),
+            kinded("r/c", "agent"),
+            kinded("r/d", "mcp"),
+        ]);
+        s.cycle_kind_filter();
+        s.cycle_kind_filter();
+        assert_eq!(s.kind_filter, Some(ArtifactKind::Agent));
+        assert_eq!(s.filtered.len(), 2);
+        assert!(s.filtered.iter().all(|&i| s.rows[i].kind == "agent"));
+    }
+
+    #[test]
+    fn kind_filter_makes_a_typed_kind_word_text() {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            kinded("r/vscode-settings", "skill"),
+            kinded("r/other", "settings"),
+        ]);
+        s.cycle_kind_filter();
+        assert_eq!(s.kind_filter, Some(ArtifactKind::Skill));
+        s.apply_query("settings");
+        assert_eq!(visible(&s), vec!["r/vscode-settings"]);
+    }
+
+    #[test]
+    fn kind_filter_alone_keeps_tree_view() {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Tree;
+        s.set_rows(vec![kinded("r/a", "skill"), kinded("r/b", "agent")]);
+        s.cycle_kind_filter();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+    }
+
+    #[test]
+    fn kind_label_names_the_active_kind() {
+        let mut s = TuiState::new();
+        assert_eq!(s.kind_label(), "");
+        s.kind_filter = Some(ArtifactKind::Agent);
+        assert_eq!(s.kind_label(), "kind: agent");
+    }
+
+    fn kind_word_tree() -> TuiState {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![
+            tree_row("reg/acme/vscode-settings", "skill", ArtifactState::NotInstalled),
+            tree_row("reg/acme/prefs", "settings", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // -> Tree
+        s
+    }
+
+    #[test]
+    fn kind_filter_turns_a_kind_word_query_into_a_ranked_flat_list() {
+        let mut s = kind_word_tree();
+        s.apply_query("settings");
+        assert_eq!(s.view_mode, ViewMode::Tree, "a kind-only query keeps the tree");
+        s.cycle_kind_filter();
+        assert_eq!(s.kind_filter, Some(ArtifactKind::Skill));
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        assert!(s.tree_suspended_by_search);
+        let repos: Vec<_> = s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect();
+        assert_eq!(repos, ["reg/acme/vscode-settings"]);
+    }
+
+    #[test]
+    fn kind_filter_with_a_text_query_ranks_within_the_kind() {
+        let mut s = kind_word_tree();
+        s.apply_query("vscode");
+        s.kind_filter = None;
+        s.cycle_kind_filter();
+        assert_eq!(s.kind_filter, Some(ArtifactKind::Skill));
+        let repos: Vec<_> = s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect();
+        assert_eq!(repos, ["reg/acme/vscode-settings"]);
     }
 
     #[test]

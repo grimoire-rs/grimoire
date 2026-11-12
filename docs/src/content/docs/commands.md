@@ -2122,6 +2122,15 @@ way. They no longer match a name or keyword as text. When
 `[[registries]]` are configured, all of them are browsed and the results
 are flattened into one table.
 
+`--kind <KIND>` (short `-k`) shows only the listed kinds. It is repeatable and
+comma-separated, so `--kind skill,rule` equals `-k skill -k rule`. The values
+are `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook` and `settings`, singular
+only. An unknown value exits `64`. With `--kind`, every query word matches as
+text, so a bare kind keyword is no longer a filter. `grim search --kind skill
+settings` finds a skill named `vscode-settings`, which bare `grim search
+settings` does not. The JSON output and exit codes are unchanged, and
+`options.search_min_relevance` applies within the filtered kinds.
+
 The artifact's name (the repository's leaf segment) and its keywords match
 by **fuzzy subsequence**, the same shape [fzf][fzf] and most editor command
 palettes use. A term's letters must appear in order, but need not be
@@ -3576,7 +3585,10 @@ for one run, and [`options.tui.sort_order`](./configuration.md#options-tui)
 picks the direction the order opens in. Omitted and unconfigured, the
 browse opens grouped by kind and then by name as it always has; the `s`
 key cycles through the same orders live, `S` flips the direction, and the
-Catalog title names the active one. When the browse source publishes
+Catalog title names the active one. The `f` key cycles a kind filter through
+the kinds present in the loaded catalog, and the title names it before the
+sort (`kind: agent · sort: rating desc`). While it is on, `/` search text
+matches as text. When the browse source publishes
 [artifact ratings](./ratings.md), the detail pane gains a `Rating:` row
 below the provenance rows (`42 upvotes`); an unrated artifact simply has no
 such row, never a `0`.
@@ -4275,7 +4287,7 @@ down when the client closes stdin (EOF).
 
 | Tool | Description | Gate |
 |------|-------------|------|
-| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. An unpaged call on a large index can return tens of megabytes, so pass `limit` and `offset`. `total`, `truncated` and `sources[].capped` report the cut. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `kind?` (an array of the `grim search --kind` kind names; with it, every word of `query` matches as text), `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. An unpaged call on a large index can return tens of megabytes, so pass `limit` and `offset`. `total`, `truncated` and `sources[].capped` report the cut. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 32 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |

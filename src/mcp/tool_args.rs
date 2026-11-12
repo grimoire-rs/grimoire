@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use rmcp::schemars;
 use serde::Deserialize;
 
+use crate::oci::artifact_kind::ArtifactKind;
+
 /// Per-call install-scope selection, flattened into every scope-sensitive
 /// tool's arguments. All fields optional; every combination is valid input.
 ///
@@ -61,9 +63,15 @@ pub struct SearchToolArgs {
     /// scoring below `options.search_min_relevance` percent of the best
     /// (default 50) are dropped. A bare kind keyword
     /// (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular or plural)
-    /// filters by kind. Omit to list the whole catalog, unranked, in registry order.
+    /// filters by kind, unless `kind` is given. Omit to list the whole catalog,
+    /// unranked, in registry order.
     #[serde(default)]
     pub query: Option<String>,
+
+    /// Return only these kinds (`skill`, `rule`, `agent`, `bundle`, `mcp`,
+    /// `hook`, `settings`). With `kind`, every word of `query` matches as text.
+    #[serde(default)]
+    pub kind: Option<Vec<ArtifactKind>>,
 
     /// Return at most this many results (at least 1): the best matches under
     /// a `query`, the first rows in registry order without one, counted from
@@ -297,6 +305,28 @@ mod tests {
                 serde_json::from_str::<SearchToolArgs>(&json).is_err(),
                 "limit {bad} must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn search_args_deserialize_a_kind_list() {
+        let with: SearchToolArgs = serde_json::from_value(serde_json::json!({"kind": ["agent"]})).unwrap();
+        assert_eq!(with.kind, Some(vec![ArtifactKind::Agent]));
+        let without: SearchToolArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(without.kind, None);
+    }
+
+    #[test]
+    fn search_args_reject_an_unknown_kind() {
+        assert!(serde_json::from_value::<SearchToolArgs>(serde_json::json!({"kind": ["bogus"]})).is_err());
+    }
+
+    #[test]
+    fn search_args_schema_lists_every_kind() {
+        let schema = serde_json::to_value(schemars::schema_for!(SearchToolArgs)).unwrap();
+        let text = schema.to_string();
+        for k in ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"] {
+            assert!(text.contains(&format!("\"{k}\"")), "schema lacks kind {k}: {text}");
         }
     }
 

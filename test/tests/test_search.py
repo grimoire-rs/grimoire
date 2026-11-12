@@ -761,3 +761,82 @@ def test_search_json_names_a_source_whose_cache_will_not_parse(
         f"no machine-local path leaks into the frozen document: {source!r}"
     )
     assert source["locator"] == locator, f"the failed source is named: {source!r}"
+
+
+def test_search_kind_flag_filters(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``--kind`` keeps only the named kinds; repeats and commas are equivalent."""
+    make_artifact(
+        f"{unique_repo}/a-skill",
+        "skill",
+        {"a-skill/SKILL.md": "---\nname: a-skill\n---\n# s\n"},
+        tag="latest",
+    )
+    make_artifact(
+        f"{unique_repo}/a-rule",
+        "rule",
+        {"a-rule.md": "---\npaths: ['**/*.rs']\n---\n# r\n"},
+        tag="latest",
+    )
+    make_artifact(
+        f"{unique_repo}/an-agent",
+        "agent",
+        {"an-agent.md": "---\nname: an-agent\ndescription: An agent.\nmodel: sonnet\n---\n# Agent\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+    scoped = ["--registry", f"{REGISTRY_HOST}/{unique_repo}"]
+
+    warm = runner.json("search", unique_repo, *scoped, "--refresh")["items"]
+    warm_repos = {r["repo"].split("/")[-1] for r in warm}
+    assert {"a-skill", "a-rule", "an-agent"} <= warm_repos, (
+        f"warm catalog must hold all three kinds, got {warm_repos}"
+    )
+
+    def leaves(*flags: str) -> set[str]:
+        rows = runner.json("--offline", "search", unique_repo, *scoped, *flags)["items"]
+        return {r["repo"].split("/")[-1] for r in rows}
+
+    assert leaves("--kind", "agent") == {"an-agent"}
+    assert leaves("--kind", "skill,rule") == {"a-skill", "a-rule"}
+    assert leaves("-k", "skill", "-k", "rule") == {"a-skill", "a-rule"}
+
+
+def test_search_kind_flag_makes_a_kind_word_text(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """With ``--kind``, the word ``settings`` matches as text, not as a kind."""
+    make_artifact(
+        f"{unique_repo}/vscode-settings",
+        "skill",
+        {"vscode-settings/SKILL.md": "---\nname: vscode-settings\n---\n# s\n"},
+        tag="latest",
+    )
+    make_artifact(
+        f"{unique_repo}/unrelated",
+        "skill",
+        {"unrelated/SKILL.md": "---\nname: unrelated\n---\n# u\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+    scoped = ["--registry", f"{REGISTRY_HOST}/{unique_repo}"]
+
+    runner.json("search", unique_repo, *scoped, "--refresh")
+
+    bare = runner.json("--offline", "search", "settings", *scoped)["items"]
+    assert not any(r["repo"].endswith("vscode-settings") for r in bare), (
+        f"bare `settings` is the kind keyword, got {bare}"
+    )
+
+    rows = runner.json("--offline", "search", "--kind", "skill", "settings", *scoped)["items"]
+    leaves = {r["repo"].split("/")[-1] for r in rows}
+    assert "vscode-settings" in leaves, leaves
+    assert "unrelated" not in leaves, leaves
+
+
+def test_search_kind_flag_rejects_unknown_kind(grim_at, project_dir: Path) -> None:
+    """An unknown ``--kind`` value is a usage error (exit 64)."""
+    runner = grim_at(project_dir)
+    result = runner.run("search", "--kind", "bogus", check=False)
+    assert result.returncode == 64, (result.returncode, result.stderr)

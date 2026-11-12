@@ -8,7 +8,8 @@
 //! whitespace splits it into tokens, each lowercased. A bare *kind keyword*
 //! (`skill`, `rule`, `bundle`, `agent`, `mcp`, `hook` or `settings`, singular or
 //! plural) is a kind **filter** (never a literal text term); every other token is a text
-//! term. Matching is an AND across all of them:
+//! term. An explicit kind list (`parse_with_kinds`) replaces keyword extraction, so every
+//! token is then text. Matching is an AND across all of them:
 //!
 //! - each text term must independently hit *any* of an entry's fields
 //!   (case-insensitive), and
@@ -188,6 +189,20 @@ impl SearchQuery {
             }
         }
         Self { terms, kinds }
+    }
+
+    /// Parse `raw` against an explicit kind list. Explicit kinds win: with a
+    /// non-empty `kinds`, every token is a text term, so a kind word like
+    /// `settings` matches as text. An empty slice is [`Self::parse`].
+    pub fn parse_with_kinds(raw: &str, kinds: &[ArtifactKind]) -> Self {
+        if kinds.is_empty() {
+            return Self::parse(raw);
+        }
+        let terms = raw.split_whitespace().map(str::to_lowercase).collect();
+        Self {
+            terms,
+            kinds: kinds.to_vec(),
+        }
     }
 
     /// Whether the query carries at least one text term — i.e. whether it
@@ -500,6 +515,44 @@ mod tests {
         );
         // A kindless entry never satisfies a kind filter.
         assert!(!q.matches_fields(None, "acme/x", "", "", &[]));
+    }
+
+    #[test]
+    fn parse_with_kinds_empty_slice_equals_parse() {
+        for raw in ["", "rule foo", "settings"] {
+            assert_eq!(SearchQuery::parse_with_kinds(raw, &[]), SearchQuery::parse(raw));
+        }
+    }
+
+    #[test]
+    fn explicit_kind_makes_a_kind_word_a_text_term() {
+        let q = SearchQuery::parse_with_kinds("settings", &[ArtifactKind::Skill]);
+        assert_eq!(q.terms, vec!["settings".to_string()]);
+        assert_eq!(q.kinds, vec![ArtifactKind::Skill]);
+        assert!(q.matches_fields(Some("skill"), "acme/vscode-settings", "", "", &[]));
+        assert!(!q.matches_fields(Some("settings"), "acme/vscode-settings", "", "", &[]));
+    }
+
+    #[test]
+    fn explicit_kinds_are_ored() {
+        let q = SearchQuery::parse_with_kinds("", &[ArtifactKind::Agent, ArtifactKind::Skill]);
+        assert!(q.matches_fields(Some("agent"), "acme/x", "", "", &[]));
+        assert!(q.matches_fields(Some("skill"), "acme/x", "", "", &[]));
+        assert!(!q.matches_fields(Some("rule"), "acme/x", "", "", &[]));
+        assert!(!q.matches_fields(None, "acme/x", "", "", &[]));
+    }
+
+    #[test]
+    fn explicit_kind_gate_stays_exact() {
+        let q = SearchQuery::parse_with_kinds("", &[ArtifactKind::Skill]);
+        assert!(!q.matches_fields(Some("skills"), "acme/x", "", "", &[]));
+        assert!(!q.matches_fields(Some("skil"), "acme/x", "", "", &[]));
+    }
+
+    #[test]
+    fn explicit_kinds_lowercase_terms() {
+        let q = SearchQuery::parse_with_kinds("Review  BAZEL", &[ArtifactKind::Rule]);
+        assert_eq!(q.terms, vec!["review".to_string(), "bazel".to_string()]);
     }
 
     #[test]

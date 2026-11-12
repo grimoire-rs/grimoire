@@ -58,6 +58,7 @@ use crate::install::status_badge::StatusBadge;
 use crate::install::target::{InstallTarget, active_clients};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
+use crate::oci::artifact_kind::ArtifactKind;
 
 use super::scope_resolution;
 
@@ -74,12 +75,17 @@ pub struct SearchArgs {
     /// below `options.search_min_relevance` percent of the best (default 50)
     /// are dropped, with a note on stderr saying how many. A bare kind
     /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular
-    /// or plural) filters by kind instead of matching as text. Empty ⇒ list the whole
-    /// catalog, unranked, in registry order. Results are narrowed further by
-    /// each source's
-    /// `include`/`exclude` browse filter — `grim context` shows the active
-    /// patterns.
+    /// or plural) filters by kind instead of matching as text, unless `--kind`
+    /// is given. Empty ⇒ list the whole catalog, unranked, in registry order.
+    /// Results are narrowed further by each source's `include`/`exclude`
+    /// browse filter — `grim context` shows the active patterns.
     pub query: Option<String>,
+
+    /// Show only these kinds (repeat the flag or separate with commas). With
+    /// `--kind`, every query word matches as text, so `grim search --kind skill
+    /// settings` finds a skill named `vscode-settings`.
+    #[arg(long, short = 'k', value_delimiter = ',')]
+    pub kind: Vec<ArtifactKind>,
 
     /// Order the results: `name` (ascending, case-insensitive), `updated`
     /// (newest first, undated last), `rating` (most upvotes first, then
@@ -154,7 +160,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     let access = super::access_seam(ctx)?;
     // Parse the raw query once for the truncation hint (the service applies
     // the same matcher per registry).
-    let parsed = SearchQuery::parse(args.query.as_deref().unwrap_or(""));
+    let parsed = SearchQuery::parse_with_kinds(args.query.as_deref().unwrap_or(""), &args.kind);
 
     // Resolve the scope's registry set + the best-effort badge inputs once,
     // then browse every configured registry through the shared catalog
@@ -764,6 +770,7 @@ mod tests {
     fn args() -> SearchArgs {
         SearchArgs {
             query: None,
+            kind: Vec::new(),
             sort: None,
             limit: None,
             offset: 0,
@@ -814,6 +821,7 @@ mod tests {
             ),
             "the query arg must say a filter can hide rows; got:\n{collapsed}"
         );
+        assert!(collapsed.contains("--kind"), "help must list --kind; got:\n{collapsed}");
         assert!(
             collapsed.contains(
                 "Collapses the browse set to exactly these registries and browses them unfiltered — a configured `include`/`exclude` does not apply"
@@ -1511,6 +1519,37 @@ mod tests {
             collapsed.contains("`offset + items.length < total` means more rows remain"),
             "--offset must state the has-more recipe; got:\n{collapsed}"
         );
+    }
+
+    #[test]
+    fn kind_flag_accepts_repeats_and_commas() {
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(flatten)]
+            args: SearchArgs,
+        }
+        use clap::Parser as _;
+
+        let want = vec![ArtifactKind::Agent, ArtifactKind::Skill];
+        let commas = Harness::try_parse_from(["search", "--kind", "agent,skill"]).unwrap();
+        assert_eq!(commas.args.kind, want);
+        let repeats = Harness::try_parse_from(["search", "-k", "agent", "-k", "skill"]).unwrap();
+        assert_eq!(repeats.args.kind, want);
+    }
+
+    #[test]
+    fn kind_flag_rejects_an_unknown_kind() {
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(flatten)]
+            _args: SearchArgs,
+        }
+        use clap::Parser as _;
+
+        let err = Harness::try_parse_from(["search", "--kind", "bogus"])
+            .err()
+            .expect("bogus is not a kind");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]

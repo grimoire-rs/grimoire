@@ -240,9 +240,28 @@ impl std::fmt::Display for ArtifactKind {
     }
 }
 
+/// The `--kind` flag values are the kind strings.
+impl clap::ValueEnum for ArtifactKind {
+    fn value_variants<'a>() -> &'a [Self] {
+        &Self::ALL
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.kind_str()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_enum_names_every_kind_by_its_kind_str() {
+        for k in ArtifactKind::ALL {
+            assert_eq!(<ArtifactKind as clap::ValueEnum>::from_str(k.kind_str(), false), Ok(k));
+        }
+        assert!(<ArtifactKind as clap::ValueEnum>::from_str("skills", false).is_err());
+    }
 
     #[test]
     fn subdir_and_dir_artifact() {
