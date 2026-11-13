@@ -492,6 +492,8 @@ pub fn read_table_diagnosed(
 pub fn read_table_bytes(path: &Path) -> Result<Vec<u8>, DispatchDegrade> {
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() > MAX_TABLE_BYTES => return Err(DispatchDegrade::Oversize),
+        // Opening a FIFO with no writer blocks forever; a directory already ends as unparsable.
+        Ok(meta) if !meta.is_file() => return Err(DispatchDegrade::Unparsable),
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(DispatchDegrade::Absent),
         // Unreadable for any other reason is not "absent": the file may well be
@@ -798,5 +800,32 @@ mod tests {
             ["NOT-HEX"]
         );
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_table_is_unparsable_not_read() {
+        let dir = std::env::temp_dir().join(format!("hook-core-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dispatch.json");
+        // `unsafe_code` is forbidden, so no `libc::mkfifo`.
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // An open of the FIFO never returns, so bound the wait.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        std::thread::spawn(move || {
+            // The receiver is gone once the wait timed out; the test has failed by then.
+            let _ = tx.send(read_table_bytes(&probe));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+        std::fs::remove_dir_all(&dir).ok();
+        let got = got.expect("a FIFO table must not block");
+        assert_eq!(got, Err(DispatchDegrade::Unparsable));
     }
 }

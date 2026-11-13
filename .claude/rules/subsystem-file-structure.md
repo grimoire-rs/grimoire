@@ -91,6 +91,9 @@ read again. 0.13 and 0.14.x refuse a cache holding the field.
   name → content mapping.
 - Concurrent processes must coordinate via advisory file locks for any
   read-modify-write on shared metadata.
+- Read a path grim derives with `store::read_regular` /
+  `read_regular_to_string` (or `config::read_capped_regular`): a plain read blocks
+  forever on a FIFO. A path the user names keeps the plain reader, since a pipe is valid there.
 
 ## Cross-References
 

@@ -731,7 +731,12 @@ fn converge_on(
         let client = armed.client;
         // Read before the converge rewrites it: C-022 compares the strings.
         let codex_before = (client == ClientTarget::Codex)
-            .then(|| armed.surface.as_deref().and_then(|s| std::fs::read_to_string(s).ok()))
+            .then(|| {
+                armed
+                    .surface
+                    .as_deref()
+                    .and_then(|s| crate::store::read_regular_to_string(s).ok())
+            })
             .flatten();
         let outcome = match sync_for_state(
             client.vendor(),
@@ -1041,7 +1046,10 @@ impl ArmedClient {
     ///
     /// Returns the hooks rewritten for that reason, each once.
     fn narrow(&mut self, closure: &BTreeSet<NodeKey>, standing: &[DispatchEntry]) -> Vec<String> {
-        let text = self.surface.as_deref().and_then(|s| std::fs::read_to_string(s).ok());
+        let text = self
+            .surface
+            .as_deref()
+            .and_then(|s| crate::store::read_regular_to_string(s).ok());
         let vendor = self.client.vendor();
         let rows = std::mem::take(&mut self.rows);
         let registrations = std::mem::take(&mut self.registrations);
@@ -1208,7 +1216,7 @@ fn sync_for_state(
         // Rendered whole, so what stays has to be in the document, in desired
         // order: Codex keys its stored trust on an entry's position.
         Some(HookSurface::OwnFile) => {
-            let text = std::fs::read_to_string(surface).ok();
+            let text = crate::store::read_regular_to_string(surface).ok();
             let kept: Vec<_> = every
                 .iter()
                 .filter(|m| writes(m) || element_on(vendor, text.as_deref(), m))
@@ -1338,7 +1346,7 @@ fn converge_own_file(
     // Byte-identical rewrites are skipped so re-materialization leaves `status`
     // not-modified (Principle 9's self-heal obligation). Only reachable for a
     // grim-owned file, so the existing bytes already match the record.
-    if owner == SurfaceOwner::Grim && std::fs::read(surface).is_ok_and(|existing| existing == bytes) {
+    if owner == SurfaceOwner::Grim && crate::store::read_regular(surface).is_ok_and(|existing| existing == bytes) {
         return Ok(SurfaceWrite::Unchanged);
     }
     if let Some(parent) = surface.parent() {
@@ -1419,8 +1427,9 @@ fn own_file_owner(vendor: &dyn Vendor, grim_home: &Path, surface: &Path) -> Surf
         Ok(meta) if meta.is_file() => {}
         _ => return SurfaceOwner::User,
     }
-    let recorded = std::fs::read_to_string(super::hook_dispatch::owned_file_record_path(grim_home, surface));
-    let actual = std::fs::read(surface);
+    let recorded =
+        crate::store::read_regular_to_string(&super::hook_dispatch::owned_file_record_path(grim_home, surface));
+    let actual = crate::store::read_regular(surface);
     match (recorded, actual) {
         (Ok(recorded), Ok(actual)) if recorded.trim() == sha256_hex(&actual) => SurfaceOwner::Grim,
         _ => SurfaceOwner::User,
@@ -1560,7 +1569,7 @@ fn converge_splice_holding(
             vendor.name()
         )));
     };
-    let original = match std::fs::read_to_string(surface) {
+    let original = match crate::store::read_regular_to_string(surface) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e),
@@ -1733,7 +1742,7 @@ fn owns_anything(vendor: &dyn Vendor, grim_home: &Path, surface: Option<&Path>, 
             // introduce a false negative — while it does kill the accidental
             // positive where the value alone appears in a comment or an
             // unrelated string.
-            std::fs::read_to_string(surface)
+            crate::store::read_regular_to_string(surface)
                 .is_ok_and(|text| text.contains(HOOK_MARKER_KEY) && text.contains(HOOK_MARKER_VALUE))
         }
         // `CodegenModule` ships no template in v1 and `None` has no surface at
@@ -1800,7 +1809,7 @@ pub(crate) fn surface_snapshot(workspace: &Path, scope: ConfigScope) -> SurfaceS
                 let surface = client.vendor().hook_config_path(workspace, scope)?;
                 let text = confined_target(&surface, confine)
                     .ok()
-                    .and_then(|_| std::fs::read_to_string(&surface).ok());
+                    .and_then(|_| crate::store::read_regular_to_string(&surface).ok());
                 Some((client, text))
             })
             .collect(),
@@ -1948,7 +1957,7 @@ pub(crate) fn unparseable_surfaces(workspace: &Path, scope: ConfigScope, clients
         .filter_map(|client| client.vendor().hook_config_path(workspace, scope))
         .filter(|surface| {
             confined_target(surface, confine).is_ok()
-                && match std::fs::read_to_string(surface) {
+                && match crate::store::read_regular_to_string(surface) {
                     Ok(text) => json_splice::value_at(&text, &[]).is_err(),
                     Err(e) => e.kind() != io::ErrorKind::NotFound,
                 }
@@ -2510,7 +2519,7 @@ fn armable_manifest(
             "its payload was modified since install; restore it with `{grim} install --force`"
         ));
     }
-    let source = std::fs::read_to_string(payload_dir.join(HOOK_MANIFEST_FILE))
+    let source = crate::store::read_regular_to_string(&payload_dir.join(HOOK_MANIFEST_FILE))
         .map_err(|e| format!("its {HOOK_MANIFEST_FILE} cannot be read ({e})"))?;
     // The parse error quotes publisher bytes on their way to a terminal.
     HookManifest::from_toml_str(&source).map_err(|e| {
@@ -2598,7 +2607,7 @@ pub fn ensure_settings_local_excluded(workspace: &Path) -> ExcludeOutcome {
     let exclude = info_dir.join("exclude");
     // Only an absent file reads as empty: any other failure (non-UTF-8, EACCES,
     // a directory) would otherwise have the write below replace the user's rules.
-    let existing = match std::fs::read_to_string(&exclude) {
+    let existing = match crate::store::read_regular_to_string(&exclude) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(_) => return ExcludeOutcome::Unwritable,
@@ -2643,7 +2652,7 @@ fn git_dir(workspace: &Path) -> Option<PathBuf> {
     if meta.is_dir() {
         return Some(dot_git);
     }
-    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let pointer = crate::store::read_regular_to_string(&dot_git).ok()?;
     let target = pointer.lines().find_map(|line| line.strip_prefix("gitdir:"))?.trim();
     let target = Path::new(target);
     Some(if target.is_absolute() {
@@ -2656,7 +2665,7 @@ fn git_dir(workspace: &Path) -> Option<PathBuf> {
 /// `$GIT_COMMON_DIR` for `git_dir`: its `commondir` file, relative to `git_dir`
 /// unless absolute, else `git_dir` itself.
 fn git_common_dir(git_dir: &Path) -> Option<PathBuf> {
-    match std::fs::read_to_string(git_dir.join("commondir")) {
+    match crate::store::read_regular_to_string(&git_dir.join("commondir")) {
         Ok(pointer) => Some(git_dir.join(pointer.trim_end_matches(['\r', '\n']))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Some(git_dir.to_path_buf()),
         // Falling back to `git_dir` here would write a rule git never reads.
@@ -2740,7 +2749,7 @@ pub fn drop_settings_local_exclude(workspace: &Path) -> ExcludeOutcome {
         return ExcludeOutcome::Shared;
     }
     let exclude = info_dir.join("exclude");
-    let Ok(existing) = std::fs::read_to_string(&exclude) else {
+    let Ok(existing) = crate::store::read_regular_to_string(&exclude) else {
         return ExcludeOutcome::Absent;
     };
     if !exclude_lines(&existing).any(|line| line == CLAUDE_LOCAL_SETTINGS) {

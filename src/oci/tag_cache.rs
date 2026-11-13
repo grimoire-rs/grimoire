@@ -74,7 +74,7 @@ impl TagCache {
     /// rejection mapped to [`std::io::ErrorKind::InvalidData`].
     fn read_file(&self, id: &Identifier) -> std::io::Result<Option<TagCacheFile>> {
         let path = self.file_for(id);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match crate::store::read_regular(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),

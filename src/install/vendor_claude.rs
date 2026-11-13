@@ -707,7 +707,7 @@ fn managed_setting_files(dir: &Path) -> Vec<PathBuf> {
 /// `..` drops the layer (debug log) and never fails the command. Nothing is
 /// expanded — not `~`, not `$VAR`.
 fn settings_env_config_dir(file: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(file).ok()?;
+    let text = crate::store::read_regular_to_string(file).ok()?;
     // Claude's loader drops one leading BOM before parsing, so a file it reads must read here.
     let json = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let doc: serde_json::Value = match serde_json::from_str(json) {

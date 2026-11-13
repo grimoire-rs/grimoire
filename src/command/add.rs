@@ -516,7 +516,7 @@ pub(super) async fn refuse_settings_conflict_for(
 /// Any other read failure (74/77): a rollback must never delete a file it could
 /// not snapshot.
 pub(crate) fn snapshot_config(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
+    match crate::store::read_regular(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow::Error::from(crate::error::Error::from(
@@ -538,7 +538,7 @@ pub(crate) fn restore_config_unless_edited(
     written: Option<&[u8]>,
     grim: &Invocation,
 ) {
-    if written.is_none_or(|written| std::fs::read(path).is_ok_and(|now| now == written)) {
+    if written.is_none_or(|written| crate::store::read_regular(path).is_ok_and(|now| now == written)) {
         restore_config(path, original, grim);
     } else {
         tracing::warn!(
@@ -2102,7 +2102,7 @@ pub(crate) fn read_plugin_table(
     path: &std::path::Path,
 ) -> Result<Option<crate::config::plugin_meta::PluginMeta>, crate::config::config_error::ConfigError> {
     use crate::config::config_error::{ConfigError, ConfigErrorKind};
-    let content = match std::fs::read_to_string(path) {
+    let content = match crate::store::read_regular_to_string(path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(ConfigError::new(path, ConfigErrorKind::Io(e))),
@@ -2124,7 +2124,7 @@ pub(crate) fn write_config_with_plugin(
     use crate::config::config_error::{ConfigError, ConfigErrorKind};
 
     let desired = render_config(options, registries, set, plugin);
-    let text = match std::fs::read_to_string(path) {
+    let text = match crate::store::read_regular_to_string(path) {
         Ok(existing) => match crate::config::toml_merge::merge(&existing, &desired) {
             Ok(text) => text,
             // Report a broken file as the loader would (78). A file only

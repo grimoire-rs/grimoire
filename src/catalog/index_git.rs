@@ -182,6 +182,7 @@ fn walk_metadata(root: &Path, cache_path: &Path, locator: &str) -> Result<Vec<In
 /// The file's bytes, or `InvalidData` once it exceeds [`MAX_METADATA_BYTES`].
 fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+    crate::store::ensure_regular(path)?;
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
         .take(MAX_METADATA_BYTES + 1)

@@ -199,7 +199,7 @@ fn clear_blocker(path: &Path) -> io::Result<()> {
 
 /// What stands at `path`.
 pub(crate) fn read_own_file(path: &Path) -> io::Result<OwnFile> {
-    match std::fs::read(path) {
+    match crate::store::read_regular(path) {
         Ok(bytes) => Ok(OwnFile::Present(own_file_hash(&bytes))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(OwnFile::Absent),
         Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(OwnFile::Blocked { clearable: false }),
@@ -253,7 +253,7 @@ pub(crate) fn read_pointer(format: McpConfigFormat, text: &str, path: &[String])
 
 /// The file's text; an absent file reads empty, as the splices take it.
 pub(crate) fn reread(path: &Path) -> io::Result<String> {
-    match std::fs::read_to_string(path) {
+    match crate::store::read_regular_to_string(path) {
         // A dangling link reads as no file, and the write would then swap the
         // link for a regular file: only a file that is really absent is empty.
         Err(error) if error.kind() == io::ErrorKind::NotFound && !path.is_symlink() => Ok(String::new()),

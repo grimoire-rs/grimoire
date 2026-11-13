@@ -85,7 +85,7 @@ pub fn sync_managed_element(config_path: &Path, key: &str, entry: &str, want: bo
     // A missing file reads as empty text — the splice engine's own
     // "no document yet" case, which emits the minimal skeleton on add and
     // is a no-op on remove.
-    let raw = match std::fs::read_to_string(config_path) {
+    let raw = match crate::store::read_regular_to_string(config_path) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(with_path(config_path, e)),

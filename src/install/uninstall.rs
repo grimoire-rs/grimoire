@@ -513,7 +513,7 @@ pub fn remove_entry(
         Ok(client) if path.exists() => crate::install::cline_lock::guard(client, &lock_at)?,
         _ => None,
     };
-    let text = match std::fs::read_to_string(path) {
+    let text = match crate::store::read_regular_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),

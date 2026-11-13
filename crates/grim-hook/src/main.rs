@@ -148,6 +148,13 @@ fn table_path() -> io::Result<PathBuf> {
 /// The table's bytes, capped one past [`MAX_TABLE_BYTES`] so the selector can
 /// refuse an oversize table without the launcher ever holding it whole.
 fn read_table(path: &std::path::Path) -> Result<Vec<u8>, Fail> {
+    // Opening a FIFO with no writer blocks forever.
+    if fs::metadata(path).is_ok_and(|meta| !meta.is_file() && !meta.is_dir()) {
+        return Err(Fail::error(
+            DispatchExit::IoError,
+            format!("cannot open {}: not a regular file", path.display()),
+        ));
+    }
     let file = File::open(path).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => Fail::error(DispatchExit::NotFound, format!("{} does not exist", path.display())),
         _ => Fail::error(DispatchExit::IoError, format!("cannot open {}: {e}", path.display())),

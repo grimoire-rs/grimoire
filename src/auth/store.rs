@@ -371,7 +371,7 @@ fn dup_credential(cred: &Credential) -> Credential {
 /// Read and parse the docker config. A missing or empty file is the
 /// default (empty) config; malformed JSON is an error.
 fn read_config(path: &Path) -> Result<DockerConfig, AuthError> {
-    let bytes = match std::fs::read(path) {
+    let bytes = match crate::store::read_regular(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DockerConfig::default()),
         Err(source) => {

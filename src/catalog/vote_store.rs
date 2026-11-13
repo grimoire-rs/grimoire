@@ -204,7 +204,7 @@ impl VoteStore {
     /// indistinguishable from unreadable here: both mean grim knows
     /// nothing, and neither is worth an error the user cannot act on.
     fn load(&self) -> Option<VotesFile> {
-        let bytes = std::fs::read(&self.path).ok()?;
+        let bytes = crate::store::read_regular(&self.path).ok()?;
         match serde_json::from_slice(&bytes) {
             Ok(file) => Some(file),
             Err(err) => {

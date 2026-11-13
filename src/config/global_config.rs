@@ -73,7 +73,7 @@ impl GlobalConfig {
             registries: Vec<RegistryConfig>,
         }
 
-        config::read_capped(path)
+        config::read_capped_regular(path)
             .ok()
             .and_then(|content| toml::from_str::<RawRegistries>(&content).ok())
             .map(|raw| raw.registries)
@@ -91,7 +91,7 @@ impl GlobalConfig {
     /// Propagates parse / size / non-not-found I/O failures with path
     /// context.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let content = match config::read_capped(path) {
+        let content = match config::read_capped_regular(path) {
             Ok(c) => c,
             Err(ConfigError {
                 kind: ConfigErrorKind::Io(io),
@@ -271,5 +271,35 @@ default = true
             panic!("expected RegistryInvalid, got {:?}", err.kind);
         };
         assert!(reason.contains("default"), "reason must mention 'default': {reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_global_config_is_refused_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.toml");
+        // `unsafe_code` is forbidden, so no `libc::mkfifo`.
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // An open of the FIFO never returns, so bound the wait.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The receiver is gone once the wait timed out; the test has failed by then.
+            let _ = tx.send((
+                GlobalConfig::load(&path).map(|_| ()),
+                GlobalConfig::registries_unvalidated(&path),
+            ));
+        });
+        let (loaded, salvaged) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a FIFO global config must not block");
+        let err = loaded.expect_err("a FIFO is not a config");
+        assert!(matches!(err.kind, ConfigErrorKind::Io(_)), "{err:?}");
+        assert!(salvaged.is_empty());
     }
 }

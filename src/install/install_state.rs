@@ -173,7 +173,7 @@ impl ClientOutput {
         }
         // A footprint hash folds the file's name in, and the rule judges bytes.
         if kind == ArtifactKind::Settings {
-            return std::fs::read(&target)
+            return crate::store::read_regular(&target)
                 .map(|bytes| own_file_hash(&bytes))
                 .map_err(|source| AnchorError::Io { path: target, source });
         }
@@ -442,7 +442,7 @@ fn read_entry_value(
 ) -> io::Result<Option<serde_json::Value>> {
     use crate::install::vendor::McpConfigFormat;
 
-    let raw = std::fs::read_to_string(target)?;
+    let raw = crate::store::read_regular_to_string(target)?;
     if kind == ArtifactKind::Settings {
         return read_settings_value(&raw, pointer, element, format);
     }
@@ -876,7 +876,7 @@ impl InstallState {
         reason = "V2-only test seam; production always goes through load_project/load_global (see doc above)"
     )]
     pub fn load(scope_path: &Path) -> std::io::Result<Self> {
-        let bytes = match std::fs::read(scope_path) {
+        let bytes = match crate::store::read_regular(scope_path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self {
@@ -914,7 +914,7 @@ impl InstallState {
     /// [`std::io::Error`] for a read failure; an unknown version or a corrupt
     /// file is surfaced as [`std::io::ErrorKind::InvalidData`].
     pub fn load_global(scope_path: &Path, roots: &AnchorRoots) -> std::io::Result<Self> {
-        let bytes = match std::fs::read(scope_path) {
+        let bytes = match crate::store::read_regular(scope_path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self {
@@ -1189,7 +1189,7 @@ impl InstallState {
 
         // Primary location: <workspace>/.grimoire/state.json. Present ⇒ read
         // it (V2 direct, or V1 converted in memory — never written here).
-        match std::fs::read(&new_path) {
+        match crate::store::read_regular(&new_path) {
             Ok(bytes) => return Self::records_from_bytes(&bytes, &new_path, Some(convert)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -1204,7 +1204,7 @@ impl InstallState {
         let state_dir = grim_home.join("state");
         let canonical = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
         let legacy_path = Self::legacy_project_path(&state_dir, &canonical);
-        match std::fs::read(&legacy_path) {
+        match crate::store::read_regular(&legacy_path) {
             // The state stays backed by the NEW location, so a later mutating
             // `save` relocates it (the legacy file is reaped by the migration
             // persist step, not here — and only when the conversion was
@@ -1374,7 +1374,7 @@ impl InstallState {
         let backup = path.with_file_name(backup_name);
 
         let snapshot = || -> std::io::Result<bool> {
-            let bytes = match std::fs::read(path) {
+            let bytes = match crate::store::read_regular(path) {
                 Ok(bytes) => bytes,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
                 Err(e) => return Err(e),
@@ -5363,6 +5363,32 @@ mod tests {
         let st = InstallState::load_global(&path, &roots).unwrap();
 
         assert_eq!(st.get(ArtifactKind::Skill, "x").unwrap().outputs.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_global_state_is_refused_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("global.json");
+        // `unsafe_code` is forbidden, so no `libc::mkfifo`.
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let roots = global_roots(tmp.path());
+        // An open of the FIFO never returns, so bound the wait.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The receiver is gone once the wait timed out; the test has failed by then.
+            let _ = tx.send(InstallState::load_global(&path, &roots).map(|_| ()));
+        });
+        let loaded = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a FIFO global state must not block");
+        assert!(loaded.is_err());
     }
 
     /// A state file is external input: a declined pair must reach neither a

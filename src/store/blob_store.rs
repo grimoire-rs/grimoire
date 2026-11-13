@@ -52,7 +52,7 @@ impl BlobStore {
     ///
     /// Returns any I/O error other than not-found.
     pub fn get(&self, digest: &Digest) -> io::Result<Option<Vec<u8>>> {
-        match std::fs::read(self.blob_path(digest)) {
+        match crate::store::read_regular(&self.blob_path(digest)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),

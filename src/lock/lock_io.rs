@@ -195,7 +195,7 @@ fn write_capped(path: &Path, serialized: &str) -> Result<(), LockError> {
 /// Read a lock file with the shared config-tier size cap, mapping
 /// config-tier I/O / size errors onto the lock-tier taxonomy.
 fn read_capped(path: &Path) -> Result<String, LockError> {
-    config::read_capped(path).map_err(|e| {
+    config::read_capped_regular(path).map_err(|e| {
         let kind = match e.kind {
             config::ConfigErrorKind::Io(io) => LockErrorKind::Io(io),
             config::ConfigErrorKind::FileTooLarge { size, limit } => LockErrorKind::FileTooLarge { size, limit },
@@ -1726,5 +1726,31 @@ pinned = \"{p6}\"
             entry("skill", "x", Some("team"))
         );
         assert_load_marketplace_scope_mismatch(&body);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_lock_is_refused_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        // `unsafe_code` is forbidden, so no `libc::mkfifo`.
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // An open of the FIFO never returns, so bound the wait.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The receiver is gone once the wait timed out; the test has failed by then.
+            let _ = tx.send(load_existing(&path));
+        });
+        let err = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a FIFO lock must not block")
+            .expect_err("a FIFO is not a lock");
+        assert!(matches!(err.kind, LockErrorKind::Io(_)), "{err:?}");
     }
 }

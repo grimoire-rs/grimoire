@@ -516,7 +516,7 @@ fn machine_key(grim_home: &Path) -> io::Result<Vec<u8>> {
 /// on the machine, and reporting a corrupt key is recoverable where silently
 /// disarming everything is not.
 fn read_root_key(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
+    match crate::store::read_regular(path) {
         Ok(key) if key.len() >= ROOT_KEY_BYTES => Ok(Some(key)),
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::InvalidData,

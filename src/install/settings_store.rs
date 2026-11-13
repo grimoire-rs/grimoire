@@ -55,7 +55,7 @@ pub(crate) fn path(grim_home: &Path, workspace: &Path) -> PathBuf {
 /// Any other read failure. The file may hold records, so the caller must not
 /// read this as empty: [`save`] would then replace what it could not see.
 pub(crate) fn load(path: &Path, workspace: &Path) -> io::Result<Vec<InstallRecord>> {
-    let bytes = match std::fs::read(path) {
+    let bytes = match crate::store::read_regular(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
@@ -81,7 +81,7 @@ pub(crate) fn load(path: &Path, workspace: &Path) -> io::Result<Vec<InstallRecor
 /// the record file. No failure loses an unusable file: nothing replaces or
 /// removes it until it is kept.
 pub(crate) fn save(path: &Path, workspace: &Path, records: &[&InstallRecord]) -> io::Result<()> {
-    let current = match std::fs::read(path) {
+    let current = match crate::store::read_regular(path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),

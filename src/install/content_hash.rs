@@ -179,7 +179,7 @@ fn hash_entries(entries: &[(PathBuf, PathBuf)]) -> io::Result<Digest> {
         let rel_bytes = path_to_bytes(rel);
         hasher.update(&rel_bytes);
         hasher.update([0u8]);
-        let body = std::fs::read(abs)?;
+        let body = crate::store::read_regular(abs)?;
         hasher.update(&body);
     }
     Ok(Digest::Sha256(hex::encode(hasher.finalize())))

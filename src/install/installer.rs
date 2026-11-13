@@ -3215,7 +3215,7 @@ async fn install_mcp(
             };
             let (container, member) = (container.to_string(), member.to_string());
 
-            let raw = match std::fs::read_to_string(&config_path) {
+            let raw = match crate::store::read_regular_to_string(&config_path) {
                 Ok(raw) => raw,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(e) => return Err(target_io(&config_path, e).into()),
@@ -3310,7 +3310,7 @@ async fn install_mcp(
             // plan may have written this very file through an alias (a
             // symlinked `.github/mcp.json` → `.vscode/mcp.json`), and
             // splicing onto the older bytes would erase its member.
-            let raw = match std::fs::read_to_string(&plan.config_path) {
+            let raw = match crate::store::read_regular_to_string(&plan.config_path) {
                 Ok(raw) => raw,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(e) => return Err(target_io(&plan.config_path, e).into()),

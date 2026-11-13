@@ -10,6 +10,7 @@
 pub mod atomic_write;
 pub mod blob_store;
 pub mod paths;
+pub mod read_regular;
 
 #[allow(unused_imports)]
 pub use atomic_write::atomic_write;
@@ -17,3 +18,5 @@ pub use atomic_write::atomic_write;
 pub use blob_store::BlobStore;
 #[allow(unused_imports)]
 pub use paths::GrimPaths;
+#[allow(unused_imports)]
+pub use read_regular::{ensure_regular, read_regular, read_regular_to_string};

@@ -223,6 +223,35 @@ fn an_unreadable_table_is_exit_74() {
 }
 
 #[test]
+fn a_fifo_table_is_exit_74_not_a_hang() {
+    let f = Fixture::new();
+    let table = f.path().join("dispatch.json");
+    // `unsafe_code` is forbidden, so no `libc::mkfifo`.
+    assert!(Command::new("mkfifo").arg(&table).status().unwrap().success());
+    let mut child = Command::new(f.bin())
+        .args(["claude", "PreToolUse", ROOT])
+        .stdin(f.stdin(PAYLOAD.as_bytes()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("GRIM_LOG")
+        .spawn()
+        .expect("spawn the launcher");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().ok();
+            child.wait().ok();
+            panic!("the launcher blocked on a FIFO table");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    assert_eq!(status.code(), Some(74));
+}
+
+#[test]
 fn an_unusable_table_is_exit_65() {
     let f = Fixture::new();
     let write = |bytes: &[u8]| fs::write(f.path().join("dispatch.json"), bytes).unwrap();

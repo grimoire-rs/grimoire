@@ -261,7 +261,7 @@ pub fn load(grim_home: &Path, workspace: &Path) -> Option<ConsentRecord> {
 
 /// [`load`] against an explicit path.
 fn load_at(path: &Path) -> Option<ConsentRecord> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = crate::store::read_regular(path).ok()?;
     match serde_json::from_slice::<ConsentRecord>(&bytes) {
         Ok(record) => Some(record),
         Err(err) => {

@@ -166,7 +166,7 @@ pub fn load_bound(cache: &Path, source_key: &str, catalog_bytes: Option<&[u8]>) 
 
 /// The sidecar beside `cache` when it is this version's and `source_key`'s.
 fn read_for(cache: &Path, source_key: &str) -> Option<SyncState> {
-    let bytes = std::fs::read(sidecar_path(cache)).ok()?;
+    let bytes = crate::store::read_regular(&sidecar_path(cache)).ok()?;
     let state: SyncState = serde_json::from_slice(&bytes).ok()?;
     (state.version == SYNC_STATE_VERSION && state.locator_sha256 == sha256_hex(source_key.as_bytes())).then_some(state)
 }

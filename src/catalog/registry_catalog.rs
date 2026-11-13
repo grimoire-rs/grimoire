@@ -545,7 +545,7 @@ impl Catalog {
 
     /// The cache file's bytes; `None` when there is no file.
     fn read_file(path: &Path) -> Result<Option<Vec<u8>>, CatalogError> {
-        match std::fs::read(path) {
+        match crate::store::read_regular(path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(CatalogError::io(path, e)),

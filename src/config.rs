@@ -103,3 +103,15 @@ pub fn read_capped(path: &Path) -> Result<String, ConfigError> {
     }
     Ok(content)
 }
+
+/// [`read_capped`] for a path grim derives itself, never one the user names.
+///
+/// # Errors
+///
+/// [`ConfigErrorKind::Io`] when `path` is neither a regular file nor a
+/// directory, else whatever [`read_capped`] returns.
+pub fn read_capped_regular(path: &Path) -> Result<String, ConfigError> {
+    // Opening a FIFO with no writer blocks forever. A directory keeps its OS error.
+    crate::store::ensure_regular(path).map_err(|e| ConfigError::new(path, ConfigErrorKind::Io(e)))?;
+    read_capped(path)
+}
