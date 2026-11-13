@@ -109,6 +109,42 @@ Do **B alone, sealed**. (Revised the same day; the first draft recommended A and
 
 Not included: a grim-prefixed resource-attributes variable for fleet labels. Add it when someone asks.
 
+## Addendum 2026-11-13: owner decision, and the ocx install-path check
+
+The owner replaced the recommendation above with option D in a narrow form:
+`GRIM_CONFIG` names TOML layers, version 1 reads only `[telemetry]`, and the
+file form is additive with `OTEL_*` rather than sealed
+(`.agents/goals/issue-334.md` § Rules; `adr_grim_config_layers.md`).
+
+**Can an ocx patch put its own install path into a variable value? Yes.**
+`${installPath}` inside a patch (ocx calls it a companion) resolves to the
+patch package's own `content/` directory, not the target's.
+
+- `website/src/content/docs/explanation/patches.mdx`, "Companions are part of
+  their target": `${installPath}`, `${deps.*}` and `${self.env.*}` inside a
+  companion resolve against the companion. The same page ships a `cacerts`
+  file and points `JAVA_TOOL_OPTIONS` at `${installPath}/cacerts`, the shape
+  grim needs.
+- `website/src/content/docs/reference/metadata/env.md:21`: `${installPath}` is
+  "this package's own `content/` directory"; `${self.installPath}` is an
+  alias; `:native` and `:posix` suffixes pick the separator style.
+- A variable with no `visibility` is `private` and reaches only launchers, so
+  the entry must say `"visibility": "public"` to reach a shell that runs `grim`
+  directly.
+- A `constant` entry overwrites any `GRIM_CONFIG` already in the composed
+  environment; `GRIM_TELEMETRY=0`, `DO_NOT_TRACK` and the other opt-outs still
+  win because they are separate variables.
+
+Planned patch entry:
+
+```json
+{"key": "GRIM_CONFIG", "type": "constant", "value": "${installPath}/telemetry.toml", "visibility": "public"}
+```
+
+Read from the local docs at `/home/mherwig/dev/ocx-sh/ocx` commit `a536e92f`
+(2026-11-12, `git describe` v0.6.6). The Rust expansion code and the published
+`ocx.sh` pages were not read, so a release-vs-local drift is unverified.
+
 ## Sources
 
 | Source | Type | Date | Relevance |

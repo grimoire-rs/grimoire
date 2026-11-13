@@ -106,6 +106,12 @@ research-axes:
 
 ## Memory
 
+- **Active plan (2026-11-13, hex-execute high, goal loop `.agents/goals/issue-334.md`):**
+  `.agents/plans/plan_grim_config_telemetry.md`, State `review`, Next `/hex-finalize` (execute pass and review call 1 done, two fix rounds, converged; PD-16…PD-22), branch `hex/issue-334` (worktree `/home/mherwig/.herdr/worktrees/grimoire/duo`). `GRIM_CONFIG` `[telemetry]` files, `GRIM_TELEMETRY_OTLP_HEADERS`; ADRs `adr_grim_config_layers.md` and the 2026-11-13 amendment of `adr_otel_usage_telemetry.md`. Windows proof of the `;` separator owed to a CI deep run (PD-22).
+  **Pitfall:** the pre-commit hook denies any Bash command whose text holds the git commit subcommand, heredoc bodies included; write plan text and retro entries with Edit/Write, and tell workers never to type the phrase.
+  **Pitfall:** `std::env::var(..).ok()` maps a non-UTF-8 value to absent; a tri-state switch must read `var_os`, or an explicit off becomes unset (codex Block, round 1).
+  **Pitfall:** a 1 ms timeout can still succeed against a loopback collector; prove timeout isolation with the fixture's `delay=<ms>` mode and the debug `failed` line.
+
 - **ADR revised once, re-validated once (2026-11-11, still Proposed):** the fix pass covered only findings that hold whether or not the background round stays. Spec re-validation: drift-row fix closed; root rule, bounded reads and stamp partly closed; one new Block (bash/zsh stamp in a shared temp directory); six Warns. All are listed in the ADR under "Unresolved review findings". No second fix pass was run: the stamp mechanism was rewritten once and came back with a new Block, so the remedy is the owner's pick.
   **Pitfall:** a file-based change guard for bash/zsh drew a Block in both rounds; zsh can read mtimes with `zsh/stat` and needs no file.
 
