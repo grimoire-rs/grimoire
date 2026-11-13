@@ -11,6 +11,7 @@ Modes (``collector.mode``, settable at any time):
 - ``ok``: 200, empty ``ExportLogsServiceResponse``, ``application/x-protobuf``.
 - ``status=<code>``: that status, empty body (``status=503``).
 - ``hang``: accepts and never answers until the collector is closed.
+- ``delay=<ms>``: records the request, sleeps that long, then answers like ``ok``.
 - ``redirect``: 307 to ``/redirected`` on this server; that request is
   recorded too, so a test can assert it got zero requests.
 
@@ -24,6 +25,7 @@ import json
 import re
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -104,6 +106,10 @@ def _check_mode(mode: str) -> str:
     if mode.startswith("status="):
         int(mode.removeprefix("status="))
         return mode
+    if mode.startswith("delay="):
+        if not 0 <= int(mode.removeprefix("delay=")) <= 5000:
+            raise ValueError(f"unknown collector mode {mode!r}")
+        return mode
     raise ValueError(f"unknown collector mode {mode!r}")
 
 
@@ -140,6 +146,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if mode.startswith("delay="):
+            time.sleep(int(mode.removeprefix("delay=")) / 1000)
         status = (
             int(mode.removeprefix("status=")) if mode.startswith("status=") else 200
         )

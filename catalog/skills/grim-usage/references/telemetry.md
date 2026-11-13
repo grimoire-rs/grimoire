@@ -10,9 +10,11 @@ later.
 
 ## Turn it on
 
-Telemetry is armed only when `GRIM_TELEMETRY` is truthy (`1`, `true`, `yes`,
-`on`, any case) **and** no disarm switch applies. `OTEL_*` variables alone never
-arm anything. An OTLP endpoint is also **required**:
+Telemetry is armed by one of two sources, and only when no disarm switch
+applies. One is `GRIM_TELEMETRY` truthy (`1`, `true`, `yes`, `on`, any case).
+The other is a `GRIM_CONFIG` file with `[telemetry] enabled = true`.
+`OTEL_*` variables alone never arm anything. An OTLP endpoint is also
+**required**:
 
 ```sh
 export GRIM_TELEMETRY=1
@@ -33,6 +35,31 @@ grim install
   from the project's `origin` remote (project scope only, never a repository
   that is the home directory).
 
+## Configure with a file
+
+`GRIM_CONFIG` lists absolute TOML files, joined with the platform path
+separator. Grim reads only their `[telemetry]` table. A file can arm telemetry
+and name a grim-only destination:
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "https://collector.example.com:4318"
+
+[telemetry.headers]
+authorization = "Bearer example-token"
+```
+
+- With a file `endpoint`, grim reads no `OTEL_EXPORTER_OTLP_*` variable.
+- `GRIM_TELEMETRY_OTLP_HEADERS` (`name=value,name=value`) adds a token from the
+  environment. Prefer it over a file only when the file cannot hold secrets.
+- Opt-outs still win and are checked before any file is opened. A non-blank
+  `GRIM_TELEMETRY` that is not truthy, such as `0`, also turns a file off.
+- An unusable file prints one warning and leaves telemetry off for that run.
+  The exit code does not change.
+
+Keys, merge rules and warning texts: [config file][config-file].
+
 Each armed command sends one `grim.command` event, plus one
 `grim.artifact.changed` event per artifact that `install`, `update` or `add`
 changed. Exact attribute lists, and what is never collected, are tier-3 detail:
@@ -47,8 +74,9 @@ no endpoint is set and nothing will be sent, and no header value ever appears:
 GRIM_TELEMETRY=1 GRIM_LOG=debug grim status 2>&1 | grep 'telemetry payload'
 ```
 
-To prove it is off, unset `GRIM_TELEMETRY` (or set a disarm switch) and confirm
-no `$GRIM_HOME/telemetry/` directory is created: an unarmed run writes nothing.
+To prove it is off, unset both `GRIM_TELEMETRY` and `GRIM_CONFIG` (or set a
+disarm switch) and confirm no `$GRIM_HOME/telemetry/` directory is created: an
+unarmed run writes nothing.
 
 ## Installation id
 
@@ -60,5 +88,6 @@ collector, header scoping and limits: [telemetry][telemetry].
 
 [telemetry]: https://grimoire.rs/telemetry.html
 [stability]: https://grimoire.rs/stability.html#unstable
+[config-file]: https://grimoire.rs/telemetry.html#config-file
 [fields]: https://grimoire.rs/telemetry.html#fields
 [never-collected]: https://grimoire.rs/telemetry.html#never-collected

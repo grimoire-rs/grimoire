@@ -114,8 +114,8 @@ pub fn exit_info(outcome: &anyhow::Result<ExitCode>) -> (i64, Option<String>) {
     (i64::from(exit.exit as u8), error_type)
 }
 
-/// Resource attributes in merge order: derived keys, then
-/// `OTEL_RESOURCE_ATTRIBUTES`, then `OTEL_SERVICE_NAME` (later wins).
+/// Resource attributes in merge order: derived keys, then the folded
+/// overrides (`OTEL_*` first, `GRIM_CONFIG` last; later wins).
 pub fn resource(
     installation_id: Option<&str>,
     vcs: Option<&Vcs>,
@@ -148,7 +148,7 @@ pub fn resource(
     out
 }
 
-fn set(resource: &mut Vec<(String, String)>, key: &str, value: &str) {
+pub(crate) fn set(resource: &mut Vec<(String, String)>, key: &str, value: &str) {
     match resource.iter_mut().find(|(k, _)| k == key) {
         Some(slot) => slot.1 = value.to_string(),
         None => resource.push((key.to_string(), value.to_string())),

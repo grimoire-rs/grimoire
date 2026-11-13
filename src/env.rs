@@ -6,6 +6,7 @@
 //! `GRIM_LOG` is intentionally absent here — log filtering is initialized
 //! directly in `main.rs` before anything else runs.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Environment variable holding the Grimoire data root.
@@ -16,6 +17,8 @@ const GRIM_DEFAULT_REGISTRY: &str = "GRIM_DEFAULT_REGISTRY";
 const GRIM_OFFLINE: &str = "GRIM_OFFLINE";
 /// Environment variable that, when truthy, arms opt-in usage telemetry.
 const GRIM_TELEMETRY: &str = "GRIM_TELEMETRY";
+/// Environment variable holding the platform path list of config layer files.
+const GRIM_CONFIG: &str = "GRIM_CONFIG";
 /// Environment variable that, when truthy, adds the redacted git origin to
 /// the telemetry resource.
 const GRIM_TELEMETRY_REPOSITORY: &str = "GRIM_TELEMETRY_REPOSITORY";
@@ -54,9 +57,47 @@ pub fn offline() -> bool {
     truthy(GRIM_OFFLINE)
 }
 
-/// Whether usage telemetry is switched on via `$GRIM_TELEMETRY`.
-pub fn telemetry() -> bool {
-    truthy(GRIM_TELEMETRY)
+/// Raw `$GRIM_CONFIG` path list; unset or blank yields `None`.
+pub fn grim_config() -> Option<OsString> {
+    std::env::var_os(GRIM_CONFIG).and_then(non_blank_os)
+}
+
+/// A valid-Unicode value that is empty after trimming counts as unset; a
+/// non-Unicode value is returned as is.
+fn non_blank_os(value: OsString) -> Option<OsString> {
+    match value.to_str() {
+        Some(text) if text.trim().is_empty() => None,
+        _ => Some(value),
+    }
+}
+
+/// The three answers `$GRIM_TELEMETRY` can give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetrySwitch {
+    /// Absent or blank: no opinion.
+    Unset,
+    /// A truthy value.
+    On,
+    /// Any other non-blank value: an explicit opt-out.
+    Off,
+}
+
+/// `$GRIM_TELEMETRY` as a tri-state: unset, on, or an explicit opt-out.
+pub fn telemetry_switch() -> TelemetrySwitch {
+    telemetry_switch_from(std::env::var_os(GRIM_TELEMETRY).as_deref())
+}
+
+fn telemetry_switch_from(value: Option<&std::ffi::OsStr>) -> TelemetrySwitch {
+    let Some(value) = value else {
+        return TelemetrySwitch::Unset;
+    };
+    match value.to_str() {
+        Some(v) if v.trim().is_empty() => TelemetrySwitch::Unset,
+        Some(v) if is_truthy(v) => TelemetrySwitch::On,
+        Some(_) => TelemetrySwitch::Off,
+        // Unset here would let a GRIM_CONFIG file arm telemetry over an explicit off.
+        None => TelemetrySwitch::Off,
+    }
 }
 
 /// Whether repository context is requested via `$GRIM_TELEMETRY_REPOSITORY`.
@@ -188,6 +229,41 @@ mod tests {
     fn non_empty_filters_empty_string() {
         assert_eq!(non_empty(String::new()), None);
         assert_eq!(non_empty("x".to_string()), Some("x".to_string()));
+    }
+
+    #[test]
+    fn non_blank_os_treats_blank_unicode_as_unset() {
+        assert_eq!(non_blank_os(OsString::new()), None);
+        assert_eq!(non_blank_os(OsString::from("  ")), None);
+        assert_eq!(non_blank_os(OsString::from("/a")), Some(OsString::from("/a")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_blank_os_keeps_non_unicode() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = OsString::from_vec(vec![0xff, 0xfe]);
+        assert_eq!(non_blank_os(raw.clone()), Some(raw));
+    }
+
+    #[test]
+    fn telemetry_switch_table() {
+        use TelemetrySwitch::*;
+        use std::ffi::OsStr;
+        for v in [None, Some(""), Some("  ")] {
+            assert_eq!(telemetry_switch_from(v.map(OsStr::new)), Unset, "{v:?}");
+        }
+        for v in ["1", " TRUE ", "yes", "on"] {
+            assert_eq!(telemetry_switch_from(Some(OsStr::new(v))), On, "{v:?}");
+        }
+        for v in ["0", "false", "no", "off", "x"] {
+            assert_eq!(telemetry_switch_from(Some(OsStr::new(v))), Off, "{v:?}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(telemetry_switch_from(Some(OsStr::from_bytes(&[0xff]))), Off);
+        }
     }
 
     #[test]

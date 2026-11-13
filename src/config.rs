@@ -13,6 +13,7 @@
 pub mod config_error;
 pub mod declaration;
 pub mod defaults;
+pub mod env_layers;
 pub mod global_config;
 pub mod hash;
 pub mod path_source;

@@ -87,7 +87,7 @@ a reference file has accreted one, delete it and link instead.
 - `indexer init`, `index.config.json sync layout anchored legacy revalidate`,
   `c/root.json`, `index-policy.json trustedBots`, `GRIM_INDEX_BOT_TOKEN`,
   `rating_host`
-- `GRIM_TELEMETRY OTEL_EXPORTER_OTLP_ENDPOINT telemetry payload installation-id`
+- `GRIM_TELEMETRY GRIM_CONFIG OTEL_EXPORTER_OTLP_ENDPOINT telemetry payload installation-id`
 
 ## Canonical Pages
 
