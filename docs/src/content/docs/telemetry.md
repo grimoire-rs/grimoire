@@ -6,9 +6,9 @@ description: "Opt-in anonymous usage telemetry: what grim sends to your OpenTele
 
 Grimoire can send one usage record per command to an [OpenTelemetry][otel]
 collector that you operate. It is off by default. Nothing is written or sent
-until `GRIM_TELEMETRY` is set. Arming writes the
-[installation ID](#installation-id) file. No request goes out until an
-endpoint variable points at a collector.
+until `GRIM_TELEMETRY` or a [`GRIM_CONFIG` file](#config-file) arms it.
+Arming writes the [installation ID](#installation-id) file. No request goes
+out until an endpoint names a collector.
 
 There is no default endpoint and no maintainer-run collector. Every record
 goes to the address you configure, and nowhere else. The whole surface is
@@ -41,12 +41,16 @@ visible only at `GRIM_LOG=debug`.
 ## Switch it on {#enable}
 
 Telemetry is armed when `GRIM_TELEMETRY` is truthy and no opt-out applies.
-Truthy means `1`, `true`, `yes` or `on`, in any case. An empty value, `0` and
-`false` leave it off.
+Truthy means `1`, `true`, `yes` or `on`, in any case. A [`GRIM_CONFIG`
+file](#config-file) with `enabled = true` arms it too.
+
+A blank `GRIM_TELEMETRY` counts as unset and defers to those files. Any other
+value that is not truthy, such as `0` or `false`, is an explicit off. It also
+disarms a file.
 
 Setting `OTEL_*` variables alone never arms anything. Without
-`GRIM_TELEMETRY` grim makes no telemetry call, even when every `OTEL_*`
-variable is present in the environment.
+`GRIM_TELEMETRY` or an enabling file grim makes no telemetry call, even when
+every `OTEL_*` variable is present in the environment.
 
 ```sh
 export GRIM_TELEMETRY=1
@@ -58,10 +62,10 @@ grim install
 
 | Variable | Effect |
 |---|---|
-| `GRIM_TELEMETRY` | Arms telemetry. Unset means off. |
-| `GRIM_TELEMETRY_REPOSITORY` | Adds up to four `vcs.*` resource keys. Needs `GRIM_TELEMETRY`. Project scope only, and never for a repository that is your home directory. Same truthy values. |
-| `OTEL_SDK_DISABLED` | A truthy value disarms telemetry. It wins over `GRIM_TELEMETRY`. |
-| `DO_NOT_TRACK` | A truthy value disarms telemetry. It wins over `GRIM_TELEMETRY`. See [Console Do Not Track][dnt]. |
+| `GRIM_TELEMETRY` | Arms telemetry. Unset or blank defers to the [`GRIM_CONFIG` files](#config-file). Any other non-truthy value is off. |
+| `GRIM_TELEMETRY_REPOSITORY` | Adds up to four `vcs.*` resource keys. Needs telemetry armed, by either source. Project scope only, and never for a repository that is your home directory. Same truthy values. |
+| `OTEL_SDK_DISABLED` | A truthy value disarms telemetry. It wins over `GRIM_TELEMETRY` and over a file. |
+| `DO_NOT_TRACK` | A truthy value disarms telemetry. It wins over `GRIM_TELEMETRY` and over a file. See [Console Do Not Track][dnt]. |
 | `GRIM_OFFLINE`, `--offline` | Either one disarms telemetry, like every other network call. |
 
 ### Endpoint and headers {#enable-endpoint}
@@ -104,11 +108,12 @@ generic headers go only to the base endpoint. A request to
 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` carries `OTEL_EXPORTER_OTLP_LOGS_HEADERS`
 and nothing else.
 
-An ambient `OTEL_EXPORTER_OTLP_HEADERS` still reaches the base endpoint of any
-environment that also sets `GRIM_TELEMETRY`. A CI runner or a shared shell
-profile that exports both sends that credential to that endpoint on every
-command. Set the headers only in shells you control, and prefer an `https://`
-endpoint.
+An ambient `OTEL_EXPORTER_OTLP_HEADERS` reaches the base endpoint of any
+environment that arms telemetry. A CI runner or a shared shell profile that
+exports the headers and arms telemetry sends that credential on every command.
+An endpoint set by a [`GRIM_CONFIG` file](#config-file) never receives ambient
+`OTEL_*` headers. Set the headers only in shells you control, and prefer an
+`https://` endpoint.
 
 ### Unsupported variables {#enable-unsupported}
 
@@ -132,6 +137,182 @@ export. Each is cut off after 1 second.
 
 The export is lost when the process is killed or interrupted, for example by
 Ctrl-C.
+
+## Configure with a file {#config-file}
+
+A tool manager composes one environment for many tools. Any `OTEL_*` variable
+set for grim there reaches every OpenTelemetry-aware process in that
+environment. It also hands them grim's token.
+
+`GRIM_CONFIG` avoids that. Only grim reads it. It names TOML files that arm
+telemetry, name the collector and carry the headers, so an organisation can
+ship one file and set one variable. Everything below is [Unstable until
+1.0][stability-unstable].
+
+### The variable {#config-file-variable}
+
+`GRIM_CONFIG` holds a list of file paths. The separator is `:` on Linux and
+macOS and `;` on Windows. A blank value counts as unset, and empty entries are
+skipped.
+
+- Every entry must be an absolute path. A relative entry is refused and never
+  read. There is no `~` or `$VAR` expansion.
+- Every entry must be a regular file. A symlink to one is followed. A
+  directory, FIFO or device is refused before it is opened.
+- A file larger than 8 MiB is refused, the same cap as `grimoire.toml`.
+- Files are read in list order. A later file wins over an earlier one.
+- Only the `[telemetry]` table is read. Any other key, such as `[options]` or
+  `[[registries]]`, is ignored with one warning. Artifact declarations,
+  consent records and registry credentials never come from these files.
+
+`grim config` neither reads nor writes these files. Grim reads no system or
+user config file on its own.
+
+### Keys {#config-file-keys}
+
+| Key | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | `true` arms telemetry like `GRIM_TELEMETRY=1`. |
+| `endpoint` | string | Base URL. Grim appends `/v1/logs`. Needs `http` or `https`, a host and no userinfo. |
+| `headers` | table of strings | OTLP headers, sent only to this `endpoint`. Values are not percent-decoded. An invalid or reserved name, or an invalid value, makes the file unusable ([warning](#config-file-warnings)). |
+| `timeout` | integer | Milliseconds, above 0. Default 500. Used only with a file `endpoint`. |
+| `protocol` | string | Only `http/protobuf`, in any case. |
+| `service_name` | string | Replaces `service.name`. An empty string is ignored. |
+| `resource_attributes` | table of strings | Keys added to the resource. |
+
+Across files, a later scalar replaces an earlier one. `headers` merge per name,
+ignoring case. `resource_attributes` merge per exact key. The later file wins
+in both.
+
+### How arming is decided {#config-file-arming}
+
+Grim decides once per command, before any telemetry code runs. The first rule
+that applies wins:
+
+1. `DO_NOT_TRACK` or `OTEL_SDK_DISABLED` is truthy, `GRIM_OFFLINE` is truthy,
+   or `--offline` is given. Telemetry is off. No file is opened and nothing
+   warns.
+2. `GRIM_TELEMETRY` is set to a non-blank value that is not truthy. Telemetry
+   is off and no file is opened. A blank value counts as unset.
+3. Grim reads the files. An unusable file turns telemetry off for this run,
+   even with `GRIM_TELEMETRY=1`, and prints one [warning](#config-file-warnings).
+4. Telemetry is armed when `GRIM_TELEMETRY` is truthy or the merged `enabled`
+   is `true`. `GRIM_TELEMETRY=1` arms even when a file says `enabled = false`.
+
+`GRIM_TELEMETRY_REPOSITORY` applies whenever telemetry is armed, by either
+source. It stays environment-only.
+
+### The destination {#config-file-destination}
+
+The destination is one unit, chosen by whether a file sets `endpoint`.
+
+With a file `endpoint`, grim reads no `OTEL_EXPORTER_OTLP_*` variable: not the
+endpoints, headers, protocol or timeout. Ambient values never change the
+request. The headers are the merged file headers, then
+`GRIM_TELEMETRY_OTLP_HEADERS`. The protocol is `http/protobuf` and the timeout
+is the file value or 500 ms.
+
+With no file `endpoint`, the [`OTEL_*` rules](#enable-endpoint) apply as
+before. Grim never sends the file headers or `GRIM_TELEMETRY_OTLP_HEADERS`
+there. A credential grim owns travels only to an endpoint grim owns. A
+`timeout` without a file `endpoint` is unused and silent.
+
+The resource is built the same way for both destinations. Later entries
+override earlier ones:
+
+1. The keys grim derives.
+2. `OTEL_RESOURCE_ATTRIBUTES`.
+3. `OTEL_SERVICE_NAME`.
+4. The file `resource_attributes`.
+5. The file `service_name`.
+
+A `service.name` attribute in a file therefore beats an ambient
+`OTEL_SERVICE_NAME`.
+
+### Headers from the environment {#config-file-headers}
+
+`GRIM_TELEMETRY_OTLP_HEADERS` holds comma-separated `name=value` pairs. Values
+are percent-decoded, as for `OTEL_EXPORTER_OTLP_HEADERS`. A pair replaces a file
+header of the same name, ignoring case. It is sent only with a file `endpoint`.
+
+### Warnings {#config-file-warnings}
+
+Warnings go to stderr at the default log level. They never change the exit
+code or stdout. No warning, log line or error ever holds a header value, file
+content or endpoint userinfo.
+
+| Warning | When |
+|---|---|
+| `GRIM_CONFIG entry '<entry>' is not an absolute path` | A relative entry. |
+| `cannot read GRIM_CONFIG file '<path>': <os error>` | A missing or unreadable file. |
+| `GRIM_CONFIG file '<path>' is not a regular file` | A directory, FIFO or device. |
+| `GRIM_CONFIG file '<path>' is larger than <N> bytes` | A file over the cap. |
+| `GRIM_CONFIG file '<path>' is not valid TOML (line L, column C)` | A parse error. |
+| `GRIM_CONFIG file '<path>' has an unusable value for '<key>'` | A wrong type or value for a known key. |
+| `ignored GRIM_CONFIG keys in '<path>': <keys>` | Unknown keys, when every file loaded. |
+| `telemetry headers from GRIM_CONFIG or GRIM_TELEMETRY_OTLP_HEADERS are not sent: no GRIM_CONFIG file sets an endpoint` | Grim headers with no file endpoint, in an armed run. |
+
+The first six end with `; telemetry is off for this run`. A listed file that
+does not exist warns on every command until you fix it. That is deliberate: a
+mistyped organisation path must not drop its destination silently.
+
+### Fleet example {#config-file-fleet}
+
+An [ocx][ocx] patch package can ship the file and set the variable. The value
+must be absolute, and `"visibility": "public"` lets a shell that runs `grim`
+directly see it. The entry overwrites any `GRIM_CONFIG` already in the composed
+environment.
+
+<!-- doc-norun: ocx patch metadata, not a grim command -->
+```json
+{"key": "GRIM_CONFIG", "type": "constant", "value": "${installPath}/telemetry.toml", "visibility": "public"}
+```
+<!-- /doc-norun -->
+
+The package ships `telemetry.toml`:
+
+<!-- doc-norun: file shipped by the organisation, with a placeholder token -->
+```toml
+[telemetry]
+enabled = true
+endpoint = "https://otel.example.com:4318"
+
+[telemetry.headers]
+authorization = "Bearer <token>"
+```
+<!-- /doc-norun -->
+
+A user who wants their own collector lists a second file after it. Its
+`endpoint` replaces the organisation's. Headers merge per name, so the
+organisation's headers go to that collector too unless the user's file names
+each of them. To keep them away, list only your own file in `GRIM_CONFIG`.
+
+```sh
+export GRIM_CONFIG="$ORG_FILE:$HOME/.config/grim/telemetry.toml"
+```
+
+A user who wants telemetry off sets `GRIM_TELEMETRY=0` or `DO_NOT_TRACK=1`.
+
+### Who can set it {#config-file-trust}
+
+A repository can carry its own environment: an `.envrc`, a trusted
+`.mise.toml`, a devcontainer `containerEnv` or CI `variables:`. Such an
+environment can set `GRIM_CONFIG` to a file the repository ships. That arms
+telemetry and chooses the endpoint.
+
+This is the same exposure as `GRIM_TELEMETRY` plus an `OTEL_*` endpoint set by
+that environment. It collects command names and artifact references. It can
+also receive `GRIM_TELEMETRY_OTLP_HEADERS`, or an organisation file's headers
+when the repository lists its file after the organisation's. Anything that
+injects a repository's environment can already run code.
+
+Two points narrow it. Ambient `OTEL_*` headers never reach a `GRIM_CONFIG`
+endpoint. A relative entry is refused, so a committed file cannot become a
+layer with no environment at all.
+
+Prefer the file form for tokens, and protect the file with permissions. Every
+child process grim starts, such as `git`, `gh`, `glab` and MCP servers,
+inherits `GRIM_TELEMETRY_OTLP_HEADERS`.
 
 ## Fields {#fields}
 
@@ -333,8 +514,10 @@ section defines its own.
 
 ## Stability {#stability}
 
-Everything on this page is Unstable until 1.0: both switches, the event names,
-every attribute and resource key, the debug line and the installation ID file.
+Everything on this page is Unstable until 1.0. That covers the switches,
+`GRIM_CONFIG`, the `[telemetry]` table of its files and
+`GRIM_TELEMETRY_OTLP_HEADERS`. It also covers the event names, every attribute
+and resource key, the debug line and the installation ID file.
 Keys can be added or renamed in any minor release. See
 [Unstable][stability-unstable].
 
@@ -345,6 +528,7 @@ Keys can be added or renamed in any minor release. See
 
 <!-- external -->
 [otel]: https://opentelemetry.io/
+[ocx]: https://ocx.sh
 [otlp]: https://opentelemetry.io/docs/specs/otlp/
 [dnt]: https://consoledonottrack.com/
 [count-connector]: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/connector/countconnector

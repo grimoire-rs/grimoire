@@ -5,9 +5,10 @@
 //!
 //! One OTLP/HTTP request per CLI invocation: a `grim.command` event plus one
 //! `grim.artifact.changed` per changed artifact. Nothing here runs unless the
-//! operator sets `GRIM_TELEMETRY`; an unarmed [`Telemetry`] holds no state and
-//! every method on it returns immediately. The exemption this module rests on
-//! is `adr_otel_usage_telemetry.md`.
+//! operator sets `GRIM_TELEMETRY` or a `GRIM_CONFIG` file sets
+//! `[telemetry] enabled`; an unarmed [`Telemetry`] holds no state and every
+//! method on it returns immediately. The exemption this module rests on is
+//! `adr_otel_usage_telemetry.md`.
 //!
 //! The handle lives on [`crate::context::Context`]. The hook launcher is a
 //! separate binary with no telemetry code at all.
@@ -23,13 +24,17 @@ use std::time::Instant;
 
 use crate::Command;
 use crate::cli::exit_code::ExitCode;
+use crate::config::env_layers::LayerError;
 use crate::config::scope::ConfigScope;
+use crate::env::TelemetrySwitch;
 use crate::install::client_target::ClientTarget;
+use layer::{IgnoredKeys, TelemetryLayer};
 
 pub mod command_name;
 pub mod config;
 pub mod export;
 pub mod identity;
+pub mod layer;
 pub mod payload;
 pub mod record;
 pub mod redact;
@@ -53,6 +58,8 @@ pub(crate) const LOG_TARGET: &str = "grim::telemetry";
 #[derive(Debug, Clone)]
 pub(crate) struct State {
     pub grim_home: PathBuf,
+    /// What the `GRIM_CONFIG` files said; the default when none is set.
+    pub layer: TelemetryLayer,
     /// `GRIM_TELEMETRY_REPOSITORY` as read when the handle was built.
     pub repository: bool,
     pub started: Instant,
@@ -72,6 +79,7 @@ impl State {
     pub(crate) fn new(grim_home: PathBuf, repository: bool) -> Self {
         Self {
             grim_home,
+            layer: TelemetryLayer::default(),
             repository,
             started: Instant::now(),
             command: None,
@@ -84,14 +92,59 @@ impl State {
             artifacts: Vec::new(),
         }
     }
+
+    pub(crate) fn with_layer(mut self, layer: TelemetryLayer) -> Self {
+        self.layer = layer;
+        self
+    }
 }
 
-/// Whether telemetry is armed: the switch is on and no opt-out applies.
+/// The environment opt-outs; any one of them wins over every arming source.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OptOuts {
+    pub sdk_disabled: bool,
+    pub do_not_track: bool,
+    pub offline: bool,
+}
+
+/// Outcome of [`decide`]: `layer` is `Some` exactly when telemetry is armed.
+#[derive(Debug)]
+pub(crate) struct Gate {
+    pub layer: Option<TelemetryLayer>,
+    pub warnings: Vec<String>,
+}
+
+const UNUSED_HEADERS_WARNING: &str = "telemetry headers from GRIM_CONFIG or GRIM_TELEMETRY_OTLP_HEADERS are not sent: no GRIM_CONFIG file sets an endpoint";
+
+/// Decides whether telemetry is armed, without touching the process environment.
 ///
-/// A pure function of four booleans so the 16-row truth table needs no
-/// process-environment mutation.
-pub(crate) fn armed(switch: bool, sdk_disabled: bool, do_not_track: bool, offline: bool) -> bool {
-    switch && !sdk_disabled && !do_not_track && !offline
+/// `load` reads the `GRIM_CONFIG` files and runs only past the opt-outs and an
+/// explicit off, so an opted-out run never opens one.
+pub(crate) fn decide(
+    switch: TelemetrySwitch,
+    opt_outs: OptOuts,
+    grim_headers_set: bool,
+    load: impl FnOnce() -> Result<(TelemetryLayer, IgnoredKeys), LayerError>,
+) -> Gate {
+    let unarmed = |warnings| Gate { layer: None, warnings };
+    if opt_outs.sdk_disabled || opt_outs.do_not_track || opt_outs.offline || switch == TelemetrySwitch::Off {
+        return unarmed(Vec::new());
+    }
+    let (layer, ignored) = match load() {
+        Ok(loaded) => loaded,
+        Err(err) => return unarmed(vec![format!("{err}; telemetry is off for this run")]),
+    };
+    let mut warnings: Vec<String> = ignored.warning().into_iter().collect();
+    if switch != TelemetrySwitch::On && layer.enabled != Some(true) {
+        return Gate { layer: None, warnings };
+    }
+    if layer.endpoint.is_none() && (!layer.headers.is_empty() || grim_headers_set) {
+        warnings.push(UNUSED_HEADERS_WARNING.to_owned());
+    }
+    Gate {
+        layer: Some(layer),
+        warnings,
+    }
 }
 
 /// Per-invocation telemetry handle; cheap to clone, shared between clones.
@@ -111,17 +164,35 @@ impl std::fmt::Debug for Telemetry {
 }
 
 impl Telemetry {
-    /// Decides the gate from the environment: four reads, no I/O, no OTel type.
+    /// Decides the gate from the environment: the opt-outs are read first, and
+    /// only when none applies are the `GRIM_CONFIG` files read. No OTel type is built.
     pub fn from_env(offline: bool, grim_home: &Path) -> Self {
-        if !armed(
-            crate::env::telemetry(),
-            crate::env::otel_sdk_disabled(),
-            crate::env::do_not_track(),
+        let opt_outs = OptOuts {
+            sdk_disabled: crate::env::otel_sdk_disabled(),
+            do_not_track: crate::env::do_not_track(),
             offline,
-        ) {
-            return Self::default();
+        };
+        let grim_headers_set = std::env::var(config::GRIM_TELEMETRY_OTLP_HEADERS).is_ok_and(|v| !v.trim().is_empty());
+        let gate = decide(
+            crate::env::telemetry_switch(),
+            opt_outs,
+            grim_headers_set,
+            || match crate::env::grim_config() {
+                None => Ok((TelemetryLayer::default(), IgnoredKeys::default())),
+                Some(value) => {
+                    crate::config::env_layers::read_layers(&value).and_then(|layers| TelemetryLayer::merge(&layers))
+                }
+            },
+        );
+        for warning in &gate.warnings {
+            tracing::warn!(target: LOG_TARGET, "{warning}");
         }
-        Self::armed_with(State::new(grim_home.to_path_buf(), crate::env::telemetry_repository()))
+        match gate.layer {
+            Some(layer) => Self::armed_with(
+                State::new(grim_home.to_path_buf(), crate::env::telemetry_repository()).with_layer(layer),
+            ),
+            None => Self::default(),
+        }
     }
 
     fn armed_with(state: State) -> Self {
@@ -283,12 +354,12 @@ async fn deliver(state: State, outcome: payload::Outcome, lookup: fn(&str) -> Op
         _ => None,
     };
 
-    let overrides = config::resource_overrides(&lookup);
+    let overrides = config::resource_overrides(&lookup, &state.layer);
     let resource = payload::resource(installation_id.as_deref(), vcs.as_ref(), overrides);
     let payload = payload::build(resource, &state, &outcome);
     tracing::debug!(target: LOG_TARGET, "telemetry payload {}", payload.to_json_line());
 
-    let export_config = match config::from_env(&lookup) {
+    let export_config = match config::select(&state.layer, &lookup) {
         Ok(cfg) => cfg,
         Err(skip) => {
             tracing::debug!(target: LOG_TARGET, "telemetry not sent: {skip}");
@@ -312,22 +383,160 @@ async fn deliver(state: State, outcome: payload::Outcome, lookup: fn(&str) -> Op
 mod tests {
     use super::*;
 
-    /// Every combination of the four inputs: armed exactly when the switch is
-    /// on and all three opt-outs are off.
+    fn none() -> OptOuts {
+        OptOuts::default()
+    }
+
+    fn opt_out_rows() -> Vec<OptOuts> {
+        (0u8..8)
+            .map(|bits| OptOuts {
+                sdk_disabled: bits & 1 != 0,
+                do_not_track: bits & 2 != 0,
+                offline: bits & 4 != 0,
+            })
+            .collect()
+    }
+
+    fn empty() -> Result<(TelemetryLayer, IgnoredKeys), LayerError> {
+        Ok((TelemetryLayer::default(), IgnoredKeys::default()))
+    }
+
+    fn enabled(value: bool) -> Result<(TelemetryLayer, IgnoredKeys), LayerError> {
+        Ok((
+            TelemetryLayer {
+                enabled: Some(value),
+                ..TelemetryLayer::default()
+            },
+            IgnoredKeys::default(),
+        ))
+    }
+
+    fn not_regular() -> Result<(TelemetryLayer, IgnoredKeys), LayerError> {
+        Err(LayerError::NotRegular {
+            path: PathBuf::from("/etc/grim.toml"),
+        })
+    }
+
+    /// Switch `Unset`/`On` times the eight opt-out rows: armed exactly when
+    /// the switch is on and no opt-out applies; `Off` never arms.
     #[test]
     fn gate_truth_table_arms_only_for_switch_without_any_opt_out() {
         let mut armed_rows = 0;
-        for bits in 0u8..16 {
-            let (switch, sdk, dnt, offline) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
-            let expected = switch && !sdk && !dnt && !offline;
-            assert_eq!(
-                armed(switch, sdk, dnt, offline),
-                expected,
-                "switch={switch} sdk_disabled={sdk} dnt={dnt} offline={offline}"
-            );
-            armed_rows += usize::from(expected);
+        for switch in [TelemetrySwitch::Unset, TelemetrySwitch::On] {
+            for o in opt_out_rows() {
+                let any = o.sdk_disabled || o.do_not_track || o.offline;
+                let gate = decide(switch, o, false, empty);
+                let expected = switch == TelemetrySwitch::On && !any;
+                assert_eq!(gate.layer.is_some(), expected, "{switch:?} {o:?}");
+                armed_rows += usize::from(expected);
+            }
         }
         assert_eq!(armed_rows, 1, "exactly one of the 16 rows arms");
+        for o in opt_out_rows() {
+            assert!(decide(TelemetrySwitch::Off, o, false, empty).layer.is_none());
+        }
+    }
+
+    #[test]
+    fn gate_truth_table_with_layers() {
+        type Load = fn() -> Result<(TelemetryLayer, IgnoredKeys), LayerError>;
+        let layers: [(&str, Load); 4] = [
+            ("empty", empty),
+            ("enabled", || enabled(true)),
+            ("disabled", || enabled(false)),
+            ("error", not_regular),
+        ];
+        for switch in [TelemetrySwitch::Unset, TelemetrySwitch::On, TelemetrySwitch::Off] {
+            for o in opt_out_rows() {
+                for (name, load) in layers {
+                    let called = Cell::new(false);
+                    let gate = decide(switch, o, false, || {
+                        called.set(true);
+                        load()
+                    });
+                    let opted_out = o.sdk_disabled || o.do_not_track || o.offline;
+                    let expected = !opted_out
+                        && switch != TelemetrySwitch::Off
+                        && name != "error"
+                        && (switch == TelemetrySwitch::On || name == "enabled");
+                    let ctx = format!("{switch:?} {o:?} {name}");
+                    assert_eq!(gate.layer.is_some(), expected, "{ctx}");
+                    if opted_out || switch == TelemetrySwitch::Off {
+                        assert!(!called.get(), "loader must not run: {ctx}");
+                        assert!(gate.warnings.is_empty(), "{ctx}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_load_error_gives_exactly_one_warning_even_for_the_on_switch() {
+        for switch in [TelemetrySwitch::Unset, TelemetrySwitch::On] {
+            let gate = decide(switch, none(), false, not_regular);
+            assert!(gate.layer.is_none());
+            let [warning] = gate.warnings.as_slice() else {
+                panic!("expected one warning: {:?}", gate.warnings)
+            };
+            let err = not_regular().unwrap_err().to_string();
+            assert!(warning.starts_with(&err), "{warning}");
+            assert!(warning.ends_with("; telemetry is off for this run"), "{warning}");
+        }
+    }
+
+    #[test]
+    fn ignored_keys_warn_only_when_the_load_succeeded() {
+        let ignored = || {
+            let layers = [crate::config::env_layers::Layer {
+                path: PathBuf::from("/c.toml"),
+                table: "[other]\nx = 1\n".parse().unwrap(),
+            }];
+            TelemetryLayer::merge(&layers)
+        };
+        for switch in [TelemetrySwitch::Unset, TelemetrySwitch::On] {
+            let gate = decide(switch, none(), false, ignored);
+            assert_eq!(gate.layer.is_some(), switch == TelemetrySwitch::On);
+            assert_eq!(gate.warnings.len(), 1, "{switch:?}");
+            assert!(gate.warnings[0].contains("ignored GRIM_CONFIG keys"));
+        }
+        assert!(decide(TelemetrySwitch::On, none(), false, not_regular).warnings.len() == 1);
+    }
+
+    fn with_headers(endpoint: bool) -> Result<(TelemetryLayer, IgnoredKeys), LayerError> {
+        let mut layer = TelemetryLayer::default();
+        layer
+            .headers
+            .set("authorization", secrecy::SecretString::from("hunter2-value"));
+        if endpoint {
+            layer.endpoint = Some("https://otel.example/v1/logs".parse().unwrap());
+        }
+        Ok((layer, IgnoredKeys::default()))
+    }
+
+    #[test]
+    fn unused_headers_warn_only_when_armed_without_an_endpoint() {
+        let on = TelemetrySwitch::On;
+        let warns = |g: &Gate| g.warnings.iter().any(|w| w == UNUSED_HEADERS_WARNING);
+        assert!(
+            warns(&decide(on, none(), false, || with_headers(false))),
+            "file headers"
+        );
+        assert!(warns(&decide(on, none(), true, empty)), "env headers");
+        assert!(!warns(&decide(on, none(), false, empty)), "no headers");
+        assert!(
+            !warns(&decide(on, none(), false, || with_headers(true))),
+            "endpoint set"
+        );
+        assert!(
+            !warns(&decide(TelemetrySwitch::Unset, none(), true, || with_headers(false))),
+            "unarmed"
+        );
+        let gate = decide(on, none(), true, || with_headers(false));
+        assert!(
+            gate.warnings.iter().all(|w| !w.contains("hunter2")),
+            "{:?}",
+            gate.warnings
+        );
     }
 
     #[test]

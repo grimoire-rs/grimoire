@@ -5,6 +5,9 @@
 
 use std::time::Duration;
 
+use crate::telemetry::layer::TelemetryLayer;
+use crate::telemetry::payload::set;
+
 /// Why no request is made. Internal: ends in one debug line.
 #[derive(Debug, thiserror::Error)]
 pub enum Skip {
@@ -15,12 +18,25 @@ pub enum Skip {
 }
 
 /// Header values that never reach a `Debug` or `Display` rendering.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Headers(Vec<(String, secrecy::SecretString)>);
 
 impl Headers {
     pub fn new(pairs: Vec<(String, secrecy::SecretString)>) -> Self {
         Self(pairs)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Stores `name` lowercased; an existing entry equal ignoring ASCII case is replaced in place.
+    pub fn set(&mut self, name: &str, value: secrecy::SecretString) {
+        let name = name.to_ascii_lowercase();
+        match self.0.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(&name)) {
+            Some(slot) => *slot = (name, value),
+            None => self.0.push((name, value)),
+        }
     }
 
     /// `(name, value)` pairs; reading a value is an explicit act at the call site.
@@ -50,6 +66,9 @@ pub struct ResourceOverrides {
     pub attributes: Vec<(String, String)>,
     pub service_name: Option<String>,
 }
+
+/// Grim-owned header list, applied only with a `GRIM_CONFIG` endpoint.
+pub(crate) const GRIM_TELEMETRY_OTLP_HEADERS: &str = "GRIM_TELEMETRY_OTLP_HEADERS";
 
 const ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 const LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
@@ -114,7 +133,7 @@ pub fn from_env(lookup: Lookup<'_>) -> Result<ExportConfig, Skip> {
 }
 
 /// A usable `http(s)` URL without userinfo; a base URL gets `/v1/logs` appended.
-fn parse_endpoint(raw: &str, base: bool) -> Result<reqwest::Url, Skip> {
+pub(crate) fn parse_endpoint(raw: &str, base: bool) -> Result<reqwest::Url, Skip> {
     let mut url = reqwest::Url::parse(raw).map_err(|_| Skip::Endpoint)?;
     let plain = matches!(url.scheme(), "http" | "https")
         && url.host().is_some()
@@ -139,22 +158,65 @@ fn timeout(lookup: Lookup<'_>) -> Duration {
         .map_or(DEFAULT_TIMEOUT, Duration::from_millis)
 }
 
-/// Parses the operator's resource overrides from an injected lookup.
-pub fn resource_overrides(lookup: Lookup<'_>) -> ResourceOverrides {
-    ResourceOverrides {
-        attributes: lookup(RESOURCE_ATTRIBUTES).map_or_else(Vec::new, |raw| {
-            let (pairs, dropped) = parse_pairs(&raw, |a, b| a == b, |_, _| true);
-            log_dropped("resource attribute", &dropped);
-            pairs
-        }),
-        service_name: non_empty(lookup, SERVICE_NAME),
+/// Folds every resource override into `attributes`, lowest precedence first:
+/// `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME`, then the config files.
+pub fn resource_overrides(lookup: Lookup<'_>, layer: &TelemetryLayer) -> ResourceOverrides {
+    let mut attributes = Vec::new();
+    if let Some(raw) = lookup(RESOURCE_ATTRIBUTES) {
+        let (pairs, dropped) = parse_pairs(&raw, |a, b| a == b, |_, _| true);
+        log_dropped("resource attribute", &dropped);
+        attributes = pairs;
     }
+    if let Some(name) = non_empty(lookup, SERVICE_NAME) {
+        set(&mut attributes, "service.name", &name);
+    }
+    for (key, value) in &layer.resource_attributes {
+        set(&mut attributes, key, value);
+    }
+    if let Some(name) = layer.service_name.as_deref().filter(|n| !n.is_empty()) {
+        set(&mut attributes, "service.name", name);
+    }
+    // `payload::resource` applies `service_name` last; leaving the env value
+    // there would beat a `service.name` attribute from a config file.
+    ResourceOverrides {
+        attributes,
+        service_name: None,
+    }
+}
+
+/// The export destination: a config-file endpoint with its file headers
+/// (the grim-owned header variable overriding by name), else `from_env`.
+///
+/// # Errors
+///
+/// [`Skip`] when no request should be made.
+pub fn select(layer: &TelemetryLayer, lookup: Lookup<'_>) -> Result<ExportConfig, Skip> {
+    // Grim-owned credentials ride only with a grim-owned endpoint.
+    let Some(endpoint) = &layer.endpoint else {
+        return from_env(lookup);
+    };
+    // An ambient OTel value must not change a request bound for a grim-chosen endpoint.
+    let mut headers = layer.headers.clone();
+    if let Some(raw) = lookup(GRIM_TELEMETRY_OTLP_HEADERS) {
+        for (name, value) in parse_headers(&raw).iter() {
+            headers.set(name, value.clone());
+        }
+    }
+    Ok(ExportConfig {
+        endpoint: endpoint.clone(),
+        headers,
+        timeout: layer.timeout.unwrap_or(DEFAULT_TIMEOUT),
+    })
+}
+
+/// A legal header name that is not one grim sets itself.
+pub(crate) fn valid_header_name(name: &str) -> bool {
+    reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok_and(|n| !RESERVED_HEADERS.contains(&n.as_str()))
 }
 
 fn parse_headers(raw: &str) -> Headers {
     let (pairs, dropped) = parse_pairs(raw, str::eq_ignore_ascii_case, |name, value| {
-        reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok_and(|n| !RESERVED_HEADERS.contains(&n.as_str()))
-            && reqwest::header::HeaderValue::from_str(value).is_ok()
+        valid_header_name(name) && reqwest::header::HeaderValue::from_str(value).is_ok()
     });
     log_dropped("header", &dropped);
     Headers::new(
@@ -259,6 +321,17 @@ mod tests {
             !rendered.contains("s3cret") && !rendered.contains("authorization"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn headers_set_replaces_ignoring_case_in_place() {
+        let mut headers = Headers::default();
+        assert!(headers.is_empty());
+        headers.set("A-One", secrecy::SecretString::from("1"));
+        headers.set("b", secrecy::SecretString::from("2"));
+        headers.set("a-ONE", secrecy::SecretString::from("3"));
+        let got: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k, v.expose_secret())).collect();
+        assert_eq!(got, [("a-one", "3"), ("b", "2")]);
     }
 
     #[test]
@@ -414,28 +487,187 @@ mod tests {
 
     #[test]
     fn resource_overrides_table() {
-        let none = resource_overrides(&env(&[]));
+        let none = resource_overrides(&env(&[]), &TelemetryLayer::default());
         assert_eq!(none, ResourceOverrides::default());
 
-        let got = resource_overrides(&env(&[
-            (
-                RESOURCE_ATTRIBUTES,
-                "vcs.owner.name=acme, deployment.env = prod%20eu ,junk,=x,k=a=b",
-            ),
-            (SERVICE_NAME, " svc "),
-        ]));
+        let got = resource_overrides(
+            &env(&[
+                (
+                    RESOURCE_ATTRIBUTES,
+                    "vcs.owner.name=acme, deployment.env = prod%20eu ,junk,=x,k=a=b",
+                ),
+                (SERVICE_NAME, " svc "),
+            ]),
+            &TelemetryLayer::default(),
+        );
         assert_eq!(
             got.attributes,
-            pairs(&[("vcs.owner.name", "acme"), ("deployment.env", "prod eu"), ("k", "a=b")])
+            pairs(&[
+                ("vcs.owner.name", "acme"),
+                ("deployment.env", "prod eu"),
+                ("k", "a=b"),
+                ("service.name", "svc")
+            ])
         );
-        assert_eq!(got.service_name.as_deref(), Some("svc"));
+        assert_eq!(got.service_name, None);
 
-        let empty_name = resource_overrides(&env(&[(SERVICE_NAME, "  ")]));
-        assert_eq!(empty_name.service_name, None);
+        let empty_name = resource_overrides(&env(&[(SERVICE_NAME, "  ")]), &TelemetryLayer::default());
+        assert!(empty_name.attributes.is_empty());
 
         // header-only restrictions do not apply to resource attributes
-        let host = resource_overrides(&env(&[(RESOURCE_ATTRIBUTES, "host=h,Dup=1,dup=2,dup=3")]));
+        let host = resource_overrides(
+            &env(&[(RESOURCE_ATTRIBUTES, "host=h,Dup=1,dup=2,dup=3")]),
+            &TelemetryLayer::default(),
+        );
         assert_eq!(host.attributes, pairs(&[("host", "h"), ("Dup", "1"), ("dup", "3")]));
+    }
+
+    fn layer_with(endpoint: Option<&str>, headers: &[(&str, &str)]) -> TelemetryLayer {
+        let mut layer = TelemetryLayer {
+            endpoint: endpoint.map(|e| parse_endpoint(e, true).expect("url")),
+            ..TelemetryLayer::default()
+        };
+        for (k, v) in headers {
+            layer.headers.set(k, secrecy::SecretString::from(*v));
+        }
+        layer
+    }
+
+    fn hdrs(cfg: &ExportConfig) -> Vec<(String, String)> {
+        header_pairs(cfg)
+    }
+
+    #[test]
+    fn destination_unit_table() {
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let ambient: Vars = &[
+            (ENDPOINT, "http://b"),
+            (LOGS_ENDPOINT, "http://c/v1/logs"),
+            (HEADERS, "x-ambient=1"),
+            (PROTOCOL, "grpc"),
+            (TIMEOUT, "1"),
+        ];
+        let lookup = |key: &str| {
+            asked.borrow_mut().push(key.to_owned());
+            ambient.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_owned())
+        };
+        // (a) a file endpoint ignores every ambient OTel variable
+        let mut layer = layer_with(Some("http://file"), &[("authorization", "Bearer f-fake")]);
+        let cfg = select(&layer, &lookup).expect("endpoint");
+        assert_eq!(cfg.endpoint.as_str(), "http://file/v1/logs");
+        assert_eq!(hdrs(&cfg), pairs(&[("authorization", "Bearer f-fake")]));
+        assert_eq!(cfg.timeout, Duration::from_millis(500));
+        layer.timeout = Some(Duration::from_millis(900));
+        assert_eq!(
+            select(&layer, &lookup).expect("endpoint").timeout,
+            Duration::from_millis(900)
+        );
+        assert!(
+            asked.borrow().iter().all(|k| !k.starts_with("OTEL_")),
+            "{:?}",
+            asked.borrow()
+        );
+
+        // (b) the grim header variable overrides by name, decoded
+        let layer = layer_with(
+            Some("http://file"),
+            &[("authorization", "Bearer f-fake"), ("x-keep", "k")],
+        );
+        let vars: Vars = &[(GRIM_TELEMETRY_OTLP_HEADERS, "Authorization=Bearer%20e-fake,x-team=a")];
+        let cfg = select(&layer, &env(vars)).expect("endpoint");
+        assert_eq!(
+            hdrs(&cfg),
+            pairs(&[("authorization", "Bearer e-fake"), ("x-keep", "k"), ("x-team", "a")])
+        );
+
+        // (c) no file endpoint: exactly from_env, no grim-owned headers
+        let layer = layer_with(None, &[("authorization", "Bearer f-fake")]);
+        let envs: &[Vars] = &[
+            &[(ENDPOINT, "http://h"), (HEADERS, "x-o=1")],
+            &[(LOGS_ENDPOINT, "http://c:9/p"), (HEADERS, "x-o=1"), (TIMEOUT, "700")],
+            &[(ENDPOINT, "http://h"), (LOGS_HEADERS, "x-s=2")],
+        ];
+        for base in envs {
+            let mut all = base.to_vec();
+            all.push((GRIM_TELEMETRY_OTLP_HEADERS, "x-grim=3"));
+            let got = select(&layer, &env(&all)).expect("endpoint");
+            let want = from_env(&env(base)).expect("endpoint");
+            assert_eq!(got.endpoint, want.endpoint, "{base:?}");
+            assert_eq!(got.timeout, want.timeout, "{base:?}");
+            assert_eq!(hdrs(&got), hdrs(&want), "{base:?}");
+        }
+
+        // (d) no endpoint anywhere
+        assert!(matches!(
+            select(&layer, &env(&[(GRIM_TELEMETRY_OTLP_HEADERS, "a=b")])),
+            Err(Skip::Endpoint)
+        ));
+    }
+
+    fn resolved(vars: Vars, layer: &TelemetryLayer) -> Vec<(String, String)> {
+        crate::telemetry::payload::resource(None, None, resource_overrides(&env(vars), layer))
+    }
+
+    fn service_name(out: &[(String, String)]) -> &str {
+        out.iter()
+            .find(|(k, _)| k == "service.name")
+            .map(|(_, v)| v.as_str())
+            .expect("service.name")
+    }
+
+    #[test]
+    fn resource_overrides_with_layer_table() {
+        let mut layer = TelemetryLayer {
+            resource_attributes: pairs(&[("service.name", "from-file")]),
+            ..TelemetryLayer::default()
+        };
+        let out = resolved(&[(SERVICE_NAME, "ambient")], &layer);
+        assert_eq!(service_name(&out), "from-file");
+
+        layer.service_name = Some("file-svc".into());
+        assert_eq!(
+            service_name(&resolved(&[(SERVICE_NAME, "ambient")], &layer)),
+            "file-svc"
+        );
+
+        // an empty file value is ignored
+        let blank = TelemetryLayer {
+            service_name: Some(String::new()),
+            ..TelemetryLayer::default()
+        };
+        assert_eq!(service_name(&resolved(&[(SERVICE_NAME, "svc")], &blank)), "svc");
+
+        // empty layer keeps today's rule: OTEL_SERVICE_NAME beats the attribute
+        let empty = TelemetryLayer::default();
+        let out = resolved(
+            &[(RESOURCE_ATTRIBUTES, "service.name=attr"), (SERVICE_NAME, "svc")],
+            &empty,
+        );
+        assert_eq!(service_name(&out), "svc");
+
+        // empty layer: output equals the pre-layer behaviour (derived keys, then attributes, then name)
+        let base = resolved(&[], &empty);
+        assert_eq!(
+            base,
+            crate::telemetry::payload::resource(None, None, ResourceOverrides::default())
+        );
+        let with_attr = resolved(&[(RESOURCE_ATTRIBUTES, "a=1,b=2")], &empty);
+        let mut want = base.clone();
+        want.extend(pairs(&[("a", "1"), ("b", "2")]));
+        assert_eq!(with_attr, want);
+        let with_both = resolved(&[(RESOURCE_ATTRIBUTES, "a=1,b=2"), (SERVICE_NAME, "svc")], &empty);
+        let mut want = want.clone();
+        want.iter_mut().find(|(k, _)| k == "service.name").expect("sn").1 = "svc".into();
+        assert_eq!(with_both, want);
+
+        // a layer attribute beats an equal OTEL_RESOURCE_ATTRIBUTES key, position kept
+        let layer = TelemetryLayer {
+            resource_attributes: pairs(&[("a", "file")]),
+            ..TelemetryLayer::default()
+        };
+        let out = resolved(&[(RESOURCE_ATTRIBUTES, "a=1,b=2")], &layer);
+        let tail = &out[base.len()..];
+        assert_eq!(tail, pairs(&[("a", "file"), ("b", "2")]));
     }
 
     #[test]

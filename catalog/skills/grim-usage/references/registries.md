@@ -46,8 +46,10 @@ Environment variables that matter here (full table:
 | `GRIM_HOME` | Data root: cache, catalog, global config (default `~/.grimoire`) |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references |
 | `GRIM_OFFLINE` | Same as `--offline` |
-| `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry to the OTLP collector named by `OTEL_EXPORTER_OTLP_ENDPOINT` (off by default, no default endpoint; `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline disarm it; unstable until 1.0). Procedure: [telemetry.md](telemetry.md) |
-| `GRIM_TELEMETRY_REPOSITORY` | With `GRIM_TELEMETRY`, add the redacted project `origin` remote as `vcs.*` |
+| `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry to the OTLP collector named by `OTEL_EXPORTER_OTLP_ENDPOINT` or a `GRIM_CONFIG` file (off by default, no default endpoint; `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline disarm it; unstable until 1.0). Procedure: [telemetry.md](telemetry.md) |
+| `GRIM_TELEMETRY_REPOSITORY` | When telemetry is armed, add the redacted project `origin` remote as `vcs.*` |
+| `GRIM_CONFIG` | Absolute TOML files whose `[telemetry]` table can arm telemetry and name its collector. Procedure: [telemetry.md](telemetry.md) |
+| `GRIM_TELEMETRY_OTLP_HEADERS` | Auth header for a collector named by a `GRIM_CONFIG` file. Procedure: [telemetry.md](telemetry.md) |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated plain-HTTP registries, for a host no `[[registries]]` entry declares — adds to the `insecure` field, never overrides it |
 | `DOCKER_CONFIG` | Directory of the Docker-compatible credential `config.json` |
 

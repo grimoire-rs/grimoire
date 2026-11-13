@@ -276,23 +276,11 @@ impl TuiOptions {
     }
 }
 
-// No environment variable selects the hook feature.
-//
-// An owner decision on 2026-08-17 removed `GRIM_EXPERIMENTAL_HOOKS`
-// (and the separate `GRIM_ALLOW_HOOKS`) from the surface entirely, in
-// favour of config only. The feature flag is a *feature flag*, set by
-// `grim config set options.experimental.hooks true` in project or global
-// config; consent is the workspace's own machine-local record (written by
-// `grim hook allow`, never by a config file); and `--trust-hooks` remains
-// the per-invocation escape for CI.
-//
-// This is a simplification, not a mitigation: an environment variable is
-// repo-carriable (`.envrc`, `.mise.toml`, devcontainer `containerEnv`), so
-// honouring one in the enabling direction would let a cloned repository
-// turn on a default-deny *execution* feature through a file the user never
-// reads. Deleting the variable removes that class rather than guarding it,
-// and it retires the "which direction may it be honoured in" question with
-// no precedence rule to get wrong.
+// The feature flag has no environment form, but it is not the gate: a committed
+// `grimoire.toml` can set it, and a `GRIM_CONFIG` file may carry it later.
+// Workspace consent is the gate, and it has no environment or `GRIM_CONFIG`
+// form: a repository can supply its own environment (`.envrc`, devcontainer
+// `containerEnv`), so either form would let it consent on a cloner's behalf.
 
 /// Experimental-feature opt-ins, nested under `[options.experimental]`.
 ///
@@ -360,9 +348,9 @@ impl ExperimentalOptions {
     }
 
     /// The effective settings flag: the config key is the whole answer, as
-    /// for [`Self::hooks_enabled`]. An environment variable is repo-carriable,
-    /// so one in the enabling direction would let a cloned repository turn on
-    /// writes into a harness's own config.
+    /// for [`Self::hooks_enabled`]. The flag is not the gate (a committed
+    /// `grimoire.toml` can set it); workspace consent is, and consent has no
+    /// environment or `GRIM_CONFIG` form.
     pub fn settings_enabled(&self) -> bool {
         self.settings
     }

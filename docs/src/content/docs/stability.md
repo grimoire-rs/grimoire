@@ -24,7 +24,8 @@ each — see [Upgrading](./upgrading.md).
 Breaking any guarantee below is a major-version change, not a minor one.
 Three exceptions sit inside these rows: the experimental [hook](./hooks.md)
 surface, the experimental [settings][settings] surface, and the
-[telemetry switches][telemetry-enable] in the environment variables row.
+[telemetry switches][telemetry-enable], [`GRIM_CONFIG`][telemetry-config] and
+`GRIM_TELEMETRY_OTLP_HEADERS` in the environment variables row.
 [Unstable](#unstable) lists all three by name.
 
 | Area | Guarantee |
@@ -43,7 +44,7 @@ surface, the experimental [settings][settings] surface, and the
 | [Package index][package-index] transport | The locators a published index serves. The client contract is [the root][index-root] at `<base>/c/root.json` and [the gzip blobs][index-blobs] it names at `<base>/c/f/sha256/<hex>.json.gz`, whose digest and size cover the inflated JSON. Both are permanent once an index emits them, and under `schema: 1` they grow only by additive fields. Their *presence* is not promised: a `404` is a normal answer that sends grim to `all.json`. Everything else under `c/` is private to the index pipeline. Also served: HTTP `<base>/all.json` and the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], both while the index's `legacy` setting is true (the default), and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised either (most indexes publish none, and a `404` is a normal, non-error answer). Its **path and document shape** are promised, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
-| Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars], except the [telemetry switches][telemetry-enable], Unstable until 1.0 |
+| Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars], except the [telemetry switches][telemetry-enable], `GRIM_CONFIG` and `GRIM_TELEMETRY_OTLP_HEADERS`, Unstable until 1.0 |
 | [`.grimignore`][grimignore] | gitignore syntax, defaults-extend-not-replace semantics, and the three never-ignored names (`SKILL.md`, a rule's index, `.grimignore` itself) — see [Additive fields](#frozen-additive-fields) for what growing the built-in default list does and does not cover. One kind-scoped exception: for a [hook](./hooks.md) root only, `hook.toml` is never ignored even when a `.grimignore` entry names it — its `hook.toml` is still packed and hashed |
 
 ### Additive fields {#frozen-additive-fields}
@@ -602,12 +603,14 @@ exclusions are what keep 1.x able to move at all:
   consumer has shaped it. Anything you script against it today may move.
 - **[Telemetry][telemetry].** The opt-in usage export is Unstable
   through 1.0. That covers the `GRIM_TELEMETRY` and
-  `GRIM_TELEMETRY_REPOSITORY` switches, the `grim.command` and
+  `GRIM_TELEMETRY_REPOSITORY` switches, `GRIM_CONFIG`, the `[telemetry]`
+  table of its files, `GRIM_TELEMETRY_OTLP_HEADERS`, the `grim.command` and
   `grim.artifact.changed` event names, every [attribute and resource
   key][telemetry-fields], the `GRIM_LOG=debug` payload line, and the
   `$GRIM_HOME/telemetry/installation-id` file. Keys may be added, renamed
-  or removed in any minor release. Neither the switches nor the file
-  change anything for a user who never sets `GRIM_TELEMETRY`.
+  or removed in any minor release. Neither the switches nor the files
+  change anything for a user who sets neither `GRIM_TELEMETRY` nor
+  `GRIM_CONFIG`.
 - **[`grim export plugin`][export-plugin] and [`grim export
   marketplace`][export-marketplace] tree bytes.** The report shape and
   version grammar are frozen under the table rows above. The commands'
@@ -1062,6 +1065,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [telemetry]: ./telemetry.md
 [telemetry-enable]: ./telemetry.md#enable
 [telemetry-fields]: ./telemetry.md#fields
+[telemetry-config]: ./telemetry.md#config-file
 [artifacts-kinds]: ./artifacts.md#kinds
 [batch-publish]: ./publishing.md#batch-publish
 [publishing-release]: ./publishing.md#release

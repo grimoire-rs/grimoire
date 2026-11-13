@@ -45,7 +45,7 @@ is open. Anchors (`{#...}`) moved with their sections.
 
 `$GRIM_HOME/telemetry/installation-id` holds the opt-in telemetry
 installation ID: one lowercase hyphenated UUID v4, written atomically on the
-first **armed** run (`GRIM_TELEMETRY` truthy and no disarm) and reused after
+first **armed** run (`GRIM_TELEMETRY` or a `GRIM_CONFIG` file arms it, no disarm) and reused after
 that. An unarmed run never creates the file or the directory. A value that
 does not parse is replaced, a non-absolute `GRIM_HOME` or any I/O error means
 no ID (the export proceeds without `grim.installation.id`), and a shared
