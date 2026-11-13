@@ -13,6 +13,7 @@
 **Domain Tags:** integration, security, devops
 **Supersedes:** N/A
 **Superseded By:** N/A
+**Amended:** 2026-11-13 — § Amendment 2026-11-13 (`GRIM_CONFIG` `[telemetry]`, #334); with `adr_grim_config_layers.md`
 
 ## Context
 
@@ -250,6 +251,88 @@ field table and env semantics are the plan's contracts
 - [adr_vendor_support_tiers.md](./adr_vendor_support_tiers.md) — re-check the Tier 1 set once usage telemetry lands
 - OBS-12, OBS-20, OBS-22 in `.claude/rules/rust-quality/docs-and-tracing.md`
 
+
+## Amendment 2026-11-13: a grim-only destination through `GRIM_CONFIG` (#334)
+
+[grimoire-rs/grimoire#334](https://github.com/grimoire-rs/grimoire/issues/334):
+a tool manager composes one environment for many tools, so `OTEL_*` set for
+grim redirects other tools' telemetry and hands them grim's token. The owner
+decided the fix (`.agents/goals/issue-334.md` § Rules); the general file
+mechanism is `adr_grim_config_layers.md`. This amendment changes three things
+this ADR recorded: env-only arming, no config-file form, and headers coming
+only from `OTEL_EXPORTER_OTLP_[LOGS_]HEADERS`. Everything else stands.
+
+### The `[telemetry]` table
+
+Read from `GRIM_CONFIG` files only (never from `grimoire.toml`), merged per
+`adr_grim_config_layers.md` (later file wins; tables per entry).
+
+| Key | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | `true` arms the export, like `GRIM_TELEMETRY`. |
+| `endpoint` | string | Base URL; grim appends `/v1/logs`, as for `OTEL_EXPORTER_OTLP_ENDPOINT`. `http`/`https`, a host, no userinfo. |
+| `headers` | table of strings | OTLP headers, sent only to `endpoint`. Same name rules as the env form (valid name, not `host`/`content-length`/`content-type`/`transfer-encoding`). No percent-decoding: TOML strings carry their own escapes. |
+| `timeout` | integer, ms, > 0 | Default 500. |
+| `protocol` | string | Only `http/protobuf`. |
+| `service_name` | string | Replaces `service.name`. |
+| `resource_attributes` | table of strings | Added to the resource, per key. |
+
+No `${VAR}` substitution, no `headers_file` key, no helper command (owner
+recommendation): a repository can point `GRIM_CONFIG` at its own file, and any
+of the three would let that file send a secret of the user's choosing to an
+endpoint the repository chose.
+
+### Arming, replacing "Gate before construction" (condition 2)
+
+Grim decides the gate in `Context::new`, before any OTel type exists, in this order:
+
+1. `DO_NOT_TRACK` truthy, `OTEL_SDK_DISABLED` truthy, or offline → unarmed. No file is read.
+2. `GRIM_TELEMETRY` set to a non-blank value that is not truthy (`0`, `false`, anything else) → unarmed. No file is read. A blank value counts as unset.
+3. Read the `GRIM_CONFIG` layers. Any unusable layer → one warning, unarmed (`adr_grim_config_layers.md` D-1).
+4. Armed when `GRIM_TELEMETRY` is truthy or the merged `enabled` is `true`. Environment over file: `GRIM_TELEMETRY=1` arms even when a file says `enabled = false`.
+
+### Destination, extending "Headers are grim's" (condition 4)
+
+The destination is one unit: endpoint, headers, protocol and timeout come from one family.
+
+- **A `GRIM_CONFIG` layer sets `endpoint`** → grim's own selection reads no `OTEL_EXPORTER_OTLP_*` variable: not the endpoints, headers, protocol or timeout, and no ambient value changes the request. (The pinned SDK builder still reads the env headers itself; `GrimHttpClient` discards them, as condition 4 already requires.) Headers are the merged `[telemetry.headers]`, then `GRIM_TELEMETRY_OTLP_HEADERS` (OTel `k=v,k=v`, percent-decoded) merged over them per name. Protocol is `http/protobuf`, timeout is the file's or 500 ms.
+- **No layer sets `endpoint`** → exactly today's `OTEL_*` rules (condition 4 as written), and neither `[telemetry.headers]` nor `GRIM_TELEMETRY_OTLP_HEADERS` is sent: grim-owned credentials ride only with a grim-owned endpoint. An armed run with such unused grim headers prints one warning naming their two sources, never a value.
+- **Resource**, whichever destination, per key, lowest first: grim's derived keys, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_SERVICE_NAME`, the file's `resource_attributes`, the file's `service_name`. So a file's `service.name` attribute beats an ambient `OTEL_SERVICE_NAME`.
+- **`GRIM_TELEMETRY_REPOSITORY`** applies whenever the run is armed, by either source. It stays environment-only.
+
+`GrimHttpClient` still clears every crate-set header and inserts only grim's
+selection, so the crate's own env-header merge cannot reach either destination.
+
+### Quantified impact, revised row
+
+| Metric | Before | After |
+|---|---|---|
+| Unarmed run cost | 4 env reads | 5 env reads; plus one capped read per `GRIM_CONFIG` entry when no env opt-out applies |
+
+### Consequences, revised
+
+- **Fixes #334 in both directions.** Other tools no longer see grim's
+  destination or token, and an ambient `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`,
+  timeout or header set no longer rides along into a grim-file destination
+  (research Key Finding 6).
+- **T3 re-check against decision 19 (A-1).** A repository-supplied environment
+  can now also name a `GRIM_CONFIG` file. That arms and redirects exactly as
+  `GRIM_TELEMETRY` plus `OTEL_EXPORTER_OTLP_ENDPOINT` already could, and can
+  receive `GRIM_TELEMETRY_OTLP_HEADERS` or an organisation file's headers the
+  way decision 19's repository received ambient generic headers. Same class,
+  same owner-accepted reasoning (repository environment injection already
+  grants code execution or ownership of the environment); no widening. Two
+  points narrow it: ambient `OTEL_*` headers never reach a grim-file endpoint,
+  and a relative `GRIM_CONFIG` entry (which would make a committed file a layer
+  with no repository environment) is refused. `telemetry.md` states the
+  exposure in plain words (it did not yet, despite decision 19 saying so).
+- **Credential delivery.** The file form is preferred (file permissions); the
+  variable exists for setups that already hold the secret in the environment.
+
+### Validation, added
+
+- [ ] Arming order and destination unit pinned by the tests named in `.agents/plans/plan_grim_config_telemetry.md` (C-004, C-005, C-006)
+
 ---
 
 ## Changelog
@@ -259,3 +342,4 @@ field table and env semantics are the plan's contracts
 | 2026-10-22 | hex-plan | Initial record of the owner's exporter decision and the conditions of the OBS-12 exemption |
 | 2026-10-22 | hex-plan adversary (native substitute; codex usage-limited) | Endpoint userinfo refused; `finish` isolated in a spawned task; git env scrubbed; credential exposure of the base endpoint written into § Consequences |
 | 2026-10-22 | hex-plan review | Spec review: condition 4 states the exact header set and "no default endpoint"; conditions mapped to tests; `finish` order in the diagram; size measured on `dist` and `release` |
+| 2026-11-13 | hex-plan (#334) | Amendment: `GRIM_CONFIG` `[telemetry]` table can arm and name a grim-only destination; destination is one unit; `GRIM_TELEMETRY_OTLP_HEADERS`; falsy `GRIM_TELEMETRY` disarms a file; T3 re-checked against decision 19 |
