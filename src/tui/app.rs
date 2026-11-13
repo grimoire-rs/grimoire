@@ -2830,12 +2830,12 @@ async fn run_batch_scoped(
 #[error("uninstall failed")]
 struct HeldRefusal(#[source] crate::install::uninstall::UninstallError);
 
-/// [`held_refusal_line`]'s remedy cut to fit the lead slot: the area the status
-/// line gets at 80 columns holds "N failed; " and about 25 more characters.
+/// [`held_refusal_line`]'s remedy cut to fit the lead slot: at 80 columns the offline
+/// title leaves 30 columns, 29 kept, so after "N failed; " it has about 15 to 19.
 fn held_lead(total: usize) -> &'static str {
     match total {
-        1 => "delete again: Uninstall",
-        _ => "delete it on its own",
+        1 => "retry: Uninstall",
+        _ => "delete it alone",
     }
 }
 
@@ -10896,23 +10896,28 @@ mod tests {
         }
     }
 
-    /// At 80 columns the status area holds about 35 characters, and the counts
-    /// used to take 28 of them: the remedy of a held-delete refusal leads instead.
+    /// At 80 columns the status area holds about 35 columns online and 30 under
+    /// the offline title; the remedy of a held-delete refusal leads, so it fits both.
     #[test]
     fn a_held_delete_refusal_shows_its_remedy_at_80_columns() {
         let repo = "ghcr.io/grimoire-rs/a-repository-with-a-long-name/skills/team-conventions";
-        for (total, remedy) in [(1, "delete again: Uninstall"), (2, "delete it on its own")] {
-            let line = batch_line(&BatchTally {
-                failed: 1,
-                ok: 0,
-                last_err: Some(held_refusal_line(repo, total)),
-                held_remedy: Some(held_lead(total)),
-                ..delete_tally(total, &[], &PinChanges::default())
-            });
+        for (total, failed) in [(1, 1), (2, 1), (12, 10)] {
+            for offline in [false, true] {
+                let line = batch_line(&BatchTally {
+                    failed,
+                    ok: 0,
+                    last_err: Some(held_refusal_line(repo, total)),
+                    held_remedy: Some(held_lead(total)),
+                    ..delete_tally(total, &[], &PinChanges::default())
+                });
 
-            let drawn = drawn_status(line, false);
+                let drawn = drawn_status(line, offline);
 
-            assert!(drawn.contains(remedy), "{total} rows: {drawn:?}");
+                assert!(
+                    drawn.contains(held_lead(total)),
+                    "{total} rows, {failed} failed, offline {offline}: {drawn:?}"
+                );
+            }
         }
     }
 
