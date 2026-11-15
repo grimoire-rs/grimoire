@@ -46,36 +46,32 @@ did not write is never replaced without `--force`. Like a hook, it applies at
 project scope only after the workspace consents. See the
 [settings reference][settings] and [Stability][stability-unstable].
 
-### Rules with a support directory {#rule-support-dir}
+### Rules and support directories {#rule-support-dir}
 
-A rule is often an *index* that points at extra context — a worked example, a
-JSON schema, a script — that would clutter the rule itself. The convention
-across AI-config tooling is to put that next to the rule in a sibling folder
-with the same name (`rules/my-rule.md` referencing `./my-rule/examples.md`).
+A rule is a single `.md` file. Before grim 0.16.0 it could also carry a
+**support directory**: a folder beside it with the same stem
+(`my-rule.md` + `my-rule/`). It held extra context such as a worked example.
+grim packed the folder with the rule and installed it beside the rule.
 
-A bare index whose links resolved to nothing would be useless, so a rule may
-carry an optional **support directory**: a folder beside the index sharing its
-stem (`my-rule.md` + `my-rule/`). Grimoire packs the index and every file under
-that folder into the one artifact, and installs them beside each other so the
-index's relative links resolve:
+That broke in practice. Clients that read `rules/` recursively load every file
+in the folder as a rule. grim's repair covered Claude Code only. It wrote a
+`claudeMdExcludes` entry in one `settings.json`, which Claude ignores when the
+repository is loaded from another directory. Qoder has no usable exclude key,
+and the other clients were never audited.
 
-```
-.claude/rules/my-rule.md
-.claude/rules/my-rule/examples.md
-.claude/rules/my-rule/schema.json
-```
+So a rule can no longer ship a support directory. `grim build`,
+`grim release` and `grim publish` refuse one with exit `65`. A rule declared by
+local path is refused the same way. See
+[Publishing][ref-publishing-md-rule-support-dir].
 
-A rule with no support directory is unchanged — it remains the single
-`my-rule.md` file. See [Publishing](./publishing.md#rule-support-dir) for how
-the directory is packed.
+A rule published with a support directory before 0.16.0 keeps installing as it
+did. Its files land under `rules/<name>/`, and Claude gets its
+`claudeMdExcludes` entry. grim prints one warning per such rule when it writes
+files. See [Claude support-directory exclusion][ref-vendor-metadata-md-claude-md-excludes].
 
-One client needs a little help here. [Claude Code][claude-memory] reads
-`.claude/rules/` recursively and treats every unscoped file it finds as
-always-on context, which would load the whole support tree into every session
-instead of the one the index sends it to. So when grim installs a support-dir
-rule for Claude it also registers the directory in `claudeMdExcludes` — the
-files stay on disk and stay readable, only the automatic load goes away. See
-[Claude support-directory exclusion](./vendor-metadata.md#claude-md-excludes).
+The replacement is a [dependency][ref-guides-dependencies-md-rule-with-lookup-data].
+Put the depth files into a skill, require that skill from the rule's
+frontmatter, and name it in the rule body.
 
 ## Artifacts as OCI content {#artifacts-as-oci-content}
 
@@ -501,7 +497,11 @@ downloading content, so an `--offline` run after only a lock exits `81`.
 [hub]: https://hub.docker.com
 [dist]: https://distribution.github.io/distribution/
 [claude]: https://docs.anthropic.com/en/docs/claude-code/overview
-[claude-memory]: https://code.claude.com/docs/en/memory
 [opencode]: https://opencode.ai
 [copilot]: https://github.com/features/copilot
 [codex]: https://developers.openai.com/codex
+
+<!-- internal -->
+[ref-publishing-md-rule-support-dir]: ./publishing.md#rule-support-dir
+[ref-vendor-metadata-md-claude-md-excludes]: ./vendor-metadata.md#claude-md-excludes
+[ref-guides-dependencies-md-rule-with-lookup-data]: ./guides/dependencies.md#rule-with-lookup-data

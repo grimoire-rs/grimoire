@@ -514,7 +514,8 @@ Like [Cursor], Antigravity splits `globs` on every comma. A glob such as
 `src/**/*.{rs,toml}` is read as two patterns, and grim warns at install time
 ([Cursor: a comma inside a glob](#gap-cursor-globs)).
 
-A rule's support directory is installed beside it. Antigravity does not
+A rule published before grim 0.16.0 with a support directory has that
+directory installed beside it. Antigravity does not
 auto-load it: it scans only the `.md` files directly inside `rules/`. If you
 list that subdirectory in `.agents/rules.json`, its `.md` files load as rules.
 Antigravity also reads an unscoped `~/.gemini/GEMINI.md`
@@ -686,7 +687,7 @@ it. Droid's `disabled` and `disabledTools` toggles are Droid's own state, so a
 toggled grim entry still reads as unmodified and keeps them across installs,
 updates and `--force`.
 
-### Qoder: rule support directories load as rules, MCP env references {#gap-qoder}
+### Qoder: old rule support directories load as rules, MCP env references {#gap-qoder}
 
 [Qoder] reads the same config shapes as [Claude], under `.qoder/` instead of
 `.claude/`, so skills, rules and agents install unchanged. These paths come
@@ -694,13 +695,16 @@ from the documentation for `qodercli`, Qoder's command-line client. Qoder's
 IDE docs name the same `.qoder/` directory but do not say whether the IDE
 reads every file in it. Two gaps remain.
 
-A rule that ships a support directory installs it beside the rule, as
-`.qoder/rules/<name>/`. [Qoder] loads every Markdown file under `rules/`,
-subdirectories included, so the files in that directory load as rules of their
-own, with no path scope. [Claude] had the same problem, and grim fixed it with
-an exclude entry in Claude's own settings file. [Qoder]'s docs name an
-`agentsMdExcludes` setting once, but not what it applies to or what values it
-takes, so grim cannot rely on it yet. Single-file rules are unaffected.
+A rule published before grim 0.16.0 with a support directory installs it
+beside the rule, as `.qoder/rules/<name>/`. [Qoder] loads every Markdown file
+under `rules/`, subdirectories included, so the files in that directory load
+as rules of their own, with no path scope. [Claude] had the same problem, and
+grim fixed it with an exclude entry in Claude's own settings file. [Qoder]'s
+docs name an `agentsMdExcludes` setting once, but not what it applies to or
+what values it takes, so grim cannot rely on it yet.
+
+Single-file rules are unaffected. grim 0.16.0 and later no longer publish a
+rule with a support directory. See [the upgrade note][ref-upgrading-md-rule-support-dir].
 
 MCP servers go into `.qoder/settings.json`, not the shared `.mcp.json` that
 [Qoder] also reads, because grim already manages `.mcp.json` for [Claude].
@@ -791,3 +795,6 @@ where.
 [env-refs]: ./mcp-servers.md#env-references
 [mcp-limitations]: ./mcp-servers.md#limitations
 [envvars]: ./configuration.md#environment-variables
+
+<!-- internal -->
+[ref-upgrading-md-rule-support-dir]: ./upgrading.md#rule-support-dir

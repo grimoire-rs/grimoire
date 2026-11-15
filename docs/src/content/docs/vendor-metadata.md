@@ -541,7 +541,7 @@ The mapping table for rules:
 | [GitHub Copilot][copilot-instructions-docs] | `paths` | top-level | `applyTo` | Comma-joined into a single string (Copilot does not accept a list) |
 | [GitHub Copilot][copilot-instructions-docs] | `copilot.exclude-agent` | `metadata` | `excludeAgent` | Enum: `code-review` or `cloud-agent` (registry in `src/install/vendor_copilot.rs`) |
 | [Cursor][cursor-subagents-docs] | `paths` | top-level | `globs` | Comma-joined into a single string, plus a computed `alwaysApply: false`; unscoped (no `paths`) emits no `globs` and `alwaysApply: true` instead (`src/install/vendor_cursor.rs`) |
-| [Qoder][qoder-rules-docs] | `paths` | top-level | `paths` | Verbatim, as for Claude Code. Qoder loads `rules/` recursively and documents no usable exclude setting, so a rule's support directory loads as unscoped rules — a [known gap](./clients.md#gap-qoder) |
+| [Qoder][qoder-rules-docs] | `paths` | top-level | `paths` | Verbatim, as for Claude Code. Qoder loads `rules/` recursively and documents no usable exclude setting, so a support directory of a rule published before grim 0.16.0 loads as unscoped rules — a [known gap][ref-clients-md-gap-qoder] |
 | [Kiro][kiro-docs] | `paths` | top-level | `fileMatchPattern` | YAML array (not comma-joined), plus a computed `inclusion: fileMatch`; unscoped emits `inclusion: always` instead, no `fileMatchPattern` (`src/install/vendor_kiro.rs`) |
 | [Antigravity][antigravity-rules-docs] | `paths` | top-level | `globs` | Comma-joined into a single string, plus a computed `trigger: glob`; unscoped emits `trigger: always_on` instead, no `globs`. A `description` is written from the rule's first heading or line, when the body has one (`src/install/vendor_antigravity.rs`). The `antigravity.*` rule registry is empty |
 | [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via the OpenCode config file |
@@ -624,24 +624,35 @@ survive.
 
 ## Claude support-directory exclusion {#claude-md-excludes}
 
-A rule may ship a [sibling support directory](./concepts.md#rule-support-dir),
-and grim installs it beside the index so the index's relative links resolve.
-For [Claude Code][claude-memory-docs] that lands the depth files inside
-`.claude/rules/`, which Claude discovers **recursively** — and a file without
-`paths:` frontmatter is loaded into every session with the same priority as
-`CLAUDE.md`. The material the index is meant to *route to* would arrive
-unconditionally, in every session, forever.
+This section concerns only a rule published before grim 0.16.0 with a
+[support directory][ref-concepts-md-rule-support-dir]. grim no longer publishes
+such a rule. Installing one prints a deprecation warning. A single-file
+rule never touches `claudeMdExcludes`.
+
+An old rule's support directory installs beside the index, so the index's
+relative links resolve. For [Claude Code][claude-memory-docs] that lands the
+depth files inside `.claude/rules/`, which Claude discovers **recursively**.
+A file without `paths:` frontmatter is loaded into every session with the
+same priority as `CLAUDE.md`. The material the index is meant to *route to*
+would arrive unconditionally, in every session, forever.
 
 No frontmatter fixes that: no path glob expresses "only when the index sends
 you", which is exactly what a support directory means. So grim manages one
-`claudeMdExcludes` element per support-dir rule — added when the rule
-installs, removed when grim uninstalls it (or a new version of it stops
-shipping a support directory). grim only ever removes an element it wrote
-itself, so your own exclusions in the same `settings.json` are left alone —
-with one accepted exception: an element you hand-wrote in grim's exact
-spelling is indistinguishable from grim's own, so grim adopts it and removes
-it when that rule is uninstalled. A retired rule whose support directory is
+`claudeMdExcludes` element per such rule. It is added when the rule installs.
+It is removed when grim uninstalls the rule, or when an update installs a
+single-file version of it. That update also removes the directory, and the key
+itself when its list empties.
+
+grim only ever removes an element it wrote itself, so your own exclusions in
+the same `settings.json` are left alone, with one accepted exception. An
+element you hand-wrote in grim's exact spelling is indistinguishable from
+grim's own. grim adopts it and removes it when that rule is uninstalled. A retired rule whose support directory is
 still on disk keeps its element either way.
+
+The exclusion is a Claude-only repair, and Claude ignores it when the
+repository is loaded from another directory. That is why grim stopped
+publishing such rules. A new rule moves its depth files into a skill it
+[requires][ref-guides-dependencies-md-rule-with-lookup-data].
 
 Exclusion suppresses **auto-load only**. Every file stays on disk and stays
 readable, so the index keeps routing to its depth and its relative links keep
@@ -762,3 +773,8 @@ claude namespace to silence it and gain proper type conversion.
 [qoder-docs]: https://qoder.com
 [qoder-rules-docs]: https://docs.qoder.com/cli/memory
 [qoder-config-docs]: https://docs.qoder.com/cli/config-scope
+
+<!-- internal -->
+[ref-clients-md-gap-qoder]: ./clients.md#gap-qoder
+[ref-concepts-md-rule-support-dir]: ./concepts.md#rule-support-dir
+[ref-guides-dependencies-md-rule-with-lookup-data]: ./guides/dependencies.md#rule-with-lookup-data

@@ -14,7 +14,8 @@ Grim has two ways to say "these belong together". A **bundle** is a named set
 the consumer declares once. A **requirement** is a link one artifact carries
 to another, so the dependency installs without being declared. This guide
 builds one of each, installs them, and reads `grim why` to see which chain
-brought in what.
+brought in what. A last section shows a [rule that requires a
+skill][ref-rule-with-lookup-data].
 
 ## Before you start {#prerequisites}
 
@@ -34,6 +35,7 @@ brought in what.
 |---|---|---|
 | Consumers to take a curated set with one declaration | A [bundle][bundles] | One line brings every member. Membership follows the bundle version your lock pins, and `grim update` moves that pin. |
 | An artifact that breaks without another | A [requirement][requires] | The dependency installs whenever the artifact does. |
+| A rule that points at reference tables or scripts | A rule that [requires a skill][ref-rule-with-lookup-data] | A rule is one file, so the depth lives in a skill the rule pulls in. |
 | Both: a curated set whose members share a helper | A bundle of artifacts that require the helper | The set is a choice. The helper is not. |
 
 The test is whether a piece is needed wherever its artifact goes. The review
@@ -260,6 +262,63 @@ the skill.
    the skill, since nothing else asks for it. `grim remove` drops both from the
    lock only, and leaves the entry in your clients' config.
 
+## A rule with lookup data {#rule-with-lookup-data}
+
+A rule is one file. When it points at reference tables, a checklist or a
+script, those files cannot ride beside it. Since grim 0.16.0 a rule that ships
+a support directory refuses to build. Clients that read `rules/` recursively
+would load every one of those files as a rule. See the
+[upgrade note][upgrading-rule-support-dir]. The depth files go into a skill
+that the rule requires.
+
+The rule stays short and always visible. The skill holds the depth, and the
+agent loads it when the rule sends it there.
+
+1. Put the depth files into a skill. Here `architecture-guide` carries
+   `patterns.md` beside its `SKILL.md`.
+
+   ```text
+   skills/architecture-guide/
+     SKILL.md
+     patterns.md
+   ```
+
+2. Require the skill from the rule's frontmatter, and name it in the rule body
+   so the agent loads it.
+
+   ```markdown
+   ---
+   paths:
+     - "src/**/*.rs"
+   summary: Architecture guide with examples
+   metadata:
+     grim.requires.skills.architecture-guide: "ghcr.io/acme/skills/architecture-guide:1"
+   ---
+
+   # Architecture Guide
+
+   Load the `architecture-guide` skill for the worked patterns this rule
+   references.
+
+   - Facade at the CLI boundary; business logic in plain modules.
+   - Strategy via traits for swappable implementations.
+   ```
+
+3. Release the skill first, then the rule. `grim release` of the rule does not
+   look the skill up, as [Artifact formats][artifacts-requires] explains.
+   Installing the rule installs the skill, and removing the rule removes it
+   again unless something else needs it.
+
+The skill must stay model-invocable, because the agent has to be able to load
+it. For Claude Code, never set `claude.disable-model-invocation: "true"` on it.
+That removes the skill's description from context, and Claude cannot load it.
+
+The skill may set `claude.user-invocable: "false"`. That hides it from the `/`
+menu while Claude can still load it, as the [Claude Code skills
+documentation][claude-skills-docs] describes. No other client has a
+skill-level key in grim. There the skill's description and the explicit name
+in the rule body carry the load.
+
 ## When the chain is not what you expected {#overrides}
 
 A direct declaration with a tag beats whatever an artifact asked for. If you
@@ -294,6 +353,7 @@ requesters that claim different majors of one artifact exit `78`.
 [relative]: ../artifacts.md#bundle-relative-refs
 [claims]: ../artifacts.md#what-the-tag-claims
 [publishing]: ../publishing.md
+[upgrading-rule-support-dir]: ../upgrading.md#rule-support-dir
 [publishing-bundles]: ../publishing.md#bundles
 [artifacts-requires]: ../artifacts.md#requires
 [concepts-dependencies]: ../concepts.md#dependencies
@@ -304,3 +364,7 @@ requesters that claim different majors of one artifact exit `78`.
 [docker]: https://docs.docker.com/get-started/get-docker/
 [google-drive]: https://www.google.com/drive/
 [claude-code]: https://code.claude.com
+[claude-skills-docs]: https://code.claude.com/docs/en/skills
+
+<!-- internal -->
+[ref-rule-with-lookup-data]: #rule-with-lookup-data

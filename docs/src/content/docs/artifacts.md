@@ -28,7 +28,7 @@ downloading layers.
 | Kind | Source shape | `com.grimoire.kind` | Installs as |
 |------|--------------|---------------------|-------------|
 | **Skill** | Directory with a `SKILL.md` index | `skill` | Directory tree under the client's `skills/` dir |
-| **Rule** | Single `.md` file (+ optional sibling support directory) | `rule` | `rules/<name>.md` (+ `rules/<name>/…`), per-client transform |
+| **Rule** | Single `.md` file | `rule` | `rules/<name>.md`, per-client transform |
 | **Agent** | Single `.md` file | `agent` | One agent file per client, per-client rendering |
 | **MCP server** | `mcp/<name>.toml` | `mcp` | Entry registered in each client's own MCP config file — never a materialized file |
 | **Bundle** | `.toml` member list | `bundle` | Never materializes itself — expands to its members |
@@ -247,20 +247,15 @@ comes back base64-encoded, decoding to the exact bytes in plain mode). This
 is a **convention, not a schema** — grim reads no meaning from these names;
 they are simply the agreed spot a tool looks for a readme or an icon.
 
-A rule follows the same convention inside its [sibling support
-directory](#rules) (`architecture-guide/README.md`,
-`architecture-guide/logo.png`), which packs into the same layer tree.
+A [rule][ref-rules] or an [agent][ref-agents] is a single `.md` file and packs
+nothing else. Since grim 0.16.0 the directory beside it sharing its stem
+(`rules/<name>/`, `agents/<name>/`) may hold `README.md`, `logo.png` and
+`logo.svg` for a catalog UI. None of them is packed, so
+`grim fetch <ref> --path <name>/README.md` finds nothing. Read them through
+the [description lookup][ref-publishing-md-description-entry-readme] instead.
 
-An [agent](#agents) — a single `.md` file — carries the same well-known
-files from a sibling directory sharing its stem (`agents/<name>/README.md`,
-`agents/<name>/logo.png`, `agents/<name>/logo.svg`). Unlike a rule's support
-directory, an agent packs **only** those allowlisted files, never an arbitrary
-tree: the agent's identity stays the standalone `<name>.md`, and the companions
-ride the layer purely so a catalog UI can show them. They land under
-`<name>/…` in the layer, so the retrieval path is identical for every tree-backed
-kind — `grim fetch <ref> --path <name>/README.md`. The companions are not
-installed to a client (an agent installs as its lone `.md`); they exist for
-`grim fetch`/catalog consumers.
+Any other file in that directory refuses the build. See [Rules ship one
+file][ref-publishing-md-rule-support-dir].
 
 [MCP servers](#mcp-servers) and [bundles](#bundles) have no file tree of their
 own — their layer is a single JSON document — so they carry no *in-tree* README.
@@ -273,7 +268,7 @@ conventional `README.md` / `CHANGELOG.md` / `logo.*` files) and it rides
 
 ### Excluding files with `.grimignore` {#grimignore}
 
-A skill directory, or a rule's [support directory](#rules), accumulates
+A skill or hook directory accumulates
 files that have nothing to do with the artifact: a `__pycache__/` left
 behind by running a bundled script, a stray `.DS_Store`, a `.venv/` built
 for local testing. None of that belongs in a published layer, and none of
@@ -281,7 +276,7 @@ it should make [`grim status`](./commands.md#artifact-states) report the
 artifact `modified` just because a consumer ran a script.
 
 Grim applies a built-in default ignore list — [gitignore][gitignore-spec]
-syntax — to every skill directory and rule support directory, both when
+syntax — to every skill and hook directory, both when
 packing (`grim build`/`release`/`publish`) and when hashing an installed
 tree (`grim status`/`update`):
 
@@ -312,8 +307,7 @@ desktop.ini
 artifact content (a Rust example, a shipped `.gitignore` template) rather
 than junk, so a publisher who wants either ignored adds it explicitly.
 
-Drop a `.grimignore` at the directory root — a skill's own root, or a
-support directory's root for a multi-file rule — to extend the defaults
+Drop a `.grimignore` at the directory root of a skill or hook to extend the defaults
 with full gitignore syntax, including `!pattern` to re-include a default
 (`!node_modules/` ships it after all). Lines *add to* the built-in list; a
 `.grimignore` never replaces it, so an empty or trivial file cannot
@@ -357,9 +351,10 @@ handler that names an ignored file, such as `.venv/lib/dep.py`, fails
 ignored `node_modules/`, `.venv/` or `venv/` that no handler names only
 draws a build warning.
 
-[Agents](#agents) get no `.grimignore`: their companion directory is
-already an allowlist of exactly `README.md`, `logo.png`, and `logo.svg`,
-so there is nothing else to exclude.
+[Rules][ref-rules] and [agents][ref-agents] get no `.grimignore`. Neither packs a
+directory, so grim reads none. A `.grimignore` in the directory sharing their
+stem is itself a stray file that refuses the build. Only the built-in
+defaults, such as `.DS_Store`, are skipped there.
 
 ## Rules {#rules}
 
@@ -374,16 +369,18 @@ from the first Markdown heading or first non-empty line.
 | `summary` | no | string | Short one-line blurb for the catalog |
 | `keywords` | no | string or list | Comma-separated tags (a YAML list is comma-joined) |
 | `license` | no | string | SPDX-style identifier (e.g. `Apache-2.0`); emitted as the OCI license annotation |
-| `metadata` | no | string→string map | Vendor extensions (e.g. `copilot.exclude-agent`) |
+| `metadata` | no | string→string map | Vendor extensions (e.g. `copilot.exclude-agent`) and [`grim.requires.*`][ref-requires] dependencies |
 | *(any other key)* | no | any YAML | Preserved verbatim (forward compatibility) |
 
 Note the asymmetry with skills: rule `summary`/`keywords` are **top-level**
 frontmatter keys, not `metadata` entries.
 
-A rule may also carry a sibling support directory sharing its stem
-(`architecture-guide.md` + `architecture-guide/`); both pack into one
-artifact and install side by side — see
-[Rules with a support directory](./publishing.md#rule-support-dir).
+A rule packs to its single `.md` file. Since grim 0.16.0 it can no longer
+carry a sibling support directory sharing its stem (`architecture-guide/`).
+The build refuses one with exit `65`. Put the depth files into a skill and
+[require][ref-requires] it instead. See [Rules ship one
+file][ref-publishing-md-rule-support-dir] and [A rule with lookup
+data][ref-guides-dependencies-md-rule-with-lookup-data].
 
 ### Example — minimal rule {#rule-example-minimal}
 
@@ -455,11 +452,11 @@ vendor key lifts to the same native field as a common field (`model`,
 override escape hatch
 ([override precedence](./agents.md#override-precedence)).
 
-An agent may ship a `README.md` and a `logo.png`/`logo.svg` from a sibling
-directory sharing its stem (`agents/<name>/`) — the
-[well-known assets](#well-known-assets) convention. Only those allowlisted
-files ride the layer; every other file in that directory is ignored, so the
-installed agent stays the single `<name>.md`.
+An agent packs to its single `<name>.md`. The directory sharing its stem
+(`agents/<name>/`) may hold `README.md`, `logo.png` and `logo.svg` for catalog
+UIs, as the [well-known assets][ref-well-known-assets] convention describes.
+None of them is packed. Since grim 0.16.0 any other file there refuses the
+build with exit `65`. It used to be ignored.
 
 ### Example — minimal agent {#agent-example-minimal}
 
@@ -757,6 +754,9 @@ command = "gdrive-mcp"
 gws-shared = "ghcr.io/acme/skills/gws-shared:1"
 ```
 
+A rule may require a skill, which is how a rule carries lookup data. See
+[A rule with lookup data][ref-guides-dependencies-md-rule-with-lookup-data].
+
 Metadata values are strings, so each dependency is one flat key. The keys ride
 in the packed skill, rule or agent as ordinary metadata, which no client
 reads. A `[requires]` table in an MCP descriptor is split off before the
@@ -965,3 +965,12 @@ updated without re-releasing every published version.
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source-label]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 [mcp-spec]: https://modelcontextprotocol.io/specification/latest
+
+<!-- internal -->
+[ref-rules]: #rules
+[ref-agents]: #agents
+[ref-publishing-md-description-entry-readme]: ./publishing.md#description-entry-readme
+[ref-publishing-md-rule-support-dir]: ./publishing.md#rule-support-dir
+[ref-requires]: #requires
+[ref-guides-dependencies-md-rule-with-lookup-data]: ./guides/dependencies.md#rule-with-lookup-data
+[ref-well-known-assets]: #well-known-assets
