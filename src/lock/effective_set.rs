@@ -127,6 +127,8 @@ pub fn effective_graph(set: &DesiredSet, lock: &GrimoireLock) -> Option<Effectiv
 /// relock of `set` claims. A key `set` declares and neither `lock` nor `proof` holds
 /// is new to the lock: it records no edge, so it is a leaf. A key `proof` declares
 /// lost its row, and the rows below it are no ghosts, so its walk stops at `None`.
+/// An artifact line retyped to another reference keeps its row in `lock`, so the walk
+/// expands that stale row and the relock claims its edges.
 /// `None` when the lock cannot show the closure.
 pub fn reached_rows(set: &DesiredSet, lock: &GrimoireLock, proof: Option<&DesiredSet>) -> Option<BTreeSet<NodeKey>> {
     let new_key = |key: &NodeKey| {
