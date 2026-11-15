@@ -5,7 +5,7 @@
 //!
 //! A normal release of semver `X.Y.Z` is published once and then the tags
 //! `X.Y.Z`, `X.Y`, `X`, `latest` move to it, most-specific first for crash
-//! safety (see `command/release.rs`), a float never to a lower version. A
+//! safety (see `command/release.rs`), a float never off a newer release. A
 //! **prerelease** (`X.Y.Z-rc.1`) is intentionally NOT part of the
 //! cascade: only its own exact tag is published — no `X.Y`, `X`, or
 //! `latest` move, so a release candidate never silently becomes the
@@ -227,13 +227,17 @@ pub enum FloatVerdict {
 }
 
 /// Whether `release` moves `float`, whose manifest's evidence is `current`.
-/// Only an exact version, a prerelease included, inside the float's own span
-/// and above the release by semver precedence keeps it; build metadata is ignored.
+/// Only an exact normal release inside the float's own span and above the
+/// release by semver precedence keeps it; build metadata is ignored. A float
+/// on a prerelease always moves: `grim release` never cascades one, so a float
+/// sits there only when someone pushed the tag by hand.
 pub fn float_verdict(float: &str, current: &Evidence, release: &semver::Version) -> FloatVerdict {
     let Evidence::Exact(current) = current else {
         return FloatVerdict::Move;
     };
-    // Field compare, not `VersionReq`: its prerelease filter would move a float down from `2.5.0-rc.1`.
+    if !current.pre.is_empty() {
+        return FloatVerdict::Move;
+    }
     let in_span = float == "latest"
         || match decimal_parts(float).as_deref() {
             Some(&[major]) => current.major == major,
@@ -431,20 +435,25 @@ mod tests {
     }
 
     #[test]
-    fn a_prerelease_current_is_compared_by_precedence() {
+    fn a_float_on_a_prerelease_moves_even_to_a_lower_release() {
         for (float, current, release) in [
+            ("latest", "2.0.0-rc.1", "1.9.0"),
             ("latest", "3.0.0-rc.1", "2.4.1"),
             ("2", "2.5.0-rc.1", "2.4.1"),
             ("2.5", "2.5.1-rc.1", "2.5.0"),
             ("0", "0.5.0-beta", "0.4.1"),
+            ("2", "2.9.0-rc.1+build.1", "2.4.1"),
         ] {
             assert_eq!(
                 float_verdict(float, &exact(current), &v(release)),
-                FloatVerdict::Keep(v(current)),
+                FloatVerdict::Move,
                 "{float} on {current} against {release}"
             );
         }
-        // Its own final, or any higher release, replaces it; another major's prerelease is outside the span.
+    }
+
+    #[test]
+    fn a_float_on_a_prerelease_moves_to_its_final_or_a_higher_release() {
         for (float, current, release) in [
             ("latest", "3.0.0-rc.1", "3.0.0"),
             ("2", "2.5.0-rc.1", "2.5.0"),

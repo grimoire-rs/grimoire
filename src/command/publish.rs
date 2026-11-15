@@ -69,7 +69,7 @@ pub struct PublishArgs {
     pub tag: Option<String>,
 
     /// Assert the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for every
-    /// entry, but never a float to a lower version. Requires semver versions —
+    /// entry, but never a float off a newer release. Requires semver versions —
     /// combining it with a non-semver `--version` channel is a data error (65).
     /// Default (neither flag): cascade automatically for semver, single tag for
     /// a channel.
@@ -77,8 +77,8 @@ pub struct PublishArgs {
     pub cascade: bool,
 
     /// Publish only each entry's exact version tag; suppress the
-    /// `X.Y`/`X`/`latest` cascade (the cascade never moves a float to a lower
-    /// version).
+    /// `X.Y`/`X`/`latest` cascade (the cascade never moves a float off a newer
+    /// release).
     #[arg(long, overrides_with = "cascade")]
     pub no_cascade: bool,
 
