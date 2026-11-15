@@ -16,6 +16,7 @@ is the manifest-wide kill switch.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -597,6 +598,13 @@ def _repos(registry: str, names: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _fetch_bytes(runner, repo: str, path: str) -> bytes:
+    """The bytes of one file of a repository's published companion."""
+    doc = runner.json("fetch", f"{repo}:__grimoire", "--path", path)
+    assert doc["encoding"] == "base64"
+    return base64.b64decode(doc["content"])
+
+
 def _companion_paths(runner, repo: str) -> set[str]:
     return {f["path"] for f in runner.json("fetch", f"{repo}:__grimoire")["files"]}
 
@@ -625,10 +633,12 @@ def test_package_readme_is_the_default_companion_readme(
         assert changelog.stdout == CHANGELOG, f"{kind} changelog comes from the root"
 
 
-def test_entry_readme_with_path_components_is_a_data_error_nothing_pushed(
-    grim_at, project_dir: Path, registry: str, unique_repo: str
+@pytest.mark.parametrize("value", ["../x", "ABOUT.md", "README.md"])
+def test_entry_readme_string_is_a_manifest_error_nothing_pushed(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, value: str
 ) -> None:
-    """`entry_readme` names one file, not a path: `../x` exits 65 before any
+    """`entry_readme` is a switch, not a file name: any string, a custom
+    name or a path alike, is a manifest parse error (exit 65) before any
     push, so the artifact repository stays absent."""
     prefix = unique_repo.split("/")[-1]
     name = f"{prefix}-badname"
@@ -637,12 +647,13 @@ def test_entry_readme_with_path_components_is_a_data_error_nothing_pushed(
     _manifest(
         project_dir,
         registry,
-        '\n[description]\nentry_readme = "../x"\n' f'\n[skills.{name}]\nversion = "1.0.0"\n',
+        f'\n[description]\nentry_readme = "{value}"\n' f'\n[skills.{name}]\nversion = "1.0.0"\n',
     )
 
     result = grim_at(project_dir).run("publish", format="json", check=False)
     assert result.returncode == 65, f"got {result.returncode}; stderr: {result.stderr}"
-    assert "entry_readme" in result.stderr
+    assert "invalid manifest" in result.stderr and "entry_readme" in result.stderr, result.stderr
+    assert "expected a boolean" in result.stderr, result.stderr
     _assert_tag_absent(f"skills/{name}", "1.0.0")
 
 
@@ -689,7 +700,7 @@ def test_partial_table_warns_and_entries_keep_their_own_readme(
     "table",
     [
         'readme = "README.md"\nlogo = "logo.png"',
-        'entry_readme = "README.md"',
+        "entry_readme = false",
         'publish = false',
     ],
     ids=["readme-named", "entry-readme-only", "kill-switch"],
@@ -718,22 +729,21 @@ def test_entry_readme_only_table_keeps_the_root_probe_on(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """A table that sets only `entry_readme` is no partial table: no "resolves
-    to no files" error, the root README/CHANGELOG are still probed for an entry
-    without a README of its own, and a custom file name is honoured."""
+    to no files" error, and the root README/CHANGELOG are still probed for an
+    entry without a README of its own. `entry_readme = true` is the default."""
     prefix = unique_repo.split("/")[-1]
-    plain, custom = f"{prefix}-plain", f"{prefix}-custom"
+    plain, own = f"{prefix}-plain", f"{prefix}-own"
     _skill(project_dir, plain)
-    _skill(project_dir, custom)
-    _write(project_dir / "skills" / custom / "ABOUT.md", "# about custom\n")
-    _write(project_dir / "skills" / custom / "README.md", "# not this one\n")
+    _skill(project_dir, own)
+    _write(project_dir / "skills" / own / "README.md", "# own readme\n")
     _write(project_dir / "README.md", README)
     _write(project_dir / "CHANGELOG.md", CHANGELOG)
     _manifest(
         project_dir,
         registry,
-        '\n[description]\nentry_readme = "ABOUT.md"\n'
+        "\n[description]\nentry_readme = true\n"
         f'\n[skills.{plain}]\nversion = "0.1.0"\n'
-        f'\n[skills.{custom}]\nversion = "0.1.0"\n',
+        f'\n[skills.{own}]\nversion = "0.1.0"\n',
     )
 
     runner = grim_at(project_dir)
@@ -741,7 +751,7 @@ def test_entry_readme_only_table_keeps_the_root_probe_on(
     plain_doc = runner.json("fetch", f"{registry}/skills/{plain}:__grimoire")
     assert plain_doc["content"] == README
     assert _companion_paths(runner, f"{registry}/skills/{plain}") == {"README.md", "CHANGELOG.md"}
-    assert runner.json("fetch", f"{registry}/skills/{custom}:__grimoire")["content"] == "# about custom\n"
+    assert runner.json("fetch", f"{registry}/skills/{own}:__grimoire")["content"] == "# own readme\n"
 
 
 def test_entry_readme_false_and_per_entry_switches_win_over_package_readme(
@@ -858,8 +868,8 @@ def _publish_with_unusable_readme(runner, project_dir: Path, registry: str, name
     _manifest(project_dir, registry, f'\n[rules.{name}]\nversion = "0.1.0"\n')
     result = runner.run("publish", format="json")
     assert result.returncode == 0, result.stderr
-    assert "its own README was not published" in result.stderr, result.stderr
-    assert "the top-level README stays" in result.stderr, result.stderr
+    assert "was not used as its README" in result.stderr, result.stderr
+    assert "Make it a regular file inside the manifest directory" in result.stderr, result.stderr
     assert "set `entry_readme = false`" in result.stderr, result.stderr
     assert runner.json("fetch", f"{registry}/rules/{name}:__grimoire")["content"] == README
     return result
@@ -872,12 +882,13 @@ def test_a_package_readme_that_is_not_a_regular_file_is_skipped_with_a_warning(
     0, the warning says why and what to do, and the top-level README stays."""
     name = f"{unique_repo.split('/')[-1]}-style"
     _write(project_dir / "rules" / f"{name}.md", "---\npaths: ['**/*.md']\n---\n# rule\n")
-    _write(project_dir / "rules" / name / "README.md" / "inner.md", "# not a file\n")
+    # Empty, so the rule's directory holds no file a rule may no longer ship.
+    (project_dir / "rules" / name / "README.md").mkdir(parents=True)
     _write(project_dir / "README.md", README)
 
     result = _publish_with_unusable_readme(grim_at(project_dir), project_dir, registry, name)
 
-    assert "is not a regular file" in result.stderr, result.stderr
+    assert "(not a regular file)" in result.stderr, result.stderr
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs privileges on Windows")
@@ -897,5 +908,97 @@ def test_a_package_readme_symlinked_out_of_the_tree_is_skipped_with_a_warning(
 
     result = _publish_with_unusable_readme(grim_at(project_dir), project_dir, registry, name)
 
-    assert "not safely contained" in result.stderr, result.stderr
+    assert "path resolves outside the base directory" in result.stderr, result.stderr
     assert result.stderr.count(f"rules/{name}/README.md") == 1, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Lookup order: the entry's own directory, then files beside it, then the root
+# ---------------------------------------------------------------------------
+
+
+def test_entry_readme_sibling_file_is_published(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A rule with no directory of its own takes `rules/<n>.README.md`."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-sib"
+    _write(project_dir / "rules" / f"{name}.md", "---\npaths: ['**/*.md']\n---\n# rule\n")
+    _write(project_dir / "rules" / f"{name}.README.md", "# sibling readme\n")
+    _write(project_dir / "README.md", README)
+    _manifest(project_dir, registry, f'\n[rules.{name}]\nversion = "0.1.0"\n')
+
+    runner = grim_at(project_dir)
+    runner.json("publish")
+
+    assert runner.json("fetch", f"{registry}/rules/{name}:__grimoire")["content"] == "# sibling readme\n"
+
+
+def test_entry_logo_in_skill_directory_wins_over_sibling_and_root(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Logo lookup for a skill: `<skill>/logo.png` first, then `<skill>.png`
+    beside the directory, then the manifest root's `logo.png`."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-logo"
+    _skill(project_dir, name)
+    inside, beside, root = b"\x89PNG-inside\xff", b"\x89PNG-beside\xff", b"\x89PNG-root\xff"
+    (project_dir / "skills" / name / "logo.png").write_bytes(inside)
+    (project_dir / "skills" / f"{name}.png").write_bytes(beside)
+    (project_dir / "logo.png").write_bytes(root)
+    _write(project_dir / "README.md", README)
+    _manifest(project_dir, registry, f'\n[skills.{name}]\nversion = "0.1.0"\n')
+
+    runner = grim_at(project_dir)
+    runner.json("publish")
+
+    assert _fetch_bytes(runner, f"{registry}/skills/{name}", "logo.png") == inside
+
+
+def test_entry_logo_sibling_for_mcp_entry(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An mcp entry (`mcp/<n>.toml`) has no directory: `mcp/<n>.png` is its logo."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-mcp"
+    _write(
+        project_dir / "mcp" / f"{name}.toml",
+        'description = "probe"\nsummary = "probe"\nkeywords = "probe"\n\n'
+        '[server]\ntransport = "stdio"\ncommand = "true"\n',
+    )
+    sibling = b"\x89PNG-mcp-sibling\xff"
+    (project_dir / "mcp" / f"{name}.png").write_bytes(sibling)
+    (project_dir / "logo.png").write_bytes(LOGO)
+    _write(project_dir / "README.md", README)
+    _manifest(project_dir, registry, f'\n[mcp.{name}]\nversion = "0.1.0"\n')
+
+    runner = grim_at(project_dir)
+    runner.json("publish")
+
+    assert _fetch_bytes(runner, f"{registry}/mcp/{name}", "logo.png") == sibling
+
+
+def test_entry_readme_false_keeps_entry_logo(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`entry_readme = false` turns only the README lookup off: the entry's
+    own logo still ships, and the README is the root one."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-keep"
+    _skill(project_dir, name)
+    _write(project_dir / "skills" / name / "README.md", "# own readme, not looked up\n")
+    own_logo = b"\x89PNG-own\xff"
+    (project_dir / "skills" / name / "logo.png").write_bytes(own_logo)
+    _write(project_dir / "README.md", README)
+    _manifest(
+        project_dir,
+        registry,
+        "\n[description]\nentry_readme = false\n" f'\n[skills.{name}]\nversion = "0.1.0"\n',
+    )
+
+    runner = grim_at(project_dir)
+    runner.json("publish")
+
+    repo = f"{registry}/skills/{name}"
+    assert runner.json("fetch", f"{repo}:__grimoire")["content"] == README
+    assert _fetch_bytes(runner, repo, "logo.png") == own_logo
