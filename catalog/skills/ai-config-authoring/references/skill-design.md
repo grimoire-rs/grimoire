@@ -6,6 +6,7 @@ an existing one, or reviewing a skill's anatomy, size, or bundled files.
 Contents: [Anatomy](#anatomy) · [Size](#size) ·
 [Progressive Disclosure](#progressive-disclosure) ·
 [Discovery and Portability](#discovery-and-portability) ·
+[Support Skills](#support-skills) ·
 [Eval-Driven Authoring](#eval-driven-authoring) ·
 [Anti-Patterns](#anti-patterns)
 
@@ -120,6 +121,28 @@ Two consequences worth designing for:
 - **Vendor frontmatter degrades silently.** All major clients ignore
   unknown frontmatter, so a client-specific field is dropped rather than
   rejected — never make correctness depend on one (see [Anatomy](#anatomy)).
+
+## Support Skills
+
+A skill that exists only to hold a rule's depth files (a "support skill";
+the rule requires it and names it, see
+[rule-design.md](rule-design.md#depth-files-never-beside-a-rule)) is still
+a skill, and the frontmatter that controls who may invoke it matters. The
+table is Claude's; verified against its
+[skills documentation][cc] on 2026-11-15 ("Control who invokes a skill").
+
+| Field | Effect | On a support skill |
+|---|---|---|
+| `disable-model-invocation: true` | Description leaves context; only the user can invoke | **Never.** Claude cannot load it, so the rule's pointer dead-ends |
+| `user-invocable: false` | Hidden from the `/` menu; Claude can still load it | Optional, and the usual choice: nobody types it |
+
+In a grim package these are the Claude-only keys `claude.disable-model-invocation`
+and `claude.user-invocable`, string-valued (`"true"` / `"false"`) in
+`metadata`. No other client has a skill-level invocation key in grim, so
+elsewhere the skill's description and the rule body naming it do the work:
+write a short, specific description (every description is loaded at
+session start, so a support skill is a standing cost) and name the skill
+explicitly in the rule.
 
 ## Eval-Driven Authoring
 

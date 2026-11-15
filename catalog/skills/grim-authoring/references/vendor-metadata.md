@@ -10,7 +10,7 @@ artifact, or a publish failed or warned on a vendor key.
 Contents: [Mental Model](#mental-model) · [Outcome Classes](#outcome-classes) ·
 [Literal Discipline](#literal-discipline) ·
 [Where the Registries Live](#where-the-registries-live) ·
-[Worked Example](#worked-example) · [Legacy Migration](#legacy-migration)
+[Support Skill Options](#support-skill) · [Worked Example](#worked-example) · [Legacy Migration](#legacy-migration)
 
 ## Mental Model
 
@@ -106,6 +106,22 @@ grow over time. The authoritative tables:
 - [`droid.*` agent registry][droid-agent-reg] (`droid.reasoning-effort`)
 - [Rule-level keys][rule-keys] (today: `copilot.exclude-agent` only)
 - [Empty skill registries][empty-reg] — every client but Claude; a namespaced skill key always warns and drops
+
+## Support Skill Options {#support-skill}
+
+A rule that needs depth files requires a support skill
+(`grim.requires.skills.<name>` in the rule's `metadata`; see
+[rule-spec.md](rule-spec.md#support-directory)). Vendor options for that skill:
+
+| Client | Key | Effect |
+|---|---|---|
+| Claude | `claude.user-invocable: "false"` | Hides the skill from the `/` menu; Claude can still load it. Optional |
+| Claude | `claude.disable-model-invocation: "true"` | **Never on a support skill**: its description leaves context and Claude cannot load it |
+| Every other client | none | grim has no skill-level key there (an empty registry, so a namespaced key warns and drops); the skill's description and the explicit name in the rule body carry it |
+
+Keep the description short and specific: every skill description is loaded
+into context at session start. Claude's behaviour verified against the
+[skills documentation](https://code.claude.com/docs/en/skills) on 2026-11-15.
 
 ## Worked Example
 

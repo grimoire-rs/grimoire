@@ -10,7 +10,8 @@ Contents: [Two Activation Modes](#two-activation-modes) ·
 [Path-Scoping Discipline](#path-scoping-discipline) ·
 [Tree Hierarchy + Catalog](#tree-hierarchy--catalog) ·
 [Vendor Differences](#vendor-differences) ·
-[The Eager-Import Trap](#the-eager-import-trap)
+[The Eager-Import Trap](#the-eager-import-trap) ·
+[Depth Files: Never Beside a Rule](#depth-files-never-beside-a-rule)
 
 ## Two Activation Modes
 
@@ -141,6 +142,30 @@ in disguise. For optional depth, write a plain pointer instead ("read
 `docs/style.md` when touching templates"); the model loads it only when
 relevant. Imports are for content that genuinely belongs in every
 session and merely lives in another file.
+
+## Depth Files: Never Beside a Rule
+
+Never put depth files (examples, lookup tables, long guides) in a directory
+under `rules/`. Clients that read `rules/` recursively load every file in
+it as a rule of its own, so the depth you meant to defer becomes
+always-on cost, or path-scoped noise. Repairs are client-specific and
+fragile: Claude has a `claudeMdExcludes` setting that is ignored when the
+repository is loaded from another directory, Qoder has no usable exclude
+key, and other clients are unaudited. grim 0.16.0 and later refuses to pack
+a rule with such a directory.
+
+Same cure as the eager-import trap, one level up: keep the rule short, move
+the depth into a **support skill**, require it, and point at it by name.
+
+- With grim, the rule's frontmatter declares
+  `metadata: {grim.requires.skills.<name>: "<ref>"}` so installing the rule
+  installs the skill. The rule body names the skill ("for the full catalog,
+  load the `<name>` skill") so the agent loads it on demand.
+- The support skill must stay model-invocable. On Claude, `claude.user-invocable: "false"`
+  hides it from the `/` menu and is fine; `claude.disable-model-invocation: "true"`
+  removes its description from context and is not. See
+  [skill-design.md](skill-design.md#support-skills).
+- Keep the skill's description short and specific; it is paid every session.
 
 ## Further Reading
 

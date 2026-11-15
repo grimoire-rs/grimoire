@@ -1,11 +1,11 @@
 # Rule Spec
 
 You loaded this file because you are authoring or fixing a grim rule — a
-single Markdown file, optionally with a sibling support directory — for
+single Markdown file, never with a support directory — for
 `grim build` or `grim release`.
 
 Contents: [File Shape](#file-shape) · [Frontmatter](#frontmatter) ·
-[The Asymmetry](#the-asymmetry) · [Support Directory](#support-directory) ·
+[The Asymmetry](#the-asymmetry) · [Support Directory (anti-pattern)](#support-directory) ·
 [Per-Client Transforms](#per-client-transforms) · [Examples](#examples) ·
 [Validation Pitfalls](#validation-pitfalls)
 
@@ -49,28 +49,67 @@ shows no summary in `grim search`.
 `paths` is also top-level: it is a *common* capability every client
 understands, not a vendor key ([common vs. unique][common-unique]).
 
-## Support Directory
+## Support Directory {#support-directory}
 
-An index rule may carry extra context — examples, schemas, scripts — in
-a sibling folder sharing its stem:
+**Anti-pattern: never ship depth files in a directory beside a rule.**
+Clients that read `rules/` recursively load every file in
+`rules/<name>/` as a rule of its own. grim's repair was Claude-only (a
+`claudeMdExcludes` entry in one `settings.json`, ignored when the
+repository is loaded from another directory), Qoder has no usable exclude
+key, and other clients are unaudited. So grim 0.16.0 and later packs a
+rule as its `.md` alone. The directory beside it (`rules/<name>/`) may hold
+only `README.md`, `logo.png` and `logo.svg`, and none of them is packed;
+any other file refuses the build (exit 65, `a rule can no longer ship a
+support directory`). That applies to `grim build`, `release`, `publish` and
+to a rule declared by local path. No `.grimignore` is read there; one in the
+directory is itself a stray file. Only built-in junk such as `.DS_Store` is
+skipped. Rules published before 0.16.0 still install; grim warns once per
+such rule when it writes files.
+
+The replacement is a **support skill**: put the depth files in a skill,
+require it from the rule, and name it in the rule body so the agent loads it.
 
 ```
 rules/
-  my-rule.md     # the index you pass to build/release
-  my-rule/       # optional support dir, same stem — auto-discovered
-    examples.md
+  architecture-guide.md          # the rule: short, always loaded
+skills/
+  architecture-guide/            # the depth files, loaded on demand
+    SKILL.md
+    patterns.md
 ```
 
-Both pack into one layer and install side by side (`rules/my-rule.md` +
-`rules/my-rule/…`), so the index's relative links resolve on the
-consumer. Support files are copied verbatim for every client — only the
-index is ever transformed ([support directories][support-dir]). Claude Code
-would auto-load that tree as unconditional context, so grim also excludes the
-directory in the consumer's Claude settings; the files stay readable, only
-the automatic load goes ([Claude support-directory exclusion][claude-excl]). The
-[well-known assets][well-known] convention applies here too: a
-`README.md` or `logo.png`/`logo.svg` inside the support directory is
-where catalog UIs look for a readme or icon.
+```yaml
+# rules/architecture-guide.md
+---
+paths:
+  - "src/**"
+metadata:
+  grim.requires.skills.architecture-guide: "ghcr.io/acme/skills/architecture-guide:1"
+---
+
+# Architecture
+
+Layering rules in two lines. For the full pattern catalog, load the
+`architecture-guide` skill.
+```
+
+Rules for the support skill:
+
+- It stays **model-invocable**. On Claude, never set
+  `claude.disable-model-invocation: "true"` on it: its description leaves
+  context and Claude cannot load it. It may set
+  `claude.user-invocable: "false"` to hide it from the `/` menu while Claude
+  can still load it. No other client has a skill-level key in grim, so there
+  the skill's description and the explicit name in the rule body carry it.
+- Keep its description short and specific: every skill description is loaded
+  into context at session start.
+- A rule's own README and logo may sit in `rules/<name>/` or beside it as
+  `<name>.README.md`, `<name>.png`; they feed the catalog description only
+  ([lookup](release-checklist.md#description-companion)).
+
+Designing the split (what stays in the rule, what moves to the skill):
+see the `ai-config-authoring` skill, `references/rule-design.md`. Vendor
+options for the support skill: [vendor-metadata.md](vendor-metadata.md#support-skill).
 
 ## Per-Client Transforms
 
@@ -137,25 +176,26 @@ Prefer `&str` over `String` parameters...
 | Vendor key authored top-level (`copilot.exclude-agent:` outside `metadata`) | **Warning** — key is not projected ([example][rule-vendor-ex]) |
 | `copilot.exclude-agent` outside `code-review`/`cloud-agent` | Hard error, exit 65 |
 | `summary`/`keywords` placed inside `metadata` (skill-style) | No error — catalog silently shows nothing |
+| A file other than `README.md`/`logo.png`/`logo.svg` in `rules/<name>/` | Hard error, exit 65 (since 0.16.0) — move it into a required support skill |
 | Frontmatter carries both `name` and `description` | Warning — looks like an agent; did you forget `--kind agent`? |
 
 ## Further Reading
 
 - [Rule schema and examples][rules-ref] — the authoritative field table.
 - [Catalog metadata for rules][pub-rule] — where summary/keywords go.
-- [Rules with a support directory][support-dir] — packing semantics.
-- [Claude support-directory exclusion][claude-excl] — why the tree does
-  not auto-load, and what grim writes to keep it that way.
+- [Rule support directory removal][support-dir] — the 0.16.0 refusal and
+  the upgrade path.
+- [Claude support-directory exclusion][claude-excl] — what grim still
+  writes for rules published before 0.16.0.
 - [Rule-level vendor keys][rule-keys] — per-client transform detail.
 - [Client compatibility][clients] — which clients host rules, and why the
   rest decline.
 
 [rules-ref]: https://grimoire.rs/artifacts.html#rules
 [pub-rule]: https://grimoire.rs/publishing.html#metadata-rule
-[support-dir]: https://grimoire.rs/publishing.html#rule-support-dir
+[support-dir]: https://grimoire.rs/upgrading.html#rule-support-dir
 [claude-excl]: https://grimoire.rs/vendor-metadata.html#claude-md-excludes
 [rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
 [clients]: https://grimoire.rs/clients.html
 [rule-vendor-ex]: https://grimoire.rs/vendor-metadata.html#rule-authoring-example
 [common-unique]: https://grimoire.rs/vendor-metadata.html#common-vs-unique
-[well-known]: https://grimoire.rs/artifacts.html#well-known-assets

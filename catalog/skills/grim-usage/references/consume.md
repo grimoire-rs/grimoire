@@ -86,8 +86,8 @@ grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
   instead of silently replacing it — pass `--name` to bind the new
   reference under another name. A renamed skill installs under the binding name with its
   `SKILL.md` frontmatter `name` rewritten to match (no client-level name
-  collision); a renamed multi-file rule may break the index's relative
-  links (grim warns). Skill/rule/agent binding names must be 1–64 chars —
+  collision); a renamed rule published before 0.16.0 with a support directory
+  may break the index's relative links (grim warns). Skill/rule/agent binding names must be 1–64 chars —
   `[a-z0-9]` runs joined by single `.` or `-` (exit 64 otherwise);
   installing a name already installed
   at the other scope for the same client warns about the shadow.
@@ -285,6 +285,15 @@ dependency refuses the same way, and so does a `grim add` that would bring
 in a dev-installed name. A plain `grim install` that meets a dev record
 under a locked name exits 64 too; `--force` replaces the local copy.
 Confirm the current flag set with `grim install --help`.
+
+**A rule that ships a support directory.** A rule published before grim
+0.16.0 may carry a directory beside it (`rules/<name>/`). It keeps installing
+as before, and grim prints one warning per such rule, only when it writes
+files: `rule '<name>' ships a support directory, which is deprecated: its
+files load as extra rules in some clients`. Nothing is wrong on your side. Tell
+the publisher to move the files into a skill the rule requires; grim 0.16.0 and
+later can no longer publish such a rule. Updating to a single-file version
+removes the directory and Claude's `claudeMdExcludes` entry for it.
 
 ## Updating
 
@@ -804,6 +813,10 @@ took out of the lock as `dropped`.
 - **Needs grim 0.16.0 or later.** An older grim refuses a dependent artifact
   at `grim add`, or locks it silently without its dependencies. A newer grim
   then exits 65 `stale-lock` on that lock: run `grim lock`.
+
+A rule that needs lookup data requires a support skill instead of shipping a
+directory: installing the rule installs the skill, and the rule body names it
+so the agent loads it.
 
 Details: [Dependencies][dependencies].
 
