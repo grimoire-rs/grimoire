@@ -1274,8 +1274,8 @@ the agent needs at run time belong in a skill it requires, which
 
 `grim publish` used to give every entry the repository-level README and logo.
 Since 0.16.0 it looks for each entry's own first. For a skill or hook that is
-`<path>/README.md` and `<path>/logo.png` or `logo.svg`, then `<stem>.README.md`,
-`<stem>.png` and `<stem>.svg` beside the directory.
+`<path>/README.md` and `<path>/logo.svg` or `logo.png`, then `<stem>.README.md`,
+`<stem>.svg` and `<stem>.png` beside the directory.
 
 A rule or agent looks in `<path without .md>/`, then beside the file. An mcp,
 bundle or settings entry looks only beside its `.toml` file. README and logo
@@ -1287,6 +1287,10 @@ artifacts are skipped and each companion is re-pointed, so
 `grim fetch --description` returns the package README. The changelog still
 comes from the top level, and no artifact's digest changes. A repository
 without per-package files publishes as before.
+
+From 0.16.0 an SVG wins over a PNG at every level, including the top-level
+lookup. A repository with both `logo.png` and `logo.svg` in the same place
+publishes the SVG on its next run, where earlier releases published the PNG.
 
 To turn the README lookup off, set `[description] entry_readme = false`. The
 logo lookup has no toggle. Give an entry a `[<kind>.<name>.description]` table

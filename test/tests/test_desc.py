@@ -1002,3 +1002,26 @@ def test_entry_readme_false_keeps_entry_logo(
     repo = f"{registry}/skills/{name}"
     assert runner.json("fetch", f"{repo}:__grimoire")["content"] == README
     assert _fetch_bytes(runner, repo, "logo.png") == own_logo
+
+
+def test_root_logo_prefers_svg_over_png(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A repository holding both `logo.png` and `logo.svg` at the manifest
+    root publishes the SVG: format order is svg then png."""
+    prefix = unique_repo.split("/")[-1]
+    name = f"{prefix}-svgfirst"
+    _skill(project_dir, name)
+    _write(project_dir / "README.md", README)
+    (project_dir / "logo.png").write_bytes(LOGO)
+    _write(project_dir / "logo.svg", "<svg/>\n")
+    _manifest(project_dir, registry, f'\n[skills.{name}]\nversion = "0.1.0"\n')
+
+    runner = grim_at(project_dir)
+    runner.json("publish")
+
+    repo = f"{registry}/skills/{name}"
+    assert _companion_paths(runner, repo) == {"README.md", "logo.svg"}
+    logo = runner.plain("fetch", f"{repo}:__grimoire", "--path", "logo.svg")
+    assert logo.returncode == 0, logo.stderr
+    assert logo.stdout == "<svg/>\n"

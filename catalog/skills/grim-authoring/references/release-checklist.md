@@ -223,11 +223,11 @@ the reserved tag is hidden from tag listings. Consumers read it with
 - **Package README and logo**: an entry's own README and logo replace the
   companion's; first hit wins, and each falls back independently to the
   top level. For a skill or hook at `P` named `S`: `P/README.md`, then
-  `S.README.md` beside `P`; logo `P/logo.png`, `P/logo.svg`, then `S.png`,
-  `S.svg` beside `P`. For a rule or agent at `D/S.md`: `D/S/README.md`, then
-  `D/S.README.md`; logo `D/S/logo.*`, then `D/S.png`, `D/S.svg`. For an mcp,
-  bundle or settings package at `D/S.toml`: `D/S.README.md`; logo `D/S.png`,
-  `D/S.svg`. A file inside a skill or hook directory ships with the package;
+  `S.README.md` beside `P`; logo `P/logo.svg`, `P/logo.png`, then `S.svg`,
+  `S.png` beside `P`. For a rule or agent at `D/S.md`: `D/S/README.md`, then
+  `D/S.README.md`; logo `D/S/logo.*`, then `D/S.svg`, `D/S.png`. For an mcp,
+  bundle or settings package at `D/S.toml`: `D/S.README.md`; logo `D/S.svg`,
+  `D/S.png`. A file inside a skill or hook directory ships with the package;
   a sibling beside it does not. `[description] entry_readme = false` turns
   the README lookup off (boolean only); the logo lookup has no toggle. A
   repository with package READMEs publishes a different companion on its next

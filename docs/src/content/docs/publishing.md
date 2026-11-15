@@ -149,7 +149,7 @@ conventional files and publishes a companion when it finds any:
 |-------------------------------------|-----------|
 | `README.md` | `README.md` |
 | `CHANGELOG.md` | `CHANGELOG.md` |
-| `assets/logo.png` / `assets/logo.svg` / `logo.png` / `logo.svg` (first hit) | `logo.png` / `logo.svg` |
+| `assets/logo.svg` / `assets/logo.png` / `logo.svg` / `logo.png` (first hit) | `logo.svg` / `logo.png` |
 
 Every member is optional, so a repo with just a `README.md` publishes a
 one-file companion. Probe misses are silent: a manifest directory with none of
@@ -164,9 +164,9 @@ its kind. `S` is the stem of the source path, not the entry name.
 
 | Kind | README | Logo |
 |------|--------|------|
-| skill, hook (source directory `P`, named `S`) | `P/README.md`, then `S.README.md` beside `P`, then the root | `P/logo.png`, `P/logo.svg`, then `S.png`, `S.svg` beside `P`, then the root |
-| rule, agent (source `D/S.md`) | `D/S/README.md`, then `D/S.README.md`, then the root | `D/S/logo.png`, `D/S/logo.svg`, then `D/S.png`, `D/S.svg`, then the root |
-| mcp, bundle, settings (source `D/S.toml`) | `D/S.README.md`, then the root | `D/S.png`, `D/S.svg`, then the root |
+| skill, hook (source directory `P`, named `S`) | `P/README.md`, then `S.README.md` beside `P`, then the root | `P/logo.svg`, `P/logo.png`, then `S.svg`, `S.png` beside `P`, then the root |
+| rule, agent (source `D/S.md`) | `D/S/README.md`, then `D/S.README.md`, then the root | `D/S/logo.svg`, `D/S/logo.png`, then `D/S.svg`, `D/S.png`, then the root |
+| mcp, bundle, settings (source `D/S.toml`) | `D/S.README.md`, then the root | `D/S.svg`, `D/S.png`, then the root |
 
 README and logo fall back to the top-level companion independently, so an
 entry may have its own logo and the root README. The changelog is top-level

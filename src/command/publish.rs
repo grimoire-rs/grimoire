@@ -299,7 +299,7 @@ pub struct DescriptionSpec {
     /// Top-level table only; ignored on a per-entry table. Each package looks
     /// for its own README and logo, and the first hit replaces that slot of
     /// its companion. A skill or hook looks in its directory, then for a
-    /// sibling `<name>.README.md`, `<name>.png`, `<name>.svg`; a rule or
+    /// sibling `<name>.README.md`, `<name>.svg`, `<name>.png`; a rule or
     /// agent in the directory named like its file, then for the same
     /// siblings; an mcp, bundle or settings package only for the siblings.
     /// The changelog and included files still come from the top-level table
@@ -2515,10 +2515,10 @@ fn entry_readme_candidates(kind: ArtifactKind, path: &Path) -> Vec<PathBuf> {
     entry_candidates(kind, path, &["README.md"], |stem| vec![format!("{stem}.README.md")])
 }
 
-/// Where an entry's own logo may live, in lookup order (png before svg).
+/// Where an entry's own logo may live, in lookup order (svg before png).
 fn entry_logo_candidates(kind: ArtifactKind, path: &Path) -> Vec<PathBuf> {
-    entry_candidates(kind, path, &["logo.png", "logo.svg"], |stem| {
-        vec![format!("{stem}.png"), format!("{stem}.svg")]
+    entry_candidates(kind, path, &["logo.svg", "logo.png"], |stem| {
+        vec![format!("{stem}.svg"), format!("{stem}.png")]
     })
 }
 
@@ -2605,8 +2605,8 @@ fn probe_conventional_description(manifest_dir: &Path) -> Vec<(String, PathBuf)>
         files.push((DESC_CHANGELOG.to_string(), changelog));
     }
     // A repo has one logo; the first hit wins. Probe order: assets/ before the
-    // repo root, png before svg.
-    for candidate in ["assets/logo.png", "assets/logo.svg", "logo.png", "logo.svg"] {
+    // repo root, svg before png.
+    for candidate in ["assets/logo.svg", "assets/logo.png", "logo.svg", "logo.png"] {
         let p = manifest_dir.join(candidate);
         if p.is_file() {
             files.push((logo_packed_name(&p), p));
@@ -5084,21 +5084,34 @@ mod tests {
         let dir = tmp.path();
         write(&dir.join("README.md"), "# r\n");
         write(&dir.join("CHANGELOG.md"), "# c\n");
-        // Two logo candidates present; the probe order picks assets/logo.png.
+        // Two logo candidates present; the probe order picks assets/logo.svg.
         std::fs::create_dir_all(dir.join("assets")).unwrap();
-        std::fs::write(dir.join("assets/logo.png"), b"png").unwrap();
-        std::fs::write(dir.join("logo.svg"), b"svg").unwrap();
+        std::fs::write(dir.join("assets/logo.svg"), b"svg").unwrap();
+        std::fs::write(dir.join("logo.png"), b"png").unwrap();
 
         let files = probe_conventional_description(dir);
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"README.md"));
         assert!(names.contains(&"CHANGELOG.md"));
-        assert!(names.contains(&"logo.png"), "assets/logo.png wins the probe order");
-        assert!(!names.contains(&"logo.svg"), "only the first logo hit rides");
+        assert!(names.contains(&"logo.svg"), "assets/logo.svg wins the probe order");
+        assert!(!names.contains(&"logo.png"), "only the first logo hit rides");
 
-        // Which absolute path backs logo.png? The assets/ one.
-        let logo = files.iter().find(|(n, _)| n == "logo.png").unwrap();
-        assert!(logo.1.ends_with("assets/logo.png"));
+        // Which absolute path backs logo.svg? The assets/ one.
+        let logo = files.iter().find(|(n, _)| n == "logo.svg").unwrap();
+        assert!(logo.1.ends_with("assets/logo.svg"));
+    }
+
+    #[test]
+    fn root_logo_prefers_svg_over_png() {
+        for (sub, label) in [("assets/", "assets"), ("", "manifest dir")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            write(&dir.join(format!("{sub}logo.png")), "png");
+            write(&dir.join(format!("{sub}logo.svg")), "svg");
+            let files = probe_conventional_description(dir);
+            let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, ["logo.svg"], "{label}: svg wins over png");
+        }
     }
 
     #[test]
@@ -5634,21 +5647,21 @@ mod tests {
             write(&dir.join(format!("{base}.svg")), "sibling-svg");
             let pd = plan_one(dir, kind, name, &rel, "");
             assert_eq!(slot_text(&pd, "README.md").as_deref(), Some("# sibling\n"), "{name}");
-            assert_eq!(slot_text(&pd, "logo.png").as_deref(), Some("sibling-png"), "{name}");
-            assert_eq!(slot_text(&pd, "logo.svg"), None, "{name}");
+            assert_eq!(slot_text(&pd, "logo.svg").as_deref(), Some("sibling-svg"), "{name}");
+            assert_eq!(slot_text(&pd, "logo.png"), None, "{name}");
         }
     }
 
     #[test]
-    fn entry_logo_prefers_png_over_svg() {
+    fn entry_logo_prefers_svg_over_png() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         root_files(dir);
-        write(&dir.join("skills/s/logo.svg"), "svg");
-        write(&dir.join("skills/s/logo.png"), "png-own");
+        write(&dir.join("skills/s/logo.png"), "png");
+        write(&dir.join("skills/s/logo.svg"), "svg-own");
         let pd = plan_one(dir, ArtifactKind::Skill, "s", "skills/s", "");
-        assert_eq!(slot_text(&pd, "logo.png").as_deref(), Some("png-own"));
-        assert_eq!(slot_text(&pd, "logo.svg"), None);
+        assert_eq!(slot_text(&pd, "logo.svg").as_deref(), Some("svg-own"));
+        assert_eq!(slot_text(&pd, "logo.png"), None);
         assert_eq!(pd.files.iter().filter(|(n, _)| n.starts_with("logo")).count(), 1);
     }
 

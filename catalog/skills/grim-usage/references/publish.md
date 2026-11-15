@@ -539,7 +539,7 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
   table still publishes one.
 - **Convention fallback.** With no `[description]` table at all, grim
   probes the manifest directory for `README.md`, `CHANGELOG.md`, and
-  `assets/logo.png|svg` / `logo.png|svg`; any hit publishes a companion
+  `assets/logo.svg|png` / `logo.svg|png`; any hit publishes a companion
   automatically (opt out per entry with `description = false`). All
   members are optional — an explicit table that resolves to zero files is
   a data error (exit 65), but a conventional-probe miss is silent.
@@ -550,9 +550,9 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
 
   | Kind | README | Logo |
   |---|---|---|
-  | skill, hook (directory `P`, named `S`) | `P/README.md`, then `S.README.md` beside `P` | `P/logo.png`, `P/logo.svg`, then `S.png`, `S.svg` beside `P` |
-  | rule, agent (`D/S.md`) | `D/S/README.md`, then `D/S.README.md` | `D/S/logo.png`, `D/S/logo.svg`, then `D/S.png`, `D/S.svg` |
-  | mcp, bundle, settings (`D/S.toml`) | `D/S.README.md` | `D/S.png`, `D/S.svg` |
+  | skill, hook (directory `P`, named `S`) | `P/README.md`, then `S.README.md` beside `P` | `P/logo.svg`, `P/logo.png`, then `S.svg`, `S.png` beside `P` |
+  | rule, agent (`D/S.md`) | `D/S/README.md`, then `D/S.README.md` | `D/S/logo.svg`, `D/S/logo.png`, then `D/S.svg`, `D/S.png` |
+  | mcp, bundle, settings (`D/S.toml`) | `D/S.README.md` | `D/S.svg`, `D/S.png` |
 
   A file inside a skill or hook directory ships with the package; a sibling
   beside it does not. Changelog and included files still come from the

@@ -102,9 +102,9 @@ companion.
 
 | Kind | README | Logo |
 |---|---|---|
-| skill, hook (dir `P`, named `S`) | `P/README.md`, `S.README.md` beside `P`, root | `P/logo.png`, `P/logo.svg`, `S.png`, `S.svg` beside `P`, root |
-| rule, agent (`D/S.md`) | `D/S/README.md`, `D/S.README.md`, root | `D/S/logo.png`, `D/S/logo.svg`, `D/S.png`, `D/S.svg`, root |
-| mcp, bundle, settings (`D/S.toml`) | `D/S.README.md`, root | `D/S.png`, `D/S.svg`, root |
+| skill, hook (dir `P`, named `S`) | `P/README.md`, `S.README.md` beside `P`, root | `P/logo.svg`, `P/logo.png`, `S.svg`, `S.png` beside `P`, root |
+| rule, agent (`D/S.md`) | `D/S/README.md`, `D/S.README.md`, root | `D/S/logo.svg`, `D/S/logo.png`, `D/S.svg`, `D/S.png`, root |
+| mcp, bundle, settings (`D/S.toml`) | `D/S.README.md`, root | `D/S.svg`, `D/S.png`, root |
 
 `[description] entry_readme` is boolean only; the logo lookup has no toggle.
 
@@ -121,6 +121,10 @@ companion.
 - (g) Migrating the six `ocx-sh/grimoire-lore` rules is a follow-up issue, out
   of scope.
 - (h) First-party skills teach the pattern and the vendor options.
+- (i) SVG is preferred over PNG at every level, including the top-level
+  lookup (`assets/logo.svg`, `assets/logo.png`, `logo.svg`, `logo.png`). The
+  top-level order shipped png first, so a repository holding both formats in
+  one place publishes a different logo on its next `grim publish`.
 
 ### Implementer rulings, not owner decisions (open to being overturned)
 

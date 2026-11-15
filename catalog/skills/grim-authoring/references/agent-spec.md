@@ -117,7 +117,7 @@ Full matrix: [emit matrix][emit-matrix] · [client compatibility][clients].
   the stem (`agents/<name>/`) may hold only `README.md`, `logo.png` and
   `logo.svg`, and **none of them is packed**: they feed the catalog
   description only (`<name>/README.md`, else `<name>.README.md` beside the
-  agent; logo likewise, `<name>/logo.png|svg`, else `<name>.png|svg`). Any
+  agent; logo likewise, `<name>/logo.svg|png`, else `<name>.svg|png`). Any
   other file there refuses the build (exit 65, `an agent's directory may hold
   only README.md, logo.png and logo.svg`). Older grims packed the three
   companions and ignored the rest silently. Files an agent needs at run time
