@@ -15,6 +15,7 @@
 **Supersedes:** the "no recursion in v1" nested-bundle rejection (`src/oci/bundle.rs:46`, `src/resolve/resolver.rs:500-505`; origin commit `49944cd9`)
 **Extends:** `.agents/adr/adr_effective_set_mutations.md` (effective set becomes closure-aware), `.agents/adr/adr_hook_workspace_consent.md` (consent seam and transport rung applied along edges; condition 2 of Decision 4 is a proposed trust narrowing, awaiting the owner)
 **Superseded By:** N/A
+**Amended by:** .agents/adr/adr_dependency_version_claims.md (Accepted) — Decision 3 (diamond policy and its 78 row, Direct-wins for bare lines, one tag resolve per node, the partial-resolve pin rule): `requires` tags become Cargo-style claims resolved to the newest in the claimed major; adds four refusals and two graph limits; bundle members and non-semver tags keep equal digests
 
 ## Context
 
