@@ -1264,6 +1264,18 @@ it, matched by lock name, mirroring plain `update <name>`'s partial
 resolve. Every other pin in the plugin carries, and an include its lock entry
 already holds reads no tag.
 
+A plugin the selector does not pick carries byte for byte while its part of
+`marketplace.lock` matches its declaration. A part whose declaration changed
+since it was locked is relocked in the same run, so the lock never ends stale.
+That relock is not an update. Each pin that still answers its include stays,
+even after its tag moved. A new include resolves and a removed one drops.
+
+Only the plugins you picked roll forward. Before it relocks a stale part, grim
+prints one warning on stderr naming the plugin and its lock file. The report
+shows its rows like any resolved part, with `unchanged` for a kept pin. The JSON
+shape is unchanged. A plugin with no lock entry yet stays without one, since the
+run did not pick it.
+
 A bundle the plugin reaches carries too, at the digest its rows record in
 `bundle_tag`. Only a run with no selector, a bare `<plugin>`, or a
 `<plugin>:<bundle>` naming that bundle moves it. A pick of a bundle keeps a bundle
@@ -1360,6 +1372,11 @@ reached through a symbolic link, gets no command, only the reason.
 | A dependency graph that cannot be walked: a [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits), or a feature this grim does not know (`unsupported-artifact-feature`) | `65` |
 | A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`), or claims in two majors | `78` |
 | An include's floating tag or a tag below an include needs the network under `--offline`, or a recorded bundle digest the local store lacks | `81` |
+
+A stale part the selector did not pick can fail to relock. The run then exits
+with the code a pick of that plugin would give, for example `79` for an include
+whose tag does not exist. It writes nothing. Grim 0.15.1 exited `0` and left
+that part stale.
 
 Every other failure propagates from the resolver with its existing
 classification. That covers an unreachable registry, a rejected credential and
@@ -3001,6 +3018,11 @@ export, or that have no lock entry yet, then writes `marketplace.lock` back.
 
 That reconcile follows [`grim lock`](#lock), not `grim update`. A new include
 resolves, and an unchanged include keeps its pin even after its tag moved.
+
+When an export saves `marketplace.lock` because a selected plugin is stale or a
+part drops, every other stale part is relocked too, each kept pin staying. An
+export whose selected plugins are in line and that drops nothing reads nothing
+and writes no lock.
 
 A bundle the plugin reaches keeps its pin too, by include, by `requires` or through
 another bundle. `marketplace.lock` has no bundle row, so its digest sits in the
