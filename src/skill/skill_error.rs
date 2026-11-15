@@ -45,6 +45,15 @@ impl std::error::Error for SkillError {
     }
 }
 
+/// First five names joined by `, `, then `(+N more)`.
+fn file_list(files: &[String]) -> String {
+    let shown = files.iter().take(5).map(String::as_str).collect::<Vec<_>>().join(", ");
+    match files.len().saturating_sub(5) {
+        0 => shown,
+        more => format!("{shown} (+{more} more)"),
+    }
+}
+
 /// Inner discriminant for skill-standard failures.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -98,6 +107,22 @@ pub enum SkillErrorKind {
     /// (CWE-400/770). The message names the bound that was exceeded.
     #[error("local source too large to pack: {0}")]
     TooLarge(String),
+
+    /// A rule's stem directory holds files other than the catalog companions.
+    #[error(
+        "a rule can no longer ship a support directory (since grim 0.16.0)\n  found in {dir}/: {files}\n  why: clients load every file under rules/ as a rule, and the exclusion grim wrote for Claude is ignored when the repository is loaded from another directory\n  fix: move these files into a skill, require it from the rule's frontmatter\n         metadata:\n           grim.requires.skills.<skill-name>: \"<registry>/<repository>:<major>\"\n       and name that skill in the rule body so the agent loads it\n  only README.md, logo.png and logo.svg may stay in {dir}/\n  see https://grimoire.rs/upgrading.html#rule-support-dir",
+        dir = dir.display(),
+        files = file_list(files)
+    )]
+    RuleSupportDir { dir: PathBuf, files: Vec<String> },
+
+    /// An agent's stem directory holds files other than the catalog companions.
+    #[error(
+        "an agent's directory may hold only README.md, logo.png and logo.svg (since grim 0.16.0)\n  found in {dir}/: {files}\n  why: an agent package is the .md file alone, and grim no longer skips other files there silently\n  fix: delete these files or move them out of {dir}/; files an agent needs at run time belong in a skill it requires\n  see https://grimoire.rs/upgrading.html#agent-companions",
+        dir = dir.display(),
+        files = file_list(files)
+    )]
+    AgentStrayFiles { dir: PathBuf, files: Vec<String> },
 
     /// A filesystem operation failed.
     #[error("I/O error")]

@@ -110,7 +110,7 @@
     "name": "architecture-guide",
     "kind": "rule",
     "ref": "localhost:5050/grimoire/rules/architecture-guide",
-    "description": "Architecture invariants, with a sibling support directory.",
+    "description": "Architecture invariants, requiring the architecture-guide skill for its pattern files.",
     "summary": "architecture rule",
     "keywords": [
       "architecture"

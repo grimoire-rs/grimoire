@@ -7,9 +7,7 @@
 //!
 //! The pack ↔ install round-trip is a hard contract: `pack_skill_dir`
 //! emits entries rooted at `<name>/`, while `pack_rule_file` and
-//! `pack_agent_file` emit a `<name>.md` index — the rule variant plus an
-//! optional support dir, the agent variant plus any well-known companion
-//! files (`README.md`, `logo.png`, `logo.svg`) — byte-for-byte what the
+//! `pack_agent_file` emit the single `<name>.md` index — byte-for-byte what the
 //! materializer (and the acceptance harness `make_artifact`) extracts. The
 //! tar entries are emitted in sorted path order so the layer digest is
 //! deterministic.
@@ -269,37 +267,104 @@ fn warn_left_behind_dependencies(name: &str, pruned_dirs: &[PathBuf]) {
     }
 }
 
-/// Pack the rule file at `file` into an uncompressed tar.
+/// Catalog files that may sit in the stem directory of a rule or agent
+/// (`rules/<name>/`, `agents/<name>/`). They are read elsewhere and never packed.
+const COMPANION_FILES: &[&str] = &["README.md", "logo.png", "logo.svg"];
+
+/// Files in the stem directory of `file` other than [`COMPANION_FILES`]:
+/// forward-slash paths relative to that directory, sorted. Empty when the
+/// directory is absent. Only the built-in ignore defaults apply, so a
+/// `.grimignore` there cannot hide a stray file.
+fn stray_stem_files(file: &Path) -> Result<Vec<String>, SkillError> {
+    let stem_dir = file.with_extension("");
+    if !stem_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let limits = &PackLimits::DEFAULT;
+    let ignore = IgnoreSet::defaults_only(crate::oci::ArtifactKind::Rule);
+    let mut state = WalkState::default();
+    collect_files(&stem_dir, &stem_dir, "", &ignore, &mut state, 0, limits)?;
+    let mut files: Vec<String> = state
+        .out
+        .into_iter()
+        .map(|(entry, _)| entry.trim_start_matches('/').to_string())
+        .filter(|rel| !COMPANION_FILES.contains(&rel.as_str()))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// Pack the single `<name>.md` index of a rule into an uncompressed tar.
 ///
-/// Emits the index `<name>.md` entry, plus — when a sibling support
-/// directory `<parent>/<name>/` exists beside the index — every file under
-/// it rooted at `<name>/<rel>`. Entries are emitted in sorted path order so
-/// the layer digest is deterministic; a rule with no support directory
-/// packs byte-identically to a single `<name>.md` entry.
+/// The stem directory (`<parent>/<name>/`) may hold only [`COMPANION_FILES`],
+/// which are not packed.
 ///
 /// # Errors
 ///
-/// [`SkillErrorKind::Io`] for a read/walk failure.
+/// [`SkillErrorKind::RuleSupportDir`] when the stem directory holds any other
+/// file; [`SkillErrorKind::Io`] for a read/walk failure.
 pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     let name = rule_name(file)?;
+    let stray = stray_stem_files(file)?;
+    if !stray.is_empty() {
+        return Err(SkillError::new(
+            file,
+            SkillErrorKind::RuleSupportDir {
+                dir: file.with_extension(""),
+                files: stray,
+            },
+        ));
+    }
+    pack_index_only(file, &name)
+}
 
+/// Pack the single `<name>.md` index of an agent into an uncompressed tar.
+///
+/// The stem directory may hold only [`COMPANION_FILES`], which are not packed.
+///
+/// # Errors
+///
+/// [`SkillErrorKind::AgentStrayFiles`] when the stem directory holds any other
+/// file, [`SkillErrorKind::Io`] for a read failure,
+/// [`SkillErrorKind::NameInvalid`] for a stem-less path.
+pub fn pack_agent_file(file: &Path) -> Result<Vec<u8>, SkillError> {
+    let name = rule_name(file)?;
+    let stray = stray_stem_files(file)?;
+    if !stray.is_empty() {
+        return Err(SkillError::new(
+            file,
+            SkillErrorKind::AgentStrayFiles {
+                dir: file.with_extension(""),
+                files: stray,
+            },
+        ));
+    }
+    pack_index_only(file, &name)
+}
+
+fn pack_index_only(file: &Path, name: &str) -> Result<Vec<u8>, SkillError> {
     let limits = &PackLimits::DEFAULT;
+    let meta = std::fs::metadata(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+    check_pack_bounds(file, meta.len(), 1, limits)?;
+    let bytes = read_capped(file, limits.byte_limit)?;
+    let mut builder = tar::Builder::new(Vec::new());
+    append_entry(&mut builder, &format!("{name}.md"), &bytes)
+        .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+    builder
+        .into_inner()
+        .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))
+}
 
-    // Seed the walk with the index file so the packing bounds account for
-    // it alongside any support-dir files (CWE-400/770).
-    let index_meta = std::fs::metadata(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+/// The pre-0.16 rule layout: the index plus every file under the stem
+/// directory as `<name>/<rel>`, for tests that need an old-format package.
+#[cfg(test)]
+pub(crate) fn pack_rule_file_legacy(file: &Path) -> Result<Vec<u8>, SkillError> {
+    let name = rule_name(file)?;
+    let limits = &PackLimits::DEFAULT;
     let mut state = WalkState {
         out: vec![(format!("{name}.md"), file.to_path_buf())],
-        total_bytes: index_meta.len(),
-        nodes: 0,
-        pruned_dirs: Vec::new(),
+        ..WalkState::default()
     };
-    check_pack_bounds(file, state.total_bytes, state.out.len(), limits)?;
-
-    // The optional sibling support dir shares the index's stem: for
-    // `rules/<name>.md` it is `rules/<name>/`. Include it only when it is a
-    // real directory; any other sibling (or none) leaves the degenerate
-    // single-file case untouched.
     let support = file.with_extension("");
     if support.is_dir() {
         let ignore = ignore_set(&support, crate::oci::ArtifactKind::Rule)?;
@@ -307,78 +372,9 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     }
     let mut files = state.out;
     files.sort_by(|a, b| a.0.cmp(&b.0));
-
     let mut builder = tar::Builder::new(Vec::new());
-    let mut read_bytes: u64 = 0;
     for (entry_path, abs) in &files {
-        let bytes = read_capped(abs, limits.byte_limit.saturating_sub(read_bytes))?;
-        read_bytes = read_bytes.saturating_add(bytes.len() as u64);
-        append_entry(&mut builder, entry_path, &bytes).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
-    }
-    builder
-        .into_inner()
-        .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))
-}
-
-/// Well-known companion files an agent may ship in a sibling directory that
-/// shares its stem (`agents/<name>/`): a human-facing `README.md` and a
-/// `logo.png` / `logo.svg` for a catalog/gallery UI. They ride the layer as
-/// `<name>/<file>` — retrievable with `grim fetch <ref> --path <name>/README.md`,
-/// the same path shape a skill or a rule uses. This is a fixed allowlist, not
-/// a general support dir: any other file in the sibling directory is ignored,
-/// so an agent's identity stays the standalone `<name>.md`.
-const AGENT_COMPANIONS: &[&str] = &["README.md", "logo.png", "logo.svg"];
-
-/// Pack the agent file at `file` into an uncompressed tar: the `<name>.md`
-/// index plus any [well-known companion][AGENT_COMPANIONS] found in a sibling
-/// directory sharing the stem (`agents/<name>/README.md`, `…/logo.png`, …),
-/// each emitted as `<name>/<file>`.
-///
-/// Unlike [`pack_rule_file`], the sibling directory contributes ONLY those
-/// allowlisted files — never an arbitrary tree — so a client still reads a
-/// standalone agent file. Entries are emitted in sorted path order for a
-/// deterministic digest; an agent with no companions packs byte-identically
-/// to the single `<name>.md` entry it always did.
-///
-/// # Errors
-///
-/// [`SkillErrorKind::Io`] for a read failure,
-/// [`SkillErrorKind::NameInvalid`] for a stem-less path.
-pub fn pack_agent_file(file: &Path) -> Result<Vec<u8>, SkillError> {
-    let name = rule_name(file)?;
-
-    let limits = &PackLimits::DEFAULT;
-
-    let mut files: Vec<(String, PathBuf)> = vec![(format!("{name}.md"), file.to_path_buf())];
-
-    // The companion dir shares the index's stem: for `agents/<name>.md` it is
-    // `agents/<name>/` (same discovery as a rule's support dir). Only the
-    // allowlisted files ride; everything else there is deliberately ignored.
-    let companion_dir = file.with_extension("");
-    if companion_dir.is_dir() {
-        for well_known in AGENT_COMPANIONS {
-            let candidate = companion_dir.join(well_known);
-            if candidate.is_file() {
-                files.push((format!("{name}/{well_known}"), candidate));
-            }
-        }
-    }
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Bound the cumulative size before reading any file into memory
-    // (CWE-400/770); the read-side cap below is the TOCTOU backstop.
-    let mut total_bytes: u64 = 0;
-    for (_, abs) in &files {
-        let meta = std::fs::metadata(abs).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
-        total_bytes = total_bytes.saturating_add(meta.len());
-    }
-    check_pack_bounds(file, total_bytes, files.len(), limits)?;
-
-    let mut builder = tar::Builder::new(Vec::new());
-    let mut read_bytes: u64 = 0;
-    for (entry_path, abs) in &files {
-        let bytes = read_capped(abs, limits.byte_limit.saturating_sub(read_bytes))?;
-        read_bytes = read_bytes.saturating_add(bytes.len() as u64);
+        let bytes = read_capped(abs, limits.byte_limit)?;
         append_entry(&mut builder, entry_path, &bytes).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
     }
     builder
@@ -815,40 +811,97 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pack_rule_with_support_dir_round_trips_index_and_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("rules/my-rule.md");
-        write(
-            &f,
-            "---\npaths: [\"**/*.rs\"]\n---\n# index\nsee ./my-rule/examples.md\n",
-        );
-        // Sibling support dir sharing the index stem.
-        write(&tmp.path().join("rules/my-rule/examples.md"), "# examples\n");
-        write(&tmp.path().join("rules/my-rule/schema.json"), "{}\n");
+    fn rule_with(tmp: &Path, files: &[(&str, &str)]) -> PathBuf {
+        let f = tmp.join("r.md");
+        write(&f, "# index\n");
+        for (rel, body) in files {
+            write(&tmp.join("r").join(rel), body);
+        }
+        f
+    }
 
-        let tar = pack_rule_file(&f).expect("pack");
-        let dest = tmp.path().join("out");
-        let written = DefaultMaterializer
-            .materialize(ArtifactKind::Rule, "my-rule", &tar, &dest)
-            .expect("materialize");
-        // The materializer returns `written` sorted as `PathBuf`
-        // (component-wise), so support files precede the index file.
-        assert_eq!(
-            written,
-            vec![
-                PathBuf::from("my-rule/examples.md"),
-                PathBuf::from("my-rule/schema.json"),
-                PathBuf::from("my-rule.md"),
-            ]
+    #[test]
+    fn pack_rule_refuses_support_files_and_names_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = rule_with(tmp.path(), &[("notes.md", "n"), ("sub/deep.md", "d")]);
+        let err = pack_rule_file(&f).expect_err("support dir");
+        let SkillErrorKind::RuleSupportDir { files, .. } = &err.kind else {
+            panic!("wrong kind: {err}");
+        };
+        assert_eq!(files, &["notes.md", "sub/deep.md"]);
+        let text = err.to_string();
+        assert!(text.contains("found in"));
+        assert!(text.contains("upgrading.html#rule-support-dir"));
+    }
+
+    #[test]
+    fn pack_rule_lists_at_most_five_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..7).map(|i| format!("f{i}.md")).collect();
+        let entries: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x")).collect();
+        let f = rule_with(tmp.path(), &entries);
+        let text = pack_rule_file(&f).expect_err("support dir").to_string();
+        assert!(text.contains("(+2 more)"), "{text}");
+        assert!(!text.contains("f5.md"), "{text}");
+    }
+
+    #[test]
+    fn pack_rule_with_companions_only_is_single_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let with = rule_with(
+            &tmp.path().join("a"),
+            &[("README.md", "r"), ("logo.png", "p"), ("logo.svg", "s")],
         );
+        let without = rule_with(&tmp.path().join("b"), &[]);
+        assert_eq!(pack_rule_file(&with).unwrap(), pack_rule_file(&without).unwrap());
+    }
+
+    #[test]
+    fn pack_rule_ignores_os_junk_in_stem_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = rule_with(tmp.path(), &[(".DS_Store", "x")]);
+        assert!(pack_rule_file(&f).is_ok());
+    }
+
+    #[test]
+    fn pack_rule_does_not_read_grimignore_in_stem_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = rule_with(tmp.path(), &[(".grimignore", "notes.md\n"), ("notes.md", "n")]);
+        let err = pack_rule_file(&f).expect_err("support dir");
+        let SkillErrorKind::RuleSupportDir { files, .. } = &err.kind else {
+            panic!("wrong kind: {err}");
+        };
+        assert_eq!(files, &[".grimignore", "notes.md"]);
+    }
+
+    #[test]
+    fn pack_agent_is_index_only_with_companions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("a.md");
+        write(&f, "---\nname: a\ndescription: d\n---\nbody\n");
+        write(&tmp.path().join("a/README.md"), "r");
+        write(&tmp.path().join("a/logo.png"), "p");
+        assert_eq!(tar_names(&pack_agent_file(&f).unwrap()), vec!["a.md"]);
+    }
+
+    #[test]
+    fn pack_agent_refuses_stray_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("a.md");
+        write(&f, "---\nname: a\ndescription: d\n---\nbody\n");
+        write(&tmp.path().join("a/extra.txt"), "x");
+        let err = pack_agent_file(&f).expect_err("stray");
+        assert!(matches!(err.kind, SkillErrorKind::AgentStrayFiles { .. }));
+        assert!(err.to_string().contains("upgrading.html#agent-companions"));
+    }
+
+    #[test]
+    fn pack_rule_file_legacy_emits_name_rel_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = rule_with(tmp.path(), &[("notes.md", "n")]);
         assert_eq!(
-            std::fs::read_to_string(dest.join("my-rule/examples.md")).unwrap(),
-            "# examples\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dest.join("my-rule/schema.json")).unwrap(),
-            "{}\n"
+            tar_names(&pack_rule_file_legacy(&f).unwrap()),
+            vec!["r.md", "r/notes.md"]
         );
     }
 
@@ -865,18 +918,6 @@ mod tests {
             .materialize(ArtifactKind::Rule, "rust-style", &tar, &dest)
             .expect("materialize");
         assert_eq!(written, vec![PathBuf::from("rust-style.md")]);
-    }
-
-    #[test]
-    fn pack_rule_with_support_dir_is_deterministic() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("my-rule.md");
-        write(&f, "# index\n");
-        write(&tmp.path().join("my-rule/a.md"), "a\n");
-        write(&tmp.path().join("my-rule/nested/b.json"), "{}\n");
-        let first = pack_rule_file(&f).unwrap();
-        let second = pack_rule_file(&f).unwrap();
-        assert_eq!(first, second, "multi-file rule pack must be byte-stable");
     }
 
     #[test]
@@ -934,77 +975,6 @@ mod tests {
             .expect("materialize");
         assert_eq!(written, vec![PathBuf::from("code-reviewer.md")]);
         assert_eq!(std::fs::read_to_string(dest.join("code-reviewer.md")).unwrap(), doc);
-    }
-
-    #[test]
-    fn pack_agent_ignores_non_wellknown_sibling_and_is_deterministic() {
-        // The sibling dir contributes ONLY the well-known companions: an
-        // arbitrary file there (`extra.md`) must NOT ride, so the agent stays
-        // a standalone `<name>.md`. A no-companion agent is byte-identical to
-        // the historical single-entry pack.
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("my-agent.md");
-        write(&f, "---\nname: my-agent\ndescription: d\n---\nbody\n");
-        write(&tmp.path().join("my-agent/extra.md"), "# ignored\n");
-
-        let first = pack_agent_file(&f).unwrap();
-        let second = pack_agent_file(&f).unwrap();
-        assert_eq!(first, second, "agent pack must be byte-stable");
-
-        let dest = tmp.path().join("out");
-        let written = DefaultMaterializer
-            .materialize(ArtifactKind::Agent, "my-agent", &first, &dest)
-            .expect("materialize");
-        assert_eq!(written, vec![PathBuf::from("my-agent.md")], "single entry only");
-    }
-
-    #[test]
-    fn pack_agent_with_readme_and_logo_round_trips() {
-        // A README + logo in the sibling companion dir ride the layer as
-        // `<name>/README.md` / `<name>/logo.png`, retrievable via the same
-        // `--path <name>/README.md` shape a skill/rule uses.
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("agents/code-reviewer.md");
-        let doc = "---\nname: code-reviewer\ndescription: d\n---\nYou review code.\n";
-        write(&f, doc);
-        write(&tmp.path().join("agents/code-reviewer/README.md"), "# Code Reviewer\n");
-        // A non-UTF-8 logo proves binary companions ride verbatim.
-        std::fs::write(
-            tmp.path().join("agents/code-reviewer/logo.png"),
-            [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0xff],
-        )
-        .unwrap();
-        // A stray file in the companion dir is ignored (allowlist only).
-        write(&tmp.path().join("agents/code-reviewer/notes.txt"), "ignored\n");
-
-        let tar = pack_agent_file(&f).expect("pack");
-        let dest = tmp.path().join("out");
-        let written = DefaultMaterializer
-            .materialize(ArtifactKind::Agent, "code-reviewer", &tar, &dest)
-            .expect("materialize");
-        // The materializer returns `written` sorted as `PathBuf`
-        // (component-wise), so the companion files precede the index file.
-        assert_eq!(
-            written,
-            vec![
-                PathBuf::from("code-reviewer/README.md"),
-                PathBuf::from("code-reviewer/logo.png"),
-                PathBuf::from("code-reviewer.md"),
-            ],
-            "index + well-known companions only; notes.txt excluded"
-        );
-        assert_eq!(std::fs::read_to_string(dest.join("code-reviewer.md")).unwrap(), doc);
-        assert_eq!(
-            std::fs::read_to_string(dest.join("code-reviewer/README.md")).unwrap(),
-            "# Code Reviewer\n"
-        );
-        assert_eq!(
-            std::fs::read(dest.join("code-reviewer/logo.png")).unwrap(),
-            [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0xff]
-        );
-
-        // Deterministic across repeated packs.
-        assert_eq!(tar, pack_agent_file(&f).unwrap(), "companion pack must be byte-stable");
     }
 
     #[test]
@@ -1330,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn rule_support_dir_honours_its_own_grimignore() {
+    fn legacy_rule_support_dir_honours_its_own_grimignore() {
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("rules/my-rule.md");
         write(&f, "# index\n");
@@ -1338,7 +1308,7 @@ mod tests {
         write(&tmp.path().join("rules/my-rule/__pycache__/run.cpython-313.pyc"), "x");
         write(&tmp.path().join("rules/my-rule/draft.md"), "x\n");
         write(&tmp.path().join("rules/my-rule/.grimignore"), "draft.md\n");
-        let names = tar_names(&pack_rule_file(&f).unwrap());
+        let names = tar_names(&pack_rule_file_legacy(&f).unwrap());
         assert_eq!(names, vec!["my-rule.md", "my-rule/.grimignore", "my-rule/run.py"]);
     }
 

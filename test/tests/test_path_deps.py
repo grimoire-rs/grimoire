@@ -77,7 +77,7 @@ def test_install_materializes_path_skill_offline(
     assert "# Body v1" in rendered.read_text(encoding="utf-8")
 
 
-def test_path_rule_with_support_dir(grim_at, project_dir: Path) -> None:
+def _path_rule_with_support_file(project_dir: Path) -> None:
     _write(
         project_dir / "rules" / "house-style.md",
         "---\npaths: ['**/*.rs']\n---\n# Style\nsee ./house-style/x.md\n",
@@ -85,12 +85,46 @@ def test_path_rule_with_support_dir(grim_at, project_dir: Path) -> None:
     _write(project_dir / "rules" / "house-style" / "x.md", "# extra\n")
     _config(project_dir, "rules", "house-style", "./rules/house-style.md")
 
+
+def test_path_rule_with_support_dir(grim_at, project_dir: Path) -> None:
+    """Since grim 0.16.0 a path rule is the `.md` only: packing it (here at
+    `grim lock`) refuses a support file with exit 65."""
+    _path_rule_with_support_file(project_dir)
+
+    result = _offline(grim_at(project_dir)).run("lock", check=False)
+
+    assert result.returncode == 65, f"got {result.returncode}; stderr: {result.stderr}"
+    assert "a rule can no longer ship a support directory (since grim 0.16.0)" in result.stderr, result.stderr
+    assert not (project_dir / "grimoire.lock").exists()
+
+
+def test_status_on_path_rule_with_support_files(grim_at, project_dir: Path) -> None:
+    """Never locked, so `grim status` has no source to pack: it reports the
+    entry `stale`, exit 0, and says nothing about the support file."""
+    _path_rule_with_support_file(project_dir)
+
+    result = _offline(grim_at(project_dir)).run("status", format="json", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert [(i["name"], i["state"]) for i in json.loads(result.stdout)["items"]] == [("house-style", "stale")]
+    assert "no longer ship a support directory" not in result.stderr
+
+
+def test_status_warns_when_a_locked_path_rule_gains_support_files(grim_at, project_dir: Path) -> None:
+    """A rule locked and installed before the file appeared: `grim status`
+    exits 0, reports it `outdated`, and warns with the refusal text."""
+    _write(project_dir / "rules" / "house-style.md", "---\npaths: ['**/*.rs']\n---\n# Style\n")
+    _config(project_dir, "rules", "house-style", "./rules/house-style.md")
     runner = _offline(grim_at(project_dir))
     runner.run("lock")
     runner.run("install", "--client", "claude")
+    _write(project_dir / "rules" / "house-style" / "x.md", "# extra\n")
 
-    assert (project_dir / ".claude" / "rules" / "house-style.md").is_file()
-    assert (project_dir / ".claude" / "rules" / "house-style" / "x.md").is_file()
+    result = runner.run("status", format="json", check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert [(i["name"], i["state"]) for i in json.loads(result.stdout)["items"]] == [("house-style", "outdated")]
+    assert "a rule can no longer ship a support directory (since grim 0.16.0)" in result.stderr, result.stderr
 
 
 def test_path_agent_via_kind_table(grim_at, project_dir: Path) -> None:

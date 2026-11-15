@@ -189,6 +189,14 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         support_dir: staged_support.as_deref(),
     }))?;
 
+    let mut warnings = fetched.warnings;
+    if staged_support.is_some() {
+        warnings.push(crate::install::installer::support_dir_deprecation(
+            &fetched.name,
+            &fetched.identifier.registry_repository(),
+        ));
+    }
+
     Ok(RenderReport {
         reference: fetched.identifier.to_string(),
         digest: fetched.pinned.strip_advisory().digest().to_string(),
@@ -197,7 +205,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         vendor: client.as_str().to_string(),
         dest_dir: args.dest_dir.clone(),
         files: written.into_iter().map(|f| f.path).collect(),
-        warnings: fetched.warnings,
+        warnings,
     })
 }
 
@@ -317,6 +325,11 @@ mod tests {
         assert!(
             dest_dir.join("my-rule/examples.md").is_file(),
             "support dir beside the index"
+        );
+        assert!(
+            report.warnings.iter().any(|w| w.contains("ships a support directory")),
+            "{:?}",
+            report.warnings
         );
     }
 
