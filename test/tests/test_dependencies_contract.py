@@ -94,3 +94,42 @@ def test_transitive_chain_lock_why_remove(
     assert not re.findall(r'(?m)^\[\[skill\]\]', remaining), (
         "b and c leave the lock with a, nothing else reaches them:\n" + remaining
     )
+
+
+WARNING = "grimoire.lock now records dependencies, which grim 0.15.1 and older cannot read"
+
+
+def test_first_dependency_rows_warn_once_on_stderr(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The lock that first gains `requires` rows warns; later writes stay silent."""
+    make_artifact(f"{unique_repo}/base", "skill", _skill("base"), tag="1")
+    dep = make_dependent(f"{unique_repo}/dep", "1", "skill", _skill("dep"), [("skill", "base", "./base:1")])
+    write_config(project_dir, skills={"dep": dep.fq})
+    runner = grim_at(project_dir)
+
+    first = runner.run("lock", format="json")
+
+    assert first.returncode == 0
+    assert first.stderr.count(WARNING) == 1, first.stderr
+    assert "grim 0.16.0 or newer" in first.stderr
+    json.loads(first.stdout)
+    assert "now records dependencies" not in first.stdout
+
+    second = runner.run("lock", format="json")
+
+    assert second.returncode == 0
+    assert "now records dependencies" not in second.stderr, second.stderr
+
+
+def test_a_lock_without_dependency_rows_never_warns(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    plain = make_artifact(f"{unique_repo}/plain", "skill", _skill("plain"), tag="1")
+    write_config(project_dir, skills={"plain": plain.fq})
+    runner = grim_at(project_dir)
+
+    result = runner.run("lock", format="json")
+
+    assert result.returncode == 0
+    assert "now records dependencies" not in result.stderr, result.stderr

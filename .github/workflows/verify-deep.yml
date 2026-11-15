@@ -292,9 +292,9 @@ jobs:
           outcomes = [next((c.tag for c in case if c.tag in bad), "passed") for case in cases]
           passed, skipped = outcomes.count("passed"), outcomes.count("skipped")
           print(f"golden: {passed} passed, {skipped} skipped, {len(outcomes)} total")
-          # 2 pre-hooks + 7 pre-dependencies + 11 pre-settings + 2 dependency contract tests.
-          if (passed, skipped, len(outcomes)) != (22, 0, 22):
-              raise SystemExit("expected exactly 22 passed and 0 skipped golden tests")
+          # 2 pre-hooks + 7 pre-dependencies + 11 pre-settings + 4 dependency contract tests.
+          if (passed, skipped, len(outcomes)) != (24, 0, 24):
+              raise SystemExit("expected exactly 24 passed and 0 skipped golden tests")
           EOF
       - name: Upload Golden Results
         if: ${{ !cancelled() }}

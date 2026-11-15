@@ -488,7 +488,9 @@ reason `stale-lock`, and asks for `grim lock`.
 before a publisher adds declarations to an artifact it uses. Never run
 `grim lock` or `grim update` on an old grim in a project that already depends
 on a dependent artifact. If a lock was written that way, run
-[`grim lock`][lock] with 0.16.0 or later and commit the result. As a
+[`grim lock`][lock] with 0.16.0 or later and commit the result. A newer grim
+warns once, the first time it writes dependency rows into a lock that had none.
+The warning means that lock now needs grim 0.16.0 or newer. As a
 publisher, put the first dependency-bearing version under a
 [new major tag](./publishing.md#requires-consumers) so floating consumers stay
 on a version their grim can read.
