@@ -36,7 +36,9 @@ use crate::command::lock::load_previous;
 use crate::command::status::{
     self, SettingsArmingInputs, SettingsGateScope, SettingsGates, declares_settings, settings_arming,
 };
-use crate::command::uninstall::{EditTarget, Hold, undeclare_and_unlock};
+use crate::command::uninstall::{
+    EditTarget, Hold, relock_drops, relock_keeps, relock_undeclared, save_relocked, undeclare_and_unlock,
+};
 use crate::command::update::NamedScope;
 use crate::config::declaration::{ConfigOptions, DesiredSet};
 use crate::config::global_config::GlobalConfig;
@@ -2657,7 +2659,7 @@ async fn run_batch_scoped(
     let total = rows.len();
     let (mut ok, mut failed) = (0usize, 0usize);
     let mut last_err: Option<String> = None;
-    let mut held_remedy: Option<&'static str> = None;
+    let mut held_remedy: Option<String> = None;
     // A refusal `--force` resolves, queued for the modal confirmation below,
     // with the nodes its dialog lists.
     let mut refused: Option<(usize, BatchOp, String, String, BTreeSet<NodeKey>)> = None;
@@ -2712,7 +2714,7 @@ async fn run_batch_scoped(
             }
             BatchOp::Uninstall => {
                 progress.advance(n + 1, &row.repo);
-                perform_uninstall(ctx, &row, &mut ledger, force).map(|deleted| {
+                perform_uninstall(ctx, &row, &mut ledger, force).await.map(|deleted| {
                     removed_dependencies = deleted.orphans;
                     notes.extend(deleted.notes);
                     kept.extend(deleted.kept);
@@ -2759,10 +2761,15 @@ async fn run_batch_scoped(
                 }
                 last_err = Some(match e.downcast_ref::<HeldRefusal>() {
                     Some(_) => {
-                        held_remedy = Some(held_lead(total));
+                        held_remedy = Some(held_lead(total).to_string());
                         held_refusal_line(&row.repo, total)
                     }
-                    None => failure_line(&row.repo, &e),
+                    None => {
+                        if let Some(lead) = relock_lead(&e) {
+                            held_remedy = Some(lead.to_string());
+                        }
+                        failure_line(&row.repo, &e)
+                    }
                 });
             }
         }
@@ -2800,7 +2807,7 @@ async fn run_batch_scoped(
         ok,
         failed,
         last_err,
-        held_remedy,
+        held_remedy: held_remedy.as_deref(),
         refused_dependency,
         pins: &pins,
         hooks: &hooks,
@@ -2860,9 +2867,10 @@ struct BatchTally<'a> {
     ok: usize,
     failed: usize,
     last_err: Option<String>,
-    /// What to do about a row a [`HeldRefusal`] stopped; it leads the failure
-    /// because the area cuts the end and `last_err` sits behind the counts.
-    held_remedy: Option<&'static str>,
+    /// What to do about the row a [`HeldRefusal`] or a [`RelockRefused`] stopped;
+    /// it leads the failure because the area cuts the end and `last_err` sits
+    /// behind the counts.
+    held_remedy: Option<&'a str>,
     refused_dependency: Option<String>,
     pins: &'a PinChanges,
     hooks: &'a HookNote,
@@ -3049,7 +3057,9 @@ struct Deleted {
 /// provides keeps its files ([`files_held_by`]) — the delete
 /// degrades to dropping the direct declaration, like `grim remove`. `force`
 /// removes what `grim uninstall --force` removes, for each artifact it names.
-fn perform_uninstall(
+/// A direct line relocks first ([`relock_delete`]), so a refusal deletes and
+/// writes nothing.
+async fn perform_uninstall(
     ctx: &TuiContext,
     row: &TuiRow,
     ledger: &mut SettingsLedger,
@@ -3059,7 +3069,7 @@ fn perform_uninstall(
     // declaration (config + lock) or drop a dev record — never the
     // registry-uninstall path below, which keys on a registry identity.
     if matches!(row.source, RowSource::Local) {
-        return perform_local_uninstall(ctx, row, ledger, force);
+        return perform_local_uninstall(ctx, row, ledger, force).await;
     }
 
     // Authoritative repository field (never first-slash-split `repo`, which
@@ -3130,7 +3140,10 @@ fn perform_uninstall(
         }
     };
 
-    let hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force)?;
+    let relock = relock_delete(ctx, kind, &name, force).await?;
+    let mut targets = targets;
+    settle_relocked(relock.as_ref(), &(kind, name.clone()), &mut targets, &mut orphans);
+    let mut hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force)?;
 
     // Undeclare from the config + lock through the `grim uninstall` seam
     // (the config flock acquired at the top is still held for this
@@ -3141,7 +3154,7 @@ fn perform_uninstall(
     // user removed, say), there is nothing left to undeclare — the goal is
     // already met, so converge rather than fail the delete (the `let Ok(..)
     // else` precedent from `bundle_uninstall_targets`).
-    let Ok((options, registries, mut set)) = load_scope_declaration(ctx) else {
+    let Some(undeclared) = undeclare_row(ctx, relock, kind, &name, &targets, &mut hooks) else {
         hooks.warn_unregistered(&[]);
         return Ok(Deleted {
             orphans,
@@ -3150,14 +3163,7 @@ fn perform_uninstall(
             ..Deleted::default()
         });
     };
-    let (declared, notes) = hooks.warned_after(undeclare_and_unlock(
-        &edit_target(ctx),
-        &options,
-        &registries,
-        &mut set,
-        kind,
-        &name,
-    ))?;
+    let (declared, notes) = hooks.warned_after(undeclared)?;
     Ok(Deleted {
         orphans,
         notes,
@@ -3174,7 +3180,7 @@ fn perform_uninstall(
 ///   lock) and its materialized files are removed, and
 /// - a **dev record** row has its install-state record dropped (and files
 ///   removed) — there is no declaration to undeclare.
-fn perform_local_uninstall(
+async fn perform_local_uninstall(
     ctx: &TuiContext,
     row: &TuiRow,
     ledger: &mut SettingsLedger,
@@ -3208,7 +3214,7 @@ fn perform_local_uninstall(
     // this artifact reached, as `grim uninstall` does. A bundle has no record of
     // its own: its targets are what it alone provided, as the registry arm's are.
     let held = lock_and_set(ctx);
-    let (orphans, targets, hold) = if kind == ArtifactKind::Bundle {
+    let (mut orphans, mut targets, hold) = if kind == ArtifactKind::Bundle {
         let hold = files_held_by(ctx, held.as_ref(), kind, &name);
         let targets = match hold {
             Some(_) => Vec::new(),
@@ -3221,21 +3227,16 @@ fn perform_local_uninstall(
         targets.extend(orphans.iter().cloned());
         (orphans, targets, None)
     };
-    let hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force)?;
+    let relock = relock_delete(ctx, kind, &name, force).await?;
+    settle_relocked(relock.as_ref(), &(kind, name.clone()), &mut targets, &mut orphans);
+    let mut hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force)?;
 
     // Undeclare a path declaration from config + lock (a no-op for a bare dev
     // record — nothing declared, and dev installs never write a lock entry). If
     // the config can no longer be read, the goal is already met — converge.
     let (mut declared, mut notes) = (false, Vec::new());
-    if let Ok((options, registries, mut set)) = load_scope_declaration(ctx) {
-        (declared, notes) = hooks.warned_after(undeclare_and_unlock(
-            &edit_target(ctx),
-            &options,
-            &registries,
-            &mut set,
-            kind,
-            &name,
-        ))?;
+    if let Some(undeclared) = undeclare_row(ctx, relock, kind, &name, &targets, &mut hooks) {
+        (declared, notes) = hooks.warned_after(undeclared)?;
     } else {
         hooks.warn_unregistered(&[]);
     }
@@ -4439,11 +4440,14 @@ async fn perform_local_dev(
 /// error text or an exit code.
 fn failure_line(repo: &str, e: &anyhow::Error) -> String {
     // The whole chain: an outer context's advice alone can read as the cause.
-    // [`moved_note`] and [`HookNote::lead`] name these contexts, so they stay out of it.
-    let skip = usize::from(e.is::<MovedAhead>()) + usize::from(e.is::<HooksAhead>());
+    // [`moved_note`], [`HookNote::lead`] and [`relock_lead`] name these contexts, so
+    // they stay out of it, and so does the CLI's sentence naming the relock's skip.
+    let relock = e.is::<RelockRefused>();
+    let skip = usize::from(e.is::<MovedAhead>()) + usize::from(e.is::<HooksAhead>()) + usize::from(relock);
     let chain = e
         .chain()
         .skip(skip)
+        .skip_while(|cause| relock && cause.downcast_ref::<crate::error::Error>().is_none())
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(": ");
@@ -4899,6 +4903,16 @@ impl HookNote {
         edit
     }
 
+    /// After a delete saved its relock: the lock is in line, so no remedy here
+    /// names `grim lock`.
+    fn lock_in_line(&mut self) {
+        for (_, why) in &mut self.gated {
+            if let Unarmed::Unregistered(unregistered, _) = why {
+                unregistered.lock_in_line = true;
+            }
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.consented.is_empty() && self.gated.is_empty()
     }
@@ -5148,6 +5162,136 @@ fn edit_target(ctx: &TuiContext) -> EditTarget<'_> {
         grim: &ctx.invocation,
         store: crate::store::GrimPaths::new(ctx.roots.grim_home.clone()),
     }
+}
+
+/// A delete's relock, made before anything is deleted, and what it replaces.
+struct DeleteRelock {
+    scope: crate::command::scope_resolution::ResolvedScope,
+    previous: GrimoireLock,
+    after: DesiredSet,
+    relocked: TargetLock,
+}
+
+/// A delete whose relock refused; it carries the status line's lead, the
+/// command that deletes anyway and leaves the lock stale.
+#[derive(Debug, thiserror::Error)]
+#[error("{lead}")]
+struct RelockRefused {
+    lead: String,
+}
+
+/// The lead of a delete [`RelockRefused`] stopped.
+fn relock_lead(e: &anyhow::Error) -> Option<&str> {
+    e.downcast_ref::<RelockRefused>().map(|refused| refused.lead.as_str())
+}
+
+/// Relock without `(kind, name)`'s direct line, as `grim uninstall` does before
+/// it deletes. `None` when no lock or declaration reads, or no direct line names
+/// it: the delete then edits the lock in place, as `--no-relock` does.
+///
+/// # Errors
+///
+/// The relock's refusal, or a conflict among the settings packages its lock
+/// arms, under [`RelockRefused`].
+async fn relock_delete(
+    ctx: &TuiContext,
+    kind: ArtifactKind,
+    name: &str,
+    force: &ForceScope,
+) -> anyhow::Result<Option<DeleteRelock>> {
+    let (Ok(previous), Ok((options, registries, set))) = (lock_io::load(&ctx.lock_path), load_scope_declaration(ctx))
+    else {
+        return Ok(None);
+    };
+    let scope = crate::command::scope_resolution::ResolvedScope {
+        scope: ctx.scope,
+        set,
+        options,
+        registries,
+        config_path: ctx.config_path.clone(),
+        lock_path: ctx.lock_path.clone(),
+        state_path: ctx.state_path.clone(),
+        workspace: ctx.workspace.clone(),
+        roots: ctx.roots.clone(),
+        invocation: ctx.invocation.clone(),
+    };
+    let forced = !matches!(force, ForceScope::None);
+    let access = || Ok(Arc::clone(&ctx.access));
+    let refused = |e: anyhow::Error| {
+        let flags = if forced { "--no-relock --force " } else { "--no-relock " };
+        let skip = ctx.invocation.binding("uninstall", flags, kind, name);
+        e.context(RelockRefused {
+            lead: format!("`{skip}` deletes it anyway"),
+        })
+    };
+    let relocked = relock_undeclared(&scope, &previous, access, ctx.offline, kind, name, forced)
+        .await
+        .map_err(refused)?;
+    let Some((after, relocked)) = relocked else {
+        return Ok(None);
+    };
+    // As `grim uninstall` does: the saved lock would hold the conflict.
+    refuse_settings_conflict(ctx, &relocked.lock).await.map_err(refused)?;
+    Ok(Some(DeleteRelock {
+        scope,
+        previous,
+        after,
+        relocked,
+    }))
+}
+
+/// Plan `targets` and `orphans` against `relock`'s lock, the one the delete saves,
+/// where they were planned against the lock on disk, which can trail the
+/// declaration: a row it still pins keeps its files, and a row it dropped that the
+/// declaration reached goes with its row, `key` aside, as `grim uninstall` does.
+fn settle_relocked(
+    relock: Option<&DeleteRelock>,
+    key: &NodeKey,
+    targets: &mut Vec<NodeKey>,
+    orphans: &mut Vec<NodeKey>,
+) {
+    let Some(relock) = relock else { return };
+    targets.retain(|node| !relock_keeps(&relock.relocked, node));
+    orphans.retain(|node| !relock_keeps(&relock.relocked, node));
+    let drops = relock_drops(&relock.scope.set, &relock.previous, &relock.relocked).unwrap_or_default();
+    for node in drops {
+        if node != *key && !targets.contains(&node) {
+            targets.push(node.clone());
+            orphans.push(node);
+        }
+    }
+}
+
+/// Undeclare `(kind, name)`: save `relock` when the delete made one, else edit
+/// the config and lock in place. `deleted` names what the delete removed, whose
+/// dropped pins need no warning; a saved relock leaves `hooks` naming no lock
+/// step. `None` when the declaration does not read.
+fn undeclare_row(
+    ctx: &TuiContext,
+    relock: Option<DeleteRelock>,
+    kind: ArtifactKind,
+    name: &str,
+    deleted: &[NodeKey],
+    hooks: &mut HookNote,
+) -> Option<anyhow::Result<(bool, Vec<EditNote>)>> {
+    if let Some(relock) = relock {
+        let key = (kind, name.to_string());
+        let edited = |node: &NodeKey| *node == key || deleted.contains(node);
+        let saved = save_relocked(&relock.scope, &relock.after, &relock.previous, &relock.relocked, edited);
+        if saved.is_ok() {
+            hooks.lock_in_line();
+        }
+        return Some(saved);
+    }
+    let (options, registries, mut set) = load_scope_declaration(ctx).ok()?;
+    Some(undeclare_and_unlock(
+        &edit_target(ctx),
+        &options,
+        &registries,
+        &mut set,
+        kind,
+        name,
+    ))
 }
 
 fn load_scope_declaration(
@@ -6068,7 +6212,8 @@ async fn member_action(
             // it leads with any hook the Install consented to before failing.
             let moved = moved_ahead(&e).map(moved_note).unwrap_or_default();
             let hooks = hooks_ahead(&e).map(HookNote::lead).unwrap_or_default();
-            state.set_status(format!("{hooks}{}{moved}", failure_line(repo, &e)));
+            let skip = relock_lead(&e).map(|lead| format!("{lead}; ")).unwrap_or_default();
+            state.set_status(format!("{skip}{hooks}{}{moved}", failure_line(repo, &e)));
             None
         }
     }
@@ -6194,19 +6339,16 @@ async fn perform_member_uninstall(
     // declaration; a bundle-only member keeps everything (remove the bundle to
     // remove it).
     let hold = files_held_by(ctx, lock_and_set(ctx).as_ref(), member_kind, &name);
-    let mut hooks = HookNote::default();
+    let mut install_state = None;
+    let key = (member_kind, name.clone());
+    let mut targets = Vec::new();
     if hold.is_none() {
-        let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+        let state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
         // A view another grim outdated still shows the member after its name was
         // bound at another repository, and acting on it would delete that package.
-        refuse_bound_elsewhere(ctx, &install_state, member_kind, &repo, &name)?;
-        hooks = delete_targets(
-            ctx,
-            &mut install_state,
-            &[(member_kind, name.clone())],
-            ledger,
-            &ForceScope::None,
-        )?;
+        refuse_bound_elsewhere(ctx, &state, member_kind, &repo, &name)?;
+        install_state = Some(state);
+        targets.push(key.clone());
     } else {
         // The files stay and the direct line goes, so a line another grim wrote
         // at another source would drop with no view of it ever shown.
@@ -6217,31 +6359,37 @@ async fn perform_member_uninstall(
             StaleRow::ClearsOnRefresh,
         )?;
     }
+    let relock = relock_delete(ctx, member_kind, &name, &ForceScope::None).await?;
+    let mut orphans = Vec::new();
+    settle_relocked(relock.as_ref(), &key, &mut targets, &mut orphans);
+    let mut hooks = HookNote::default();
+    // An unheld member converges hooks even when the relock kept it, as the other delete sites do.
+    if install_state.is_some() || !targets.is_empty() {
+        let mut install_state = match install_state {
+            Some(state) => state,
+            None => load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?,
+        };
+        hooks = delete_targets(ctx, &mut install_state, &targets, ledger, &ForceScope::None)?;
+    }
 
     // Undeclare from config + lock, threading notes back to the caller. The
     // config flock acquired at the top is still held for this read-modify-write.
-    let Ok((options, registries, mut set)) = load_scope_declaration(ctx) else {
+    let Some(undeclared) = undeclare_row(ctx, relock, member_kind, &name, &targets, &mut hooks) else {
         hooks.warn_unregistered(&[]);
         return Ok(Deleted {
+            orphans,
             hooks,
             ..Deleted::default()
         });
     };
-    let (declared, notes) = hooks.warned_after(undeclare_and_unlock(
-        &edit_target(ctx),
-        &options,
-        &registries,
-        &mut set,
-        member_kind,
-        &name,
-    ))?;
+    let (declared, notes) = hooks.warned_after(undeclared)?;
     Ok(Deleted {
+        orphans,
         notes,
         // A bundle-only member (kept, never directly declared) has nothing to
         // undeclare, so the status line must not call the delete done.
         kept: hold.filter(|_| !declared),
         hooks,
-        ..Deleted::default()
     })
 }
 
@@ -6273,8 +6421,8 @@ mod tests {
     }
 
     /// The delete, for a test that does not read its settings list.
-    fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<Deleted> {
-        super::perform_uninstall(ctx, row, &mut SettingsLedger::default(), &ForceScope::None)
+    async fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<Deleted> {
+        super::perform_uninstall(ctx, row, &mut SettingsLedger::default(), &ForceScope::None).await
     }
 
     #[test]
@@ -7174,14 +7322,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn perform_uninstall_routes_local_row_before_the_registry_only_guard() {
+    #[tokio::test]
+    async fn perform_uninstall_routes_local_row_before_the_registry_only_guard() {
         let (_tmp, ctx) = drain_test_ctx();
         let mut row = installed_row("dummy/x");
         row.source = RowSource::Local;
         row.repository = String::new();
 
-        let result = perform_uninstall(&ctx, &row);
+        let result = perform_uninstall(&ctx, &row).await;
 
         // Positive contract: the row routed into `perform_local_uninstall`,
         // which — with nothing to delete and no config to undeclare —
@@ -12828,7 +12976,7 @@ mod tests {
             .expect("install s and d");
         assert!(workspace.join(".claude/skills/d/SKILL.md").is_file());
 
-        let deleted = perform_uninstall(&ctx, &dependent_row()).expect("uninstall s");
+        let deleted = perform_uninstall(&ctx, &dependent_row()).await.expect("uninstall s");
         assert_eq!(deleted.orphans, vec![(ArtifactKind::Skill, "d".to_string())]);
 
         assert!(!workspace.join(".claude/skills/s").exists());
@@ -12838,6 +12986,100 @@ mod tests {
         );
         let state = load_state(&ctx).unwrap();
         assert!(state.get(ArtifactKind::Skill, "d").is_none());
+    }
+
+    /// `p`, declared by hand after the last lock, requires `m`: the lock on disk
+    /// has no row for `p`, but the relock resolves it and keeps `m`'s pin.
+    #[tokio::test]
+    async fn perform_uninstall_keeps_the_files_of_a_row_the_relock_keeps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        publish_skill(&reg, "m", "first").await;
+        let edge = (ArtifactKind::Skill, "m", "localhost:5050/acme/m:1");
+        publish_skill_requiring(&reg, "p", "p", "1", "first", &[edge]).await;
+        let ctx = test_ctx(workspace, Arc::new(reg));
+        perform(&ctx, &skill_row("m"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect("install m");
+        let edited = std::fs::read_to_string(&ctx.config_path)
+            .unwrap()
+            .replace("[skills]\n", "[skills]\np = \"localhost:5050/acme/p:1\"\n");
+        std::fs::write(&ctx.config_path, edited).unwrap();
+
+        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/m"))
+            .await
+            .expect("delete m");
+
+        assert!(pin_of(&ctx, "m").is_some(), "the relock keeps m for p");
+        assert!(
+            workspace.join(".claude/skills/m/SKILL.md").is_file(),
+            "the saved lock pins m, so its files stay"
+        );
+    }
+
+    /// `p` on tag `1` requires `z`; a hand edit moves `p` to tag `2`, which does
+    /// not. Deleting `a` relocks `p` onto `2` and drops `z`'s row, so `z`'s files
+    /// go too: a saved lock with no row for them would leave them behind.
+    #[tokio::test]
+    async fn a_delete_removes_the_files_of_a_row_the_relock_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        publish_skill(&reg, "a", "first").await;
+        publish_skill(&reg, "z", "first").await;
+        let edge = (ArtifactKind::Skill, "z", "localhost:5050/acme/z:1");
+        publish_skill_requiring(&reg, "p", "p", "1", "first", &[edge]).await;
+        publish_skill_at(&reg, "p", "2", "second").await;
+        let ctx = test_ctx(workspace, Arc::new(reg));
+        for name in ["a", "p"] {
+            perform(&ctx, &skill_row(name), None, BatchOp::Install, &SilentProgress, false)
+                .await
+                .expect("the first install succeeds");
+        }
+        assert!(workspace.join(".claude/skills/z/SKILL.md").is_file());
+        let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+        assert!(config.contains("acme/p:1"), "{config}");
+        std::fs::write(&ctx.config_path, config.replace("acme/p:1", "acme/p:2")).unwrap();
+
+        let deleted = perform_uninstall(&ctx, &installed_row("localhost:5050/acme/a"))
+            .await
+            .expect("delete a");
+
+        assert_eq!(pin_of(&ctx, "z"), None, "p on tag 2 requires nothing");
+        assert!(
+            !workspace.join(".claude/skills/z").exists(),
+            "z's files go with its row"
+        );
+        assert_eq!(deleted.orphans, vec![(ArtifactKind::Skill, "z".to_string())]);
+        assert!(
+            workspace.join(".claude/skills/p/SKILL.md").is_file(),
+            "p keeps its files"
+        );
+    }
+
+    /// A delete over a lock that does not parse still deletes the row and edits the
+    /// config, and says once in `tui.log` that the lock was not updated, as `grim
+    /// uninstall` does.
+    #[tokio::test]
+    async fn a_delete_over_an_unreadable_lock_warns_once_and_still_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_reg, ctx) = project_with_two_rows(tmp.path()).await;
+        std::fs::write(&ctx.lock_path, "not = [valid toml").unwrap();
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/a"))
+            .await
+            .expect("an unreadable lock holds no pin the delete could move");
+
+        let logs = capture.text();
+        assert_eq!(logs.matches("the lock was not updated").count(), 1, "{logs}");
+        assert!(logs.contains("invalid TOML"), "names the error: {logs}");
+        assert!(!tmp.path().join(".claude/skills/a").exists());
+        let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+        assert!(!config.contains("acme/a"), "{config}");
     }
 
     #[tokio::test]
@@ -12867,12 +13109,185 @@ mod tests {
         lock_io::save(&ctx.lock_path, &lock, None).unwrap();
         let before = lock.skills[2].source.pinned().unwrap().digest();
 
-        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/h1")).expect("delete h1");
+        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/h1"))
+            .await
+            .expect_err("the relock reads h2's pin, which the registry lacks, so the delete refuses");
 
         let saved = lock_io::load(&ctx.lock_path).expect("lock saved");
         let pin = saved.skills.iter().find(|a| a.name == "m").unwrap().source.pinned();
         assert_eq!(pin.map(|p| p.tag()), Some(Some("1")), "no writer here resolved a tag");
         assert_eq!(pin.map(|p| p.digest()), Some(before), "the digest stays");
+    }
+
+    /// `a` and `b` installed on tag `1`, then `c` declared by hand, so the lock
+    /// trails the declaration. `publish_c` decides whether the registry holds `c`.
+    async fn project_with_a_hand_declared_line(workspace: &std::path::Path, publish_c: bool) -> TuiContext {
+        let (reg, ctx) = project_with_two_rows(workspace).await;
+        if publish_c {
+            publish_skill(&reg, "c", "first").await;
+        }
+        hand_edit_declaration(&ctx);
+        ctx
+    }
+
+    /// Delete row `a` through the batch path, as `d` does.
+    async fn delete_row_a(ctx: &TuiContext) -> TuiState {
+        let mut state = TuiState::new();
+        state.set_rows(vec![installed_row("localhost:5050/acme/a")]);
+        run_batch(ctx, &mut state, &[0], BatchOp::Uninstall).await;
+        state
+    }
+
+    /// The lock's hash proves the declaration on disk.
+    fn assert_lock_in_line(ctx: &TuiContext, status: &str) {
+        let (.., set) = load_scope_declaration(ctx).unwrap();
+        let lock = lock_io::load(&ctx.lock_path).unwrap();
+        assert_eq!(
+            lock.metadata.declaration_hash,
+            set.declaration_hash_cached().to_string(),
+            "{status}"
+        );
+    }
+
+    /// A delete relocks as `grim uninstall` does, so a lock a hand edit left
+    /// behind comes back in line: the row's pin goes, the other pin carries, and
+    /// the hand-declared line locks.
+    #[tokio::test]
+    async fn a_delete_relocks_a_stale_lock_into_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = project_with_a_hand_declared_line(tmp.path(), true).await;
+        let b = pin_of(&ctx, "b");
+
+        let state = delete_row_a(&ctx).await;
+
+        assert_lock_in_line(&ctx, &state.status_line);
+        assert_eq!(pin_of(&ctx, "a"), None, "{}", state.status_line);
+        assert_eq!(pin_of(&ctx, "b"), b, "the other pin carries");
+        assert!(pin_of(&ctx, "c").is_some(), "the hand-declared line locks");
+        assert!(!tmp.path().join(".claude/skills/a").exists());
+    }
+
+    /// A relock that fails deletes and writes nothing, and the status line leads
+    /// with the command that deletes anyway, whole and under the session's `grim`.
+    #[tokio::test]
+    async fn a_delete_whose_relock_fails_changes_nothing_and_names_the_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = project_with_a_hand_declared_line(tmp.path(), false).await;
+        let skill = ".claude/skills/a/SKILL.md";
+        let before = delete_witness(&ctx, &[skill]);
+
+        let state = delete_row_a(&ctx).await;
+
+        assert_eq!(delete_witness(&ctx, &[skill]), before, "{}", state.status_line);
+        assert!(
+            state
+                .status_line
+                .starts_with("1 failed; `grim uninstall --no-relock skill a` deletes it anyway; "),
+            "{}",
+            state.status_line
+        );
+    }
+
+    /// The relock leaves the lock in line, so the status line asks for no `grim lock`.
+    #[tokio::test]
+    async fn a_relocked_delete_asks_for_no_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = project_with_a_hand_declared_line(tmp.path(), true).await;
+
+        let state = delete_row_a(&ctx).await;
+
+        assert_eq!(state.status_line, "uninstalled (1 ok)");
+    }
+
+    /// An offline store holding everything its registry holds: it answers by
+    /// digest and refuses every tag read and listing, which only the network answers.
+    struct StoreOnly(crate::oci::access::memory_registry::MemoryRegistry);
+
+    #[async_trait::async_trait]
+    impl OciAccess for StoreOnly {
+        async fn resolve_digest(
+            &self,
+            id: &Identifier,
+            _op: crate::oci::access::Operation,
+        ) -> Result<Option<crate::oci::Digest>, crate::oci::access::error::AccessError> {
+            id.digest().map(Some).ok_or_else(|| {
+                crate::oci::access::error::AccessError::with_identifier(
+                    id.clone(),
+                    crate::oci::access::error::AccessErrorKind::OfflineMiss,
+                )
+            })
+        }
+        async fn fetch_manifest(
+            &self,
+            id: &crate::oci::PinnedIdentifier,
+        ) -> Result<Option<crate::oci::manifest::OciManifest>, crate::oci::access::error::AccessError> {
+            self.0.fetch_manifest(id).await
+        }
+        async fn fetch_blob(
+            &self,
+            repo: &Identifier,
+            digest: &crate::oci::Digest,
+            cap: u64,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            self.0.fetch_blob(repo, digest, cap).await
+        }
+        async fn list_tags(
+            &self,
+            id: &Identifier,
+        ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
+            Err(crate::oci::access::error::AccessError::with_identifier(
+                id.clone(),
+                crate::oci::access::error::AccessErrorKind::OfflineMiss,
+            ))
+        }
+        async fn list_catalog(
+            &self,
+            _registry: &str,
+        ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
+            Err(crate::oci::access::error::AccessError::without_identifier(
+                crate::oci::access::error::AccessErrorKind::OfflineMiss,
+            ))
+        }
+        async fn push_blob(
+            &self,
+            repo: &Identifier,
+            bytes: &[u8],
+        ) -> Result<crate::oci::Digest, crate::oci::access::error::AccessError> {
+            self.0.push_blob(repo, bytes).await
+        }
+        async fn push_manifest(
+            &self,
+            repo: &Identifier,
+            manifest: &crate::oci::manifest::OciManifest,
+        ) -> Result<crate::oci::Digest, crate::oci::access::error::AccessError> {
+            self.0.push_manifest(repo, manifest).await
+        }
+        async fn put_tag(
+            &self,
+            repo: &Identifier,
+            tag: &str,
+            digest: &crate::oci::Digest,
+        ) -> Result<(), crate::oci::access::error::AccessError> {
+            self.0.put_tag(repo, tag, digest).await
+        }
+    }
+
+    /// Offline, a delete whose store holds every pin relocks from the store,
+    /// with no tag read.
+    #[tokio::test]
+    async fn an_offline_delete_relocks_from_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (reg, mut ctx) = project_with_two_rows(tmp.path()).await;
+        let b = pin_of(&ctx, "b");
+        ctx.offline = true;
+        ctx.access = Arc::new(StoreOnly(reg));
+
+        let state = delete_row_a(&ctx).await;
+
+        assert_eq!(state.status_line, "uninstalled (1 ok)");
+        assert_lock_in_line(&ctx, &state.status_line);
+        assert_eq!(pin_of(&ctx, "a"), None);
+        assert_eq!(pin_of(&ctx, "b"), b);
     }
 
     /// `grim remove skill <name>`: the line and the lock row go, the files and the
@@ -12980,7 +13395,7 @@ mod tests {
         let member = ".claude/skills/m/SKILL.md";
         let before = delete_witness(&ctx, &[member]);
 
-        let deleted = perform_uninstall(&ctx, &bundle_row("old/pack"));
+        let deleted = perform_uninstall(&ctx, &bundle_row("old/pack")).await;
 
         assert_eq!(delete_witness(&ctx, &[member]), before, "{deleted:?}");
         let err = deleted.expect_err("pack is another repository's bundle");
@@ -13087,7 +13502,7 @@ mod tests {
             "the fixture: d is new/d's"
         );
 
-        let deleted = perform_uninstall(&ctx, &local);
+        let deleted = perform_uninstall(&ctx, &local).await;
 
         assert_eq!(delete_witness(&ctx, &[skill]), before, "{deleted:?}");
         let err = deleted.expect_err("d is another repository's skill");
@@ -13149,7 +13564,7 @@ mod tests {
             "the fixture: d is other/d's"
         );
 
-        let deleted = perform_uninstall(&ctx, &stale);
+        let deleted = perform_uninstall(&ctx, &stale).await;
 
         assert_eq!(delete_witness(&ctx, &[skill]), before, "{deleted:?}");
         let err = deleted.expect_err("d now comes from ./other/d");
@@ -13165,7 +13580,9 @@ mod tests {
             .into_iter()
             .find(|row| row.repo == "d")
             .expect("a Local row for d");
-        perform_uninstall(&ctx, &fresh).expect("the refreshed row deletes");
+        perform_uninstall(&ctx, &fresh)
+            .await
+            .expect("the refreshed row deletes");
         assert!(!ctx.workspace.join(skill).exists());
     }
 
@@ -13221,7 +13638,9 @@ mod tests {
         };
         let row = listed().expect("the dev record lists a Local row");
 
-        let err = perform_uninstall(&ctx, &row).expect_err("the name now comes from the registry line");
+        let err = perform_uninstall(&ctx, &row)
+            .await
+            .expect_err("the name now comes from the registry line");
 
         let text = format!("{err:#}");
         assert!(text.contains("now comes from localhost:5050/acme/devskill"), "{text}");
@@ -13254,7 +13673,9 @@ mod tests {
         );
         let local = rows.into_iter().find(|row| row.repo == "d").expect("a Local row for d");
 
-        perform_uninstall(&ctx, &local).expect("the row's own line deletes");
+        perform_uninstall(&ctx, &local)
+            .await
+            .expect("the row's own line deletes");
 
         assert!(!std::fs::read_to_string(&ctx.config_path).unwrap().contains("local/d"));
         assert!(load_state(&ctx).unwrap().get(ArtifactKind::Skill, "d").is_none());
@@ -13425,14 +13846,16 @@ mod tests {
         let record = load_state(&ctx).unwrap().get(ArtifactKind::Skill, "d").cloned();
         assert!(record.is_some(), "the fixture: the record stays");
 
-        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/old/d")).expect("the record is the row's own");
+        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/old/d"))
+            .await
+            .expect("the record is the row's own");
 
         assert!(!ctx.workspace.join(".claude/skills/d").exists());
         assert!(load_state(&ctx).unwrap().get(ArtifactKind::Skill, "d").is_none());
     }
 
-    /// A delete can leave the lock stale, and the user is told to run `grim lock`
-    /// nowhere else: a note otherwise lands in `tui.log`.
+    /// A delete whose relock refuses names the command that deletes anyway on the
+    /// status line, and nowhere else: a note otherwise lands in `tui.log`.
     #[tokio::test]
     async fn tui_delete_shows_what_the_lock_edit_has_to_say() {
         use crate::tui::bundle_members::test_support::lock_of;
@@ -13467,11 +13890,9 @@ mod tests {
         run_batch(&ctx, &mut state, &[0], BatchOp::Uninstall).await;
 
         let line = &state.status_line;
-        assert!(line.starts_with("run `grim lock`; uninstalled — "), "{line}");
-        assert!(
-            line.len() > "run `grim lock`; uninstalled — ".len(),
-            "the note follows: {line}"
-        );
+        let lead = "1 failed; `grim uninstall --no-relock skill m` deletes it anyway; ";
+        assert!(line.starts_with(lead), "{line}");
+        assert!(line.len() > lead.len(), "the cause follows: {line}");
     }
 
     #[tokio::test]
@@ -13498,6 +13919,7 @@ mod tests {
         row.source = RowSource::Local;
         row.repository = "./skills/local".to_string();
         let deleted = perform_local_uninstall(&ctx, &row, &mut SettingsLedger::default(), &ForceScope::None)
+            .await
             .expect("uninstall local");
         assert_eq!(deleted.orphans, vec![(ArtifactKind::Skill, "d".to_string())]);
 
@@ -13552,7 +13974,7 @@ mod tests {
             .expect("bundle install succeeds");
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
 
-        perform_uninstall(&ctx, &row).expect("bundle uninstall succeeds");
+        perform_uninstall(&ctx, &row).await.expect("bundle uninstall succeeds");
 
         assert!(
             !workspace.join(".claude/skills/demo").exists(),
@@ -13623,7 +14045,9 @@ mod tests {
             .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
             .unwrap();
 
-        perform_uninstall(&ctx, &row).expect_err("the wedged member must fail the delete");
+        perform_uninstall(&ctx, &row)
+            .await
+            .expect_err("the wedged member must fail the delete");
 
         assert!(
             !workspace.join(".claude/skills/alpha").exists(),
@@ -13888,14 +14312,18 @@ mod tests {
         assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
 
         // 3. Delete the standalone skill — files kept, the bundle still holds it.
-        perform_uninstall(&ctx, &skill_row).expect("skill delete succeeds");
+        perform_uninstall(&ctx, &skill_row)
+            .await
+            .expect("skill delete succeeds");
         assert!(
             workspace.join(".claude/skills/demo/SKILL.md").is_file(),
             "files kept while the bundle still holds the skill"
         );
 
         // 4. Delete the bundle — the last holder is gone; member files MUST go.
-        perform_uninstall(&ctx, &bundle_row).expect("bundle delete succeeds");
+        perform_uninstall(&ctx, &bundle_row)
+            .await
+            .expect("bundle delete succeeds");
         assert!(
             !workspace.join(".claude/skills/demo").exists(),
             "the orphaned member's files must be deleted when the bundle is removed"
@@ -13932,7 +14360,9 @@ mod tests {
         set.invalidate_declaration_hash_cache();
         write_config(&ctx.config_path, &options, &registries, &set).expect("rewrite config");
 
-        perform_uninstall(&ctx, &bundle_row).expect("aliased bundle delete succeeds");
+        perform_uninstall(&ctx, &bundle_row)
+            .await
+            .expect("aliased bundle delete succeeds");
 
         let body = std::fs::read_to_string(&ctx.config_path).unwrap();
         let cfg = ProjectConfig::from_toml_str(&body).expect("config parses");
@@ -14268,8 +14698,8 @@ mod tests {
     async fn bundle_member_stays_via_bundle_after_idmismatch_lock_drop() {
         // Bug 2: install a skill standalone at :latest, install a bundle pinning
         // it at :1.0.0 (id mismatch), delete the standalone skill. The keep-files
-        // gate keeps the files, but drop_from_lock drops the top-level lock entry
-        // as honestly stale. The member's files + install record + [[bundle]]
+        // gate keeps the files, and the relock pins the member at the bundle's
+        // id. The member's files + install record + [[bundle]]
         // snapshot all remain — yet the badge wrongly read NotInstalled because
         // derive required a top-level lock entry. It must read ViaBundle.
         let tmp = tempfile::tempdir().unwrap();
@@ -14292,16 +14722,21 @@ mod tests {
             .expect("bundle install succeeds");
 
         // Delete the standalone skill: files kept (bundle holds it at a different
-        // id), but the top-level lock entry is dropped as honestly stale.
-        perform_uninstall(&ctx, &skill_row).expect("skill delete succeeds");
+        // id), and the relock pins the member at the id the bundle names.
+        perform_uninstall(&ctx, &skill_row)
+            .await
+            .expect("skill delete succeeds");
         assert!(
             workspace.join(".claude/skills/demo/SKILL.md").is_file(),
             "files kept while the bundle still holds the skill"
         );
         let lock = lock_io::load(&ctx.lock_path).expect("lock loads");
-        assert!(
-            lock.skills.is_empty(),
-            "id-mismatch drops the top-level lock entry (honest staleness)"
+        let demo = lock.skills.iter().find(|row| row.name == "demo");
+        assert_eq!(
+            demo.and_then(|row| row.source.pinned()).map(|pin| pin.tag()),
+            Some(Some("1.0.0")),
+            "the relock keeps the member at the bundle's id: {:?}",
+            lock.skills
         );
         assert!(!lock.bundles.is_empty(), "the [[bundle]] snapshot is kept");
 
@@ -15694,10 +16129,10 @@ mod tests {
         }
 
         /// S-113, delete site 1 (`perform_uninstall`, a registry row).
-        #[test]
-        fn s113_deleting_a_hook_row_reaps_it_without_a_prompt() {
+        #[tokio::test]
+        async fn s113_deleting_a_hook_row_reaps_it_without_a_prompt() {
             let (_ws, _home, ctx) = armed(HOOK_DECL);
-            perform_uninstall(&ctx, &hook_row()).expect("delete succeeds");
+            perform_uninstall(&ctx, &hook_row()).await.expect("delete succeeds");
             assert_reaped(&ctx);
         }
 
@@ -15720,10 +16155,11 @@ mod tests {
         /// `shell-guard` at `Bash` beside `other` at `Write` of `other_tier`, both
         /// locked and armed in a consented workspace, with `other`'s registration
         /// removed by hand. A registry outside the loopback set: consent never
-        /// covers plain HTTP.
-        fn armed_beside_a_disabled_hook(other_tier: &str) -> (tempfile::TempDir, tempfile::TempDir, TuiContext) {
+        /// covers plain HTTP. The registry serves both pins, so a delete relocks.
+        async fn armed_beside_a_disabled_hook(other_tier: &str) -> (tempfile::TempDir, tempfile::TempDir, TuiContext) {
             use crate::install::hook_registrar::test_fixture::{hook_record_named, restamp};
             use crate::install::hook_registrar::{CLAUDE_LOCAL_SETTINGS, converge_clients, root_scope_for};
+            use crate::lock::locked_artifact::LockedArtifact;
             use crate::tui::bundle_members::test_support::lock_of;
 
             let (ws, home, ctx) = hook_ctx(
@@ -15751,14 +16187,16 @@ mod tests {
             }
             persist(&ctx, &state);
             crate::hook::consent::record(grim_home, ctx.scope, &ctx.workspace, &consented).unwrap();
-            let mut lock = lock_of(
-                &[
-                    ("shell-guard", "ghcr.io/acme/shell-guard:1", &[]),
-                    ("other", "ghcr.io/acme/other:1", &[]),
-                ],
-                "",
-            );
-            lock.hooks = std::mem::take(&mut lock.skills);
+            let mut lock = lock_of(&[], "");
+            for name in ["shell-guard", "other"] {
+                let digest = publish_hook(ctx.access.as_ref(), name).await;
+                let id = Identifier::parse(&format!("ghcr.io/acme/{name}:1"))
+                    .unwrap()
+                    .clone_with_digest(digest);
+                let pin = crate::oci::PinnedIdentifier::try_from(id).unwrap();
+                lock.hooks
+                    .push(LockedArtifact::direct(name.to_string(), ArtifactKind::Hook, pin));
+            }
             lock_io::save(&ctx.lock_path, &lock, None).unwrap();
             let policy = tui_hook_policy(&ctx, None).hooks;
             converge_clients(&state, &ctx.workspace, ctx.scope, &ctx.roots, &policy);
@@ -15773,6 +16211,55 @@ mod tests {
             (ws, home, ctx)
         }
 
+        /// Push hook `name` to `ghcr.io/acme/<name>` and move tag `1` onto it.
+        async fn publish_hook(access: &dyn OciAccess, name: &str) -> crate::oci::Digest {
+            publish_to(access, "ghcr.io", ArtifactKind::Hook, name, Vec::new()).await
+        }
+
+        /// Push `kind` artifact `name`, requiring `edges`, to `<registry>/acme/<name>`
+        /// and move tag `1` onto it.
+        async fn publish_to(
+            access: &dyn OciAccess,
+            registry: &str,
+            kind: ArtifactKind,
+            name: &str,
+            edges: Vec<crate::oci::bundle::BundleMember>,
+        ) -> crate::oci::Digest {
+            use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
+            use crate::oci::manifest::{Descriptor, OciManifest};
+
+            let id = Identifier::new_registry(format!("acme/{name}"), registry);
+            let mut blobs = vec![(
+                "application/vnd.grimoire.artifact.layer.v1.tar",
+                name.as_bytes().to_vec(),
+            )];
+            if !edges.is_empty() {
+                blobs.push((
+                    BUNDLE_LAYER_MEDIA_TYPE,
+                    BundleManifest::new(edges).to_layer_bytes().unwrap(),
+                ));
+            }
+            let mut layers = Vec::new();
+            for (media_type, bytes) in blobs {
+                layers.push(Descriptor {
+                    digest: access.push_blob(&id, &bytes).await.unwrap(),
+                    media_type: media_type.to_string(),
+                    size: bytes.len() as u64,
+                    annotations: None,
+                });
+            }
+            let manifest = OciManifest {
+                media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+                artifact_type: Some(kind.artifact_type().to_string()),
+                config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+                layers,
+                annotations: Default::default(),
+            };
+            let digest = access.push_manifest(&id, &manifest).await.unwrap();
+            access.put_tag(&id, "1", &digest).await.unwrap();
+            digest
+        }
+
         /// What a delete leaves of `other`: its row, and no element written back.
         fn assert_other_left_as_found(ctx: &TuiContext) {
             assert!(
@@ -15783,19 +16270,19 @@ mod tests {
         }
 
         /// A delete writes no other hook back, at site 1.
-        #[test]
-        fn deleting_a_hook_row_leaves_another_hooks_removed_registration_removed() {
-            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("observer");
+        #[tokio::test]
+        async fn deleting_a_hook_row_leaves_another_hooks_removed_registration_removed() {
+            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("observer").await;
             let mut row = installed_row("ghcr.io/acme/shell-guard");
             row.kind = "hook".to_string();
-            perform_uninstall(&ctx, &row).expect("delete succeeds");
+            perform_uninstall(&ctx, &row).await.expect("delete succeeds");
             assert_other_left_as_found(&ctx);
         }
 
         /// A delete writes no other hook back, at site 2.
         #[tokio::test]
         async fn deleting_a_hook_member_leaves_another_hooks_removed_registration_removed() {
-            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("observer");
+            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("observer").await;
             perform_member_uninstall(
                 &ctx,
                 "ghcr.io/acme/shell-guard".to_string(),
@@ -15813,7 +16300,7 @@ mod tests {
         /// client runs while `grim status` reads it installed.
         #[tokio::test]
         async fn a_delete_names_a_gatekeeper_left_without_a_registration() {
-            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper");
+            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper").await;
             let mut row = installed_row("ghcr.io/acme/shell-guard");
             row.kind = "hook".to_string();
             let mut state = TuiState::new();
@@ -15826,6 +16313,7 @@ mod tests {
             assert!(line.contains("hook 'other'"), "{line}");
             assert!(line.contains("no client registration"), "{line}");
             assert!(line.contains("`grim install`"), "{line}");
+            assert!(!line.contains("run `grim lock`"), "the delete relocked: {line}");
         }
 
         /// The config declares a hook the lock has not caught up with and the consent
@@ -15834,11 +16322,12 @@ mod tests {
         /// hook; it names `grim hook allow` too.
         #[tokio::test]
         async fn a_delete_beside_a_stale_lock_names_the_consent_the_config_needs() {
-            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper");
+            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper").await;
             let config = std::fs::read_to_string(&ctx.config_path).unwrap();
             let pulled = config.replace("other = ", "pulled = \"ghcr.io/acme/pulled:1\"\nother = ");
             assert_ne!(config, pulled, "precondition: the config declares a third hook");
             std::fs::write(&ctx.config_path, pulled).unwrap();
+            publish_hook(ctx.access.as_ref(), "pulled").await;
             let mut row = installed_row("ghcr.io/acme/shell-guard");
             row.kind = "hook".to_string();
             let mut state = TuiState::new();
@@ -15899,12 +16388,12 @@ mod tests {
         /// stops has no lock edit to wait for, so it logs there.
         #[tokio::test]
         async fn a_delete_logs_a_gatekeeper_left_without_a_registration_once() {
-            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper");
+            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper").await;
             let mut row = installed_row("ghcr.io/acme/shell-guard");
             row.kind = "hook".to_string();
             let capture = crate::catalog::test_hosts::LogCapture::start();
 
-            perform_uninstall(&ctx, &row).expect("the delete goes on");
+            perform_uninstall(&ctx, &row).await.expect("the delete goes on");
 
             let logs = capture.text();
             assert_eq!(logs.matches("no client registration").count(), 1, "{logs}");
@@ -15912,53 +16401,28 @@ mod tests {
 
         /// [`armed_beside_a_disabled_hook`] with skill `m` declared as `m_line` and
         /// skill `p` declared and locked beside it. `p`'s row records no edge while its
-        /// stored manifest requires `m`, as grim 0.15.1 locks a dependent, so a delete of
-        /// `m` leaves a note that names `p` beside the gatekeeper `other` left without a
-        /// registration.
-        fn armed_beside_an_unwalked_dependent(m_line: &str) -> (tempfile::TempDir, tempfile::TempDir, TuiContext) {
+        /// manifest requires `m`, as grim 0.15.1 locks a dependent. The registry serves
+        /// both, so a delete of `m` relocks beside the gatekeeper `other` left without
+        /// a registration.
+        async fn armed_beside_an_unwalked_dependent(
+            m_line: &str,
+        ) -> (tempfile::TempDir, tempfile::TempDir, TuiContext) {
             use crate::lock::locked_artifact::LockedArtifact;
-            use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
+            use crate::oci::bundle::BundleMember;
 
-            const TAR: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
-            let (ws, home, ctx) = armed_beside_a_disabled_hook("gatekeeper");
+            let (ws, home, ctx) = armed_beside_a_disabled_hook("gatekeeper").await;
             let config = std::fs::read_to_string(&ctx.config_path).unwrap();
             let skills = format!("\n[skills]\nm = {m_line}\np = \"localhost:5000/acme/p:1\"\n");
             std::fs::write(&ctx.config_path, config + &skills).unwrap();
 
-            let paths = crate::store::GrimPaths::new(ctx.roots.grim_home.clone());
-            let blobs = crate::store::BlobStore::new(paths.blobs_dir());
-            let put = |bytes: &[u8]| {
-                let digest = crate::oci::Algorithm::Sha256.hash(bytes);
-                blobs.put(&digest, bytes).unwrap();
-                digest
-            };
-            let requires = BundleManifest::new(vec![BundleMember {
+            let requires = vec![BundleMember {
                 kind: ArtifactKind::Skill,
                 name: "m".to_string(),
                 id: "localhost:5000/acme/m:1".to_string(),
-            }])
-            .to_layer_bytes()
-            .unwrap();
-            let layers: Vec<_> = [(TAR, b"p".to_vec()), (BUNDLE_LAYER_MEDIA_TYPE, requires)]
-                .into_iter()
-                .map(|(media_type, bytes)| {
-                    serde_json::json!({
-                        "mediaType": media_type,
-                        "digest": put(&bytes).to_string(),
-                        "size": bytes.len(),
-                    })
-                })
-                .collect();
-            let manifest = serde_json::json!({
-                "schemaVersion": 2,
-                "config": {
-                    "mediaType": "application/vnd.oci.empty.v1+json",
-                    "digest": format!("sha256:{}", "4".repeat(64)),
-                    "size": 2,
-                },
-                "layers": layers,
-            });
-            let p_digest = put(&serde_json::to_vec(&manifest).unwrap());
+            }];
+            let access = ctx.access.as_ref();
+            let m_digest = publish_to(access, "localhost:5000", ArtifactKind::Skill, "m", Vec::new()).await;
+            let p_digest = publish_to(access, "localhost:5000", ArtifactKind::Skill, "p", requires).await;
 
             let row = |name: &str, digest: crate::oci::Digest| {
                 let id = Identifier::parse(&format!("localhost:5000/acme/{name}:1"))
@@ -15971,64 +16435,62 @@ mod tests {
                 )
             };
             let mut lock = lock_io::load(&ctx.lock_path).unwrap();
-            lock.skills = vec![row("m", crate::oci::Algorithm::Sha256.hash(b"m")), row("p", p_digest)];
+            lock.skills = vec![row("m", m_digest), row("p", p_digest)];
             let (_, _, set) = load_scope_declaration(&ctx).unwrap();
             lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
             lock_io::save(&ctx.lock_path, &lock, None).unwrap();
             (ws, home, ctx)
         }
 
-        /// What tui.log carries of a delete whose lock edit left the unwalked note
-        /// beside a gatekeeper: the note, then the gatekeeper's warning once, sending
-        /// the user to that note's steps and advising no `grim lock`.
-        fn assert_gatekeeper_warned_after_the_note(logs: &str) {
-            let note = logs
-                .find("records no dependency edges")
-                .unwrap_or_else(|| panic!("the fixture: the lock edit names the unwalked dependent: {logs}"));
-            let warning = logs
-                .find("no client registration")
-                .unwrap_or_else(|| panic!("the fixture: a gatekeeper is left unregistered: {logs}"));
+        /// What a delete of `m` that relocked beside a gatekeeper leaves: `m` kept as
+        /// `p`'s dependency, since the relock read `p`'s requires, so tui.log carries
+        /// no unwalked note, and the gatekeeper's warning once, naming no `grim lock`
+        /// because the relock left the lock in line.
+        fn assert_gatekeeper_warned_after_the_relock(ctx: &TuiContext, logs: &str) {
+            let lock = lock_io::load(&ctx.lock_path).unwrap();
             assert!(
-                note < warning,
-                "the gatekeeper warning comes after the lock edit: {logs}"
+                lock.skills.iter().any(|row| row.name == "m"),
+                "the relock keeps `p`'s dependency"
             );
+            assert!(!logs.contains("records no dependency edges"), "{logs}");
             assert_eq!(logs.matches("no client registration").count(), 1, "{logs}");
-            assert!(logs.contains("follow the steps of the note"), "{logs}");
-            assert!(!logs.contains("run `grim lock` first"), "{logs}");
+            assert!(!logs.contains("run `grim lock`"), "{logs}");
         }
 
         /// Delete site 1 (`perform_uninstall`, a registry row) logs the gatekeeper
-        /// warning after its lock edit, with the edit's notes.
-        #[test]
-        fn a_registry_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
-            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"localhost:5000/acme/m:1\"");
+        /// warning after its lock edit, the relock, with no lock step.
+        #[tokio::test]
+        async fn a_registry_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
+            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"localhost:5000/acme/m:1\"").await;
             let capture = crate::catalog::test_hosts::LogCapture::start();
 
-            perform_uninstall(&ctx, &installed_row("localhost:5000/acme/m")).expect("the delete goes on");
+            perform_uninstall(&ctx, &installed_row("localhost:5000/acme/m"))
+                .await
+                .expect("the delete goes on");
 
-            assert_gatekeeper_warned_after_the_note(&capture.text());
+            assert_gatekeeper_warned_after_the_relock(&ctx, &capture.text());
         }
 
         /// Delete site 3 (`perform_local_uninstall`, a declared path row) logs the
-        /// gatekeeper warning after its lock edit, with the edit's notes.
-        #[test]
-        fn a_local_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
-            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"./skills/m\"");
+        /// gatekeeper warning after its lock edit, the relock, with no lock step.
+        #[tokio::test]
+        async fn a_local_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
+            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"./skills/m\"").await;
             let mut row = installed_row("m");
             row.source = RowSource::Local;
             row.repository = "./skills/m".to_string();
             let capture = crate::catalog::test_hosts::LogCapture::start();
 
-            perform_uninstall(&ctx, &row).expect("the delete goes on");
+            perform_uninstall(&ctx, &row).await.expect("the delete goes on");
 
-            assert_gatekeeper_warned_after_the_note(&capture.text());
+            assert_gatekeeper_warned_after_the_relock(&ctx, &capture.text());
         }
 
         /// Delete site 2 (`perform_member_uninstall`, a bundle member) logs the
-        /// gatekeeper warning after its lock edit, with the edit's notes.
+        /// gatekeeper warning after its lock edit, the relock, with no lock step.
         #[tokio::test]
         async fn a_member_delete_logs_its_gatekeeper_warning_after_the_lock_edit() {
-            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"localhost:5000/acme/m:1\"");
+            let (_ws, _home, ctx) = armed_beside_an_unwalked_dependent("\"localhost:5000/acme/m:1\"").await;
             let capture = crate::catalog::test_hosts::LogCapture::start();
 
             perform_member_uninstall(
@@ -16041,7 +16503,7 @@ mod tests {
             .await
             .expect("the delete goes on");
 
-            assert_gatekeeper_warned_after_the_note(&capture.text());
+            assert_gatekeeper_warned_after_the_relock(&ctx, &capture.text());
         }
 
         /// A delete that fails after its hook convergence still names the
@@ -16050,7 +16512,7 @@ mod tests {
         #[tokio::test]
         async fn a_failed_delete_names_a_gatekeeper_left_without_a_registration() {
             use std::os::unix::fs::PermissionsExt;
-            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper");
+            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper").await;
             let mut row = installed_row("ghcr.io/acme/shell-guard");
             row.kind = "hook".to_string();
             let mut state = TuiState::new();
@@ -16073,7 +16535,7 @@ mod tests {
         /// the status line names that file before the install.
         #[tokio::test]
         async fn a_delete_names_an_unparseable_client_file_before_the_install() {
-            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper");
+            let (_ws, _home, ctx) = armed_beside_a_disabled_hook("gatekeeper").await;
             let surface = ctx
                 .workspace
                 .join(crate::install::hook_registrar::CLAUDE_LOCAL_SETTINGS);
@@ -16095,8 +16557,8 @@ mod tests {
         /// carry a hook, so the site is pinned on what it must still do: a
         /// grim-owned registration whose record has already left state is
         /// reaped by any delete's convergence.
-        #[test]
-        fn c104_a_local_delete_converges_hooks_too() {
+        #[tokio::test]
+        async fn c104_a_local_delete_converges_hooks_too() {
             let (_ws, _home, ctx) = armed("[skills]\n");
             let mut state = load_state(&ctx).unwrap();
             state.remove(ArtifactKind::Hook, "shell-guard");
@@ -16104,15 +16566,15 @@ mod tests {
             let mut row = installed_row("dummy/dev-skill");
             row.source = RowSource::Local;
             row.repo = "dev-skill".to_string();
-            perform_uninstall(&ctx, &row).expect("local delete converges");
+            perform_uninstall(&ctx, &row).await.expect("local delete converges");
             assert_reaped(&ctx);
         }
 
         /// C-113: a delete under an unparseable `grimoire.toml` converges with
         /// the **flag-off** policy and reaps the root's registrations — even a
         /// hook still recorded in a consented, flag-on workspace.
-        #[test]
-        fn c113_a_delete_with_an_unparseable_config_reaps_with_the_flag_off() {
+        #[tokio::test]
+        async fn c113_a_delete_with_an_unparseable_config_reaps_with_the_flag_off() {
             let (_ws, _home, ctx) = armed(&format!("[options.experimental]\nhooks = true\n\n{HOOK_DECL}"));
             crate::hook::consent::record(
                 &ctx.roots.grim_home,
@@ -16123,7 +16585,9 @@ mod tests {
             .unwrap();
             std::fs::write(&ctx.config_path, "[[[ not toml").unwrap();
             let row = installed_row("localhost:5050/grimoire/skills/other");
-            perform_uninstall(&ctx, &row).expect("delete converges on an unreadable config");
+            perform_uninstall(&ctx, &row)
+                .await
+                .expect("delete converges on an unreadable config");
             assert_reaped(&ctx);
             assert!(
                 load_state(&ctx)
@@ -18229,6 +18693,64 @@ mod tests {
 
             assert!(state.status_line.contains("failed"), "{}", state.status_line);
             assert_eq!(std::fs::read(&ctx.lock_path).unwrap(), before, "{}", state.status_line);
+        }
+
+        /// A delete relocks as `grim uninstall` does: a hand-declared package that
+        /// sets the key `team` sets makes the relock conflict, so the delete refuses
+        /// before any file or line goes, and names the in-place delete.
+        #[tokio::test]
+        async fn a_delete_refuses_a_settings_conflict_its_relock_finds() {
+            let project = Project::new(&config(true, true));
+            let keys = BTreeSet::from([
+                CONSENT_KEY.to_string(),
+                "settings:rival@localhost:5050/acme/rival".to_string(),
+            ]);
+            consent::record(
+                project.home.path(),
+                ConfigScope::Project,
+                project.workspace.path(),
+                &keys,
+            )
+            .unwrap();
+            let reg = MemoryRegistry::new();
+            publish(&reg, "acme/team", br#"{"description":"d","claude":{"model":"sonnet"}}"#).await;
+            publish(&reg, "acme/rival", br#"{"description":"d","claude":{"model":"opus"}}"#).await;
+            super::publish_skill(&reg, "s", "first").await;
+            let ctx = project.ctx(Arc::new(reg));
+            perform(
+                &ctx,
+                &super::skill_row("s"),
+                None,
+                BatchOp::Install,
+                &SilentProgress,
+                false,
+            )
+            .await
+            .expect("install s");
+            let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+            let rival = "rival = \"localhost:5050/acme/rival:1\"\n";
+            std::fs::write(
+                &ctx.config_path,
+                config.replace("[settings]\n", &format!("[settings]\n{rival}")),
+            )
+            .unwrap();
+            let before = (
+                std::fs::read(&ctx.config_path).unwrap(),
+                std::fs::read(&ctx.lock_path).unwrap(),
+            );
+
+            let error = perform_uninstall(&ctx, &installed_row("localhost:5050/acme/s"))
+                .await
+                .expect_err("team and rival set one key");
+
+            let lead = relock_lead(&error).expect("a refused relock leads the status line");
+            assert!(lead.contains("--no-relock"), "{lead}");
+            let after = (
+                std::fs::read(&ctx.config_path).unwrap(),
+                std::fs::read(&ctx.lock_path).unwrap(),
+            );
+            assert_eq!(after, before, "{error:#}");
+            assert!(ctx.workspace.join(".claude/skills/s/SKILL.md").is_file());
         }
 
         #[tokio::test]

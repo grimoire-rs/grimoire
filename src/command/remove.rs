@@ -3,23 +3,30 @@
 
 //! `grim remove <kind> <name>` — undeclare a skill/rule.
 //!
-//! Drops the entry from the discovered config's `[skills]`/`[rules]`
-//! table and from the lock (re-saved). Materialized files are
-//! **intentionally left on disk** this milestone — removing installed
-//! client files is deferred (a future `grim clean`); `remove` only
-//! affects the declaration and the lock so the change is reversible.
+//! Drops the entry from the discovered config's table and relocks as `grim
+//! lock` would, so the lock stays in line with the declaration; `--no-relock`
+//! edits the lock in place instead. Materialized files are **intentionally
+//! left on disk** — removing installed client files is `grim uninstall`'s job;
+//! `remove` only affects the declaration and the lock so the change is
+//! reversible.
 
 use clap::Args;
 
+use crate::api::add_report::{PinnedNode, dropped_note, moved_note};
 use crate::api::remove_report::{RemoveReport, RemoveStatus};
 use crate::cli::exit_code::ExitCode;
 use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::config::scope::Invocation;
 use crate::context::Context;
+use crate::lock::effective_set::NodeKey;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::oci::ArtifactKind;
+use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
+use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
+use crate::resolve::resolve_options::Downgrade;
+use crate::resolve::resolver::TargetLock;
 
 use super::add::{restore_config, snapshot_config, write_config};
 use super::scope_resolution;
@@ -36,6 +43,12 @@ pub struct RemoveArgs {
 
     /// The config binding name to remove.
     pub name: String,
+
+    /// Edit `grimoire.lock` in place instead of relocking it: no registry is
+    /// read, and a lock whose pins no longer match the declaration stays stale
+    /// until `grim lock`.
+    #[arg(long)]
+    pub no_relock: bool,
 }
 
 /// Run `grim remove`.
@@ -43,7 +56,9 @@ pub struct RemoveArgs {
 /// # Errors
 ///
 /// Config (78/79/74) or lock save (74) failures propagate via the typed
-/// error chain. An absent entry is reported, not an error.
+/// error chain, as does a relock that fails (69/78/79/80/81 and others), which
+/// leaves the config and the lock as they were. An absent entry is reported,
+/// not an error.
 pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveReport, ExitCode)> {
     // Derived from the enum, never a local arm list with a `_ => Rule`
     // catch-all — see the same fix in `command::uninstall::run` for the defect
@@ -86,9 +101,23 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
     }
     set.invalidate_declaration_hash_cache();
 
-    // Persist the edited config, then bring the lock to the post-edit
-    // effective state: drop what no other declaration holds, keep shared
-    // entries, restamp the hash only if the lock states a fact.
+    // The relock runs before any write, so a refusal leaves both files as they were.
+    let previous = load_for_edit(&scope.lock_path);
+    let relocked = match &previous {
+        Some(previous) if !args.no_relock => {
+            let access = super::access_seam(ctx)?;
+            let relocked =
+                super::lock::relock_edit(&scope, &set, Some(previous), &access, Downgrade::Refuse, ctx.offline())
+                    .await
+                    .map_err(|e| relock_refusal(e, kind, &args.name, &EditVerb::REMOVE, ""))?;
+            super::lock::refuse_settings_conflict(ctx, &scope, &relocked.lock, &access)
+                .await
+                .map_err(|e| skip_relock(e, &scope.invocation, kind, &args.name, &EditVerb::REMOVE, ""))?;
+            Some(relocked)
+        }
+        _ => None,
+    };
+
     let edit = ConfigEdit::write(
         &scope.config_path,
         &scope.options,
@@ -97,27 +126,37 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         &scope.invocation,
     )?;
 
-    if let Some(previous) = load_for_edit(&scope.lock_path) {
-        let target = super::uninstall::EditTarget {
-            config_path: &scope.config_path,
-            lock_path: &scope.lock_path,
-            grim: &scope.invocation,
-            store: ctx.paths(),
-        };
-        let stored = target.stored_members(&set, &previous);
-        let outcome = crate::lock::edit::drop_from_lock(
-            &previous,
-            kind,
-            &args.name,
-            &set_before,
-            &set,
-            &scope.invocation,
-            &stored,
-        );
-        edit.save_lock(&scope.lock_path, &outcome.lock, &previous)?;
-        for note in &outcome.notes {
-            tracing::warn!("{note}");
+    match (previous, relocked) {
+        (Some(previous), Some(relocked)) => {
+            edit.save_lock(&scope.lock_path, &relocked.lock, &previous)?;
+            super::lock::warn_moved_bundle_pins(Some(&previous), &relocked.lock);
+            warn_pin_changes(&scope.invocation, &relocked, |(k, n)| *k == kind && *n == args.name);
         }
+        // In place: drop what no other declaration holds, keep shared entries,
+        // and restamp the hash only if the lock states a fact.
+        (Some(previous), None) => {
+            let target = super::uninstall::EditTarget {
+                config_path: &scope.config_path,
+                lock_path: &scope.lock_path,
+                grim: &scope.invocation,
+                store: ctx.paths(),
+            };
+            let stored = target.stored_members(&set, &previous);
+            let outcome = crate::lock::edit::drop_from_lock(
+                &previous,
+                kind,
+                &args.name,
+                &set_before,
+                &set,
+                &scope.invocation,
+                &stored,
+            );
+            edit.save_lock(&scope.lock_path, &outcome.lock, &previous)?;
+            for note in &outcome.notes {
+                tracing::warn!("{note}");
+            }
+        }
+        (None, _) => {}
     }
 
     // C-155: `remove` is not a converging seam (it loads no install state), so
@@ -135,6 +174,86 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         RemoveReport::new(kind, args.name.clone(), RemoveStatus::Removed),
         ExitCode::Success,
     ))
+}
+
+/// The command an edit names in its refusal, and what its done form reads.
+pub(crate) struct EditVerb {
+    verb: &'static str,
+    done: &'static str,
+}
+
+impl EditVerb {
+    pub(crate) const REMOVE: Self = Self {
+        verb: "remove",
+        done: "removed",
+    };
+    pub(crate) const UNINSTALL: Self = Self {
+        verb: "uninstall",
+        done: "uninstalled",
+    };
+}
+
+/// The error of an edit whose relock failed, naming `edit` with `flags` (each
+/// ending in a space) again without the relock. A claim refusal carries that
+/// command in its fix; any other error gains it as context, its exit unchanged.
+pub(crate) fn relock_refusal(
+    err: ResolveError,
+    kind: ArtifactKind,
+    name: &str,
+    edit: &EditVerb,
+    flags: &str,
+) -> anyhow::Error {
+    let grim = err.grim.clone();
+    let skip = grim.binding(edit.verb, &format!("--no-relock {flags}"), kind, name);
+    let command = RemedyCommand::Edit {
+        kind,
+        name: name.to_string(),
+        rerun: grim.binding(edit.verb, flags, kind, name),
+        skip: skip.clone(),
+    };
+    let err = with_remedy(err, &command);
+    let names_skip = matches!(
+        err.kind,
+        ResolveErrorKind::UnchosenRequirement { .. } | ResolveErrorKind::MajorDowngrade { .. }
+    );
+    // Typed, so the exit code survives the context.
+    let err = anyhow::Error::from(crate::error::Error::from(err));
+    if names_skip {
+        return err;
+    }
+    skip_relock(err, &grim, kind, name, edit, flags)
+}
+
+/// `err` with the context that names `edit` again with `flags` (each ending in a
+/// space) and `--no-relock`, which goes through and leaves the lock stale.
+pub(crate) fn skip_relock(
+    err: anyhow::Error,
+    grim: &Invocation,
+    kind: ArtifactKind,
+    name: &str,
+    edit: &EditVerb,
+    flags: &str,
+) -> anyhow::Error {
+    let skip = grim.binding(edit.verb, &format!("--no-relock {flags}"), kind, name);
+    err.context(format!(
+        "nothing was {done} because the lock could not be brought in line; `{skip}` {verb}s it anyway and leaves \
+         the lock stale until `{grim} lock`",
+        done = edit.done,
+        verb = edit.verb,
+    ))
+}
+
+/// Warn of the pins `relocked` moved and of those it dropped that `edited` does
+/// not name: the edit's report has no row for either.
+pub(crate) fn warn_pin_changes(grim: &Invocation, relocked: &TargetLock, edited: impl Fn(&NodeKey) -> bool) {
+    let moved = super::add::moved_pins(relocked);
+    let dropped: Vec<PinnedNode> = super::add::dropped_pins(relocked)
+        .into_iter()
+        .filter(|pin| !edited(&(pin.kind, pin.name.clone())))
+        .collect();
+    for note in moved_note(&moved).into_iter().chain(dropped_note(grim, &dropped)) {
+        tracing::warn!("{note}");
+    }
 }
 
 /// The lock a declaration edit brings along, `None` when there is none to
@@ -203,7 +322,11 @@ impl<'a> ConfigEdit<'a> {
         lock: &GrimoireLock,
         previous: &GrimoireLock,
     ) -> anyhow::Result<()> {
-        let saved = super::grim(lock_io::save(lock_path, lock, Some(previous)));
+        // A relocked lock carries the time of its resolve. Saving that time would change
+        // the `generated_at` this edit has always written: the previous one plus a second.
+        let mut edited = lock.clone();
+        edited.metadata.generated_at = previous.metadata.generated_at.clone();
+        let saved = super::grim(lock_io::save(lock_path, &edited, Some(previous)));
         if saved.is_err() {
             self.roll_back();
         }
@@ -286,6 +409,26 @@ mod tests {
         set
     }
 
+    /// A relocked lock arrives stamped with the time of its resolve. The edit
+    /// saves it one second after the lock it replaces, as the in-place edit does.
+    #[test]
+    fn a_relocked_lock_is_saved_one_second_after_the_lock_it_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("grimoire.toml");
+        let lock_path = dir.path().join("grimoire.lock");
+        std::fs::write(&config, "[skills]\nalpha = \"localhost:5000/alpha:1\"\n").unwrap();
+        let previous = lock_of(vec![locked("alpha"), locked("beta")]);
+        let mut relocked = lock_of(vec![locked("alpha")]);
+        relocked.metadata.generated_at = "2026-11-15T12:00:00Z".to_string();
+
+        let options = ConfigOptions::default();
+        let edit = ConfigEdit::write(&config, &options, &[], &set_of(&[], &[]), &Invocation::WALKED).unwrap();
+        edit.save_lock(&lock_path, &relocked, &previous).unwrap();
+
+        let saved = lock_io::load(&lock_path).unwrap();
+        assert_eq!(saved.metadata.generated_at, "2026-01-01T00:00:01Z");
+    }
+
     #[test]
     fn an_edit_nothing_else_touched_rolls_back_and_a_changed_file_stays() {
         let dir = tempfile::tempdir().unwrap();
@@ -334,6 +477,7 @@ mod tests {
         RemoveArgs {
             kind: "skill".to_string(),
             name: "alpha".to_string(),
+            no_relock: false,
         }
     }
 
@@ -448,6 +592,114 @@ mod tests {
 
         assert_eq!(out.expect("no lock is not an error").1, ExitCode::Success);
         assert!(logs.is_empty(), "{logs}");
+    }
+
+    // ── A relock that fails ──────────────────────────────────────────────
+
+    fn refusal(kind: crate::resolve::resolve_error::ResolveErrorKind, name: &str) -> ResolveError {
+        let id = Identifier::parse("ghcr.io/acme/x:2").unwrap();
+        let reference = crate::oci::reference::ArtifactRef::registry(ArtifactKind::Skill, name, id);
+        ResolveError::new(reference, kind).naming(&Invocation::GLOBAL)
+    }
+
+    #[test]
+    fn a_refusal_without_a_fix_names_the_edit_without_the_relock_and_keeps_its_exit() {
+        let conflict = ResolveErrorKind::BundleConflict {
+            kind: ArtifactKind::Skill,
+            name: "x".to_string(),
+            sources: "acme/x:1, acme/x:2".to_string(),
+            others: String::new(),
+            locations: vec!["ghcr.io/acme/x".to_string()],
+            from_bundles: false,
+        };
+
+        let err = relock_refusal(
+            refusal(conflict, "x"),
+            ArtifactKind::Skill,
+            "x",
+            &EditVerb::UNINSTALL,
+            "--force ",
+        );
+
+        assert_eq!(crate::error::classify(&err).exit, ExitCode::ConfigError);
+        let printed = crate::error::printed_chain(&err);
+        assert!(
+            printed.starts_with(
+                "nothing was uninstalled because the lock could not be brought in line; `grim --global uninstall \
+                 --no-relock --force skill x` uninstalls it anyway and leaves the lock stale until `grim --global \
+                 lock`: "
+            ),
+            "{printed}"
+        );
+    }
+
+    /// A claim refusal's fix already names the command, so no context repeats it.
+    #[test]
+    fn a_downgrade_of_the_removed_node_names_the_flag_then_the_lock_flag() {
+        let downgrade = ResolveErrorKind::MajorDowngrade {
+            from: "3.1.0".to_string(),
+            to: "2.6.0".to_string(),
+            requesters: "skill/a".to_string(),
+            claim: "2".to_string(),
+            declare: "ghcr.io/acme/x:3.1.0".to_string(),
+            fix: String::new(),
+        };
+
+        let err = relock_refusal(
+            refusal(downgrade, "-x"),
+            ArtifactKind::Skill,
+            "-x",
+            &EditVerb::REMOVE,
+            "",
+        );
+
+        let classified = crate::error::classify(&err);
+        assert_eq!(classified.exit, ExitCode::ConfigError);
+        assert!(classified.reason.is_some());
+        let printed = crate::error::printed_chain(&err);
+        assert!(!printed.contains("nothing was removed"), "{printed}");
+        let skip = if cfg!(windows) {
+            "grim --global remove --no-relock <kind> <name>"
+        } else {
+            "grim --global remove --no-relock skill -- -x"
+        };
+        assert!(
+            printed.contains(&format!(
+                "run `{skip}`, then `grim --global lock --allow-downgrade` to take 2.6.0"
+            )),
+            "{printed}"
+        );
+    }
+
+    /// Each printed command reads back as the edit it names, a name with a
+    /// leading dash included.
+    #[test]
+    fn the_printed_commands_parse_with_a_leading_dash_name() {
+        use clap::Parser as _;
+
+        let remove = Invocation::WALKED.binding("remove", "--no-relock ", ArtifactKind::Skill, "-x");
+        let uninstall = Invocation::WALKED.binding("uninstall", "--no-relock --force ", ArtifactKind::Skill, "-x");
+        if cfg!(windows) {
+            assert!(remove.contains("<name>") && uninstall.contains("<name>"));
+            return;
+        }
+        let argv = |command: &str| command.split(' ').map(str::to_string).collect::<Vec<_>>();
+        match crate::Cli::try_parse_from(argv(&remove)).expect("parses").command {
+            Some(crate::Command::Remove(args)) => {
+                assert_eq!(
+                    (args.kind.as_str(), args.name.as_str(), args.no_relock),
+                    ("skill", "-x", true)
+                );
+            }
+            _ => panic!("{remove} is not a remove"),
+        }
+        match crate::Cli::try_parse_from(argv(&uninstall)).expect("parses").command {
+            Some(crate::Command::Uninstall(args)) => {
+                assert_eq!(args.name, "-x");
+                assert!(args.no_relock && args.force);
+            }
+            _ => panic!("{uninstall} is not an uninstall"),
+        }
     }
 
     /// Every string the `<kind>` positional accepts must resolve to the kind it

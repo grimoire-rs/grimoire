@@ -80,7 +80,10 @@ def test_status_check_answers_null_where_a_keys_references_name_different_digest
 ) -> None:
     """`x = x:2` held off a parent's `x:1`. After `remove skill x`, `grim lock`
     keeps x:2's digest and no tag moves, while `grim update` meets two digests and
-    exits 78. The answer is null in every parent order, and the note says why."""
+    exits 78. The answer is null in every parent order, and the note says why.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     # Literal tags on `requires` edges: numeric ones claim two majors of `x`, which
     # `grim lock` refuses once the direct line is gone.
     low, high = ("v1", "v2") if shape == "requires" else ("1", "2")
@@ -107,7 +110,7 @@ def test_status_check_answers_null_where_a_keys_references_name_different_digest
     runner = grim_at(project_dir)
     runner.run("lock")
     runner.run("install")
-    runner.run("remove", "skill", "x")
+    runner.run("remove", "--no-relock", "skill", "x")
     runner.run("lock")
     scope = ("--registry", f"{REGISTRY_HOST}/{unique_repo}")
 
@@ -141,7 +144,10 @@ def test_status_check_answers_a_range_claimed_row_by_its_lines_target_tag(
     holds the pin until `remove skill x`. One major is one line, read through its
     float `1`: once 1.3.0 ships the row reads `true` with no split note, and
     `grim update` takes 1.3.0. Two majors satisfy no line, so the row reads null
-    with the split note, and `grim lock` and `grim update` exit 78."""
+    with the split note, and `grim lock` and `grim update` exit 78.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     repo = f"{unique_repo}/x"
     files = {"x/SKILL.md": "---\nname: x\ndescription: d\n---\n# x\n"}
     for version in ("1.0.0", release):
@@ -160,7 +166,7 @@ def test_status_check_answers_a_range_claimed_row_by_its_lines_target_tag(
     write_config(project_dir, skills={"x": high_claim, **parents})
     runner = grim_at(project_dir)
     runner.run("lock")
-    runner.run("remove", "skill", "x")
+    runner.run("remove", "--no-relock", "skill", "x")
     assert runner.run("lock", check=False).returncode == exit_code
     shipped = publish_release(repo, "1.3.0", files)
     scope = ("--registry", f"{REGISTRY_HOST}/{unique_repo}")

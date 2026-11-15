@@ -93,6 +93,28 @@ impl Invocation {
             None => format!("{self} remove <kind> <name>"),
         }
     }
+
+    /// `verb` on one binding, with `flags` (each ending in a space) before its
+    /// kind and a `--` before a name with a leading dash, or the `<kind> <name>`
+    /// form where no shell word names it.
+    pub fn binding(&self, verb: &str, flags: &str, kind: impl std::fmt::Display, name: &str) -> String {
+        self.binding_for(verb, flags, kind, name, ShellFamily::HOST)
+    }
+
+    fn binding_for(
+        &self,
+        verb: &str,
+        flags: &str,
+        kind: impl std::fmt::Display,
+        name: &str,
+        family: ShellFamily,
+    ) -> String {
+        match name_word(name, family) {
+            Some(word) if name.starts_with('-') => format!("{self} {verb} {flags}{kind} -- {word}"),
+            Some(word) => format!("{self} {verb} {flags}{kind} {word}"),
+            None => format!("{self} {verb} {flags}<kind> <name>"),
+        }
+    }
 }
 
 impl std::fmt::Display for Invocation {
@@ -428,6 +450,29 @@ mod tests {
         assert_eq!(
             Invocation::WALKED.uninstall("--force ", "mcp", "x y"),
             "grim uninstall --force mcp 'x y'"
+        );
+    }
+
+    /// A binding command keeps a leading-dash name positional with `--`, which
+    /// PowerShell may drop, so Windows gets the generic form instead.
+    #[test]
+    fn a_binding_command_puts_a_dash_name_after_the_separator() {
+        let walked = Invocation::WALKED;
+        assert_eq!(
+            walked.binding_for("remove", "--no-relock ", "skill", "x", ShellFamily::Posix),
+            "grim remove --no-relock skill x"
+        );
+        assert_eq!(
+            walked.binding_for("uninstall", "--no-relock --force ", "skill", "-x", ShellFamily::Posix),
+            "grim uninstall --no-relock --force skill -- -x"
+        );
+        assert_eq!(
+            walked.binding_for("remove", "--no-relock ", "skill", "-x", ShellFamily::Windows),
+            "grim remove --no-relock <kind> <name>"
+        );
+        assert_eq!(
+            Invocation::GLOBAL.binding_for("remove", "", "mcp", "x y", ShellFamily::Posix),
+            "grim --global remove mcp 'x y'"
         );
     }
 

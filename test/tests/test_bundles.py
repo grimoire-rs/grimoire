@@ -479,6 +479,8 @@ def test_remove_direct_keeps_artifact_held_by_bundle(
 def test_remove_direct_with_bundle_id_mismatch_goes_stale(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
+    """Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     # The bundle names the artifact at a DIFFERENT identifier than the
     # direct declaration. While the direct pin wins, the bundle's variant
     # is never resolved — removing the direct declaration cannot produce
@@ -510,7 +512,7 @@ def test_remove_direct_with_bundle_id_mismatch_goes_stale(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    result = runner.run("remove", "skill", "code-review")
+    result = runner.run("remove", "--no-relock", "skill", "code-review")
     assert "lock" in (result.stderr or "").lower(), "the user is told to re-resolve"
 
     # The lock is honestly stale: status surfaces it instead of reporting a
@@ -530,6 +532,8 @@ def test_remove_direct_with_bundle_id_mismatch_goes_stale(
 def test_remove_standalone_skill_held_by_bundle_at_floating_tag_marks_stale_not_lost(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
+    """Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     # Real-world repro: a skill is declared standalone at floating tag
     # :latest and a declared bundle pins the same skill at a different
     # floating tag :0. While the direct declaration wins, the bundle member
@@ -575,7 +579,7 @@ def test_remove_standalone_skill_held_by_bundle_at_floating_tag_marks_stale_not_
     assert before["source"] == "direct", "standalone wins while declared at :latest"
 
     # Step 4: remove the standalone declaration.
-    result = runner.run("remove", "skill", "grim-authoring")
+    result = runner.run("remove", "--no-relock", "skill", "grim-authoring")
 
     # Step 5: the stderr note must be explanatory — names the bundle, says
     # "stale" and "grim lock" — not a dead-end error phrase.
@@ -657,6 +661,8 @@ def test_uninstall_standalone_skill_held_by_bundle_keeps_files(
 def test_uninstall_standalone_skill_held_by_bundle_at_other_tag_keeps_files(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
+    """Covers the in-place edit under `--no-relock`; plain `uninstall` is
+    covered by `test_remove_relock.py`."""
     # The harder real-world repro: the standalone is declared at :latest and
     # the bundle pins the SAME skill at a different floating tag :0 (an id
     # mismatch). `grim uninstall` of the standalone must STILL keep the files
@@ -691,7 +697,7 @@ def test_uninstall_standalone_skill_held_by_bundle_at_other_tag_keeps_files(
     runner.run("install")
     assert_dir_exists(project_dir / ".claude" / "skills" / "grim-authoring")
 
-    runner.run("uninstall", "skill", "grim-authoring")
+    runner.run("uninstall", "--no-relock", "skill", "grim-authoring")
 
     # Files survive despite the id mismatch — the bundle still holds it.
     assert_dir_exists(project_dir / ".claude" / "skills" / "grim-authoring")

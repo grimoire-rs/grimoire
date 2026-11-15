@@ -120,6 +120,8 @@ def test_remove_drops_orphans(
 def test_remove_offline_incomputable_keeps_files(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
+    """Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     # a -> b (b's entry is lost below); keep -> c.
     _leaf(unique_repo, "b")
     _leaf(unique_repo, "c")
@@ -136,7 +138,7 @@ def test_remove_offline_incomputable_keeps_files(
     untouched = {name: _entry_block(project_dir, name) for name in ("a", "c", "keep")}
     files_before = _tree(project_dir / ".claude")
 
-    result = runner.run("--format", "json", "remove", "skill", "keep")
+    result = runner.run("--format", "json", "remove", "--no-relock", "skill", "keep")
 
     assert result.returncode == 0, result.stderr
     assert '"status": "removed"' in result.stdout

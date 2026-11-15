@@ -355,13 +355,16 @@ def test_remove_of_a_direct_key_keeps_a_pin_both_edges_agree_on(
     changes no row, so the hash stays the one those rows were written for. The
     pin names the edge at `:v2`, so it answers every recorded edge, and it stays
     where it was though both tags moved.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`.
     """
     runner, target = _direct_over_two_tags(grim_at, project_dir, unique_repo)
     moved = _move_tag(unique_repo, "target", tag="v2", body="v2")
     retag(f"{unique_repo}/target", "v1", moved.digest)
     proof = _lock(project_dir)["metadata"]["declaration_hash"]
 
-    removed = runner.run("remove", "skill", "target")
+    removed = runner.run("remove", "--no-relock", "skill", "target")
     assert _lock(project_dir)["metadata"]["declaration_hash"] == proof
     assert "run `grim lock`" in removed.stderr
     runner.run("lock")
@@ -393,11 +396,14 @@ def _direct_over_a_conflict(
 def test_two_removes_write_no_false_pair(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """Two plain removes wrote `x:2` beside the digest of `x:1`."""
+    """Two plain removes wrote `x:2` beside the digest of `x:1`.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     runner, one, two = _direct_over_a_conflict(grim_at, project_dir, unique_repo)
 
-    runner.run("remove", "skill", "x")
-    runner.run("remove", "skill", "p")
+    runner.run("remove", "--no-relock", "skill", "x")
+    runner.run("remove", "--no-relock", "skill", "p")
 
     assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:1@{one.digest}"
     runner.run("lock")
@@ -411,11 +417,14 @@ def test_remove_of_a_direct_key_over_a_conflict_keeps_the_pin(
 
     The pin names the edge `p` recorded, so on the stale hash it answers every
     recorded edge, offline as online. The owner accepted this exit-0 case.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`.
     """
     runner, one, _ = _direct_over_a_conflict(
         grim_at, project_dir, unique_repo, tags=("v1", "v2")
     )
-    removed = runner.run("remove", "skill", "x")
+    removed = runner.run("remove", "--no-relock", "skill", "x")
     kept = f"{REGISTRY_HOST}/{unique_repo}/x:v1@{one.digest}"
     assert _pins(project_dir)["x"] == kept
 
@@ -437,9 +446,12 @@ def test_remove_of_a_direct_key_over_a_numeric_two_major_conflict_exits_78(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """Numeric tags make `p`'s `x:1` and `q`'s `x:2` claims in two majors, which no
-    pin settles, so once the remove drops the declaration `grim lock` exits 78."""
+    pin settles, so once the remove drops the declaration `grim lock` exits 78.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     runner, one, _ = _direct_over_a_conflict(grim_at, project_dir, unique_repo)
-    runner.run("remove", "skill", "x")
+    runner.run("remove", "--no-relock", "skill", "x")
     lock = project_dir / "grimoire.lock"
     before = lock.read_bytes()
 
@@ -458,6 +470,9 @@ def test_a_global_remove_note_names_the_global_commands(
 
     Found by review: the note named plain `grim lock` and `grim update -- x`,
     which act on the project in the working directory, not the global lock.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`.
     """
     one = _skill(unique_repo, "x", tag="1", body="ONE")
     make_artifact(f"{unique_repo}/x", "skill", _files("x", "TWO"), tag="2")
@@ -468,7 +483,7 @@ def test_a_global_remove_note_names_the_global_commands(
     runner = grim_at(project_dir)
     runner.run("--global", "lock")
 
-    removed = runner.run("--global", "remove", "skill", "x")
+    removed = runner.run("--global", "remove", "--no-relock", "skill", "x")
 
     assert "run `grim --global lock`, which keeps the pin" in removed.stderr, removed.stderr
     assert "then `grim --global update -- x`" in removed.stderr, removed.stderr
@@ -562,6 +577,9 @@ def test_remove_of_an_overriding_bundle_leaves_the_lock_stale(
 
     `outer` nests `inner:1`, the direct `inner:2` overrode it. Offline, nothing
     says what `inner:1` holds, so the lock stays stale until `grim lock` reads it.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`.
     """
     old_member = _skill(unique_repo, "old-member")
     new_member = _skill(unique_repo, "new-member")
@@ -573,7 +591,7 @@ def test_remove_of_an_overriding_bundle_leaves_the_lock_stale(
     runner = grim_at(project_dir)
     runner.run("lock")
 
-    removed = runner.run("remove", "bundle", "inner")
+    removed = runner.run("remove", "--no-relock", "bundle", "inner")
     assert "grim lock" in removed.stderr, removed.stderr
 
     refused = runner.run("install", check=False)
@@ -1296,7 +1314,10 @@ def test_offline_lock_takes_a_carried_bundle_from_its_row(
 def test_remove_on_a_stale_lock_keeps_it_stale(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """S-037: `grim remove` must not launder a hand edit into a fresh-looking lock."""
+    """S-037: `grim remove` must not launder a hand edit into a fresh-looking lock.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     edited = _skill(unique_repo, "edited")
     target = _skill(unique_repo, "edited", tag="2", body="v2")
     other = _skill(unique_repo, "other")
@@ -1305,7 +1326,7 @@ def test_remove_on_a_stale_lock_keeps_it_stale(
     runner.run("lock")
     write_config(project_dir, skills={"edited": target.fq, "other": other.fq})
 
-    runner.run("remove", "skill", "other")
+    runner.run("remove", "--no-relock", "skill", "other")
 
     refused = runner.run("install", check=False)
     assert refused.returncode == 65, f"a stale lock must refuse: {refused.stderr}"
@@ -1324,6 +1345,9 @@ def _edit_then_hand_undo(
     """Lock, run one edit that changes a row, restore `grimoire.toml` by hand.
 
     Returns the runner and the skill whose row the edit took.
+
+    Covers the in-place edit under `--no-relock`; the plain edits are
+    covered by `test_remove_relock.py`.
     """
     runner = grim_at(project_dir)
     config = project_dir / "grimoire.toml"
@@ -1334,7 +1358,7 @@ def _edit_then_hand_undo(
         write_config(project_dir, skills={"x": x.fq, "q": q.fq})
         runner.run("lock")
         saved = config.read_text(encoding="utf-8")
-        runner.run("remove", "skill", "x")
+        runner.run("remove", "--no-relock", "skill", "x")
         taken = "x"
     elif shape == "stale-bundle":
         # A lock with no member lists takes the offline path that evicts a removed
@@ -1348,7 +1372,7 @@ def _edit_then_hand_undo(
         saved = config.read_text(encoding="utf-8")
         _drop_bundle_rows(project_dir)
         write_config(project_dir, skills={"b": b2.fq}, bundles={"pk": pk1.fq})
-        runner.run("remove", "bundle", "pk")
+        runner.run("remove", "--no-relock", "bundle", "pk")
         taken = "m"
     else:
         a1 = _skill(unique_repo, "a", tag="1")
@@ -1359,7 +1383,7 @@ def _edit_then_hand_undo(
         saved = config.read_text(encoding="utf-8")
         write_config(project_dir, skills={"a": a2.fq, "y": y.fq})
         verb = "uninstall" if shape == "stale-uninstall" else "remove"
-        runner.run(verb, "skill", "y")
+        runner.run(verb, "--no-relock", "skill", "y")
         taken = "y"
     assert taken not in _pins(project_dir), "the fixture takes a row"
     config.write_text(saved, encoding="utf-8", newline="\n")
@@ -1547,13 +1571,16 @@ def test_a_cold_store_edit_beside_a_bundle_with_no_member_list_exits_install_0(
     Found by review: the row stayed and `grim install` exited 65, a frozen
     exit code changed for an artifact the bundle does not provide. A note names
     the bundle and what the drop costs if it does provide the artifact.
+
+    Covers the in-place edit under `--no-relock`; the plain edits are
+    covered by `test_remove_relock.py`.
     """
     _beside_a_pack_with_no_member_list(project_dir, unique_repo, declared=("y",))
     grim_at(project_dir).run("lock")
     _drop_bundle_rows(project_dir)
     runner = _cold_runner(grim_binary, tmp_path, project_dir)
 
-    edit = runner.run(verb, "skill", "y")
+    edit = runner.run(verb, "--no-relock", "skill", "y")
 
     assert "bundle 'pack' has no member list" in edit.stderr, edit.stderr
     assert "resolves it afresh" in edit.stderr, edit.stderr
@@ -1574,6 +1601,9 @@ def test_a_cold_store_bundle_remove_evicts_a_member_as_0_15_1_does(
 
     Found by review: `m` stayed for a `grim lock` because `bz` might provide it,
     and `grim install` exited 65 where 0.15.1 exits 0. A note names `bz`.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`.
     """
     m, z = _skill(unique_repo, "m"), _skill(unique_repo, "z")
     ba = make_bundle(f"{unique_repo}/ba", [("skill", "m", m.fq)], tag="1")
@@ -1583,7 +1613,7 @@ def test_a_cold_store_bundle_remove_evicts_a_member_as_0_15_1_does(
     _drop_bundle_rows(project_dir)
     runner = _cold_runner(grim_binary, tmp_path, project_dir)
 
-    edit = runner.run("remove", "bundle", "ba")
+    edit = runner.run("remove", "--no-relock", "bundle", "ba")
 
     assert "bundle 'bz' has no member list" in edit.stderr, edit.stderr
     assert set(_pins(project_dir)) == {"z"}
@@ -1599,6 +1629,9 @@ def test_a_remove_keeps_the_pin_a_line_typed_since_the_lock_may_require(
     Found by review: on a lock with no dependency data the remove read `p` as
     requiring nothing, so it dropped `m`, and the next `grim lock` moved `m`'s
     pin. The row stays and the lock stays stale, as `grim install` found it.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`.
     """
     m = _skill(unique_repo, "m")
     p = _dependent(unique_repo, "p", [("skill", "m", m.fq)])
@@ -1608,7 +1641,7 @@ def test_a_remove_keeps_the_pin_a_line_typed_since_the_lock_may_require(
     pin = _pins(project_dir)["m"]
     write_config(project_dir, skills={"m": m.fq, "p": p.fq})
 
-    edit = runner.run("remove", "skill", "m")
+    edit = runner.run("remove", "--no-relock", "skill", "m")
 
     assert "skill 'p'" in edit.stderr, edit.stderr
     assert runner.run("install", check=False).returncode == 65
@@ -1658,6 +1691,9 @@ def test_an_edit_ending_the_proof_stamps_a_pre_change_lock(
 
     Found by review: `y` has no tag and a moved one, so with the proof gone
     `grim lock` moved a pin the source says stays.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`.
     """
     bystander = _skill(unique_repo, "y", tag="1")
     # Literal tags: numeric ones in two majors on `x` exit 78 once `x` leaves.
@@ -1673,7 +1709,7 @@ def test_an_edit_ending_the_proof_stamps_a_pre_change_lock(
     _move_tag(unique_repo, "y")
     proof = _lock(project_dir)["metadata"]["declaration_hash"]
 
-    runner.run("remove", "skill", "x")
+    runner.run("remove", "--no-relock", "skill", "x")
 
     assert _lock(project_dir)["metadata"]["declaration_hash"] not in ("", proof)
     relocked = runner.run("lock", check=False)
@@ -1685,7 +1721,10 @@ def test_an_edit_ending_the_proof_stamps_a_pre_change_lock(
 def test_stale_hash_pre_change_lock(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """An edit that leaves the hash stale ends the proof the same way, and stamps too."""
+    """An edit that leaves the hash stale ends the proof the same way, and stamps too.
+
+    Covers the in-place edit under `--no-relock`; plain `remove` is
+    covered by `test_remove_relock.py`."""
     bystander = _skill(unique_repo, "y", tag="1")
     declared = _skill(unique_repo, "x", tag="1", body="one")
     required = _skill(unique_repo, "x", tag="2", body="two")
@@ -1696,7 +1735,7 @@ def test_stale_hash_pre_change_lock(
     _rewrite_as_pre_change(project_dir)
     _move_tag(unique_repo, "y")
 
-    runner.run("remove", "skill", "x")
+    runner.run("remove", "--no-relock", "skill", "x")
 
     assert _lock(project_dir)["metadata"]["declaration_hash"] != ""
     assert "x" not in _pins(project_dir)

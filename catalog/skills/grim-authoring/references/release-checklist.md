@@ -114,7 +114,7 @@ for everyone already on them. Full rules: [Batch publishing][batch-publish].
 - **Cascade tags.** Releasing `1.2.3` also moves the floating tags
   `1`, `1.2`, and `latest` to the new digest — that is how consumers
   tracking `:1` pick up your patch on `grim update`. Implication: a
-  cascade never moves a floating tag to a lower version: a `2.3.7` backport
+  cascade never moves a floating tag off a higher release: a `2.3.7` backport
   released after `2.9.0` moves `2.3` and leaves `2` and `latest` on `2.9.0`
   (reported in `floats_kept`). A
   release is immediately visible to every floating consumer; do not

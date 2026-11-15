@@ -346,7 +346,7 @@ def _declaration_hash(project_dir: Path) -> str:
 def test_old_grim_reads_a_lock_a_current_remove_left_stale_as_stale(
     old: GrimRunner, current: GrimRunner, project_dir: Path, unique_repo: str
 ) -> None:
-    """A `grim remove` on a stale lock writes a hash no declaration produces.
+    """A `grim remove --no-relock` on a stale lock writes a hash no declaration produces.
 
     `a` moves from `:1` to `:2` by hand, so the lock is stale, and the remove of
     `c` changes its rows. The hash it writes keeps the `sha256:<hex>` form, so
@@ -368,7 +368,7 @@ def test_old_grim_reads_a_lock_a_current_remove_left_stale_as_stale(
     proven = _declaration_hash(project_dir)
 
     write_config(project_dir, skills={"a": a2.fq, "c": c.fq, "o": o.fq})
-    current.run("remove", "skill", "c")
+    current.run("remove", "--no-relock", "skill", "c")
 
     edited = _declaration_hash(project_dir)
     assert edited.startswith("sha256:") and len(edited) == len(proven), edited
@@ -438,9 +438,9 @@ def test_old_grim_refuses_the_conflict_a_current_remove_left_stale(
 ) -> None:
     """The remove of a direct line that held a version conflict off.
 
-    The current grim keeps `x`'s row and leaves the lock stale under a hash of
-    its own. 0.15.1 reads that lock as stale and its `grim lock` exits 78 on
-    the conflict, as a fresh resolve does.
+    The current grim's `--no-relock` edit keeps `x`'s row and leaves the lock
+    stale under a hash of its own. 0.15.1 reads that lock as stale and its
+    `grim lock` exits 78 on the conflict, as a fresh resolve does.
     """
     base = f"{REGISTRY_HOST}/{unique_repo}"
     x1 = _skill(unique_repo, "x", "one")
@@ -457,7 +457,7 @@ def test_old_grim_refuses_the_conflict_a_current_remove_left_stale(
     current.run("install")
     proven = _declaration_hash(project_dir)
 
-    current.run("remove", "skill", "x")
+    current.run("remove", "--no-relock", "skill", "x")
 
     edited = _declaration_hash(project_dir)
     assert edited.startswith("sha256:") and edited != proven, edited
@@ -583,7 +583,7 @@ def test_an_edit_beside_a_stored_requires_layer_drops_what_old_grim_drops(
     """0.15.1 adds `p` with no edge, and another project stores `p`'s requires layer.
 
     Both binaries share one `GRIM_HOME`, as on one machine. Each edits its own copy
-    and drops `m`, as 0.15.1 reads `p`, and the current edit names `p`.
+    and drops `m`, as 0.15.1 reads `p`, and the current `--no-relock` edit names `p`.
     Found by review: kept for `p`, the stale lock changed `grim install --offline`
     and offline `grim update` exits against 0.15.1. The next `grim
     lock` resolves `m` afresh and its pin moves, the recorded cost.
@@ -597,13 +597,14 @@ def test_an_edit_beside_a_stored_requires_layer_drops_what_old_grim_drops(
         "add", "--no-install", "--name", "p", p
     )
 
-    def edited(binary: Path, name: str) -> tuple[Path, Path, str]:
+    def edited(binary: Path, name: str, *flags: str) -> tuple[Path, Path, str]:
         project = shutil.copytree(project_dir, tmp_path / name / "project")
         home = shutil.copytree(current.grim_home, tmp_path / name / "grim-home")
-        return project, home, GrimRunner(binary, home, cwd=project).run(*args).stderr
+        run = GrimRunner(binary, home, cwd=project).run(args[0], *flags, *args[1:])
+        return project, home, run.stderr
 
     own, own_home, _ = edited(old_bin, "old")
-    project, home, stderr = edited(current.binary, "current")
+    project, home, stderr = edited(current.binary, "current", "--no-relock")
 
     by_old = _exits_on_copies(old_bin, own, own_home, tmp_path / "old")
     assert by_old == [0, 65, 81]
@@ -635,9 +636,9 @@ def test_an_edit_past_a_requires_layer_the_store_lacks_exits_as_old_grim_does(
     `grim fetch` stores `p`'s content and no requires layer either. Each binary edits
     its own copy of the project and the shared home and drops `m`, as 0.15.1 reads
     `p`. Found by review: the current edit kept `m` and left the lock stale, so
-    `grim install --offline` exited 65 where 0.15.1 exits 81. The edit
-    names `p`, whose manifest the store holds. The next `grim lock` resolves `m`
-    afresh and its pin moves, the recorded cost.
+    `grim install --offline` exited 65 where 0.15.1 exits 81. The current
+    `--no-relock` edit names `p`, whose manifest the store holds. The next `grim lock`
+    resolves `m` afresh and its pin moves, the recorded cost.
     """
     m, args = _edit_beside_p(
         "remove" if edit == "fetched" else edit,
@@ -649,13 +650,14 @@ def test_an_edit_past_a_requires_layer_the_store_lacks_exits_as_old_grim_does(
     if edit == "fetched":
         current.run("fetch", f"{REGISTRY_HOST}/{unique_repo}/p:1")
 
-    def edited(binary: Path, name: str) -> tuple[Path, Path, str]:
+    def edited(binary: Path, name: str, *flags: str) -> tuple[Path, Path, str]:
         project = shutil.copytree(project_dir, tmp_path / name / "project")
         home = shutil.copytree(current.grim_home, tmp_path / name / "grim-home")
-        return project, home, GrimRunner(binary, home, cwd=project).run(*args).stderr
+        run = GrimRunner(binary, home, cwd=project).run(args[0], *flags, *args[1:])
+        return project, home, run.stderr
 
     own, own_home, _ = edited(old_bin, "old")
-    project, home, stderr = edited(current.binary, "current")
+    project, home, stderr = edited(current.binary, "current", "--no-relock")
 
     by_old = _exits_on_copies(old_bin, own, own_home, tmp_path / "old")
     assert by_old == [0, 65, 81]
