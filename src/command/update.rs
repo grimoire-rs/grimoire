@@ -3077,7 +3077,8 @@ mod tests {
         assert!(!logs.contains("rule 'gone'"), "{logs}");
     }
 
-    /// Two rules with a support directory each, installed for `client`.
+    /// Two registry rules published in the pre-0.16 layout, each with a support
+    /// directory, installed for `client`.
     async fn support_dir_rules(
         client: &str,
     ) -> (
@@ -3086,15 +3087,44 @@ mod tests {
         Context,
         scope_resolution::ResolvedScope,
     ) {
-        let config = format!(
-            "[options]\nclients = [\"{client}\"]\n\n[rules]\ncarrier = \"./carrier.md\"\nguide = \"./guide.md\"\n"
-        );
-        let (ws, home, ctx, scope) = hook_workspace(&config);
+        use super::super::lock::test_registry::REGISTRY;
+        use crate::oci::access::OciAccess;
+        use crate::oci::manifest::{Descriptor, OciManifest};
+
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let src = tempfile::tempdir().unwrap();
         for rule in ["carrier", "guide"] {
-            std::fs::write(scope.workspace.join(format!("{rule}.md")), "# rule\n").unwrap();
-            std::fs::create_dir_all(scope.workspace.join(rule)).unwrap();
-            std::fs::write(scope.workspace.join(rule).join("depth.md"), "# depth\n").unwrap();
+            std::fs::write(src.path().join(format!("{rule}.md")), "# rule\n").unwrap();
+            std::fs::create_dir_all(src.path().join(rule)).unwrap();
+            std::fs::write(src.path().join(rule).join("depth.md"), "# depth\n").unwrap();
+            let blob =
+                crate::skill::skill_package::pack_rule_file_legacy(&src.path().join(format!("{rule}.md"))).unwrap();
+            let id = crate::oci::Identifier::new_registry(format!("acme/{rule}"), REGISTRY);
+            let layer = Descriptor {
+                digest: reg.push_blob(&id, &blob).await.unwrap(),
+                media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                size: blob.len() as u64,
+                annotations: None,
+            };
+            let manifest = OciManifest {
+                media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+                artifact_type: Some(ArtifactKind::Rule.artifact_type().to_string()),
+                config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+                layers: vec![layer],
+                annotations: Default::default(),
+            };
+            let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+            reg.put_tag(&id, "1", &digest).await.unwrap();
         }
+        let config = format!(
+            "[options]\nclients = [\"{client}\"]\n\n[rules]\ncarrier = \"{REGISTRY}/acme/carrier:1\"\nguide = \"{REGISTRY}/acme/guide:1\"\n"
+        );
+        let ws = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let config_path = dunce::canonicalize(ws.path()).unwrap().join("grimoire.toml");
+        std::fs::write(&config_path, config).unwrap();
+        let ctx = Context::with_access(dunce::canonicalize(home.path()).unwrap(), reg).with_config(config_path.clone());
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config_path)).unwrap();
         run(&ctx, &update_all()).await.expect("the first update installs");
         (ws, home, ctx, scope)
     }

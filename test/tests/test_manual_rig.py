@@ -77,8 +77,8 @@ def _catalog_artifacts() -> list[pytest.param]:
 
     Mirrors the publish matrix in ``scripts/bootstrap.sh``: skills are
     ``skills/<name>/`` directories, rules are top-level ``rules/*.md``
-    (support-directory files are packed with their index, never built
-    alone), agents are ``agents/*.md`` and need the explicit
+    (a rule is its ``.md`` alone; a rule needing more files requires a
+    skill that carries them), agents are ``agents/*.md`` and need the explicit
     ``--kind agent``, bundles are ``bundles/*.toml``.
     """
     skills = sorted(p.parent for p in _RIG_CATALOG_DIR.glob("skills/*/SKILL.md"))

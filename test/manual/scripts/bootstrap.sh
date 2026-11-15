@@ -135,9 +135,10 @@ release_versions() {
 # 4. VERSION MATRIX. Keep it SMALL but covering: most artifacts ship one
 #    1.0.0, a few carry extra versions for the upgrade / outdated demos.
 #    Each record is `kind|name|path|space-separated versions (ascending)`.
-#    A rule path is the index `<name>.md`; `grim release` packs the sibling
-#    `<name>/` support dir automatically (the `rules/*.md` glob is
-#    non-recursive, so a support file is never released as its own rule).
+#    A rule path is the `<name>.md` alone: since grim 0.16.0 a rule ships no
+#    support dir, and `grim release` refuses one. A rule that needs more files
+#    requires a skill that carries them (rules/architecture-guide.md requires
+#    the skill of the same name; skills are released first, in 4a).
 SKILL_MATRIX=(
     "skills|architecture-guide|$CATALOG/skills/architecture-guide|1.0.0"
     "skills|code-reviewer|$CATALOG/skills/code-reviewer|1.0.0 1.1.0 1.2.0"

@@ -160,39 +160,55 @@ def test_release_with_kind_agent_publishes_agent_kind(
     )
 
 
-def test_release_agent_packs_wellknown_readme_companion(
+def test_release_agent_does_not_pack_its_companions(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """``grim release --kind agent`` packs a `README.md` from the sibling
-    companion directory (`agents/<name>/`) into the layer tree, so it round-trips
-    through `grim fetch --path <name>/README.md` — the same path shape a skill
-    or rule uses. A stray file in that directory is NOT packed (allowlist only)."""
+    """An agent package is the `.md` only. `agents/<name>/` may hold a README
+    and a logo (a description companion `grim publish` reads), but
+    `grim release --kind agent` never packs them: `grim fetch --path
+    <name>/README.md` finds nothing."""
     agent_file = project_dir / "agents" / "my-agent.md"
     _write(agent_file, _agent_doc("my-agent"))
-    readme = "# my-agent\n\nWhat this agent does and how to use it.\n"
-    _write(project_dir / "agents" / "my-agent" / "README.md", readme)
-    # A non-well-known sibling file must stay out of the layer.
-    _write(project_dir / "agents" / "my-agent" / "notes.txt", "scratch\n")
+    _write(project_dir / "agents" / "my-agent" / "README.md", "# my-agent\n\nWhat this agent does.\n")
+    (project_dir / "agents" / "my-agent" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    _write(project_dir / "agents" / "my-agent" / "logo.svg", "<svg/>\n")
 
-    repo_path = f"{unique_repo}/my-agent"
-    repo = f"{registry}/{repo_path}"
+    repo = f"{registry}/{unique_repo}/my-agent"
     runner = grim_at(project_dir)
 
     out = runner.json("release", "--kind", "agent", str(agent_file), f"{repo}:1.0.0")
     assert out["pushed"] is True
 
-    # files[] lists the index and the README companion, not the stray file.
     doc = runner.json("fetch", f"{repo}:1.0.0")
     assert doc["kind"] == "agent"
-    paths = [f["path"] for f in doc["files"]]
-    assert "my-agent.md" in paths
-    assert "my-agent/README.md" in paths
-    assert "my-agent/notes.txt" not in paths, "only well-known companions ride the layer"
+    assert [f["path"] for f in doc["files"]] == ["my-agent.md"]
+    for companion in ("README.md", "logo.png", "logo.svg"):
+        result = runner.run("fetch", f"{repo}:1.0.0", "--path", f"my-agent/{companion}", check=False)
+        assert result.returncode != 0, f"{companion} must not ride the package"
+        assert f"no file 'my-agent/{companion}' in this artifact" in result.stderr, result.stderr
 
-    # The README pulls back byte-identical via the uniform `<name>/README.md` path.
-    result = runner.plain("fetch", f"{repo}:1.0.0", "--path", "my-agent/README.md")
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == readme
+
+def test_agent_directory_with_a_stray_file_refuses_build_and_release(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Any file in `agents/<name>/` beyond README.md, logo.png and logo.svg
+    refuses the pack with exit 65 (since grim 0.16.0); nothing is pushed."""
+    agent_file = project_dir / "agents" / "my-agent.md"
+    _write(agent_file, _agent_doc("my-agent"))
+    _write(project_dir / "agents" / "my-agent" / "README.md", "# my-agent\n")
+    _write(project_dir / "agents" / "my-agent" / "notes.txt", "scratch\n")
+    runner = grim_at(project_dir)
+
+    build = runner.run("build", "--kind", "agent", str(agent_file), check=False)
+    release = runner.run(
+        "release", "--kind", "agent", str(agent_file), f"{registry}/{unique_repo}/my-agent:1.0.0", check=False
+    )
+
+    for result in (build, release):
+        assert result.returncode == 65, f"got {result.returncode}; stderr: {result.stderr}"
+        assert "an agent's directory may hold only README.md, logo.png and logo.svg" in result.stderr
+        assert "notes.txt" in result.stderr
+    assert runner.run("fetch", f"{registry}/{unique_repo}/my-agent:1.0.0", check=False).returncode != 0
 
 
 # ---------------------------------------------------------------------------

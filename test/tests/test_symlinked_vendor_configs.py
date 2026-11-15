@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from src.helpers import make_artifact
 from src.runner import GrimRunner
 
 unix_only = pytest.mark.skipif(sys.platform == "win32", reason="symlinks are a Unix layout")
@@ -44,24 +45,31 @@ def _stow(link: Path, real: Path, body: str) -> None:
     os.symlink(os.path.relpath(real, link.parent), link)
 
 
-def _rule_with_support_dir(root: Path) -> Path:
-    index = root / "rules" / "probe.md"
-    index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text("---\npaths: ['**']\n---\n# probe\nsee [x](probe/x.md)\n", encoding="utf-8", newline="\n")
-    (index.parent / "probe").mkdir()
-    (index.parent / "probe" / "x.md").write_text("# x\n", encoding="utf-8", newline="\n")
-    return index
+def _rule_with_support_dir(unique_repo: str) -> str:
+    """Publish a rule in the old format (index plus support dir) and return its ref.
+
+    ``grim release`` refuses a support directory since grim 0.16.0, so the
+    artifact is pushed as a tar, the way a rule published earlier looks.
+    """
+    return make_artifact(
+        f"{unique_repo}/probe",
+        "rule",
+        {
+            "probe.md": "---\npaths: ['**']\n---\n# probe\nsee [x](probe/x.md)\n",
+            "probe/x.md": "# x\n",
+        },
+        tag="1.0.0",
+    ).fq
 
 
 @unix_only
 def test_managed_config_splices_write_through_symlinks(
-    grim_binary: Path, grim_home: Path, tmp_path: Path
+    grim_binary: Path, grim_home: Path, tmp_path: Path, unique_repo: str
 ) -> None:
     """Claude's ``settings.json`` (``claudeMdExcludes``) and OpenCode's
     ``opencode.json`` (``instructions``) stay links across install and
     uninstall, and the dotfiles copies carry every edit."""
     runner = GrimRunner(grim_binary, grim_home)
-    runner.env["GRIM_OFFLINE"] = "1"
     xdg = runner.home / ".config"
     runner.env["XDG_CONFIG_HOME"] = str(xdg)
     (xdg / "opencode" / "skills").mkdir(parents=True)
@@ -71,7 +79,7 @@ def test_managed_config_splices_write_through_symlinks(
     _stow(claude_link, claude_real, '{"userSetting": 1}\n')
     _stow(opencode_link, opencode_real, '{"theme": "dark"}\n')
 
-    result = runner.run("add", "--global", "--kind", "rule", str(_rule_with_support_dir(tmp_path)), check=False)
+    result = runner.run("add", "--global", "--kind", "rule", _rule_with_support_dir(unique_repo), check=False)
     assert result.returncode == 0, result.stderr
     assert claude_link.is_symlink() and opencode_link.is_symlink(), "the splice must not replace the links"
     claude = json.loads(claude_real.read_text(encoding="utf-8"))

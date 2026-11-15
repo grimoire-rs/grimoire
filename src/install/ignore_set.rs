@@ -108,6 +108,18 @@ impl IgnoreSet {
         }
     }
 
+    /// The built-in defaults alone; reads no `.grimignore`.
+    #[must_use]
+    pub fn defaults_only(kind: ArtifactKind) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "constant defaults, pinned by defaults_match_runtime_junk"
+        )]
+        Self::build_lines(Path::new("."), &[], kind)
+            .expect("default ignore patterns compile")
+            .0
+    }
+
     /// Lenient build for hashing an installed tree: invalid lines (and an
     /// unreadable file) are skipped with a warning, never fatal. The file is
     /// hashed anyway, so tampering with it still reads as drift.
@@ -244,6 +256,13 @@ mod tests {
         }
         let set = IgnoreSet::for_root(dir.path(), ArtifactKind::Skill).unwrap();
         (dir, set)
+    }
+
+    #[test]
+    fn defaults_only_ignores_junk_and_reads_no_grimignore() {
+        let set = IgnoreSet::defaults_only(ArtifactKind::Rule);
+        assert!(set.is_ignored(Path::new(".DS_Store"), false));
+        assert!(!set.is_ignored(Path::new("notes.md"), false));
     }
 
     #[test]

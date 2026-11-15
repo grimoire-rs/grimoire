@@ -10,7 +10,7 @@ metadata:
 
 # Architecture Guide
 
-A single-file skill that shares its name with the `architecture-guide`
+A skill that shares its name with the `architecture-guide`
 **rule**. Use it to exercise the catalog's same-name-across-kinds case — a
 skill and a rule resolve to different repos
 (`skills/architecture-guide` vs `rules/architecture-guide`) and must stay
@@ -22,3 +22,6 @@ disambiguated in `grim search`, the TUI, and `grim status`.
 2. Pick patterns deliberately — strategy traits for swappable behaviour,
    three-layer errors so batch operations diagnose per item.
 3. Record the decision and its trade-offs before writing code.
+
+Worked examples live in [patterns.md](./patterns.md), beside this file. It
+is the migrated support file of the `architecture-guide` rule.

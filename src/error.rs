@@ -723,7 +723,9 @@ fn classify_skill(err: &SkillError) -> ExitCode {
         | SkillErrorKind::MetadataInvalid(_)
         | SkillErrorKind::ValidationFailed(_)
         | SkillErrorKind::TooLarge(_)
-        | SkillErrorKind::GitProvenance(_) => ExitCode::DataError,
+        | SkillErrorKind::GitProvenance(_)
+        | SkillErrorKind::RuleSupportDir { .. }
+        | SkillErrorKind::AgentStrayFiles { .. } => ExitCode::DataError,
         SkillErrorKind::Io(io) => classify_io(io),
     }
 }
@@ -1295,6 +1297,23 @@ mod tests {
         );
         let err: anyhow::Error = Error::from(inner).into();
         assert_eq!(classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn skill_stem_dir_errors_classify_as_data_error() {
+        for kind in [
+            SkillErrorKind::RuleSupportDir {
+                dir: "/w/r".into(),
+                files: vec!["a.md".into()],
+            },
+            SkillErrorKind::AgentStrayFiles {
+                dir: "/w/a".into(),
+                files: vec!["a.txt".into()],
+            },
+        ] {
+            let err: anyhow::Error = Error::from(SkillError::new("/w/r.md", kind)).into();
+            assert_eq!(classify_error(&err), ExitCode::DataError);
+        }
     }
 
     #[test]

@@ -985,6 +985,13 @@ fn hook_gate(
     None
 }
 
+/// Deprecation text for an already-published rule that ships a support directory.
+pub(crate) fn support_dir_deprecation(name: &str, publisher: &str) -> String {
+    format!(
+        "rule '{name}' ships a support directory, which is deprecated: its files load as extra rules in some clients. Ask the publisher of {publisher} to move them into a skill the rule requires; grim 0.16.0 and later no longer publish such a rule (https://grimoire.rs/upgrading.html#rule-support-dir)"
+    )
+}
+
 /// Install one artifact into every selected client through the integrity
 /// gate. An entry left in a user's file while its output was dropped is
 /// pushed onto `abandoned`; an edited file kept at a relocated vendor root,
@@ -1076,6 +1083,13 @@ async fn install_one<M: ArtifactMaterializer>(
             stem.to_string_lossy(),
             artifact.name
         );
+    }
+    if staged_support.is_some() {
+        let publisher = match &artifact.source {
+            crate::lock::LockedSource::Registry(pinned) => pinned.registry_repository(),
+            crate::lock::LockedSource::Path { path, .. } => path.to_string(),
+        };
+        tracing::warn!("{}", support_dir_deprecation(&artifact.name, &publisher));
     }
 
     // Effective materialize set: the explicit `--client` targets PLUS — only
@@ -4507,6 +4521,65 @@ mod tests {
         .await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(&support).unwrap(), b"# ex\n");
+    }
+
+    #[tokio::test]
+    async fn support_dir_rule_warns_once_across_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = multi_rule_tar("my-rule", b"# index\n", &[("examples.md", b"# ex\n")]);
+        let lock = lock_of(vec![locked_rule("my-rule", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Cursor],
+        );
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let roots = roots(dir.path());
+        let warnings = WarnSink::default();
+        let capture = warnings.install();
+        let run = install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        drop(capture);
+        assert!(run[0].result.is_ok(), "{:?}", run[0].result);
+        let text = warnings.text();
+        assert_eq!(text.matches("ships a support directory").count(), 1, "{text}");
+        assert!(text.contains("localhost:5000/my-rule"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn single_file_rule_does_not_warn_about_support_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = multi_rule_tar("my-rule", b"# index\n", &[]);
+        let lock = lock_of(vec![locked_rule("my-rule", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let roots = roots(dir.path());
+        let warnings = WarnSink::default();
+        let capture = warnings.install();
+        install_all(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots,
+            Path::new("."),
+            false,
+        )
+        .await;
+        drop(capture);
+        assert!(!warnings.text().contains("support directory"), "{}", warnings.text());
     }
 
     #[tokio::test]
@@ -9371,12 +9444,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn c017_path_multi_file_rule_stages_its_support_dir() {
+    async fn c017_path_rule_with_support_files_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let rules = tmp.path().join("rules");
         std::fs::create_dir_all(rules.join("rust-style")).unwrap();
         std::fs::write(rules.join("rust-style.md"), b"---\npaths: [\"**/*.rs\"]\n---\n# Rust\n").unwrap();
         std::fs::write(rules.join("rust-style").join("ex.md"), b"example\n").unwrap();
+        // `locked_path` packs, and packing is what refuses; the pin is never reached.
+        let artifact = LockedArtifact {
+            name: "rust-style".to_string(),
+            kind: ArtifactKind::Rule,
+            source: crate::lock::locked_source::LockedSource::Path {
+                path: crate::config::path_source::PathSource::parse("./rules/rust-style.md").unwrap(),
+                hash: Algorithm::Sha256.hash(b"unused"),
+            },
+            bundles: Vec::new(),
+            requires: Vec::new(),
+        };
+
+        let err = stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Rule,
+            &arc(OfflineMock),
+            tmp.path(),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .err()
+        .expect("a support file refuses the stage");
+
+        let crate::error::Error::Install(install_err) = &err else {
+            panic!("not an install error: {err:?}");
+        };
+        let InstallErrorKind::LocalSource(skill_err) = &install_err.kind else {
+            panic!("not a local-source error: {install_err:?}");
+        };
+        match &skill_err.kind {
+            crate::skill::SkillErrorKind::RuleSupportDir { files, .. } => {
+                assert_eq!(files.len(), 1, "{files:?}");
+                assert!(files[0].contains("ex.md"), "{files:?}");
+            }
+            other => panic!("wrong kind: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn c017_path_single_file_rule_stages_without_a_support_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rules = tmp.path().join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("rust-style.md"), b"---\npaths: [\"**/*.rs\"]\n---\n# Rust\n").unwrap();
         let artifact = locked_path("rust-style", ArtifactKind::Rule, tmp.path(), "./rules/rust-style.md");
 
         let staged = stage_locked_artifact(
@@ -9390,8 +9508,7 @@ mod tests {
         .await
         .expect("stage path rule");
         assert_eq!(staged.canonical.file_name().unwrap(), "rust-style.md");
-        let support = staged.support_dir.as_ref().expect("support dir staged");
-        assert_eq!(std::fs::read(support.join("ex.md")).unwrap(), b"example\n");
+        assert!(staged.support_dir.is_none());
     }
 
     #[tokio::test]
