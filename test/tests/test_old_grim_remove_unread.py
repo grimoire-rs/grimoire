@@ -7,7 +7,8 @@ current edit reads such a dependent as requiring nothing, as 0.15.1 does,
 whatever the store holds, and `grim install` checks a stored requires layer.
 Where the store holds the dependent's manifest, the edit names it beside each
 row it drops. One online `grim lock` before the edit records the dependent's
-edges, and the edit then keeps the pins they reach.
+edges, and the edit then keeps the pins they reach. The edits compared with
+0.15.1's own pass `--no-relock`, the in-place edit 0.15.1 also makes.
 
 The old binary comes from `GRIM_OLD_BIN`, a build of tag `v0.15.1`, and the
 module skips when it is unset. Both binaries share one `GRIM_HOME`, as on one
@@ -131,7 +132,7 @@ def test_current_remove_of_a_bundle_drops_the_member_an_old_grim_dependent_requi
     own_home = shutil.copytree(current.grim_home, tmp_path / "old" / "grim-home")
     GrimRunner(old.binary, own_home, cwd=own).run("remove", "bundle", "pack")
 
-    edit = current.run("remove", "bundle", "pack")
+    edit = current.run("remove", "--no-relock", "bundle", "pack")
 
     assert "m" not in _pins(own)
     assert "m" not in _pins(project_dir)
@@ -180,7 +181,7 @@ def test_current_remove_of_a_bundle_an_old_grim_dependent_requires_drops_its_row
     old.run("lock")
     _store_requires(current, tmp_path, q)
 
-    edit = current.run("remove", "bundle", "pack")
+    edit = current.run("remove", "--no-relock", "bundle", "pack")
 
     assert "pack" not in _pins(project_dir)
     assert _names_unwalked(edit.stderr, "bundle 'pack'", "skill 'q'"), edit.stderr
@@ -315,7 +316,7 @@ def test_an_edit_after_an_offline_lock_drops_beside_each_row_that_records_no_edg
     if layer == "stored":
         _store_requires(current, tmp_path, p)
 
-    edited = current.run(*edit)
+    edited = current.run(edit[0], "--no-relock", *edit[1:])
 
     old_runner = GrimRunner(old.binary, own_home, cwd=own)
     old_runner.run("lock", "--offline", check=False)
@@ -353,7 +354,7 @@ def test_an_uninstall_beside_an_old_grim_dependent_names_no_lock_for_a_gatekeepe
     """0.15.1 locks `m` and a gatekeeper hook, then adds `p`, which requires `m:1`.
 
     With `p`'s requires layer stored and the gatekeeper's client registration
-    deleted, `grim uninstall skill m` names `p`: the next `grim lock` may move
+    deleted, `grim uninstall --no-relock skill m` names `p`: the next `grim lock` may move
     `m`'s pin. The gatekeeper's warning names `grim install` and no `grim lock`.
     Found by review: it asked for that `grim lock` first.
     """
@@ -369,7 +370,7 @@ def test_an_uninstall_beside_an_old_grim_dependent_names_no_lock_for_a_gatekeepe
     _store_requires(current, tmp_path, p)
     (project_dir / ".claude" / "settings.local.json").unlink()
 
-    edit = current.run("uninstall", "skill", "m")
+    edit = current.run("uninstall", "--no-relock", "skill", "m")
 
     assert _names_unwalked(edit.stderr, "skill 'm' leaves the lock", "skill 'p'"), (
         edit.stderr

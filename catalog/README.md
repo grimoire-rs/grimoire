@@ -86,7 +86,7 @@ New publishers should read [Repository
 Layout](./skills/grim-authoring/references/release-checklist.md#flat-layout)
 and publish flat — kind travels in the `com.grimoire.kind` annotation, not
 the path. Semver releases
-cascade (`1.2.3` also moves `1.2`, `1`, `latest`, never to a lower version). Bundle members
+cascade (`1.2.3` also moves `1.2`, `1`, `latest`, never off a higher release). Bundle members
 reference the floating major tag (`:0` while on the 0.x line, relative to
 the bundle's own deployment — `../skills/<name>:0`) and bundles publish
 without `--pin`, so skill patches reach bundle consumers via plain

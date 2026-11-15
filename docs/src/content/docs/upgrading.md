@@ -793,8 +793,15 @@ it, so a later run can compare it with the request.
   overwrote that file through the link. A link to a real lock keeps working.
 - `grim remove` and `grim uninstall` still run on an unreadable lock. They warn
   once and exit `0`, and the lock stays as it is.
-- `grim remove` of a bundle that hid a nested include leaves the lock stale until
-  `grim lock`, and it says so on stderr. `grim install` exits `65` until then.
+- `grim remove --no-relock` of a bundle that hid a nested include leaves the lock
+  stale until `grim lock`, and it says so on stderr. `grim install` exits `65`
+  until then. A plain `remove` relocks in the same run instead.
+- `grim remove` and `grim uninstall` relock in the same run, as `grim add` does.
+  They carry the existing pins and leave no lock stale. Where 0.15.1 exited `0`,
+  they exit with the relock's code when it fails, for example `78`, `69` or
+  `79`. They change nothing then, and `uninstall` deletes no file. The error
+  names `--no-relock`, which restores 0.15.1's in-place edit and its stale lock.
+  Add the flag to a script that must keep exit `0`.
 - `grim install` exits `65` after `grim remove` or `grim uninstall` on a stale
   lock that no longer answers its declarations. A stale lock that answers every
   declaration restamps, and `install` keeps exit `0` there. A pin with no tag
@@ -961,14 +968,14 @@ it.
   The entry takes that bundle's stamp, so `grim install` keeps exit `0`. Any
   other artifact drops as on 0.15.1, and the next `grim lock` may resolve a real
   member afresh: run `grim lock` once before such an edit to keep the pins.
-- On a lock 0.15.1 wrote, `grim remove`, `grim uninstall` and a TUI delete read a
-  dependent as requiring nothing, as 0.15.1 does. An artifact only that
+- Under `--no-relock`, on a lock 0.15.1 wrote, `grim remove` and `grim uninstall`
+  read a dependent as requiring nothing, as 0.15.1 does. An artifact only that
   dependent requires leaves the lock. The next `grim lock` resolves it afresh, so
   its pin moves if its tag moved. Where the local store holds the dependent's
   manifest, a note names both, unless the store shows that the dependent's
   dependency list never reaches that artifact through entries the lock pins.
-- After upgrading, run one online `grim lock` before `grim remove`,
-  `grim uninstall` or a TUI delete. The lock then records each dependent's
+- Under `--no-relock`, after upgrading, run one online `grim lock` before
+  `grim remove` or `grim uninstall`. The lock then records each dependent's
   edges, and the edit keeps the pins they reach. The first `grim install` on a
   lock that holds such a dependent already exits `65` and names that
   `grim lock`. If that `grim lock` exits `78`, settle the conflict it names
@@ -1030,16 +1037,17 @@ it.
   exit `78`. Its `lock`, `add` and `update` read that lock as absent and exit
   `0`. They move every pin whose tag moved and drop the dependency rows.
   `update` also deletes the files of those dependencies.
-- The online `grim lock` that keeps pins through `grim remove` records each
-  dependent's edges. 0.15.1 then refuses that lock, as above. A team that keeps
-  0.15.1 skips it, and an edit then drops what only a dependent requires, as
-  0.15.1 does.
+- A plain `grim remove` or `grim uninstall` relocks like `grim add`. In a project
+  with declared dependencies it writes the dependent's edges, and 0.15.1 then
+  refuses that lock, as above. A team that keeps 0.15.1 passes `--no-relock`,
+  and the edit then drops what only a dependent requires, as 0.15.1 does. The
+  TUI delete always relocks.
 - Its writes strip the tags, and its `grim lock` and `grim add` still roll every
   moved tag. When the lock's hash matches `grimoire.toml`, the next write by
   0.16.0 or later reads it as clean, keeps those pins and adds the tags back.
 - While both versions write, every `pinned` line changes at each hand-over. No
   digest changes unless a tag moved under 0.15.1.
-- A `grim remove` by 0.16.0 that leaves the lock stale can keep a row 0.15.1's
+- A `grim remove --no-relock` by 0.16.0 that leaves the lock stale can keep a row 0.15.1's
   `remove` drops. When it also changes the lock's rows, it writes a hash no
   declaration produces. 0.15.1 reads that lock as stale.
 - On such a lock 0.15.1's `status` reads `stale` on every row and `install`
@@ -1207,6 +1215,11 @@ or offline, the dry run warns once on stderr and plans every float moving, as
 0.15.1 did, with `floats_kept` `[]`. `--no-cascade`, a prerelease and a non-semver tag read nothing. Floats a backport
 already moved down stay where they are. Publish a newer release to move them, or
 retag with another OCI tool.
+
+A float whose current version is a prerelease is the exception: it always moves
+to the new release, whatever the precedence. `latest` on 2.0.0-rc.1 moves when
+you release 1.9.0. `grim release` never cascades a prerelease, so a float sits on
+one only when someone pushed the tag by hand.
 
 ## Smaller notes {#smaller-notes}
 

@@ -1912,7 +1912,24 @@ already-installed files (or, for an [MCP server](./mcp-servers.md), the
 registered config entry) in place — use [`grim uninstall`](#uninstall) to
 remove those too.
 
-Removal acts on the **effective** declaration, fully offline: the lock entry
+`remove` brings `grimoire.lock` in line in the same run, as
+[`grim add`](#add) does. It carries the existing pins, refreshes nothing,
+never moves a pin that still answers its claims, and writes the lock once.
+A row the rules below leave "until the next `grim lock`" is settled in the run.
+With every manifest in the local store, a plain `remove` works offline.
+
+If that relock fails, `remove` changes nothing and exits with the relock's own
+code, for example `78`, `69` or `79`. Registry unreachable, a manifest the store
+lacks, two majors of one artifact, a forced major downgrade, a settings conflict
+and a gone manifest all fail this way. The error names two remedies: its own, and
+`grim remove --no-relock <kind> <name>`. `--no-relock` edits the manifest and
+the lock rows in place and resolves nothing. The lock may be stale, the notes
+below print, and [`grim lock`](#lock) brings it in line later.
+
+The rest of this section describes that in-place edit, which the relock then
+settles. With `--no-relock` it is the whole run.
+
+Removal acts on the **effective** declaration: the lock entry
 is dropped only when no remaining declaration holds the artifact. A declared
 bundle may still name the artifact after you remove its direct declaration. At
 the *same* identifier the entry stays, and its provenance flips to the bundle. At
@@ -1972,7 +1989,7 @@ Files stay on disk, as always. An artifact that is only a dependency was never
 declared, so there is nothing to remove: `remove` reports `absent` for it, and
 removing the artifact that requires it is what drops it.
 
-`remove` resolves nothing, so a kept pin keeps its digest and its tag. After a
+A kept pin keeps its digest and its tag, since the relock carries existing pins. After a
 diamond's holder leaves, `x:1@sha256:…` can stay beside the surviving request
 `x:2`. The pair is true, because `x:1` is what resolved that digest, and relocks
 keep it. A bundle's lock row stays the same way, and
@@ -2046,8 +2063,8 @@ directory, as under `--config` or from a subdirectory, the note names both by
 absolute path. When the config changed since the last lock, the note says the recovery may not keep the rows, because its `grim lock` resolves every
 untagged pin once.
 
-Run one online `grim lock` before `grim remove`, `grim uninstall` or a TUI delete
-on a lock 0.15.1 wrote. It records each dependent's dependencies, and the edit
+Under `--no-relock`, run one online `grim lock` before `grim remove` or
+`grim uninstall` on a lock 0.15.1 wrote. It records each dependent's dependencies, and the edit
 then keeps the pins they reach. If it exits `78`, settle the conflict it names
 first. 0.15.1 refuses a lock that records them, so its `status` and `install`
 exit `78`. The first `grim install` on such a lock already exits `65` and names
@@ -2078,6 +2095,14 @@ cache answers every tag. Otherwise it exits `69` and leaves the lock as it was.
 `hook`, or `settings`) is the full inverse of install: it deletes the
 materialized files, drops the install record, and undeclares the artifact from
 the config and lock. The interactive TUI's delete action reuses the same seam.
+
+Like [`remove`](#remove), `uninstall` relocks in the same run, and also deletes
+the files of every row the relock drops. If the relock fails or finds a settings
+conflict, it deletes no file and changes nothing. It exits with the relock's code.
+The error names its own remedy and `grim uninstall --no-relock <kind> <name>`.
+`--no-relock` edits the lock rows in place and resolves nothing, so the lock may
+be stale. The TUI delete relocks the same way. On failure it changes nothing and
+shows the `grim uninstall --no-relock …` command.
 For an [MCP server](./mcp-servers.md#modification-detection), there is no
 materialized file to delete — grim splices only the managed entry back out
 of each client's config file, leaving the file itself and every other
@@ -4136,8 +4161,8 @@ artifact file does not author.
 
 `grim release <path> <reference>` validates, packs, and pushes an artifact.
 By default a full semver reference (e.g. `1.2.3`) applies cascade tags —
-`1.2.3`, `1.2`, `1`, and `latest` move onto it, but never a float to a lower
-version. A non-version tag
+`1.2.3`, `1.2`, `1`, and `latest` move onto it, but never a float off a higher
+release. A non-version tag
 (e.g. `canary`, `edge`) publishes only that exact tag with no cascade.
 `--cascade` asserts the cascade and requires a full semver: a non-semver tag
 with `--cascade` exits 65 (a typo guard). `--no-cascade` suppresses the
@@ -4192,9 +4217,13 @@ the manifest's version annotation.
 
 The float stays when that version is exact, inside the float's own span and
 higher than the release, and the exact tag of that version still names the
-float's manifest. A prerelease counts, compared by semver precedence: a float on
-3.0.0-rc.1 stays against 2.4.1, and 3.0.0 replaces it. The span of `X.Y` is that minor line. The
+float's manifest. The span of `X.Y` is that minor line. The
 span of `X` is the major line, and `latest` has none.
+
+A float whose current version is a prerelease always moves, whatever the
+precedence. `latest` on 2.0.0-rc.1 moves to a release of 1.9.0. `grim release`
+never cascades a prerelease, so a float sits on one only when someone pushed the
+tag by hand.
 
 Otherwise the float moves. A float whose version tag is gone or names another
 manifest moves, with one stderr line. A float whose manifest grim cannot parse,

@@ -692,7 +692,8 @@ def test_remove_local_bundle_evicts_member_from_lock_and_install_does_not_resurr
     installed = project_dir / ".claude" / "skills" / "code-review" / "SKILL.md"
     assert installed.is_file()
 
-    result = runner.run("remove", "bundle", "x")
+    # The in-place edit is the eviction under test; a plain remove relocks instead.
+    result = runner.run("remove", "--no-relock", "bundle", "x")
     assert result.returncode == 0, result.stderr
 
     cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")

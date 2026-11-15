@@ -58,15 +58,14 @@ use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
 use crate::lock::pin_rule::{self, PinRecord};
-use crate::lock::prior::{Prior, direct_keys};
-use crate::lock::refresh::Refresh;
+use crate::lock::prior::direct_keys;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BundleMember;
 use crate::oci::text::registry_text;
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
-use crate::resolve::resolve_options::{Downgrade, ResolveOptions};
-use crate::resolve::resolver::{LockRun, TargetLock, target_lock};
+use crate::resolve::resolve_options::Downgrade;
+use crate::resolve::resolver::TargetLock;
 
 use super::scope_resolution;
 
@@ -376,30 +375,15 @@ async fn write_config_and_relock(
     // nobody else touched the file: refusing it would wedge the declaration.
     let written = tokio::fs::read(&scope.config_path).await.ok();
 
-    // The proof is against the pre-edit set: the edit itself changes the hash,
-    // so judged against `set` every first `add` after an upgrade would re-pin
-    // the whole lock.
-    let prior = previous.as_ref().map(|lock| Prior::edited(lock, &scope.set, set));
-    let target = target_lock(
-        set,
-        prior.as_ref(),
-        &Refresh::Nothing,
-        access,
-        &ResolveOptions {
-            downgrade,
-            ..ResolveOptions::default()
-        },
-        scope.config_dir(),
-        LockRun::in_scope(offline, &scope.invocation),
-    )
-    .await
-    .map_err(|e| {
-        let command = RemedyCommand::AddFlagged {
-            target: typed.reference.clone(),
-            flags: typed_flags(typed),
-        };
-        with_remedy(e.naming(&scope.invocation), &command)
-    });
+    let target = super::lock::relock_edit(scope, set, previous.as_ref(), access, downgrade, offline)
+        .await
+        .map_err(|e| {
+            let command = RemedyCommand::AddFlagged {
+                target: typed.reference.clone(),
+                flags: typed_flags(typed),
+            };
+            with_remedy(e, &command)
+        });
     // A lock on disk is what every later run reads, so a conflict refuses before
     // the save. It rolls the config back as a failed relock or save does.
     let saved = async {
@@ -779,10 +763,10 @@ fn typed_flags(args: &AddArgs) -> Vec<String> {
     flags
 }
 
-/// The report rows for the pins this add moved, in `(kind, name)` order, the
+/// The rows for the pins a relock moved, in `(kind, name)` order, an add's
 /// target among them when the previous lock pinned it at another digest. One the
 /// previous lock never held was added, not moved.
-fn moved_pins(relocked: &TargetLock) -> Vec<PinnedNode> {
+pub(super) fn moved_pins(relocked: &TargetLock) -> Vec<PinnedNode> {
     relocked
         .dispositions
         .iter()
@@ -802,9 +786,9 @@ fn moved_pins(relocked: &TargetLock) -> Vec<PinnedNode> {
         .collect()
 }
 
-/// The report rows for the pins this add took out of the lock, in `(kind, name)`
-/// order, each at the pin it held: their files stay, so nothing else names them.
-fn dropped_pins(relocked: &TargetLock) -> Vec<PinnedNode> {
+/// The rows for the pins a relock took out of the lock, in `(kind, name)` order,
+/// each at the pin it held: their files stay, so nothing else names them.
+pub(super) fn dropped_pins(relocked: &TargetLock) -> Vec<PinnedNode> {
     relocked
         .dispositions
         .iter()

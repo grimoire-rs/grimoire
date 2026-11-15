@@ -22,6 +22,7 @@ use clap::Args;
 use crate::api::artifact_status::LockAction;
 use crate::api::lock_report::{LockEntry, LockReport};
 use crate::cli::exit_code::ExitCode;
+use crate::config::declaration::DesiredSet;
 use crate::context::Context;
 use crate::lock::disposition::LockDisposition;
 use crate::lock::file_lock::ConfigFileLock;
@@ -33,7 +34,8 @@ use crate::oci::PinnedIdentifier;
 use crate::oci::access::OciAccess;
 use crate::oci::text::registry_text;
 use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
-use crate::resolve::resolve_options::ResolveOptions;
+use crate::resolve::resolve_error::ResolveError;
+use crate::resolve::resolve_options::{Downgrade, ResolveOptions};
 use crate::resolve::resolver::{LockRun, TargetLock, target_lock};
 
 use super::scope_resolution;
@@ -84,18 +86,68 @@ pub async fn run(ctx: &Context, args: &LockArgs) -> anyhow::Result<(LockReport, 
         .await
         .map_err(|e| with_remedy(e.naming(&scope.invocation), &RemedyCommand::Lock)),
     )?;
-    // A resolve asks nothing, so only packages a record covers load a layer: a
-    // fresh clone locks as it did before the kind, and its conflict meets the run
-    // that arms it. Every later run reads this lock, so a known conflict stops here.
-    if !target.lock.settings.is_empty() && scope.options.experimental.settings_enabled() {
-        let policy = super::hook_consent::settings_policy(ctx, &scope, &target.lock, None)?;
-        let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
-        super::add::refuse_settings_conflict_for(&scope, &target.lock, policy, &[], &global, &access).await?;
-    }
+    refuse_settings_conflict(ctx, &scope, &target.lock, &access).await?;
     super::grim(lock_io::save(&scope.lock_path, &target.lock, previous.as_ref()))?;
     warn_moved_bundle_pins(previous.as_ref(), &target.lock);
 
     Ok((build_report(&target), ExitCode::Success))
+}
+
+/// Refuse `lock` when the armed settings packages it holds conflict, before it is
+/// saved; nothing with the settings flag off or no settings locked.
+///
+/// # Errors
+///
+/// Consent or install-state reads (74), target parse (65/78), or the conflict (78).
+pub(crate) async fn refuse_settings_conflict(
+    ctx: &Context,
+    scope: &scope_resolution::ResolvedScope,
+    lock: &GrimoireLock,
+    access: &Arc<dyn OciAccess>,
+) -> anyhow::Result<()> {
+    if lock.settings.is_empty() || !scope.options.experimental.settings_enabled() {
+        return Ok(());
+    }
+    // A resolve asks nothing, so only packages a record covers load a layer: a
+    // fresh clone locks as it did before the kind, and its conflict meets the run
+    // that arms it. Every later run reads this lock, so a known conflict stops here.
+    let policy = super::hook_consent::settings_policy(ctx, scope, lock, None)?;
+    let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    super::add::refuse_settings_conflict_for(scope, lock, policy, &[], &global, access).await
+}
+
+/// The relock of an edit from `scope.set` to `after`, as `grim lock` would run
+/// it: every pin that still answers carries and nothing is refreshed. The proof
+/// is judged against the pre-edit set, which the edit itself no longer hashes to.
+///
+/// # Errors
+///
+/// Any [`ResolveError`] of the relock, naming the run's [`Invocation`].
+///
+/// [`Invocation`]: crate::config::scope::Invocation
+pub(crate) async fn relock_edit(
+    scope: &scope_resolution::ResolvedScope,
+    after: &DesiredSet,
+    previous: Option<&GrimoireLock>,
+    access: &Arc<dyn OciAccess>,
+    downgrade: Downgrade,
+    offline: bool,
+) -> Result<TargetLock, ResolveError> {
+    let prior = previous.map(|lock| Prior::edited(lock, &scope.set, after));
+    target_lock(
+        after,
+        prior.as_ref(),
+        &Refresh::Nothing,
+        access,
+        &ResolveOptions {
+            downgrade,
+            ..ResolveOptions::default()
+        },
+        scope.config_dir(),
+        LockRun::in_scope(offline, &scope.invocation),
+    )
+    .await
+    .map_err(|e| e.naming(&scope.invocation))
 }
 
 /// Warn once per `[[bundle]]` row whose registry pin `lock` moved from

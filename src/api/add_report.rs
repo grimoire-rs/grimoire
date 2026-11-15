@@ -129,32 +129,43 @@ impl AddReport {
                 node_list(&self.pulled_in)
             ));
         }
-        if !self.moved.is_empty() {
-            let pins = if self.moved.len() == 1 { "pin" } else { "pins" };
-            notes.push(format!("moved {} {pins}: {}", self.moved.len(), node_list(&self.moved)));
-        }
-        if !self.dropped.is_empty() {
-            // `uninstall` removes files, config entries or settings values by kind,
-            // so the line names what was installed, never one of them.
-            let grim = &self.grim;
-            let (pins, it, them) = match self.dropped.as_slice() {
-                [_] => ("pin", "it", "it"),
-                _ => ("pins", "they", "them"),
-            };
-            let command = match self.dropped.as_slice() {
-                // A name with a leading dash reads as a flag, so `uninstall` fails on it.
-                [one] if !one.name.starts_with('-') => grim.uninstall("", one.kind, &one.name),
-                _ => format!("{grim} uninstall <kind> <name>"),
-            };
-            notes.push(format!(
-                "dropped {} {pins}: {}; remove what {it} installed with `{command}`; a bare `{grim} update` also \
-                 prunes {them} but moves every pin",
-                self.dropped.len(),
-                node_list(&self.dropped)
-            ));
-        }
+        notes.extend(moved_note(&self.moved));
+        notes.extend(dropped_note(&self.grim, &self.dropped));
         notes
     }
+}
+
+/// The stderr line naming the pins a relock moved, `None` when it moved none.
+pub(crate) fn moved_note(moved: &[PinnedNode]) -> Option<String> {
+    let pins = match moved {
+        [] => return None,
+        [_] => "pin",
+        _ => "pins",
+    };
+    Some(format!("moved {} {pins}: {}", moved.len(), node_list(moved)))
+}
+
+/// The stderr line naming the pins a relock took out of the lock and how to
+/// remove what they installed, `None` when it dropped none.
+pub(crate) fn dropped_note(grim: &Invocation, dropped: &[PinnedNode]) -> Option<String> {
+    // `uninstall` removes files, config entries or settings values by kind,
+    // so the line names what was installed, never one of them.
+    let (pins, it, them) = match dropped {
+        [] => return None,
+        [_] => ("pin", "it", "it"),
+        _ => ("pins", "they", "them"),
+    };
+    let command = match dropped {
+        // A name with a leading dash reads as a flag, so `uninstall` fails on it.
+        [one] if !one.name.starts_with('-') => grim.uninstall("", one.kind, &one.name),
+        _ => format!("{grim} uninstall <kind> <name>"),
+    };
+    Some(format!(
+        "dropped {} {pins}: {}; remove what {it} installed with `{command}`; a bare `{grim} update` also prunes \
+         {them} but moves every pin",
+        dropped.len(),
+        node_list(dropped)
+    ))
 }
 
 /// `nodes` as `kind/name, …`, the names made safe for a terminal.

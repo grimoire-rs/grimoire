@@ -40,7 +40,7 @@ surface, the experimental [settings][settings] surface, and the
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
-| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release] (a cascading release never moves a float to a lower version), the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, the `com.grimoire.uncompressed.digest` layer annotation, the [two-layer layout](./artifacts.md#requires-layer) of an artifact that declares dependencies (a grim convention: one content layer and one `application/vnd.grimoire.bundle.v1+json` requires layer, told apart by media type and written content first), and the `com.grimoire.requires-features` annotation grim reads to refuse a feature it does not know |
+| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release] (a cascading release never moves a float off a higher release), the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, the `com.grimoire.uncompressed.digest` layer annotation, the [two-layer layout](./artifacts.md#requires-layer) of an artifact that declares dependencies (a grim convention: one content layer and one `application/vnd.grimoire.bundle.v1+json` requires layer, told apart by media type and written content first), and the `com.grimoire.requires-features` annotation grim reads to refuse a feature it does not know |
 | [Package index][package-index] transport | The locators a published index serves. The client contract is [the root][index-root] at `<base>/c/root.json` and [the gzip blobs][index-blobs] it names at `<base>/c/f/sha256/<hex>.json.gz`, whose digest and size cover the inflated JSON. Both are permanent once an index emits them, and under `schema: 1` they grow only by additive fields. Their *presence* is not promised: a `404` is a normal answer that sends grim to `all.json`. Everything else under `c/` is private to the index pipeline. Also served: HTTP `<base>/all.json` and the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], both while the index's `legacy` setting is true (the default), and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised either (most indexes publish none, and a `404` is a normal, non-error answer). Its **path and document shape** are promised, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
@@ -192,15 +192,16 @@ grim 0.15.1 binary reads it, as
 for a project that declares no settings package, since 0.15.1 refuses the
 settings kind.
 
-One write differs further. A `grim remove` that leaves the lock stale can keep a row that 0.15.1's
+One write differs further. A `grim remove --no-relock` that leaves the lock stale can keep a row that 0.15.1's
 `remove` drops. When it also changes the lock's rows, it writes a hash no
 declaration produces, in the same `sha256:<hex>` form, and otherwise keeps the
 hash. 0.15.1 reads that lock as stale. The first `grim lock` after
 an upgrade adds the tags with no tag resolve, and its report reads `unchanged`.
 
-Beside a dependent whose entry records no edges, `grim remove` drops what
-0.15.1's drops. One online `grim lock` before the edit records those edges and
-keeps the pins, and 0.15.1 refuses the lock it writes. The first `grim install`
+Beside a dependent whose entry records no edges, `grim remove --no-relock` drops
+what 0.15.1's drops. A plain `grim remove` relocks like `grim add`, so it writes
+those edges and keeps the pins, and 0.15.1 refuses the lock it writes. A team
+that keeps 0.15.1 passes `--no-relock`. The first `grim install`
 on such a lock already exits `65` and names that `grim lock`.
 
 Beside such a dependent, the manifest a bundle member's moved tag names can hold dependencies that conflict. They can also form a cycle, back at the member's pinned digest or at another one. `grim add` of the member's own reference then keeps its pin, as
@@ -334,8 +335,13 @@ for anyone upgrading:
   So does one that reaches several bundles of the held repository. The refusal
   text says that the whole-plugin update it offers moves every pin of the plugin
   whose tag moved.
+- `grim remove` and `grim uninstall` exit with the relock's code (`78`, `69`,
+  `79` and others) where 0.15.1 exited `0`, when the relock they run in the
+  same run fails. They change nothing then, and `uninstall` deletes no file.
+  `--no-relock` restores the in-place edit and its exit code.
 - `grim release` and `grim publish` with the cascade on never move `X.Y`, `X` or
-  `latest` to a lower version, where they moved every float. They read each
+  `latest` to a lower version, where they moved every float. A float on a
+  prerelease is the exception and always moves. They read each
   float's manifest first and name a kept float in `floats_kept`. A real
   cascading release fails closed with `69`, `80` or `81` before any tag moves. A
   dry run keeps its exit code: it warns once and plans every float moving when
@@ -835,7 +841,7 @@ read a lock that records its tags. `status`, `install` and `lock` all exited
 That promise covers a project with no settings package. The settings table
 below lists what 0.15.1 does with one.
 
-A [`grim remove`][remove] that leaves the lock stale is the exception. It can
+A [`grim remove --no-relock`][remove] that leaves the lock stale is the exception. It can
 keep a row that 0.15.1's `remove` drops. When it also changes the lock's rows,
 it writes a hash no declaration produces, in the same `sha256:<hex>` form, and
 otherwise keeps the hash. 0.15.1 reads that lock as stale:

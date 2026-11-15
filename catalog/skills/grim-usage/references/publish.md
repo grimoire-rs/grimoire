@@ -66,13 +66,14 @@ cascade explicit: `--cascade` asserts it and rejects a non-semver tag with
 exit 65 (a typo guard); `--no-cascade` publishes only the exact tag even for
 a full semver.
 
-A cascade never moves a floating tag to a lower version. Before any tag moves,
+A cascade never moves a floating tag off a higher release. Before any tag moves,
 grim reads each float's manifest version: a float already on a higher version
 inside its own span stays, with one stderr line, so a `2.3.7` backport after
 `2.9.0` moves `2.3` and keeps `2` and `latest`. The JSON report lists them in
 `floats_kept`. Floats published earlier, or moved by other tools, stay as they
 are. A float stays only while the exact tag of its version still names its
-manifest; versions compare by semver precedence, prereleases included. A
+manifest. A float whose current version is a prerelease always moves, whatever
+the precedence, because a cascade never leaves one there. A
 cascading `--dry-run` reads the registry too and, when it cannot or offline,
 warns once and plans every float moving, exit unchanged. A real release that
 cannot read a float fails before any tag moves. Run releases into one

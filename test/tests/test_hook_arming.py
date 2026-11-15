@@ -998,7 +998,10 @@ def test_a_stale_lock_gatekeeper_remedy_names_the_consent_the_config_needs(
     has not been re-run: the lock on disk still lists only the consented hook, so
     judged by the lock the record looks complete. The remedy, followed as printed
     (`grim lock`, then the install), left the gatekeeper unregistered. It names
-    `grim hook allow` too, and the printed steps restore it."""
+    `grim hook allow` too, and the printed steps restore it.
+
+    Covers the in-place edit under `--no-relock`; plain `uninstall` is
+    covered by `test_remove_relock.py`."""
     gate = make_artifact(
         f"{unique_repo}/gate", "hook", {"gate/hook.toml": GATE_TOML, "gate/deny.sh": DENY_SH}, tag="1"
     )
@@ -1014,7 +1017,7 @@ def test_a_stale_lock_gatekeeper_remedy_names_the_consent_the_config_needs(
     runner.run("config", "set", "options.experimental.hooks", "true")
     (project_dir / ".claude" / "settings.local.json").unlink()
 
-    result = runner.run("uninstall", "skill", "carrier", check=False)
+    result = runner.run("uninstall", "--no-relock", "skill", "carrier", check=False)
 
     assert result.returncode == 0, result.stderr
     warning = [line for line in result.stderr.splitlines() if "no client registration" in line]

@@ -78,8 +78,8 @@ keeps existing pins. The
 when a lock's recorded dependencies no longer match the pinned artifacts
 (typically written by a grim older than 0.16.0): run `grim lock`.
 
-After `grim remove` of a key whose declaration hid an edge at another version,
-the lock is stale until `grim lock`, which keeps that key's pin. `grim update`
+After `grim remove --no-relock` of a key whose declaration hid an edge at another
+version, the lock is stale until `grim lock`, which keeps that key's pin. `grim update`
 exits 78 if the edges truly disagree. Restoring `grimoire.toml` by hand does not
 make such a lock fresh, because the edit wrote a hash no declaration produces
 when it changed the lock's rows. An edit that changes no row keeps the hash.

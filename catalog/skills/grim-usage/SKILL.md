@@ -101,7 +101,7 @@ To verify a pre-built grim release archive's build provenance:
 | `grim context` | Report the resolved scope, paths, clients, registries | [consume](references/consume.md) |
 | `grim fetch` | Print an artifact's content without installing | [consume](references/consume.md) |
 | `grim describe` | Report an artifact's metadata (kind, annotations, tags) without downloading content | [consume](references/consume.md) |
-| `grim remove` / `uninstall` | Undeclare vs full inverse of install; both also drop dependencies only the target needed | [consume](references/consume.md) |
+| `grim remove` / `uninstall` | Undeclare vs full inverse of install; both also drop dependencies only the target needed and relock in the same run (`--no-relock` skips it) | [consume](references/consume.md) |
 | `grim why` | Explain why an artifact is installed: direct, or required by which others (offline, lock only) | [consume](references/consume.md#dependencies) |
 | `grim export plugin` | Render already-locked artifacts as a Claude-family (Claude Code, Qoder) or Agent Plugins plugin (directory or `--zip`), for a client with no grim install | [publish](references/publish.md#export) |
 | `grim export marketplace` | Regenerate a git marketplace repository from a `marketplace.toml`'s `[marketplace]` table: one marketplace file and one plugin tree per client, plus a root README with the add commands, for consumers with no grim install | [marketplaces](references/marketplaces.md) |

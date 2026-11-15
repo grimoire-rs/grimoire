@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use super::resolve_error::{ResolveError, ResolveErrorKind, Unchosen};
 use crate::config::scope::{Invocation, shell_word};
+use crate::oci::ArtifactKind;
 
 /// The command a resolve ran under, which decides what its refusal tells the
 /// user to run instead.
@@ -23,6 +24,14 @@ pub enum RemedyCommand {
     Update { names: Vec<String> },
     /// `grim update --marketplace <manifest> <plugin>`.
     Marketplace { manifest: PathBuf, plugin: String },
+    /// An edit that undeclares `kind name`: `rerun` repeats it, `skip` makes it
+    /// without the relock and leaves the lock stale.
+    Edit {
+        kind: ArtifactKind,
+        name: String,
+        rerun: String,
+        skip: String,
+    },
 }
 
 /// Fill the `fix` of an `UnchosenRequirement` or `MajorDowngrade` refusal
@@ -95,6 +104,26 @@ pub fn with_remedy(mut err: ResolveError, command: &RemedyCommand) -> ResolveErr
                  plugin whose tag moved{instead}",
                 manifest.display()
             )
+        }
+        RemedyCommand::Edit {
+            kind,
+            name: target,
+            rerun,
+            skip,
+        } => {
+            let then = match to {
+                None => format!(
+                    "`{grim} update` to resolve every pin afresh, running `{grim} update --allow-downgrade` instead \
+                     if it refuses a major downgrade"
+                ),
+                Some(to) => format!("`{grim} lock --allow-downgrade` to take {to}"),
+            };
+            // Declaring the node the edit takes out would undo the edit.
+            if err.reference.kind == *kind && name == target {
+                format!("run `{skip}`, then {then}")
+            } else {
+                format!("declare {keep} in grimoire.toml, then rerun `{rerun}`, or run `{skip}`, then {then}")
+            }
         }
     };
     err
@@ -304,6 +333,46 @@ mod tests {
         );
     }
 
+    fn edit(name: &str) -> RemedyCommand {
+        RemedyCommand::Edit {
+            kind: ArtifactKind::Skill,
+            name: name.to_string(),
+            rerun: format!("grim remove skill {name}"),
+            skip: format!("grim remove --no-relock skill {name}"),
+        }
+    }
+
+    #[test]
+    fn the_edit_remedy_names_the_rerun_and_the_edit_without_the_relock() {
+        assert_eq!(
+            fix(downgrade(), &Invocation::WALKED, &edit("q")),
+            "declare skill r as `ghcr.io/acme/r:3.1.0` in grimoire.toml, then rerun `grim remove skill q`, or run \
+             `grim remove --no-relock skill q`, then `grim lock --allow-downgrade` to take 2.6.0"
+        );
+        assert_eq!(
+            fix(unchosen(), &Invocation::GLOBAL, &edit("q")),
+            "declare skill r as `ghcr.io/acme/r:2.1.0` in grimoire.toml, then rerun `grim remove skill q`, or run \
+             `grim remove --no-relock skill q`, then `grim --global update` to resolve every pin afresh, running \
+             `grim --global update --allow-downgrade` instead if it refuses a major downgrade"
+        );
+    }
+
+    /// Declaring the node an edit takes out would undo that edit.
+    #[test]
+    fn the_edit_remedy_of_its_own_target_offers_no_declaration() {
+        assert_eq!(
+            fix(downgrade(), &Invocation::WALKED, &edit("r")),
+            "run `grim remove --no-relock skill r`, then `grim lock --allow-downgrade` to take 2.6.0"
+        );
+        let rule = RemedyCommand::Edit {
+            kind: ArtifactKind::Rule,
+            name: "r".to_string(),
+            rerun: "grim remove rule r".to_string(),
+            skip: "grim remove --no-relock rule r".to_string(),
+        };
+        assert!(fix(downgrade(), &Invocation::WALKED, &rule).starts_with("declare skill r as"));
+    }
+
     #[test]
     fn with_remedy_leaves_other_errors_unchanged() {
         let conflict = || ResolveErrorKind::BundleConflict {
@@ -327,6 +396,7 @@ mod tests {
                 manifest: PathBuf::from("/w/marketplace.toml"),
                 plugin: "team".to_string(),
             },
+            edit("r"),
         ];
 
         let kinds: [fn() -> ResolveErrorKind; 2] = [|| ResolveErrorKind::TagNotFound, conflict];

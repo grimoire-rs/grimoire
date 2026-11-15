@@ -566,7 +566,7 @@ def test_the_recovery_from_a_subdirectory_names_the_projects_pair_by_path(
     tmp_path: Path,
     unique_repo: str,
 ) -> None:
-    """`grim remove skill m` from `work/sub` names `work`'s pair, not the shell's.
+    """`grim remove --no-relock skill m` from `work/sub` names `work`'s pair, not the shell's.
 
     0.15.1 locks `m` and adds `p`, which requires `m:1`; the lock records no edge of
     `p`. The walked run finds `work`'s config from `sub`, so a bare `grimoire.toml`
@@ -587,7 +587,7 @@ def test_the_recovery_from_a_subdirectory_names_the_projects_pair_by_path(
     sub.mkdir()
     from_sub = GrimRunner(current.binary, current.grim_home, cwd=sub)
 
-    edited = from_sub.run("remove", "skill", "m")
+    edited = from_sub.run("remove", "--no-relock", "skill", "m")
 
     here = work.resolve()
     named = f"restore {here}/grimoire.toml and {here}/grimoire.lock, run `grim lock`"
@@ -598,7 +598,7 @@ def test_the_recovery_from_a_subdirectory_names_the_projects_pair_by_path(
 
     from_sub.run("lock")
     kept = _pin(work, "m")
-    again = from_sub.run("remove", "skill", "m")
+    again = from_sub.run("remove", "--no-relock", "skill", "m")
 
     assert "no dependency edges" not in again.stderr, again.stderr
     assert _pin(work, "m") == kept == f"{m.fq}@{m.digest}"

@@ -660,6 +660,36 @@ def test_lock_conflict_exits_78(grim_at, project_dir: Path, tmp_path: Path, uniq
     assert lock.read_bytes() == held
 
 
+@pytest.mark.parametrize("verb", ["remove", "uninstall"])
+def test_a_relocked_edit_refuses_a_conflict_and_changes_nothing(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str, verb: str
+) -> None:
+    """A hand edit moved ``beta`` onto a value that clashes. Removing the skill beside
+    it relocks, which resolves that edit, so the run refuses as ``lock`` does and
+    names the in-place edit, which resolves nothing."""
+    alpha = _package(unique_repo, "alpha", {"claude": {"model": "sonnet"}})
+    beta = _package(unique_repo, "beta", {"claude": {"language": "en"}})
+    clash = _package(unique_repo, "beta", {"claude": {"model": "opus"}}, tag="3")
+    skill = _skill(unique_repo)
+    packages = {"alpha": alpha, "beta": beta}
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", packages, skills={"good": skill.fq})
+    runner.run("consent", "allow")
+    settings = {"alpha": alpha.fq, "beta": clash.fq}
+    write_config(project_dir, settings=settings, skills={"good": skill.fq}, experimental_settings=True)
+    files = [project_dir / name for name in ("grimoire.toml", "grimoire.lock")]
+    held = [path.read_bytes() for path in files]
+
+    result = runner.run(verb, "skill", "good", format="json", check=False)
+
+    assert _conflicts(result) == [("alpha", "/model", "conflict", "sonnet"), ("beta", "/model", "conflict", "opus")]
+    assert [path.read_bytes() for path in files] == held
+    assert f"`grim {verb} --no-relock skill good`" in result.stderr, result.stderr
+
+    # Positive control: the in-place edit the refusal names goes through.
+    assert runner.run(verb, "--no-relock", "skill", "good", check=False).returncode == 0
+    assert "good" not in (project_dir / "grimoire.toml").read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(("flag", "consented"), [(False, True), (True, False)], ids=["flag-off", "fresh-clone"])
 def test_lock_reads_no_layer_it_would_not_arm(
     grim_at, project_dir: Path, tmp_path: Path, unique_repo: str, flag: bool, consented: bool

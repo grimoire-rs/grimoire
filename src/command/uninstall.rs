@@ -8,7 +8,9 @@
 //! of `install`: it deletes the materialized client outputs and drops the
 //! install-state record via the shared [`crate::install::uninstall`]
 //! seam, **and** undeclares the entry from the config + lock so nothing
-//! is left behind. The TUI delete action reuses the same seam.
+//! is left behind. The TUI delete action reuses the same seam. A declared
+//! target relocks as `grim remove` does, before anything is deleted;
+//! `--no-relock` edits the lock in place instead.
 //!
 //! One exception: when the artifact is declared directly *and* a declared
 //! bundle still provides it, uninstall does **not** delete the files — the
@@ -35,7 +37,9 @@ use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_io;
 use crate::oci::ArtifactKind;
 
-use super::remove::ConfigEdit;
+use crate::resolve::resolve_options::Downgrade;
+
+use super::remove::{ConfigEdit, EditVerb, relock_refusal, skip_relock, warn_pin_changes};
 use super::scope_resolution;
 
 /// `grim uninstall` arguments.
@@ -57,6 +61,12 @@ pub struct UninstallArgs {
     /// with this flag. Materialized files are deleted either way.
     #[arg(long)]
     pub force: bool,
+
+    /// Edit `grimoire.lock` in place instead of relocking it: no registry is
+    /// read, and a lock whose pins no longer match the declaration stays stale
+    /// until `grim lock`.
+    #[arg(long)]
+    pub no_relock: bool,
 }
 
 /// Run `grim uninstall`.
@@ -64,9 +74,10 @@ pub struct UninstallArgs {
 /// # Errors
 ///
 /// Filesystem deletion (74), config (78/79/74), install-state save (74),
-/// or lock save (74) failures propagate via the typed error chain. An
-/// entry that is neither installed nor declared is reported, not an
-/// error.
+/// or lock save (74) failures propagate via the typed error chain, as does a
+/// relock that fails (69/78/79/80/81 and others), which runs before anything
+/// is deleted or written. An entry that is neither installed nor declared is
+/// reported, not an error.
 pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(UninstallReport, ExitCode)> {
     // Parsed through `ArtifactKind::from_kind_str`, the single source of truth
     // for the spelling, rather than a local `match` with a `_ => Rule`
@@ -111,9 +122,46 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         .is_some_and(|lock| crate::lock::stored_members::parent_provides(&ctx.paths(), &scope.set, lock, &key));
     let plan = plan_hold(&scope.set, lock.as_ref(), &key);
 
+    // A declared target relocks before step 1, so a refusal deletes and writes nothing.
+    let relocked = match &lock {
+        Some(previous) if !args.no_relock => {
+            let access = || super::access_seam(ctx);
+            let relocked =
+                relock_undeclared(&scope, previous, access, ctx.offline(), kind, &args.name, args.force).await?;
+            if let Some((_, relocked)) = &relocked {
+                let flags = if args.force { "--force " } else { "" };
+                super::lock::refuse_settings_conflict(ctx, &scope, &relocked.lock, &super::access_seam(ctx)?)
+                    .await
+                    .map_err(|e| skip_relock(e, &scope.invocation, kind, &args.name, &EditVerb::UNINSTALL, flags))?;
+            }
+            relocked
+        }
+        _ => None,
+    };
+    // The plan reads the lock on disk, which can trail the declaration: a row the
+    // relock keeps would otherwise lose its files while the saved lock pins it.
+    let kept = |node: &NodeKey| {
+        relocked
+            .as_ref()
+            .is_some_and(|(_, relocked)| relock_keeps(relocked, node))
+    };
+    let keep_target = held_by_bundle || kept(&key);
+    // A row the relock dropped loses its files with its row, even one the lock on
+    // disk still reached through a pin the relock moved, so it is planned there.
+    let drops = relocked
+        .as_ref()
+        .zip(lock.as_ref())
+        .and_then(|((_, relocked), previous)| relock_drops(&scope.set, previous, relocked));
+    let orphans: Vec<NodeKey> = match drops {
+        Some(drops) => drops.into_iter().filter(|node| *node != key).collect(),
+        None if keep_target => Vec::new(),
+        None => plan.orphans.iter().filter(|node| !kept(node)).cloned().collect(),
+    };
+    let in_line = relocked.is_some();
+
     // 1. Delete materialized files + drop the install-state record — UNLESS a
     //    declared bundle still holds the artifact (see above), in which case
-    //    nothing is deleted and only the declaration is dropped in step 2.
+    //    only the rows the relock dropped are deleted before step 2.
     let mut file_removed = false;
     // The footprint the containment guard refused to delete, carried out to
     // the report so the state/filesystem divergence is visible to the caller
@@ -125,7 +173,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     let mut abandoned_entries = Vec::new();
     let mut settings_changes = Vec::new();
     let mut unregistered = Unregistered::default();
-    if !held_by_bundle {
+    if !keep_target || !orphans.is_empty() {
         let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
         // The policy is resolved **without** the consent prompt reachable —
         // `grim uninstall` takes no `--trust-hooks` and must never ask a
@@ -169,9 +217,9 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             // Judged only to word a remedy: the delete above already took the fail-closed route.
             Err(_) => hook_policy.clone(),
         };
-        let nodes: Vec<_> = std::iter::once(key.clone())
-            .chain(plan.orphans.iter().cloned())
-            .collect();
+        // `delete_nodes` reports the first node as the target, so a kept target is left out.
+        let target = (!keep_target).then(|| key.clone());
+        let nodes: Vec<_> = target.into_iter().chain(orphans.iter().cloned()).collect();
         let (roots, workspace, config_path) = (scope.roots.clone(), scope.workspace.clone(), scope.config_path.clone());
         let (config_scope, force, grim) = (scope.scope, ForceScope::from(args.force), scope.invocation.clone());
         // Deleting reads, writes and removes files, so it runs on the blocking pool.
@@ -207,7 +255,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             };
             return Err(keep_changes(error, deletion.settings_changes).into());
         }
-        file_removed = deletion.target_removed;
+        file_removed = !keep_target && deletion.target_removed;
         retained = deletion.retained;
         abandoned_entries = deletion.abandoned_entries;
         settings_changes = deletion.settings_changes;
@@ -216,14 +264,22 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
 
     // 2. Undeclare from the config + lock (the `remove` half), so a later
     //    `install` does not silently bring it back.
-    let mut set = scope.set.clone();
-    let target = EditTarget {
-        config_path: &scope.config_path,
-        lock_path: &scope.lock_path,
-        grim: &scope.invocation,
-        store: ctx.paths(),
+    let undeclared = match (&lock, relocked) {
+        (Some(previous), Some((after, relocked))) => {
+            let deleted = |node: &NodeKey| *node == key || orphans.contains(node);
+            save_relocked(&scope, &after, previous, &relocked, deleted)
+        }
+        _ => {
+            let mut set = scope.set.clone();
+            let target = EditTarget {
+                config_path: &scope.config_path,
+                lock_path: &scope.lock_path,
+                grim: &scope.invocation,
+                store: ctx.paths(),
+            };
+            undeclare_and_unlock(&target, &scope.options, &scope.registries, &mut set, kind, &args.name)
+        }
     };
-    let undeclared = undeclare_and_unlock(&target, &scope.options, &scope.registries, &mut set, kind, &args.name);
     let (declared, notes) = match undeclared {
         Ok(done) => done,
         Err(error) => {
@@ -237,6 +293,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             });
         }
     };
+    unregistered.lock_in_line = in_line;
     unregistered.warn(&scope.invocation, &notes);
     settings_phase::warn_restart(&settings_changes);
 
@@ -268,6 +325,98 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             .with_settings_changes(settings_changes),
         ExitCode::Success,
     ))
+}
+
+/// Relock `previous` without `name`'s direct declaration, as `grim lock` would:
+/// `None` when the scope declares no such line. `access` is called only for a
+/// relock. A refusal names `grim uninstall --no-relock`, with `--force` when
+/// `force`, so the caller runs this before it deletes anything.
+///
+/// # Errors
+///
+/// The relock's refusal ([`relock_refusal`]), or `access`'s error.
+pub(crate) async fn relock_undeclared(
+    scope: &scope_resolution::ResolvedScope,
+    previous: &crate::lock::grimoire_lock::GrimoireLock,
+    access: impl FnOnce() -> anyhow::Result<std::sync::Arc<dyn crate::oci::access::OciAccess>>,
+    offline: bool,
+    kind: ArtifactKind,
+    name: &str,
+    force: bool,
+) -> anyhow::Result<
+    Option<(
+        crate::config::declaration::DesiredSet,
+        crate::resolve::resolver::TargetLock,
+    )>,
+> {
+    let mut after = scope.set.clone();
+    if !undeclare(&mut after, kind, name) {
+        return Ok(None);
+    }
+    let access = access()?;
+    let flags = if force { "--force " } else { "" };
+    let relocked = super::lock::relock_edit(scope, &after, Some(previous), &access, Downgrade::Refuse, offline)
+        .await
+        .map_err(|e| relock_refusal(e, kind, name, &EditVerb::UNINSTALL, flags))?;
+    Ok(Some((after, relocked)))
+}
+
+/// Write the config without the target and save the lock the relock made of it,
+/// then name the pins it moved and those it dropped that `deleted` does not cover.
+/// Nothing the relock wrote leaves a note, so the notes are empty.
+pub(crate) fn save_relocked(
+    scope: &scope_resolution::ResolvedScope,
+    after: &crate::config::declaration::DesiredSet,
+    previous: &crate::lock::grimoire_lock::GrimoireLock,
+    relocked: &crate::resolve::resolver::TargetLock,
+    deleted: impl Fn(&NodeKey) -> bool,
+) -> anyhow::Result<(bool, Vec<crate::lock::edit::EditNote>)> {
+    let grim = &scope.invocation;
+    let edit = ConfigEdit::write(&scope.config_path, &scope.options, &scope.registries, after, grim)?;
+    edit.save_lock(&scope.lock_path, &relocked.lock, previous)?;
+    super::lock::warn_moved_bundle_pins(Some(previous), &relocked.lock);
+    warn_pin_changes(grim, relocked, deleted);
+    Ok((true, Vec::new()))
+}
+
+/// The rows `set` reached in `previous` that the relock dropped, bundles aside:
+/// each loses its files with its row. `None` when the walk cannot be followed offline.
+pub(crate) fn relock_drops(
+    set: &crate::config::declaration::DesiredSet,
+    previous: &crate::lock::grimoire_lock::GrimoireLock,
+    relocked: &crate::resolve::resolver::TargetLock,
+) -> Option<Vec<NodeKey>> {
+    let before = crate::lock::effective_set::effective_set(set, previous)?;
+    let dropped = |key: &NodeKey| key.0 != ArtifactKind::Bundle && !relock_keeps(relocked, key);
+    Some(before.into_keys().filter(dropped).collect())
+}
+
+/// Whether the lock `relocked` made still holds `node`, so a delete keeps its files.
+pub(crate) fn relock_keeps(relocked: &crate::resolve::resolver::TargetLock, node: &NodeKey) -> bool {
+    relocked.lock.node_keys().any(|key| key == *node)
+}
+
+/// Drop `name`'s direct declaration from `set`; whether there was one.
+pub(crate) fn undeclare(set: &mut crate::config::declaration::DesiredSet, kind: ArtifactKind, name: &str) -> bool {
+    let declared = match kind {
+        // `uninstall` is the full inverse of install and is therefore the ONLY
+        // command that disarms a hook: it deletes the payload, drops the record,
+        // and — through the registrar's derive-never-record convergence — removes
+        // the registration from the client's own config. Refusing a hook here
+        // would leave an armed registration with no supported way to remove it,
+        // which is a worse posture than any refusal buys.
+        ArtifactKind::Hook => set.hooks.remove(name).is_some(),
+        ArtifactKind::Skill => set.skills.remove(name).is_some(),
+        ArtifactKind::Rule => set.rules.remove(name).is_some(),
+        ArtifactKind::Agent => set.agents.remove(name).is_some(),
+        ArtifactKind::Bundle => set.bundles.remove(name).is_some(),
+        ArtifactKind::Mcp => set.mcp.remove(name).is_some(),
+        ArtifactKind::Settings => set.settings.remove(name).is_some(),
+    };
+    if declared {
+        set.invalidate_declaration_hash_cache();
+    }
+    declared
 }
 
 /// The declared bundles each of which alone still provides `key`, as
@@ -390,6 +539,8 @@ pub(crate) struct Unregistered {
     /// The consent record does not cover every declared hook, so a plain install
     /// arms none of them and disarms the ones still running.
     pub(crate) unconsented: bool,
+    /// The delete saved a relocked lock, so the remedy names no `grim lock`.
+    pub(crate) lock_in_line: bool,
 }
 
 impl Unregistered {
@@ -409,7 +560,9 @@ impl Unregistered {
     /// locked settings package, which the install then applies.
     pub(crate) fn remedy(&self, grim: &Invocation, notes: &[crate::lock::edit::EditNote]) -> String {
         let install = registration_remedy(&self.unparseable, &format!("{grim} install"));
-        let lock = if notes.iter().any(crate::lock::edit::EditNote::has_steps) {
+        let lock = if self.lock_in_line {
+            String::new()
+        } else if notes.iter().any(crate::lock::edit::EditNote::has_steps) {
             format!(
                 "follow the steps of the note that says the next lock may move a pin first, because `{grim} \
                  install` exits 65 until then; "
@@ -557,6 +710,7 @@ pub(crate) fn delete_nodes(
         unparseable: unparseable_surfaces(env.workspace, env.scope, &clients),
         hooks: gatekeepers.into_keys().collect(),
         unconsented,
+        lock_in_line: false,
     };
     out
 }
@@ -692,23 +846,8 @@ pub(crate) fn undeclare_and_unlock(
     name: &str,
 ) -> anyhow::Result<(bool, Vec<crate::lock::edit::EditNote>)> {
     let set_before = set.clone();
-    let declared = match kind {
-        // `uninstall` is the full inverse of install and is therefore the ONLY
-        // command that disarms a hook: it deletes the payload, drops the record,
-        // and — through the registrar's derive-never-record convergence — removes
-        // the registration from the client's own config. Refusing a hook here
-        // would leave an armed registration with no supported way to remove it,
-        // which is a worse posture than any refusal buys.
-        ArtifactKind::Hook => set.hooks.remove(name).is_some(),
-        ArtifactKind::Skill => set.skills.remove(name).is_some(),
-        ArtifactKind::Rule => set.rules.remove(name).is_some(),
-        ArtifactKind::Agent => set.agents.remove(name).is_some(),
-        ArtifactKind::Bundle => set.bundles.remove(name).is_some(),
-        ArtifactKind::Mcp => set.mcp.remove(name).is_some(),
-        ArtifactKind::Settings => set.settings.remove(name).is_some(),
-    };
+    let declared = undeclare(set, kind, name);
     let edit = if declared {
-        set.invalidate_declaration_hash_cache();
         Some(ConfigEdit::write(
             target.config_path,
             options,
@@ -1295,6 +1434,7 @@ mod tests {
             kind: "skill".to_string(),
             name: "alpha".to_string(),
             force: false,
+            no_relock: false,
         };
 
         let (out, logs) = uninstall_logged(&ctx, &args).await;
@@ -1357,6 +1497,7 @@ mod tests {
             kind: "hook".to_string(),
             name: "shell-guard".to_string(),
             force: false,
+            no_relock: false,
         };
         let (_report, exit) = run(&ctx, &args).await.expect("uninstall succeeds");
         assert_eq!(exit, ExitCode::Success);

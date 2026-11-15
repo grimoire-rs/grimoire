@@ -221,9 +221,10 @@ An unreadable `grimoire.lock` (merge-conflict markers, bad TOML) makes
 without it would move every pin. Restore it from git or resolve the
 conflict; do not delete it, which re-resolves every tag.
 
-`grim install` exits 65 on a stale lock, and `grim remove` can cause that. If a
-removed declaration hid an edge its pin only partly answers, `remove` keeps the
-row and leaves the lock stale. Restoring `grimoire.toml` by hand does not make
+`grim install` exits 65 on a stale lock, and `grim remove --no-relock` can cause
+that. A plain `remove` or `uninstall` relocks in the same run and leaves none.
+With the flag, if a removed declaration hid an edge its pin only partly answers,
+`remove` keeps the row and leaves the lock stale. Restoring `grimoire.toml` by hand does not make
 it fresh again, because such an edit writes a hash no declaration produces when
 it changed the lock's rows. An edit that changes no row keeps the hash.
 `grim lock` then keeps that pin and writes the hash back. A pin that names no
@@ -633,7 +634,16 @@ Two commands with deliberately different depths:
 | `grim uninstall <kind> <name>` | undeclared | deleted, record dropped |
 
 `remove` only undeclares; `uninstall` is the full inverse of install.
-Both act on the **effective** declaration, fully offline: if a declared
+Both bring `grimoire.lock` in line in the same run, as `grim add` does: existing
+pins carried, nothing refreshed, the lock written once. If that relock fails
+(registry unreachable, a manifest the store lacks, a conflict the removal
+uncovers), the command changes nothing, deletes no file, and exits with the
+relock's code (78, 69, 79 and others). The error names its own remedy and
+`--no-relock`, which edits the lock rows in place, resolves nothing and may
+leave the lock stale until `grim lock`. A plain remove with every manifest in
+the store works offline. The rules below describe the in-place edit that the
+relock then settles.
+Both act on the **effective** declaration: if a declared
 bundle still names the artifact at the same identifier, the lock entry
 survives via the bundle and `uninstall` keeps the files (a directly
 declared one degrades to `remove` and a line names the bundle that keeps the
@@ -661,9 +671,10 @@ online `grim lock`, then repeat the edit. The config is `grimoire.toml`, or with
 `--global` the one in `$GRIM_HOME`. Where that pair is not in the working
 directory, as under `--config` or from a subdirectory, the note names both by
 absolute path. A lock a hand edit already made stale resolves every tagless pin
-once. The note says so, since a pin whose tag moved can still move. On a lock
-0.15.1 wrote, run one online `grim lock` before `remove`, `uninstall` or a TUI
-delete to record the edges and keep those pins, and 0.15.1 then refuses the lock.
+once. The note says so, since a pin whose tag moved can still move. Under
+`--no-relock`, on a lock 0.15.1 wrote, run one online `grim lock` before `remove`
+or `uninstall` to record the edges and keep those pins, and 0.15.1 then refuses
+the lock. A plain `remove` relocks and writes them itself.
 The first `grim install` on such a lock already exits 65 and names `grim lock`.
 
 "Deleted" has one documented exception, reported rather than hidden. The

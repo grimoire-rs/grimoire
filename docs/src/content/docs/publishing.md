@@ -706,7 +706,7 @@ exact tag even for a full semver, for a one-off version that should not move
 `latest`. A prerelease (`1.2.3-rc.1`) is always exact-only, because a release
 candidate never becomes a floating version.
 
-The cascade never moves a float to a lower version. Say 2.9.0 is out and you
+The cascade never moves a float off a higher release. Say 2.9.0 is out and you
 backport a fix as 2.3.7. That release moves `2.3` and leaves `2` and `latest` on
 2.9.0. Moving them would hand every consumer on `:2` a lower release. grim names
 each kept float on stderr and in `floats_kept` in the
@@ -718,9 +718,10 @@ moves one that already names this release. For any other float it reads the
 manifest's version annotation, so a release costs one manifest read per float.
 
 A float stays only when the annotated version lies inside the float's own span and
-is above the one you release. Versions compare by semver precedence, prereleases
-included, so a float on 3.0.0-rc.1 stays against 2.4.1 and 3.0.0 replaces it. The
-exact tag of that version must also still name the float's manifest. That costs
+is above the one you release. A float whose current version is a prerelease
+always moves, whatever the precedence: `latest` on 2.0.0-rc.1 moves to a release
+of 1.9.0. A cascade never leaves a float on a prerelease, so one sits there only
+when someone pushed the tag by hand. The exact tag of that version must also still name the float's manifest. That costs
 one more tag resolve per float that would stay. Otherwise the float moves, with
 one stderr line. A float on a manifest grim cannot parse, or one served under
 another digest, moves as before. A failed read stops a real release before any
