@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Accepted
+**Status:** Superseded by adr_rule_support_dir_removal.md
 **Date:** 2026-06-10
 **Deciders:** Michael Herwig (maintainer)
 **Tech Strategy Alignment:**
@@ -171,3 +171,4 @@ skills).
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-06-10 | Michael Herwig | Initial draft, accepted |
+| 2026-11-15 | Michael Herwig | Superseded by adr_rule_support_dir_removal.md |

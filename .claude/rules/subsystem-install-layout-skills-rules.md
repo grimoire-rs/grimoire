@@ -27,11 +27,15 @@ index → `adr_tool_namespaced_metadata_rendering.md`.
 ### Rules
 
 A **rule** materializes as the index `<name>.md` under `rules/`, and —
-when the artifact carries an optional sibling support directory — that
-directory installs **beside** the index as `rules/<name>/…` so the index's
+when the artifact is a pre-0.16.0 package carrying a sibling support
+directory — that directory installs **beside** the index as `rules/<name>/…` so the index's
 relative links resolve. The two on-disk roots (index file + sibling dir)
 are one footprint: the integrity hash folds both, and uninstall removes
 both. See `arch-principles.md` ADR index → `adr_multifile_rules.md`.
+**grim 0.16.0 and later never packs a support directory** (the rule is its
+`.md` alone; `rules/<name>/` may hold only README/logo, unpacked): the
+support-directory bullets below describe rules published before 0.16.0 only
+(`adr_rule_support_dir_removal.md`).
 
 **Most clients decline rules** (`Vendor::kind_support(Rule) == Declined`) —
 Codex, Gemini, Zed, Amp, the generic `agents` target, and five of the six
@@ -135,7 +139,7 @@ Per-client rule transforms:
   Claude's did before `claudeMdExcludes` (#102) — a disclosed known gap
   (`clients.md#gap-qoder`), not repaired until upstream ships a key.
 
-Support directory files are copied verbatim for every rule-supporting
+For rules published before 0.16.0, support directory files are copied verbatim for every rule-supporting
 client (Claude, OpenCode, Copilot, Cursor, Kiro, Antigravity, Qoder). Only the index is ever
 transformed. The copy itself is never adjusted per client — where a client
 would mis-read it, grim compensates in that client's own config (Claude, via
