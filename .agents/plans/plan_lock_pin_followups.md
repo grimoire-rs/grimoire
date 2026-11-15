@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_lock_pin_followups
-- **Active phase:** 1 — Docs and wording
+- **Active phase:** 2 — Graph split
 - **Step:** /hex-execute → Implement
-- **Last update:** 2026-11-15 (initialized)
+- **Last update:** 2026-11-15 (after 8d81e92e: chore: split long sentences in the lock pin ADR)
 
 ---
 
