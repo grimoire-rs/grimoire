@@ -114,7 +114,37 @@ pub fn save(path: &Path, lock: &GrimoireLock, previous: Option<&GrimoireLock>) -
         stamp_generated_at(&mut to_write.metadata, &prev.metadata, unchanged);
     }
     let serialized = to_write.to_toml_string().map_err(|e| LockError::new(path, e.kind))?;
-    write_capped(path, &serialized)
+    write_capped(path, &serialized)?;
+    if first_dependency_rows(previous, &to_write) {
+        warn_dependency_rows(path);
+    }
+    Ok(())
+}
+
+/// Whether writing `lock` over `previous` is the first time the lock carries
+/// dependency rows (`requires`), the moment it becomes unreadable for a grim
+/// older than [`FIRST_GRIM_READING_DEPENDENCIES`].
+fn first_dependency_rows(previous: Option<&GrimoireLock>, lock: &GrimoireLock) -> bool {
+    has_dependency_rows(lock) && !previous.is_some_and(has_dependency_rows)
+}
+
+fn has_dependency_rows(lock: &GrimoireLock) -> bool {
+    lock.iter_artifacts().any(|a| !a.requires.is_empty())
+}
+
+/// The grim release that first reads a lock with dependency rows.
+const FIRST_GRIM_READING_DEPENDENCIES: &str = "0.16.0";
+/// The last release that cannot read one.
+const LAST_GRIM_NOT_READING_DEPENDENCIES: &str = "0.15.1";
+
+fn warn_dependency_rows(path: &Path) {
+    let name = path
+        .file_name()
+        .map_or_else(|| "the lock".into(), |n| n.to_string_lossy());
+    tracing::warn!(
+        "{name} now records dependencies, which grim {LAST_GRIM_NOT_READING_DEPENDENCIES} and older cannot read; \
+         every machine and CI job that uses this project needs grim {FIRST_GRIM_READING_DEPENDENCIES} or newer"
+    );
 }
 
 /// Load a `marketplace.lock` from `path`: the same capped read and raw
@@ -158,7 +188,12 @@ pub fn save_marketplace(
         stamp_generated_at(&mut to_write.metadata, &prev.metadata, unchanged);
     }
     let serialized = to_write.to_toml_string().map_err(|e| LockError::new(path, e.kind))?;
-    write_capped(path, &serialized)
+    write_capped(path, &serialized)?;
+    let rows = |l: &MarketplaceLock| l.plugins.values().any(has_dependency_rows);
+    if rows(&to_write) && !previous.is_some_and(rows) {
+        warn_dependency_rows(path);
+    }
+    Ok(())
 }
 
 /// Keep the previous `generated_at` when content is `unchanged`; otherwise
@@ -319,6 +354,30 @@ mod tests {
             mcp: vec![],
             bundles: vec![],
         }
+    }
+
+    fn with_requires(mut lock: GrimoireLock) -> GrimoireLock {
+        lock.skills[0].requires = vec![crate::oci::bundle::BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "base".to_string(),
+            id: "./base:1".to_string(),
+        }];
+        lock
+    }
+
+    fn plain_lock() -> GrimoireLock {
+        lock_with("2026-04-19T00:00:00Z", vec![artifact("a", pinned("acme/a", None, 'a'))])
+    }
+
+    #[test]
+    fn first_dependency_rows_decides_on_the_transition_only() {
+        let plain = plain_lock();
+        let rows = with_requires(plain_lock());
+        assert!(first_dependency_rows(None, &rows), "no lock before");
+        assert!(first_dependency_rows(Some(&plain), &rows), "a lock without rows before");
+        assert!(!first_dependency_rows(Some(&rows), &rows), "rows were already there");
+        assert!(!first_dependency_rows(None, &plain), "no rows written");
+        assert!(!first_dependency_rows(Some(&rows), &plain), "rows removed");
     }
 
     #[test]

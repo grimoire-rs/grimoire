@@ -220,6 +220,13 @@ scope fails until it is removed. The same value through `grim config set`
 is refused earlier, at 65. Only a verified pool reader may be opted in —
 grim never writes where nothing reads.
 
+## A Lock That Now Records Dependencies
+
+A warning that `grimoire.lock now records dependencies, which grim 0.15.1 and
+older cannot read` prints once, the first time a write adds `requires` rows to
+a lock that had none. The exit is 0. Every machine and CI job that uses the
+project needs grim 0.16.0 or newer.
+
 ## A Held-Back Request
 
 A warning that `skill/x is requested by skill/p as <ref>, but your declaration
