@@ -1470,7 +1470,7 @@ adding a column.
 ## grim status {#status}
 
 Reports each declared artifact's state in a `State` column, one of
-`installed`, `outdated`, `modified`, `missing`, or `stale` — the five words
+`installed`, `outdated`, `modified`, `missing`, or `stale`. The five words
 are defined under [artifact states](#artifact-states), alongside the
 vocabularies the [TUI](#tui) and [`grim search`](#search) print, which
 differ from this one. The `Source` column shows each artifact's
