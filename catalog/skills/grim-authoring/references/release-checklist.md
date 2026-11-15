@@ -220,12 +220,18 @@ the reserved tag is hidden from tag listings. Consumers read it with
 - **`[description]` table** decouples layout: `readme`/`logo`/`changelog`
   map onto fixed wire names; `include` globs add extra assets (each keeps
   its manifest-relative path — README-referenced images keep working).
-- **Package READMEs**: by default an entry's own `README.md`
-  (`<path>/README.md` for a skill or hook, `<path without .md>/README.md`
-  for a rule or agent) replaces the README of its companion; changelog and
-  logo still come from the top level. `[description] entry_readme = "<name>"`
-  renames the file and `false` turns the lookup off. A repository with
-  package READMEs publishes a different companion on its next run.
+- **Package README and logo**: an entry's own README and logo replace the
+  companion's; first hit wins, and each falls back independently to the
+  top level. For a skill or hook at `P` named `S`: `P/README.md`, then
+  `S.README.md` beside `P`; logo `P/logo.png`, `P/logo.svg`, then `S.png`,
+  `S.svg` beside `P`. For a rule or agent at `D/S.md`: `D/S/README.md`, then
+  `D/S.README.md`; logo `D/S/logo.*`, then `D/S.png`, `D/S.svg`. For an mcp,
+  bundle or settings package at `D/S.toml`: `D/S.README.md`; logo `D/S.png`,
+  `D/S.svg`. A file inside a skill or hook directory ships with the package;
+  a sibling beside it does not. `[description] entry_readme = false` turns
+  the README lookup off (boolean only); the logo lookup has no toggle. A
+  repository with package READMEs publishes a different companion on its next
+  run.
 - **Precedence**: per-entry table, then top-level table, then the
   conventional files. A top-level table with files but no `readme`, next to
   a root `README.md`, warns that the README is not published.

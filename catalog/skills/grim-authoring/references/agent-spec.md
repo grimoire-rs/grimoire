@@ -111,16 +111,19 @@ Full matrix: [emit matrix][emit-matrix] · [client compatibility][clients].
 - **No object-valued vendor fields** — `metadata` is string-valued, so
   Claude's `mcpServers`/`hooks`, OpenCode's `permission`, and Copilot's
   `mcp-servers` cannot be authored; add them post-install.
-- **No support directory** — an agent installs as exactly one file
-  (`<name>.md`, or `<name>.toml` for Codex). A sibling directory sharing
-  the stem is read **only** for the well-known companions `README.md`,
-  `logo.png`, and `logo.svg`:
-  those three ride the published layer (under `<name>/…`, for
-  `grim fetch --path` and catalog UIs) but are never installed to a
-  client; every other file in that directory is ignored
-  ([well-known assets][well-known]). That `<name>/README.md` is also the
-  README of the agent's description companion, unless `publish.toml`
-  turns the lookup off with `[description] entry_readme = false`.
+- **No support directory, and no packed companions** — an agent installs
+  as exactly one file (`<name>.md`, or `<name>.toml` for Codex), and since
+  grim 0.16.0 the package is that `.md` alone. A sibling directory sharing
+  the stem (`agents/<name>/`) may hold only `README.md`, `logo.png` and
+  `logo.svg`, and **none of them is packed**: they feed the catalog
+  description only (`<name>/README.md`, else `<name>.README.md` beside the
+  agent; logo likewise, `<name>/logo.png|svg`, else `<name>.png|svg`). Any
+  other file there refuses the build (exit 65, `an agent's directory may hold
+  only README.md, logo.png and logo.svg`). Older grims packed the three
+  companions and ignored the rest silently. Files an agent needs at run time
+  belong in a skill it requires (`grim.requires.skills.<name>` in its
+  `metadata`). A `.grimignore` in that directory is itself a stray file.
+  Description lookup: [release-checklist.md](release-checklist.md#description-companion).
 - **No model translation** — see vendor overrides above.
 
 ## Minimal Example
@@ -145,7 +148,7 @@ You are a code reviewer. Examine the diff...
 | `name` ≠ file stem | Hard error, exit 65 — name mismatch |
 | Known vendor key, bad literal (`claude.permission-mode: yolo`) | Hard error, exit 65 — publish stops |
 | Typo'd own-namespace key (`opencode.temprature`) | Warning + dropped |
-| Sibling dir sharing the stem | Only `README.md`/`logo.png`/`logo.svg` pack (catalog companions, never installed); everything else silently ignored |
+| Sibling dir sharing the stem holds any file but `README.md`/`logo.png`/`logo.svg` | Hard error, exit 65 (since 0.16.0; earlier grims ignored it). The three allowed files are catalog-only and never packed |
 | Vendor key shadowing a common field | Silent override per vendor — a feature, but a surprise when unintended |
 | `repository` not `https://` | Hard error, exit 65 |
 
@@ -156,10 +159,11 @@ You are a code reviewer. Examine the diff...
 - [Override precedence][precedence] — the shadow semantics in full.
 - [Agent vendor registries][registries] — every projectable key per vendor.
 - [Catalog metadata for agents][pub-agent] — `metadata` map placement.
+- [Upgrading: agent companions][upgrading] — what changed in 0.16.0.
 
 [agents-doc]: https://grimoire.rs/agents.html
 [artifacts-agents]: https://grimoire.rs/artifacts.html#agents
-[well-known]: https://grimoire.rs/artifacts.html#well-known-assets
+[upgrading]: https://grimoire.rs/upgrading.html#agent-companions
 [precedence]: https://grimoire.rs/agents.html#override-precedence
 [emit-matrix]: https://grimoire.rs/agents.html#emit-matrix
 [clients]: https://grimoire.rs/clients.html

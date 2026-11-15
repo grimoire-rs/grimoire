@@ -5,6 +5,7 @@ the exit code, diagnose the cause, or get past an integrity gate.
 
 Contents: [Exit Codes](#exit-codes) · [Exit 65](#exit-65-data-errors) ·
 [Exit 78](#exit-78-no-client-can-host-it) ·
+[Rule Support Directory Warning](#a-rule-that-ships-a-support-directory) ·
 [Held-Back Request](#a-held-back-request) ·
 [Integrity Gates](#integrity-gates) ·
 [Containment Refusals](#containment-refusals) ·
@@ -131,6 +132,21 @@ Common causes, roughly in order of frequency:
   frontmatter fence; missing `name` or `description`; frontmatter
   `name` not equal to the directory name; description empty or over
   1024 chars.
+- **A rule's support directory (since 0.16.0).** `a rule can no longer ship a
+  support directory`: `rules/<name>/` holds a file other than `README.md`,
+  `logo.png`, `logo.svg`. Raised by `grim build`, `release`, `publish`, and by
+  `grim lock`, `update`, `add <path>`, `install <path>` for a rule declared by
+  path. Move the files into a skill, require it from the rule's frontmatter
+  (`grim.requires.skills.<name>`), name it in the rule body. A `.grimignore`
+  there is itself a stray file. `grim status` on an already-locked path rule
+  that gained such a file exits 0, reports it `outdated` and prints the
+  refusal as a warning. Link: `https://grimoire.rs/upgrading.html#rule-support-dir`.
+- **An agent's stray files (since 0.16.0).** `an agent's directory may hold only
+  README.md, logo.png and logo.svg`: `agents/<name>/` holds anything else.
+  Delete the files or move them out; run-time files belong in a skill the
+  agent requires. The three allowed files are no longer packed either
+  (`grim fetch <ref> --path <name>/README.md` now exits 1). Link:
+  `https://grimoire.rs/upgrading.html#agent-companions`.
 - **Agent frontmatter.** Agents *require* frontmatter with `name`
   (== file stem) and `description`.
 - **Catalog metadata.** `keywords` written as a list instead of a
@@ -226,6 +242,15 @@ A warning that `grimoire.lock now records dependencies, which grim 0.15.1 and
 older cannot read` prints once, the first time a write adds `requires` rows to
 a lock that had none. The exit is 0. Every machine and CI job that uses the
 project needs grim 0.16.0 or newer.
+
+## A Rule That Ships a Support Directory
+
+An install warning `rule '<name>' ships a support directory, which is
+deprecated` means the package was published before grim 0.16.0. The exit is 0
+and the rule works. Its directory files load as extra rules in some clients.
+Ask the publisher of the named repository to move them into a required skill.
+It prints once per such rule, only when grim writes files, not on a no-op
+install.
 
 ## A Held-Back Request
 

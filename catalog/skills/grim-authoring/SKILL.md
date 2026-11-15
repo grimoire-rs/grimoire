@@ -27,23 +27,21 @@ bundle and the build exits 78).
 | Kind | Source shape | Inference | Installs as |
 |---|---|---|---|
 | Skill | Directory with a `SKILL.md` index | directory → skill | Directory tree under the client's `skills/` dir |
-| Rule | Single `.md` file | `.md` → rule | `rules/<name>.md`, per-client transform |
-| Rule + support dir | `<name>.md` + sibling `<name>/` dir | sibling dir auto-discovered | Index file + `rules/<name>/…` side by side |
+| Rule | Single `.md` file; a sibling `<name>/` may hold only `README.md`, `logo.png`, `logo.svg`, none packed | `.md` → rule | `rules/<name>.md`, per-client transform |
 | Agent | Single `.md`, frontmatter required | **never — `--kind agent` mandatory** | One agent file per client, per-client render |
 | MCP server | `.toml` descriptor with a `[server]` table | **never — `--kind mcp` mandatory** | Entry in each client's MCP config file, per-client render |
 | Hook | Directory with a `hook.toml` manifest + its payload files | directory with `hook.toml` → hook | Payload tree materialized once per scope, one recorded output per client. **Arming is gated and off by default** — see [hook-spec.md](references/hook-spec.md) |
 | Settings (experimental) | `settings/<name>.toml`: top-level catalog keys plus one table per harness (`claude`, `codex`, `copilot`, `cursor`, `opencode`, `qoder`, `antigravity`, `amp`, `droid`, `gemini`, `kilo`, `kiro`, `warp`) | **never — `--kind settings` mandatory** | Values merged into each harness's own settings file, never a file of its own. **Applies only past its flag and workspace consent** — see [Settings Ship Gated](#settings-ship-gated) |
 | Bundle | `.toml` member list | `.toml` → bundle | Never materializes — expands to its members |
 
-A skill directory or a rule's support directory can drop a `.grimignore`
+A skill or hook directory can drop a `.grimignore`
 at its root (gitignore syntax) to keep runtime junk — `__pycache__/`,
 `.venv/`, `.DS_Store` — out of the pack and out of drift detection; a
 built-in default list already covers the common cases and `.grimignore`
 lines extend it; a `!pattern` line re-includes a default. `SKILL.md`, a rule's index, a hook's `hook.toml`, and `.grimignore`
 itself are never ignorable. A hook handler naming an ignored file fails
 `grim build` (65) — it would never be packed; its runtime byproducts
-beyond the defaults belong in `.grimignore`, or they read as drift. Agents get no `.grimignore` — their companion
-directory is already an allowlist. Full default list and semantics:
+beyond the defaults belong in `.grimignore`, or they read as drift. Rules and agents get no `.grimignore`: the package is the single `.md`, and a `.grimignore` beside it in `<name>/` is itself a stray file. Full default list and semantics:
 [Artifact Reference § .grimignore][grimignore].
 
 Two directory kinds share one inference arm, and the order is
@@ -82,7 +80,11 @@ version, or a digest, keeps the literal meaning. See
 reference, duplicate or self-reference). Publishing packs them as a second
 layer, so **author, build and release with grim 0.16.0 or later**: an older grim
 drops them silently. Never add them to a version tag consumers already float
-on; start a new major tag. Details and the cycle and size limits:
+on; start a new major tag. A rule that needs lookup data does not
+ship a support directory (grim 0.16.0 refuses to pack one): it puts the depth
+files in a skill and requires it, `grim.requires.skills.<name>: "<ref>"` in
+its frontmatter `metadata`, and names the skill in its body. See
+[rule-spec.md](references/rule-spec.md#support-directory). Details and the cycle and size limits:
 [Artifact Reference § Declaring dependencies][requires],
 [publishing § Publishing dependencies][pub-requires].
 
@@ -373,7 +375,7 @@ Four surfaces, and the choice can change what you author:
 | Read… | …when |
 |---|---|
 | [references/skill-spec.md](references/skill-spec.md) | Authoring a skill directory or its `SKILL.md` frontmatter |
-| [references/rule-spec.md](references/rule-spec.md) | Authoring a rule file, its globs, or a support directory |
+| [references/rule-spec.md](references/rule-spec.md) | Authoring a rule file, its globs, or replacing a rule's support directory with a support skill |
 | [references/agent-spec.md](references/agent-spec.md) | Authoring an agent definition or its vendor overrides |
 | [references/mcp-spec.md](references/mcp-spec.md) | Authoring an MCP server descriptor or its env references |
 | [references/hook-spec.md](references/hook-spec.md) | Authoring a `hook.toml`, choosing an event and tier, writing a matcher, or fixing the payload-not-executable refusal |

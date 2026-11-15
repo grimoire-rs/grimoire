@@ -178,6 +178,7 @@ type** — which is why cross-client packaging defaults to skills.
 |---|---|---|
 | Always-on file > ~200 lines, or lines fail the deletion test | Split into scoped rules (per-area standards) + skills (workflows) | Adherence degrades with size; rules and skills defer the cost |
 | A scoped rule has grown procedural (step-by-step, > 200 lines) | Rule → skill; the rule keeps a one-line invariant + pointer | Multi-step procedures are skill-shaped; bundled files are free until read |
+| A rule needs lookup data or long examples beside it | Keep the rule short; move the depth into a support skill the rule requires and names. Never a directory under `rules/` | Clients load every file under `rules/` as a rule ([rule-design.md](rule-design.md#depth-files-never-beside-a-rule)) |
 | A skill encodes something that must never be skipped | Skill → hook for the enforcement core; the skill keeps the how/why | Skill activation is probabilistic; a hook runs deterministically, but it fails open, so for a hard guarantee use the client's managed settings |
 | A manual command gets used repeatedly in predictable contexts | Manual-only skill → auto-invocable skill with a trigger-rich description | Removes the "remember to type it" failure |
 | Recurring research keeps flooding the main context | Inline work → subagent; preload needed skills explicitly — auto-activation does not transfer | The main context receives only the distilled summary |

@@ -96,8 +96,10 @@ cost: `README.md` (human-facing readme) and `logo.png`/`logo.svg` (a
 catalog/gallery icon). They are ordinary tree files — no frontmatter, no
 schema meaning — that catalog UIs look for by convention and consumers
 can pull with `grim fetch <ref> --path README.md`
-([well-known assets][well-known]). For a readme at the *repository*
-level (uniform across every kind, not installed with the tree), publish
+([well-known assets][well-known]). They ship with the package; a
+`<name>.README.md` or `<name>.png` *beside* the skill directory feeds the
+catalog description instead and is never packed. For a readme at the
+*repository* level (uniform across every kind, not installed with the tree), publish
 a description companion instead — see
 [release-checklist.md](release-checklist.md#description-companion).
 

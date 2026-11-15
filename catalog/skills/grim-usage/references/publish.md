@@ -46,12 +46,27 @@ would point at, and never writes to the registry. A cascading dry run reads
 the floats it would move; when it cannot, it warns once and plans every float
 moving. Make it a habit before any version release.
 
-A skill directory or a rule support directory can drop a `.grimignore` at
+A skill or hook directory can drop a `.grimignore` at
 its root (gitignore syntax) to keep runtime junk — `__pycache__/`,
 `.venv/`, `.DS_Store` — out of the pack; a built-in default list already
 covers the common cases, so `.grimignore` is only for exceptions. See
 [Artifact Reference § .grimignore][grimignore] for the full default list
-and semantics.
+and semantics. A rule or agent directory reads no `.grimignore`; one there is
+a stray file.
+
+**A rule or agent is its `.md` alone** (grim 0.16.0 and later). The directory
+beside it (`rules/<name>/`, `agents/<name>/`) may hold only `README.md`,
+`logo.png` and `logo.svg`, none of them packed; any other file makes `grim
+build`, `release` and `publish` exit 65. A rule declared by local path is
+refused the same way by `grim lock`, `update`, `add <path>` and `install
+<path>`. The rule message starts `a rule can no longer ship a support
+directory`, lists up to five files and links
+`https://grimoire.rs/upgrading.html#rule-support-dir`; the agent message starts
+`an agent's directory may hold only README.md, logo.png and logo.svg` and links
+`#agent-companions`. Fix: move the depth files into a skill, require it from the
+rule's frontmatter (`grim.requires.skills.<name>`), and name it in the rule
+body. Keep the support skill model-invocable (see the `ai-config-authoring`
+skill's `skill-design.md`).
 
 ## Cascade Tags
 
@@ -528,15 +543,23 @@ include   = ["docs/img/*.png"]   # extra README-referenced assets
   automatically (opt out per entry with `description = false`). All
   members are optional — an explicit table that resolves to zero files is
   a data error (exit 65), but a conventional-probe miss is silent.
-- **Package READMEs.** By default each entry's own README replaces the
-  README of its companion: `<path>/README.md` for a skill or hook,
-  `<path without .md>/README.md` for a rule or agent (`<path>` is the
-  entry's source, explicit `path` included). Changelog, logo and included
-  files still come from the top-level companion. `[description]
-  entry_readme = "<name>"` picks another file name and `entry_readme =
-  false` turns the lookup off; a name with a path separator or `..` exits 65.
-  A file that escapes the manifest directory or is not a regular file is
-  skipped with a warning. A repository with package READMEs publishes a
+- **Package README and logo.** By default each entry's own README and logo
+  replace the companion's. First hit wins, and README and logo fall back
+  independently to the top-level companion (`<path>` is the entry's source,
+  explicit `path` included):
+
+  | Kind | README | Logo |
+  |---|---|---|
+  | skill, hook (directory `P`, named `S`) | `P/README.md`, then `S.README.md` beside `P` | `P/logo.png`, `P/logo.svg`, then `S.png`, `S.svg` beside `P` |
+  | rule, agent (`D/S.md`) | `D/S/README.md`, then `D/S.README.md` | `D/S/logo.png`, `D/S/logo.svg`, then `D/S.png`, `D/S.svg` |
+  | mcp, bundle, settings (`D/S.toml`) | `D/S.README.md` | `D/S.png`, `D/S.svg` |
+
+  A file inside a skill or hook directory ships with the package; a sibling
+  beside it does not. Changelog and included files still come from the
+  top-level companion. `[description] entry_readme = false` turns the README
+  lookup off (boolean only; the logo lookup has no toggle). A file that
+  escapes the manifest directory or is not a regular file is skipped with a
+  warning. A repository with package READMEs publishes a
   different companion on its next run, even at an unchanged version.
 - **Precedence.** Per-entry table, then top-level table, then the
   conventional files; the package README takes the README slot of the last
@@ -731,8 +754,8 @@ reference][commands-export-marketplace] for the layout and ownership rules.
 
 ## Further Reading
 
-- [Publishing][publishing] — the full workflow: support directories,
-  per-kind metadata, dry runs, bundle pinning.
+- [Publishing][publishing] — the full workflow: the rule and agent package
+  contents, per-kind metadata, dry runs, bundle pinning.
 - [The Package Index][package-index] — index spec, auto-merge rules,
   hosting your own.
 - [Authentication][auth] — credential resolution, storage tiers, CI.
