@@ -24,7 +24,7 @@ use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::{BundleProvenance, LockedArtifact};
 use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
 use crate::lock::part_stamps::{PartStamps, split_stamp};
-use crate::lock::pin_rule::{self, HashProof, PinRecord, bundle_provenance_tag};
+use crate::lock::pin_rule::{self, EdgeEvidence, HashProof, PinRecord, bundle_provenance_tag};
 use crate::lock::refresh::Refresh;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::{AccessError, AccessErrorKind};
@@ -32,6 +32,8 @@ use crate::oci::bundle::BundleMember;
 use crate::oci::identifier::is_valid_oci_tag;
 use crate::oci::manifest::LayerLayout;
 use crate::oci::reference::ArtifactRef;
+use crate::oci::version_claim::{Claim, EdgeOrigin, Line, claim_of};
+use crate::oci::version_evidence::annotated_version;
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 
 /// A part relock's bundle state (owner decision on how a part records a bundle).
@@ -631,10 +633,9 @@ async fn refuse_held_requirements(
     edges: &BTreeMap<NodeKey, Vec<BundleMember>>,
     inputs: &PartInputs<'_>,
 ) -> Result<(), ResolveError> {
-    let recorded = pin_rule::reached_requests(
-        run.previous,
-        reached_rows(inputs.set, run.previous, inputs.proof).as_ref(),
-    );
+    let reached = reached_rows(inputs.set, run.previous, inputs.proof);
+    let recorded = pin_rule::reached_requests(run.previous, reached.as_ref());
+    let ranges = pin_rule::reached_ranges(run.previous, reached.as_ref());
     let mut lists = Lists::default();
     for key in run.held {
         let Some(row) = run
@@ -650,7 +651,10 @@ async fn refuse_held_requirements(
                 continue;
             };
             let target = (edge.kind, run.bundle_binding(edge, &id, inputs.set).to_string());
-            let (required, parting) = match judge_edge(run, &id, &target, &recorded, inputs).await {
+            let ranged = ranges
+                .get(&(edge.kind, edge.name.clone()))
+                .is_some_and(|ranges| ranges.contains(&id));
+            let (required, parting) = match judge_edge(run, &id, &target, ranged, &recorded, inputs).await {
                 Judged::Shadowed => continue,
                 Judged::Parting(parting) => (short_ref(&id), parting),
                 Judged::Answered if target.0 == ArtifactKind::Bundle && !run.bundles.is_empty() => {
@@ -694,10 +698,13 @@ struct Parting {
 
 /// Judge the edge `id` of a held row onto `target`: the one rule for a direct edge and for
 /// each bundle a requirement nests, so the proof it takes cannot differ between them.
+/// `ranged` marks a `requires` range claim the part records and no bundle lists: it settled
+/// through its line, so a moved pin inside that line answers it, as the graph reads it.
 async fn judge_edge(
     run: &Run<'_>,
     id: &Identifier,
     target: &NodeKey,
+    ranged: bool,
     recorded: &BTreeMap<NodeKey, BTreeSet<Identifier>>,
     inputs: &PartInputs<'_>,
 ) -> Judged {
@@ -707,6 +714,9 @@ async fn judge_edge(
     let Some(moved) = run.moved(target, inputs.stamps) else {
         return Judged::Answered;
     };
+    if ranged && inside_line(id, moved.now, inputs).await {
+        return Judged::Answered;
+    }
     let answered = moved
         .was
         .is_some_and(|was| previous_pin_answered(id, target, was, recorded, inputs));
@@ -717,6 +727,25 @@ async fn judge_edge(
         moved: pin_name(target.0, &target.1),
         to: moved_to(moved.now),
     })
+}
+
+/// Whether `now`, the pin a pick moved the range claim `id` onto, shows a version inside the
+/// claim's line: its manifest's version, else its tag's shape. A manifest that cannot be
+/// read leaves the tag.
+async fn inside_line(id: &Identifier, now: PinRecord<'_>, inputs: &PartInputs<'_>) -> bool {
+    let Claim::Range(req) = claim_of(id, EdgeOrigin::Requires) else {
+        return false;
+    };
+    let read = tokio::time::timeout(
+        inputs.options.per_artifact_timeout,
+        inputs.access.fetch_manifest(&now.pin.strip_advisory()),
+    )
+    .await;
+    let annotated = match read {
+        Ok(Ok(Some(manifest))) => annotated_version(&manifest.annotations),
+        _ => None,
+    };
+    pin_rule::answers_range(now, annotated.as_ref(), &EdgeEvidence::default(), id, &Line::of([req]))
 }
 
 /// The lists one run has read through, so a bundle two held rows reach is read once.
@@ -765,7 +794,8 @@ async fn nested_parting(
                 continue;
             }
             let target = (member.kind, member.name.clone());
-            match judge_edge(run, &id, &target, recorded, inputs).await {
+            // A bundle member's tag never claims a range.
+            match judge_edge(run, &id, &target, false, recorded, inputs).await {
                 Judged::Shadowed => {}
                 Judged::Answered if nests && lists.seen.insert(id.clone()) => queue.push(id),
                 Judged::Answered => {}

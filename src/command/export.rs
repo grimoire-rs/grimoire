@@ -682,6 +682,7 @@ mod tests {
                 ErrorReason::UnsupportedLayerMediaType => "unsupported-layer-media-type",
                 ErrorReason::NoLock => "no-lock",
                 ErrorReason::UnsupportedArtifactFeature => "unsupported-artifact-feature",
+                ErrorReason::MajorDowngrade => "major-downgrade",
             }
         }
         for code in [
@@ -710,6 +711,7 @@ mod tests {
             ErrorReason::UnsupportedLayerMediaType,
             ErrorReason::NoLock,
             ErrorReason::UnsupportedArtifactFeature,
+            ErrorReason::MajorDowngrade,
         ] {
             assert_eq!(literal(reason), reason.to_string(), "{reason:?}");
         }

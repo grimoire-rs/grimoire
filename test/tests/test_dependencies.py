@@ -13,7 +13,13 @@ import json
 import re
 from pathlib import Path
 
-from src.helpers import make_artifact, make_bundle, make_dependent, write_config
+from src.helpers import (
+    make_artifact,
+    make_bundle,
+    make_dependent,
+    publish_release,
+    write_config,
+)
 from src.registry import REGISTRY_HOST, retag
 
 
@@ -250,7 +256,8 @@ def test_missing_edge_target(
     result = runner.run("lock", check=False)
 
     assert result.returncode == 79, result.stderr
-    assert "tag not found" in result.stderr, result.stderr
+    # `./gone:1` claims `^1`, which no release answers in a repository with none.
+    assert "satisfies ^1; it lists no release" in result.stderr, result.stderr
     assert "required by skill/a" in result.stderr, result.stderr
 
 
@@ -423,3 +430,55 @@ def test_offline_lock_command_carries_forward(
     assert _entries(carried) == _entries(online)
     assert _entries(carried)["b"].endswith(b.digest)
     assert 'id = "./b:1"' in carried
+
+
+def test_a_claim_whose_caret_bound_overflows_resolves_as_a_tag(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # No caret bound past u64::MAX can be written, so these tags claim no
+    # range: each names the manifest of its tag, which does not exist.
+    publish_release(f"{unique_repo}/x", "1.0.0", _skill_files("x"))
+    runner = grim_at(project_dir)
+    max_ = "18446744073709551615"
+    for i, claim in enumerate([max_, f"0.{max_}", f"0.0.{max_}"]):
+        d = _dependent(unique_repo, f"d{i}", [("skill", "x", f"./x:{claim}")])
+        write_config(project_dir, skills={f"d{i}": d.fq})
+
+        result = runner.run("lock", check=False)
+
+        assert result.returncode == 79, result.stderr
+        assert f"x:{claim}): tag not found" in result.stderr, result.stderr
+        assert "conflicting versions" not in result.stderr, result.stderr
+
+    # One below stays a range claim, answered by no release.
+    below = "18446744073709551614"
+    d = _dependent(unique_repo, "below", [("skill", "x", f"./x:{below}")])
+    write_config(project_dir, skills={"below": d.fq})
+    result = runner.run("lock", check=False)
+    assert result.returncode == 79, result.stderr
+    assert f"satisfies ^{below}" in result.stderr, result.stderr
+
+
+def test_a_prerelease_claim_beside_a_plain_claim_locks_the_newest_prerelease(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The claims match as one requirement set: `^2` alone admits no
+    # prerelease, but beside `^2.1.0-rc.1` the prereleases of 2.1.0 match.
+    x = f"{unique_repo}/x"
+    publish_release(x, "2.0.0", _skill_files("x"))
+    publish_release(x, "2.1.0-rc.1", _skill_files("x"))
+    rc2 = publish_release(x, "2.1.0-rc.2", _skill_files("x"))
+    a = _dependent(unique_repo, "a", [("skill", "x", "./x:2")])
+    c = _dependent(unique_repo, "c", [("skill", "x", "./x:2.1.0-rc.1")])
+    write_config(project_dir, skills={"a": a.fq, "c": c.fq})
+
+    grim_at(project_dir).run("lock")
+
+    pinned = _entries(_lock(project_dir))["x"]
+    assert pinned == f"{REGISTRY_HOST}/{x}:2.1.0-rc.2@{rc2.digest}"
+
+    # A newer prerelease moves nothing on a plain relock.
+    before = _lock(project_dir)
+    publish_release(x, "2.1.0-rc.3", _skill_files("x"))
+    grim_at(project_dir).run("lock")
+    assert _lock(project_dir) == before

@@ -37,8 +37,9 @@ use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::reference::ArtifactRef;
 use crate::oci::text::registry_text;
 use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
+use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
-use crate::resolve::resolve_options::ResolveOptions;
+use crate::resolve::resolve_options::{Downgrade, ResolveOptions};
 use crate::resolve::resolver::{LockRun, pin_name, target_lock};
 
 /// Which plugins a resolution covers (C-009).
@@ -344,6 +345,10 @@ pub(crate) fn declare_failure(
 /// `MemberConflict` (78), the resolver's `StaleLock` (65) for a member pick on a
 /// stale part, `MarketplacePinGone` (79), and every resolver, access and declare
 /// failure with its existing classification.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seam's inputs; every caller passes them positionally"
+)]
 pub async fn resolve_marketplace(
     m: &MarketplaceManifest,
     previous: Option<&MarketplaceLock>,
@@ -352,6 +357,7 @@ pub async fn resolve_marketplace(
     access: &Arc<dyn OciAccess>,
     origin: IncludeOrigin,
     offline: bool,
+    downgrade: Downgrade,
 ) -> Result<MarketplaceResolution, Error> {
     // 1. Hashes, then the selection against `m` — no network yet. An ad-hoc hash
     //    failure reports as `grim add` would, never naming the in-memory path.
@@ -437,7 +443,10 @@ pub async fn resolve_marketplace(
             prior.as_ref(),
             &refresh,
             access,
-            &ResolveOptions::default(),
+            &ResolveOptions {
+                downgrade,
+                ..ResolveOptions::default()
+            },
             anchor,
             LockRun {
                 offline,
@@ -515,7 +524,17 @@ pub async fn resolve_marketplace(
                 {
                     err.into()
                 }
-                _ => e.into(),
+                // An ad-hoc manifest lives in memory only, so its remedy would name no file.
+                _ => match origin {
+                    IncludeOrigin::Declared => {
+                        let command = RemedyCommand::Marketplace {
+                            manifest: m.path.clone(),
+                            plugin: plugin.clone(),
+                        };
+                        with_remedy(e.naming(&Invocation::WALKED), &command).into()
+                    }
+                    IncludeOrigin::AdHoc => e.into(),
+                },
             }
         })?;
         // `target.part` is the one sorting of the part's bundles; each step below reads it.
@@ -981,8 +1000,17 @@ mod tests {
         selection: &PluginSelection,
         access: &Arc<dyn OciAccess>,
     ) -> Result<MarketplaceResolution, Error> {
-        let resolution =
-            resolve_marketplace(m, previous, selection, &scope(), access, IncludeOrigin::Declared, false).await?;
+        let resolution = resolve_marketplace(
+            m,
+            previous,
+            selection,
+            &scope(),
+            access,
+            IncludeOrigin::Declared,
+            false,
+            Downgrade::Refuse,
+        )
+        .await?;
         for part in resolution.lock.plugins.values() {
             crate::lock::part_stamps::assert_every_recorded_pair_reads_back(part);
         }
@@ -1687,6 +1715,54 @@ mod tests {
         );
     }
 
+    /// Plugin `p` locked a bare include `x` at 3.1.0, then took an include whose
+    /// requires claims `x:2`: the export stage relocks it and refuses the move down
+    /// with the marketplace's remedy, which names the update and its flag.
+    #[tokio::test]
+    async fn an_export_stage_refusing_a_major_downgrade_names_the_marketplace_update() {
+        use crate::command::lock::test_registry::{REGISTRY, downgrade_fix, release_skill, two_majors_of_x};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("marketplace.toml");
+        let reg = MemoryRegistry::new();
+        let (_, x31) = two_majors_of_x(&reg).await;
+        release_skill(&reg, "a", "1.0.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+        let (a, x) = (format!("{REGISTRY}/acme/a:1"), format!("{REGISTRY}/acme/x"));
+        let access = access_over(&reg);
+        let first = resolve(
+            &market(&path, &[("p", &[x.as_str()])]),
+            None,
+            &PluginSelection::All,
+            &access,
+        )
+        .await
+        .expect("x locks at its newest release");
+        let m = market(&path, &[("p", &[a.as_str(), x.as_str()])]);
+
+        let err = resolve_marketplace(
+            &m,
+            Some(&first.lock),
+            &PluginSelection::Reconcile(BTreeSet::from(["p".to_string()])),
+            &scope(),
+            &access,
+            IncludeOrigin::Declared,
+            false,
+            Downgrade::Refuse,
+        )
+        .await
+        .expect_err("a major downgrade refuses");
+
+        let err = anyhow::Error::from(err);
+        let classified = classify(&err);
+        assert_eq!(classified.exit, ExitCode::ConfigError, "{err:#}");
+        assert_eq!(classified.reason, Some(ErrorReason::MajorDowngrade));
+        let fix = format!(
+            "include skill x as `{REGISTRY}/acme/x@{x31}` in plugin 'p' of {path}, or run `grim update --marketplace \
+             {path} p --allow-downgrade`, which moves every pin of the plugin whose tag moved",
+            path = path.display()
+        );
+        assert_eq!(downgrade_fix(&err), Some(fix.as_str()), "{err:#}");
+    }
+
     #[tokio::test]
     async fn c033_only_stale_plugins_re_resolve_fresh_parts_carry_and_removed_drop() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1863,6 +1939,7 @@ mod tests {
             &access,
             IncludeOrigin::Declared,
             true,
+            Downgrade::Refuse,
         )
         .await
         .expect("resolve");
@@ -1904,6 +1981,7 @@ mod tests {
             access,
             IncludeOrigin::Declared,
             true,
+            Downgrade::Refuse,
         )
         .await?;
         for part in resolution.lock.plugins.values() {
@@ -2092,6 +2170,7 @@ mod tests {
             &access_over(&reg),
             IncludeOrigin::Declared,
             true,
+            Downgrade::Refuse,
         )
         .await
         .expect("resolve");
@@ -2968,24 +3047,26 @@ mod tests {
 
     /// An include declared by tag whose tagless pin an older grim left resolves once,
     /// and the warning names it. A dependency's request by digest is no reason for
-    /// that include's pin to hold no tag, so the move was silent.
+    /// that include's pin to hold no tag, so the move was silent. The tag `v1` claims
+    /// no version, so the recorded edge onto the pin shows none either.
     #[tokio::test]
     async fn a_tagless_include_that_resolves_again_is_named_beside_a_digest_request() {
+        const X_V1: &str = "localhost:5000/acme/x:v1";
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("marketplace.toml");
         let reg = MemoryRegistry::new();
-        let x1 = publish_skill(&reg, &member("x"), "v1").await;
+        let x1 = publish_skill(&reg, X_V1, "v1").await;
         publish_skill(&reg, &member("fresh"), "v1").await;
-        publish_requiring(&reg, &member("p"), &[("x", &member("x"))]).await;
+        publish_requiring(&reg, &member("p"), &[("x", X_V1)]).await;
         let by_digest = format!("localhost:5000/acme/x@{x1}");
         publish_requiring(&reg, &member("q"), &[("x", &by_digest)]).await;
-        let includes = ["acme/x:1", "acme/p:1", "acme/q:1"];
+        let includes = ["acme/x:v1", "acme/p:1", "acme/q:1"];
         let m = market(&path, &[("team", &includes)]);
         let locked = resolve(&m, None, &PluginSelection::All, &access_over(&reg))
             .await
             .unwrap();
         let previous = as_old_grim_wrote(locked.lock);
-        let x2 = publish_skill(&reg, &member("x"), "v2").await;
+        let x2 = publish_skill(&reg, X_V1, "v2").await;
         let edited: Vec<&str> = includes.iter().copied().chain(["acme/fresh:1"]).collect();
         let m = market(&path, &[("team", &edited)]);
 
@@ -3745,6 +3826,7 @@ mod tests {
             &access,
             IncludeOrigin::Declared,
             true,
+            Downgrade::Refuse,
         )
         .await
         .expect_err("cache miss offline");
@@ -4532,7 +4614,8 @@ mod tests {
 
     /// Controls for the bundle-valued requirement: where the run's bundle answers the held
     /// edge, by its tag or by the digest that tag names, or the plugin includes the bundle
-    /// itself, nothing is refused.
+    /// itself, nothing is refused. A tag that claims a version claims it of the digest it
+    /// names, so `req:2` there refuses `y`'s `^1` with 78, where `req:v2` answers.
     #[tokio::test]
     async fn a_pick_refuses_nothing_where_the_bundle_it_moves_answers_the_edge() {
         for (label, writer, nests_before) in BUNDLE_WRITERS {
@@ -4557,28 +4640,41 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{label}: the plugin includes req:2 itself: {e}"));
         }
         for (label, writer, nests_before) in BUNDLE_WRITERS.into_iter().skip(1) {
-            let tmp = tempfile::tempdir().unwrap();
-            let path = tmp.path().join("marketplace.toml");
-            let reg = MemoryRegistry::new();
-            let (previous, m) = part_beside_a_dependent_of_a_bundle(&path, &reg, writer, nests_before, &[], "1").await;
-            let one = reg
-                .resolve_digest(&Identifier::parse(REQ_ONE).unwrap(), Operation::Resolve)
-                .await
-                .unwrap()
-                .unwrap();
-            reg.put_tag(&Identifier::parse(REQ_TWO).unwrap(), "2", &one)
-                .await
-                .unwrap();
-            let leaving = member("leaving");
-            let nests_two = [
-                (ArtifactKind::Bundle, "req", REQ_TWO),
-                (ArtifactKind::Skill, "leaving", &leaving),
-            ];
-            publish_members(&reg, PACK, &nests_two).await;
+            for (tag, answers) in [("v2", true), ("2", false)] {
+                let tmp = tempfile::tempdir().unwrap();
+                let path = tmp.path().join("marketplace.toml");
+                let reg = MemoryRegistry::new();
+                let (previous, m) =
+                    part_beside_a_dependent_of_a_bundle(&path, &reg, writer, nests_before, &[], "1").await;
+                let one = reg
+                    .resolve_digest(&Identifier::parse(REQ_ONE).unwrap(), Operation::Resolve)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let nested = format!("localhost:5000/acme/req:{tag}");
+                reg.put_tag(&Identifier::parse(&nested).unwrap(), tag, &one)
+                    .await
+                    .unwrap();
+                let leaving = member("leaving");
+                let nests = [
+                    (ArtifactKind::Bundle, "req", nested.as_str()),
+                    (ArtifactKind::Skill, "leaving", &leaving),
+                ];
+                publish_members(&reg, PACK, &nests).await;
 
-            resolve(&m, Some(&previous), &pick(&["pack"]), &access_over(&reg))
-                .await
-                .unwrap_or_else(|e| panic!("{label}: req:2 is the digest y's req:1 names: {e}"));
+                let result = resolve(&m, Some(&previous), &pick(&["pack"]), &access_over(&reg)).await;
+
+                if answers {
+                    result.unwrap_or_else(|e| panic!("{label}: req:{tag} is the digest y's req:1 names: {e}"));
+                    continue;
+                }
+                let Err(err) = result else {
+                    panic!("{label}: req:{tag} claims another major than y's req:1");
+                };
+                let text = err.to_string();
+                assert!(text.contains("req:2 from bundle"), "{label}: {text}");
+                assert_eq!(classified(err).exit, ExitCode::ConfigError, "{label}: {text}");
+            }
         }
     }
 
@@ -4596,7 +4692,9 @@ mod tests {
     /// `req:1` republished onto the digest the pick moves `req` to reads as that digest, and
     /// answers nothing for a row held since before: a part that shows the pick moved the
     /// bundle, by its recorded digest or by a row it stamps through `req:1`, refuses with 78.
-    /// A part grim 0.15.1 wrote shows neither, and the pick exits as it did.
+    /// Over the part this grim writes, the graph refuses first, as a version conflict:
+    /// `req:2` claims another major than `y`'s `^1`. A part grim 0.15.1 wrote shows
+    /// neither, and the pick exits as it did.
     #[tokio::test]
     async fn a_pick_refuses_a_dependent_whose_bundle_requirement_tag_was_republished_onto_the_moved_bundle() {
         let mut missed = Vec::new();
@@ -4618,11 +4716,18 @@ mod tests {
                 continue;
             };
             let text = err.to_string();
-            assert!(
-                text.contains("skill 'y'") && text.contains("requires req:1"),
-                "{label}: {text}"
-            );
-            assert!(text.contains("bundle 'req' to req:2"), "{label}: {text}");
+            if writer.is_none() {
+                assert!(
+                    text.contains("req:1 required by skill/y") && text.contains("req:2 from bundle"),
+                    "{label}: {text}"
+                );
+            } else {
+                assert!(
+                    text.contains("skill 'y'") && text.contains("requires req:1"),
+                    "{label}: {text}"
+                );
+                assert!(text.contains("bundle 'req' to req:2"), "{label}: {text}");
+            }
             assert_eq!(classified(err).exit, ExitCode::ConfigError, "{label}: {text}");
 
             resolve(&m, Some(&previous), &update_extra(), &access)
@@ -5336,5 +5441,109 @@ mod tests {
                 assert_eq!(row(now, "y"), row(was, "y"), "{writer:?} agree={agree}");
             }
         }
+    }
+
+    /// `team` = [`p:1` claiming `x:2.1`, `q:1` claiming `x:2.3`, `pack:1` listing `extra`],
+    /// with `x` tagged `2.3` and `2` and carrying no version annotation. The part is locked,
+    /// `x`'s pin loses its tag, and then `x` 2.5.0 is released. Returns the part, the
+    /// manifest, the digest `x` is held at and 2.5.0's.
+    async fn part_with_a_tagless_pin_two_range_claims_hold(
+        path: &Path,
+        reg: &MemoryRegistry,
+    ) -> (MarketplaceLock, MarketplaceManifest, Digest, Digest) {
+        use crate::command::lock::test_registry::{REGISTRY, release_skill};
+        let x = format!("{REGISTRY}/acme/x");
+        let held = publish_skill(reg, &format!("{x}:2.3"), "held").await;
+        let x_id = Identifier::new_registry("acme/x", REGISTRY);
+        reg.put_tag(&x_id, "2", &held).await.unwrap();
+        release_skill(reg, "p", "1.0.0", &[("x", &format!("{x}:2.1"))]).await;
+        release_skill(reg, "q", "1.0.0", &[("x", &format!("{x}:2.3"))]).await;
+        let extra = format!("{REGISTRY}/acme/extra:1");
+        publish_skill(reg, &extra, "v1").await;
+        let pack = format!("{REGISTRY}/acme/pack:1");
+        publish_bundle(reg, &pack, &[("extra", &extra)]).await;
+        let includes = [format!("{REGISTRY}/acme/p:1"), format!("{REGISTRY}/acme/q:1"), pack];
+        let includes: Vec<&str> = includes.iter().map(String::as_str).collect();
+        let m = market(path, &[("team", &includes[..])]);
+        let mut previous = resolve(&m, None, &PluginSelection::All, &access_over(reg))
+            .await
+            .unwrap()
+            .lock;
+        let team = previous.plugins.get_mut("team").unwrap();
+        let x_row = team.skills.iter_mut().find(|row| row.name == "x").expect("x is locked");
+        let LockedSource::Registry(pinned) = &x_row.source else {
+            panic!("x is a registry row");
+        };
+        assert_eq!(pinned.digest(), held);
+        x_row.source = LockedSource::Registry(pinned.strip_advisory());
+        let newest = release_skill(reg, "x", "2.5.0", &[]).await;
+        (previous, m, held, newest)
+    }
+
+    /// Only `p`'s and `q`'s recorded claims show what `x`'s tagless, unannotated pin is.
+    /// Read as ranges, `x:2.1` and `x:2.3` nest at [2.3, 3.0) and hold it, so a member
+    /// pick keeps it beside 2.5.0 as `grim lock` does, whether the pick reaches `x` or
+    /// holds it. Kept outside the pick, it is named as a pin with no tag: a range claim
+    /// records no digest.
+    #[tokio::test]
+    async fn a_member_pick_keeps_a_tagless_pin_two_recorded_range_claims_hold() {
+        for names in [&["pack"][..], &["p"][..], &["q"][..]] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("marketplace.toml");
+            let reg = MemoryRegistry::new();
+            let (previous, m, held, _) = part_with_a_tagless_pin_two_range_claims_hold(&path, &reg).await;
+
+            let capture = LogCapture::start();
+            let r = resolve(&m, Some(&previous), &pick(names), &access_over(&reg))
+                .await
+                .unwrap_or_else(|e| panic!("{names:?}: {e}"));
+
+            let x = row(part(&r, "team"), "x").expect("x stays");
+            assert_eq!(x.source.pinned().map(PinnedIdentifier::digest), Some(held), "{names:?}");
+            let logs = capture.text();
+            let named = logs.contains("kept skill 'x' at pins with no tag recorded");
+            assert_eq!(named, names == ["pack"], "{names:?}: {logs}");
+        }
+    }
+
+    /// A pick of `x` moves it onto 2.5.0, which both claims allow, as `grim update x`
+    /// does: `p` and `q` stay beside it.
+    #[tokio::test]
+    async fn a_member_pick_of_a_tagless_pin_two_range_claims_hold_moves_it_inside_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("marketplace.toml");
+        let reg = MemoryRegistry::new();
+        let (previous, m, _, newest) = part_with_a_tagless_pin_two_range_claims_hold(&path, &reg).await;
+
+        let r = resolve(&m, Some(&previous), &pick(&["x"]), &access_over(&reg)).await;
+
+        let r = r.unwrap_or_else(|e| panic!("{e}"));
+        let x = row(part(&r, "team"), "x").expect("x stays");
+        assert_eq!(x.source.pinned().map(PinnedIdentifier::digest), Some(newest));
+        for dependent in ["p", "q"] {
+            assert_eq!(
+                row(part(&r, "team"), dependent),
+                row(&previous.plugins["team"], dependent)
+            );
+        }
+    }
+
+    /// The part gone stale, as `grim export` relocks it: an unproven part vouches for no
+    /// edge onto a tagless pin, so `x` resolves afresh onto 2.5.0, as `grim lock` resolves
+    /// a tagless pin over an edited declaration.
+    #[tokio::test]
+    async fn an_export_relock_of_a_stale_part_resolves_a_tagless_pin_afresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("marketplace.toml");
+        let reg = MemoryRegistry::new();
+        let (mut previous, m, _, newest) = part_with_a_tagless_pin_two_range_claims_hold(&path, &reg).await;
+        previous.plugins.get_mut("team").unwrap().metadata.declaration_hash = "sha256:stale".to_string();
+
+        let r = resolve(&m, Some(&previous), &reconcile("team"), &access_over(&reg))
+            .await
+            .expect("resolve");
+
+        let x = row(part(&r, "team"), "x").expect("x stays");
+        assert_eq!(x.source.pinned().map(PinnedIdentifier::digest), Some(newest));
     }
 }

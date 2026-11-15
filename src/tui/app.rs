@@ -72,6 +72,7 @@ use crate::lock::verdict::{RowAt, reached_elsewhere, row_binding};
 use crate::oci::access::OciAccess;
 use crate::oci::text::{escape_controls, registry_text};
 use crate::oci::{ArtifactKind, Identifier};
+use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 use crate::resolve::resolve_options::ResolveOptions;
 use crate::resolve::resolver::{LockRun, TargetLock, moved_pins, refuse_stale_names, target_lock};
@@ -3364,6 +3365,7 @@ async fn perform(
     let relocked = match relocked_ahead {
         Some(target) => save_relock(ctx, op, *target, previous.as_ref()).await?,
         None => {
+            let remedy = row_remedy(op, id.to_string(), &name);
             // The shared `declare` seam routes a bundle into `[bundles]`.
             if declares {
                 declare(&mut set, kind, name.clone(), id);
@@ -3382,7 +3384,7 @@ async fn perform(
             };
             // A declaration a failed relock leaves behind makes the lock stale: a named
             // update refuses (65) and every later relock fails on that reference (79).
-            match relock_row(ctx, op, &set, prior.as_ref(), &refresh, previous.as_ref()).await {
+            match relock_row(ctx, op, &set, prior.as_ref(), &refresh, previous.as_ref(), &remedy).await {
                 Ok(relocked) => relocked,
                 Err(e) => {
                     if let Some((original, written)) = rollback {
@@ -3498,7 +3500,11 @@ pub(crate) async fn plan_row(
                 elsewhere: reached_elsewhere(set, prior.lock, row),
             },
         },
-        None => grim(held_by(set, prior.as_ref(), row, access, anchor, run).await)?,
+        None => grim(
+            held_by(set, prior.as_ref(), row, access, anchor, run)
+                .await
+                .map_err(|e| with_remedy(e.naming(run.grim), &row_remedy(op, id.to_string(), row.name))),
+        )?,
     };
     match held {
         // An Update gets a relock here only with no lock to keep pins of, which makes
@@ -4069,7 +4075,25 @@ fn config_anchor(ctx: &TuiContext) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
+/// The CLI command a row's action stands for, which a version-claim refusal
+/// names: Install is `grim add <target> --name <binding>`, Update
+/// `grim update <binding>`.
+fn row_remedy(op: BatchOp, target: String, binding: &str) -> RemedyCommand {
+    match op {
+        BatchOp::Update => RemedyCommand::Update {
+            names: vec![binding.to_string()],
+        },
+        // `--name` keeps the rerun on the row's binding where it differs from
+        // the name `grim add` infers from the reference.
+        BatchOp::Install | BatchOp::Uninstall => RemedyCommand::AddFlagged {
+            target,
+            flags: vec!["--name".to_string(), binding.to_string()],
+        },
+    }
+}
+
 /// Relock `set` from `prior` and save the result over `previous`, as [`save_relock`].
+/// A version-claim refusal names `remedy` under the session's invocation.
 async fn relock_row(
     ctx: &TuiContext,
     op: BatchOp,
@@ -4077,11 +4101,14 @@ async fn relock_row(
     prior: Option<&Prior<'_>>,
     refresh: &Refresh,
     previous: Option<&GrimoireLock>,
+    remedy: &RemedyCommand,
 ) -> anyhow::Result<Relocked> {
     let options = ResolveOptions::default();
     let run = LockRun::in_scope(ctx.offline, &ctx.invocation);
-    let target = grim(target_lock(set, prior, refresh, &ctx.access, &options, &config_anchor(ctx), run).await)?;
-    save_relock(ctx, op, target, previous).await
+    let target = target_lock(set, prior, refresh, &ctx.access, &options, &config_anchor(ctx), run)
+        .await
+        .map_err(|e| with_remedy(e.naming(&ctx.invocation), remedy));
+    save_relock(ctx, op, grim(target)?, previous).await
 }
 
 /// Save `target` over `previous`, with every pin it moved or dropped: the
@@ -4249,7 +4276,9 @@ async fn perform_local_declared(
     let prior = previous.as_ref().map(|lock| Prior::checked(lock, &set));
     let refresh = row_refresh(op, kind, name);
     let key = (kind, name.to_string());
-    let relocked = relock_row(ctx, op, &set, prior.as_ref(), &refresh, previous.as_ref())
+    let path = set.table(kind).get(name).map(ToString::to_string).unwrap_or_default();
+    let remedy = row_remedy(op, path, name);
+    let relocked = relock_row(ctx, op, &set, prior.as_ref(), &refresh, previous.as_ref(), &remedy)
         .await?
         .warn_unlocked(op, previous.as_ref(), name, &ctx.invocation);
 
@@ -9776,6 +9805,90 @@ mod tests {
             );
             assert_eq!(pin_of(&ctx, "y"), Some(two), "member: {member}");
         }
+    }
+
+    /// A project the TUI installed with `a` 1.0.0 and a bare direct `x` held at
+    /// 3.1.0, in a session run as `grim --config <path>`.
+    async fn project_holding_x_at_3(
+        workspace: &std::path::Path,
+    ) -> (
+        crate::oci::access::memory_registry::MemoryRegistry,
+        TuiContext,
+        crate::oci::Digest,
+    ) {
+        use crate::command::lock::test_registry::{REGISTRY, release_skill, two_majors_of_x};
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let (_, x31) = two_majors_of_x(&reg).await;
+        release_skill(&reg, "a", "1.0.0", &[]).await;
+        let config = format!("[skills]\na = \"{REGISTRY}/acme/a:1\"\nx = \"{REGISTRY}/acme/x\"\n");
+        std::fs::write(workspace.join("grimoire.toml"), config).unwrap();
+        let mut ctx = test_ctx(workspace, Arc::new(reg.clone()));
+        ctx.invocation = crate::config::scope::Invocation::config(&ctx.config_path);
+        perform(&ctx, &skill_row("a"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect("the first install locks every pin");
+        assert_eq!(pin_of(&ctx, "x"), Some(x31.clone()), "the fixture");
+        (reg, ctx, x31)
+    }
+
+    /// Asserts `err` is the 78 `major-downgrade` refusal whose fix is `fix`.
+    fn assert_tui_downgrade(err: &anyhow::Error, fix: &str) {
+        let classified = crate::error::classify(err);
+        assert_eq!(classified.exit, crate::cli::exit_code::ExitCode::ConfigError, "{err:#}");
+        assert_eq!(classified.reason, Some(crate::error::ErrorReason::MajorDowngrade));
+        assert_eq!(
+            crate::command::lock::test_registry::downgrade_fix(err),
+            Some(fix),
+            "{err:#}"
+        );
+    }
+
+    /// An Install of a row that claims a lower major of `x` is `grim add` of the
+    /// row's reference under the row's binding, so its fix names that command,
+    /// `--name` included, with the session's invocation.
+    #[tokio::test]
+    async fn tui_install_refusing_a_major_downgrade_names_grim_add_and_the_flag() {
+        use crate::command::lock::test_registry::{REGISTRY, release_skill};
+        let tmp = tempfile::tempdir().unwrap();
+        let (reg, ctx, x31) = project_holding_x_at_3(tmp.path()).await;
+        release_skill(&reg, "b", "1.0.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+
+        let err = perform(&ctx, &skill_row("b"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect_err("a major downgrade refuses");
+
+        let grim = &ctx.invocation;
+        assert_tui_downgrade(
+            &err,
+            &format!(
+                "declare skill x as `{REGISTRY}/acme/x@{x31}` in grimoire.toml, then rerun `{grim} add \
+                 {REGISTRY}/acme/b:1 --name b`, or rerun `{grim} add {REGISTRY}/acme/b:1 --name b \
+                 --allow-downgrade`"
+            ),
+        );
+    }
+
+    /// An Update is `grim update <binding>`, so a row that moves to a release
+    /// claiming a lower major of `x` names its binding and `x`, with the flag.
+    #[tokio::test]
+    async fn tui_update_refusing_a_major_downgrade_names_the_binding_and_the_flag() {
+        use crate::command::lock::test_registry::{REGISTRY, release_skill};
+        let tmp = tempfile::tempdir().unwrap();
+        let (reg, ctx, x31) = project_holding_x_at_3(tmp.path()).await;
+        release_skill(&reg, "a", "1.1.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+
+        let err = perform(&ctx, &skill_row("a"), None, BatchOp::Update, &SilentProgress, false)
+            .await
+            .expect_err("a major downgrade refuses");
+
+        let grim = &ctx.invocation;
+        assert_tui_downgrade(
+            &err,
+            &format!(
+                "declare skill x as `{REGISTRY}/acme/x@{x31}` in grimoire.toml, or run `{grim} update \
+                 --allow-downgrade -- a x`"
+            ),
+        );
     }
 
     /// The fork at `acme/fork` holds the binding `m`, a declaration wins over a

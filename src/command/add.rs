@@ -64,7 +64,8 @@ use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::BundleMember;
 use crate::oci::text::registry_text;
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
-use crate::resolve::resolve_options::ResolveOptions;
+use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
+use crate::resolve::resolve_options::{Downgrade, ResolveOptions};
 use crate::resolve::resolver::{LockRun, TargetLock, target_lock};
 
 use super::scope_resolution;
@@ -104,6 +105,10 @@ pub struct AddArgs {
     /// same question the workspace consent record answers durably.
     #[command(flatten)]
     pub hook_trust: crate::cli::options::HookTrustOpts,
+
+    /// `--allow-downgrade`: whether the relock may move a pin to a lower major version.
+    #[command(flatten)]
+    pub downgrade: crate::cli::options::DowngradeOpts,
 
     /// Whether to materialize the artifact after declaring it.
     #[command(flatten)]
@@ -233,6 +238,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         set: &set,
         kind,
         name: &name,
+        typed: args,
     };
     let global = GlobalClients::default();
     let (target, previous) = write_config_and_relock(
@@ -240,6 +246,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         &scope,
         &declaration,
         args.hook_trust.flag(),
+        args.downgrade.downgrade(),
         &access,
         ctx.offline(),
         &global,
@@ -345,16 +352,21 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 /// (74/77), the config write, a settings conflict (78), any
 /// [`ResolveError`](crate::resolve::resolve_error::ResolveError) from the
 /// relock, or the lock write; the last three after the rollback has run.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "two call sites; a parameter struct would only rename them"
+)]
 async fn write_config_and_relock(
     ctx: &Context,
     scope: &scope_resolution::ResolvedScope,
     declaration: &Declaration<'_>,
     trust: Option<bool>,
+    downgrade: Downgrade,
     access: &Arc<dyn OciAccess>,
     offline: bool,
     global: &GlobalClients,
 ) -> anyhow::Result<(TargetLock, Option<GrimoireLock>)> {
-    let &Declaration { set, .. } = declaration;
+    let &Declaration { set, typed, .. } = declaration;
     // Ahead of the write: past it, a refused lock leaves the edited config behind.
     let previous = super::lock::load_previous(&scope.lock_path)?;
 
@@ -373,11 +385,21 @@ async fn write_config_and_relock(
         prior.as_ref(),
         &Refresh::Nothing,
         access,
-        &ResolveOptions::default(),
+        &ResolveOptions {
+            downgrade,
+            ..ResolveOptions::default()
+        },
         scope.config_dir(),
         LockRun::in_scope(offline, &scope.invocation),
     )
-    .await;
+    .await
+    .map_err(|e| {
+        let command = RemedyCommand::AddFlagged {
+            target: typed.reference.clone(),
+            flags: typed_flags(typed),
+        };
+        with_remedy(e.naming(&scope.invocation), &command)
+    });
     // A lock on disk is what every later run reads, so a conflict refuses before
     // the save. It rolls the config back as a failed relock or save does.
     let saved = async {
@@ -671,6 +693,7 @@ async fn add_path_source(
         set: &set,
         kind,
         name: &name,
+        typed: args,
     };
     let global = GlobalClients::default();
     let (target, previous) = write_config_and_relock(
@@ -678,6 +701,7 @@ async fn add_path_source(
         scope,
         &declaration,
         args.hook_trust.flag(),
+        args.downgrade.downgrade(),
         &access,
         ctx.offline(),
         &global,
@@ -725,6 +749,34 @@ struct Declaration<'a> {
     set: &'a crate::config::declaration::DesiredSet,
     kind: ArtifactKind,
     name: &'a str,
+    /// The add as typed, which a refusal's remedy tells the user to rerun.
+    typed: &'a AddArgs,
+}
+
+/// The flags `args` carries beside its reference, as the words a rerun repeats.
+fn typed_flags(args: &AddArgs) -> Vec<String> {
+    let mut flags = Vec::new();
+    if let Some(kind) = &args.kind {
+        flags.extend(["--kind".to_string(), kind.clone()]);
+    }
+    if let Some(name) = &args.name {
+        flags.extend(["--name".to_string(), name.clone()]);
+    }
+    if !args.install.enabled() {
+        flags.push("--no-install".to_string());
+    }
+    if args.force {
+        flags.push("--force".to_string());
+    }
+    match args.hook_trust.flag() {
+        Some(true) => flags.push("--trust-workspace".to_string()),
+        Some(false) => flags.push("--no-trust-workspace".to_string()),
+        None => {}
+    }
+    if args.downgrade.allow_downgrade {
+        flags.push("--allow-downgrade".to_string());
+    }
+    flags
 }
 
 /// The report rows for the pins this add moved, in `(kind, name)` order, the
@@ -1317,20 +1369,43 @@ async fn install_added(
         .await,
     )?;
 
-    // `finish` surfaces the first refusal, which hides the other dependencies
-    // `--force` could not overwrite; name them all so one rerun fixes it.
-    let mut refused_dependencies: Vec<String> = refusals_outside_force(&run.items, &added.force)
+    let refused_dependencies = refused_dependencies_context(&run.items, &added.force, &scope.invocation);
+    // Only the change list survives: the add report names what was declared.
+    super::install::finish(run, &Default::default())
+        .map(|(report, _)| report.into_settings_changes())
+        .map_err(|e| match refused_dependencies {
+            Some(context) => e.context(context),
+            None => e,
+        })
+}
+
+/// The context naming every refusal outside `force`, with the `grim install
+/// --force` that clears them, or `None` when there is none. `finish` surfaces
+/// only the first refusal, and its own remedy (`--force` on this run) refuses
+/// a dependency again, so all of them are named here for one rerun to fix.
+fn refused_dependencies_context(
+    outcomes: &[crate::install::installer::ArtifactInstall],
+    force: &BTreeSet<NodeKey>,
+    grim: &Invocation,
+) -> Option<String> {
+    use crate::install::installer::InstallOutcome;
+    let mut refused: Vec<String> = refusals_outside_force(outcomes, force)
         .into_iter()
         .flat_map(|o| match &o.result {
-            Ok(crate::install::installer::InstallOutcome::RefusedUntracked { path, .. }) => vec![format!(
+            Ok(InstallOutcome::RefusedUntracked { path, .. }) => vec![format!(
                 "{} '{}' at {}",
                 o.reference.kind,
                 o.reference.name,
                 path.display()
             )],
-            Ok(crate::install::installer::InstallOutcome::RefusedSettings { pieces }) => pieces
+            // A modified artifact carries no path of its own; its install target holds the edits.
+            Ok(InstallOutcome::Refused { .. }) => vec![match &o.target {
+                Some(path) => format!("{} '{}' at {}", o.reference.kind, o.reference.name, path.display()),
+                None => format!("{} '{}'", o.reference.kind, o.reference.name),
+            }],
+            Ok(InstallOutcome::RefusedSettings { pieces }) => pieces
                 .iter()
-                .filter(|piece| !settings_piece_forced(piece, &added.force))
+                .filter(|piece| !settings_piece_forced(piece, force))
                 .map(|piece| {
                     let file = piece.file.as_deref().unwrap_or_default();
                     format!("settings '{}' {} in {file}", piece.package, piece.pointer)
@@ -1341,23 +1416,15 @@ async fn install_added(
         .collect();
     // Every settings row carries the whole list, so each piece arrives once per row.
     let mut named = BTreeSet::new();
-    refused_dependencies.retain(|line| named.insert(line.clone()));
-    // Only the change list survives: the add report names what was declared.
-    super::install::finish(run, &Default::default())
-        .map(|(report, _)| report.into_settings_changes())
-        .map_err(|e| {
-            if refused_dependencies.is_empty() {
-                e
-            } else {
-                e.context(format!(
-                    "dependencies {} were not overwritten: {}; \
-                     --force on add covers the added artifact only, run `{} install --force` to overwrite them",
-                    crate::install::install_error::CHANGED_OUTSIDE_GRIM,
-                    refused_dependencies.join(", "),
-                    scope.invocation
-                ))
-            }
-        })
+    refused.retain(|line| named.insert(line.clone()));
+    (!refused.is_empty()).then(|| {
+        format!(
+            "dependencies {} were not overwritten: {}; \
+             --force on add covers the added artifact only, run `{grim} install --force` to overwrite them",
+            crate::install::install_error::CHANGED_OUTSIDE_GRIM,
+            refused.join(", "),
+        )
+    })
 }
 
 /// `--no-install` declares and locks all the same, so it records the hook
@@ -3345,6 +3412,7 @@ mod tests {
                     trust_workspace: false,
                     no_trust_workspace: false,
                 },
+                downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: false },
                 install: InstallOnAdd {
                     install: false,
                     no_install: true,
@@ -3406,6 +3474,114 @@ mod tests {
             assert_eq!(logs.matches("kept the existing pin of skill 'a'").count(), 1, "{logs}");
             let grim = crate::config::scope::Invocation::config(&tmp.path().join("grimoire.toml"));
             assert!(logs.contains(&format!("`{grim} update -- a`")), "{logs}");
+        }
+
+        /// Adding `a`, which claims `x:2`, over a bare direct `x` held at 3.1.0
+        /// refuses with the add's fix and leaves the config as it was; the flag
+        /// takes 2.6.0.
+        #[tokio::test]
+        async fn a_major_downgrade_names_the_add_fix_and_moves_with_the_flag() {
+            use crate::command::lock::test_registry::{REGISTRY, downgrade_fix, release_skill, two_majors_of_x};
+            let tmp = tempfile::tempdir().unwrap();
+            let reg = MemoryRegistry::new();
+            let (x26, x31) = two_majors_of_x(&reg).await;
+            release_skill(&reg, "a", "1.0.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+            let config = tmp.path().join("grimoire.toml");
+            std::fs::write(&config, format!("[skills]\nx = \"{REGISTRY}/acme/x\"\n")).unwrap();
+            let ctx = Context::with_access(tmp.path().join("home"), reg).with_config(config.clone());
+            let no_flags = crate::command::lock::LockArgs {
+                downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: false },
+            };
+            crate::command::lock::run(&ctx, &no_flags)
+                .await
+                .expect("x locks at latest");
+            let before = std::fs::read(&config).unwrap();
+
+            let err = run(&ctx, &skill_args(REFERENCE))
+                .await
+                .expect_err("a major downgrade refuses");
+
+            let grim = crate::config::scope::Invocation::config(&config);
+            let fix = format!(
+                "declare skill x as `{REGISTRY}/acme/x@{x31}` in grimoire.toml, then rerun `{grim} add {REFERENCE} \
+                 --kind skill --no-install`, or rerun `{grim} add {REFERENCE} --kind skill --no-install \
+                 --allow-downgrade`"
+            );
+            let classified = crate::error::classify(&err);
+            assert_eq!(classified.exit, crate::cli::exit_code::ExitCode::ConfigError, "{err:#}");
+            assert_eq!(classified.reason, Some(crate::error::ErrorReason::MajorDowngrade));
+            assert_eq!(downgrade_fix(&err), Some(fix.as_str()), "{err:#}");
+            let printed = crate::error::printed_chain(&err);
+            assert!(printed.ends_with(&format!("; {fix}")), "{printed}");
+            assert_eq!(
+                std::fs::read(&config).unwrap(),
+                before,
+                "the refusal rolls the config back"
+            );
+
+            let mut allow = skill_args(REFERENCE);
+            allow.downgrade.allow_downgrade = true;
+            let (report, _) = run(&ctx, &allow).await.expect("the flag takes the move");
+
+            let moved = serde_json::to_value(&report).unwrap()["moved"].clone();
+            assert_eq!(
+                moved,
+                serde_json::json!([{"kind": "skill", "name": "x", "pinned": format!("{REGISTRY}/acme/x@{x26}")}])
+            );
+            // The report prints the content identity; the lock keeps the tag that resolved it.
+            let lock = crate::command::lock::load_previous(&tmp.path().join("grimoire.lock"))
+                .unwrap()
+                .unwrap();
+            let row = lock.skills.iter().find(|row| row.name == "x").expect("x is locked");
+            assert_eq!(
+                row.source.pinned().map(ToString::to_string),
+                Some(format!("{REGISTRY}/acme/x:2@{x26}"))
+            );
+        }
+
+        /// A rerun without the typed flags would bind the default name, infer the
+        /// kind and install, so the remedy repeats every flag the add was given.
+        #[tokio::test]
+        async fn the_add_remedy_reruns_the_add_with_every_flag_typed() {
+            use crate::command::lock::test_registry::{REGISTRY, downgrade_fix, release_skill, two_majors_of_x};
+            let tmp = tempfile::tempdir().unwrap();
+            let reg = MemoryRegistry::new();
+            let (x26, x31) = two_majors_of_x(&reg).await;
+            release_skill(&reg, "a", "1.0.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+            let config = tmp.path().join("grimoire.toml");
+            std::fs::write(&config, format!("[skills]\nx = \"{REGISTRY}/acme/x\"\n")).unwrap();
+            let ctx = Context::with_access(tmp.path().join("home"), reg).with_config(config.clone());
+            let no_flags = crate::command::lock::LockArgs {
+                downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: false },
+            };
+            crate::command::lock::run(&ctx, &no_flags)
+                .await
+                .expect("x locks at latest");
+            let mut typed = skill_args(REFERENCE);
+            typed.name = Some("my-a".to_string());
+            typed.force = true;
+            typed.hook_trust.no_trust_workspace = true;
+
+            let err = run(&ctx, &typed).await.expect_err("a major downgrade refuses");
+
+            let grim = crate::config::scope::Invocation::config(&config);
+            let add =
+                format!("{grim} add {REFERENCE} --kind skill --name my-a --no-install --force --no-trust-workspace");
+            let fix = format!(
+                "declare skill x as `{REGISTRY}/acme/x@{x31}` in grimoire.toml, then rerun `{add}`, \
+                 or rerun `{add} --allow-downgrade`"
+            );
+            assert_eq!(downgrade_fix(&err), Some(fix.as_str()), "{err:#}");
+
+            typed.downgrade.allow_downgrade = true;
+            run(&ctx, &typed).await.expect("the flagged rerun takes the move");
+            let declared = std::fs::read_to_string(&config).unwrap();
+            assert!(declared.contains("my-a = "), "{declared}");
+            let lock = crate::command::lock::load_previous(&tmp.path().join("grimoire.lock"))
+                .unwrap()
+                .unwrap();
+            let x = lock.skills.iter().find(|row| row.name == "x").expect("x is locked");
+            assert_eq!(x.source.pinned().map(|p| p.digest()), Some(x26));
         }
 
         #[cfg(unix)]
@@ -3546,6 +3722,7 @@ mod tests {
             use crate::oci::access::memory_registry::MemoryRegistry;
             use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
             use crate::oci::manifest::{Descriptor, OciManifest};
+            use crate::oci::version_evidence::VERSION_ANNOTATION;
             use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier, PinnedIdentifier};
 
             const X: &str = "localhost:5050/acme/x:1";
@@ -3569,7 +3746,7 @@ mod tests {
                     name: "x".to_string(),
                     id: id.to_string(),
                 });
-                publish_member(reg, kind, reference, content, member).await
+                publish_member(reg, kind, reference, content, member, None).await
             }
 
             async fn publish_member(
@@ -3578,6 +3755,7 @@ mod tests {
                 reference: &str,
                 content: &str,
                 member: Option<BundleMember>,
+                version: Option<&str>,
             ) -> Digest {
                 let id = Identifier::parse(reference).unwrap();
                 let mut layers = Vec::new();
@@ -3598,13 +3776,18 @@ mod tests {
                         annotations: None,
                     });
                 }
-                let manifest = OciManifest {
+                let mut manifest = OciManifest {
                     media_type: None,
                     artifact_type: None,
                     config_media_type: None,
                     layers,
                     annotations: BTreeMap::from([("content".to_string(), content.to_string())]),
                 };
+                if let Some(version) = version {
+                    manifest
+                        .annotations
+                        .insert(VERSION_ANNOTATION.to_string(), version.to_string());
+                }
                 let digest = reg.push_manifest(&id, &manifest).await.unwrap();
                 reg.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
                 digest
@@ -3643,9 +3826,14 @@ mod tests {
                 }
 
                 async fn lock(&self) {
-                    crate::command::lock::run(&self.ctx(), &LockArgs {})
-                        .await
-                        .expect("grim lock succeeds");
+                    crate::command::lock::run(
+                        &self.ctx(),
+                        &LockArgs {
+                            downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: false },
+                        },
+                    )
+                    .await
+                    .expect("grim lock succeeds");
                 }
 
                 fn locked(&self) -> GrimoireLock {
@@ -3701,6 +3889,14 @@ mod tests {
             /// A project whose `x:1` was locked at the returned digest and has since moved.
             async fn moved_x(reg: &MemoryRegistry) -> Digest {
                 let held = publish(reg, ArtifactKind::Skill, X, "x one", None).await;
+                publish(reg, ArtifactKind::Skill, PARENT, "parent", Some(X)).await;
+                publish(reg, ArtifactKind::Bundle, PACK, "pack", Some(X)).await;
+                held
+            }
+
+            /// [`moved_x`] with `x:1` released as `1.0.0`, the version a range claim reads.
+            async fn moved_released_x(reg: &MemoryRegistry) -> Digest {
+                let held = publish_member(reg, ArtifactKind::Skill, X, "x one", None, Some("1.0.0")).await;
                 publish(reg, ArtifactKind::Skill, PARENT, "parent", Some(X)).await;
                 publish(reg, ArtifactKind::Bundle, PACK, "pack", Some(X)).await;
                 held
@@ -3780,13 +3976,14 @@ mod tests {
 
             /// A tagless dependency or member pin under the lock's proof takes its tag
             /// from the edge the lock records, so an add at that reference keeps it,
-            /// as `grim lock` and then the add do. Hand-typing the line instead makes
-            /// the hash drift before any relock, which resolves the pin.
+            /// as `grim lock` and then the add do; `x` names its version, which a
+            /// range claim reads. Hand-typing the line instead makes the hash drift
+            /// before any relock, which resolves the pin.
             #[tokio::test]
             async fn an_add_over_a_tagless_dependency_pin_keeps_it() {
                 for (skills, bundles) in [(&[("parent", PARENT)][..], &[][..]), (&[][..], &[("pack", PACK)][..])] {
                     let reg = MemoryRegistry::new();
-                    let held = moved_x(&reg).await;
+                    let held = moved_released_x(&reg).await;
                     let ws = Workspace::new(&reg);
                     ws.declare(skills, bundles);
                     ws.lock().await;
@@ -3860,7 +4057,7 @@ mod tests {
                         name: "pack".to_string(),
                         id: PACK.to_string(),
                     };
-                    publish_member(&reg, ArtifactKind::Bundle, OUTER, "outer", Some(include)).await;
+                    publish_member(&reg, ArtifactKind::Bundle, OUTER, "outer", Some(include), None).await;
                     let ws = Workspace::new(&reg);
                     ws.declare(&[], &[if nested { ("outer", OUTER) } else { ("pack", PACK) }]);
                     ws.lock().await;
@@ -5933,5 +6130,48 @@ style = \"ghcr.io/acme/rules/style:1\"
         let outside = refusals_outside_force(&outcomes, &force);
         assert_eq!(outside.len(), 1);
         assert_eq!(outside[0].reference.name, "dep");
+    }
+
+    /// A dependency's edited files refuse again under `add --force`, so the
+    /// error names it with `install --force`, as it names an untracked one.
+    #[test]
+    fn a_modified_dependency_outside_force_is_named_with_install_force() {
+        use crate::install::installer::{ArtifactInstall, InstallOutcome};
+        let install = |name: &str, result| ArtifactInstall {
+            reference: crate::oci::ArtifactRef::registry(
+                ArtifactKind::Skill,
+                name,
+                crate::oci::Identifier::parse("localhost:5000/acme/x:1").unwrap(),
+            ),
+            target: Some(std::path::PathBuf::from(format!("/ws/.claude/skills/{name}"))),
+            result: Ok(result),
+        };
+        let modified = || InstallOutcome::Refused {
+            recorded: Digest::Sha256("a".repeat(64)),
+            actual: Digest::Sha256("b".repeat(64)),
+        };
+        let untracked = InstallOutcome::RefusedUntracked {
+            client: "claude".to_string(),
+            path: std::path::PathBuf::from("/ws/x"),
+        };
+        let outcomes = vec![
+            install("target", modified()),
+            install("r", modified()),
+            install("u", untracked),
+        ];
+        let force = BTreeSet::from([(ArtifactKind::Skill, "target".to_string())]);
+        let context = refused_dependencies_context(&outcomes, &force, &Invocation::WALKED)
+            .expect("two refusals sit outside the force set");
+        assert_eq!(
+            context,
+            "dependencies set or changed outside grim were not overwritten: \
+             skill 'r' at /ws/.claude/skills/r, skill 'u' at /ws/x; \
+             --force on add covers the added artifact only, run `grim install --force` to overwrite them"
+        );
+        assert_eq!(
+            refused_dependencies_context(&outcomes[..1], &force, &Invocation::WALKED),
+            None,
+            "a refusal inside the force set needs no dependency remedy"
+        );
     }
 }

@@ -72,6 +72,12 @@ name to a reference, relative (`./shared:1`) or fully qualified:
 | MCP server, hook, settings | `[requires.<table>]` tables in the descriptor / `hook.toml` / settings document (kept out of the settings layer) |
 | Bundle | a `[bundles]` table: nested bundles |
 
+A tag on a `requires` reference is a version claim: `:2` means "any 2.x" and
+the consumer gets the release the tag `2` names, which `grim release` keeps on
+the highest 2.x release. A tag that is not a
+version, or a digest, keeps the literal meaning. See
+[what the tag claims][claims].
+
 `grim build` checks the declarations offline (65 for a bad table, name,
 reference, duplicate or self-reference). Publishing packs them as a second
 layer, so **author, build and release with grim 0.16.0 or later**: an older grim
@@ -409,6 +415,7 @@ Verified against the grim release this package ships beside.
 [artifacts]: https://grimoire.rs/artifacts.html
 [grimignore]: https://grimoire.rs/artifacts.html#grimignore
 [requires]: https://grimoire.rs/artifacts.html#requires
+[claims]: https://grimoire.rs/artifacts.html#what-the-tag-claims
 [pub-requires]: https://grimoire.rs/publishing.html#requires
 [vendor]: https://grimoire.rs/vendor-metadata.html
 [publishing]: https://grimoire.rs/publishing.html

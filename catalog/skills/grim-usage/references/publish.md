@@ -42,8 +42,9 @@ is the most common publishing mistake — see
 `.toml` is read as a bundle and the build exits 78.
 
 `--dry-run` prints every tag the release would move and the digest each
-would point at, without touching the registry. Make it a habit before
-any version release.
+would point at, and never writes to the registry. A cascading dry run reads
+the floats it would move; when it cannot, it warns once and plans every float
+moving. Make it a habit before any version release.
 
 A skill directory or a rule support directory can drop a `.grimignore` at
 its root (gitignore syntax) to keep runtime junk — `__pycache__/`,
@@ -65,6 +66,20 @@ cascade explicit: `--cascade` asserts it and rejects a non-semver tag with
 exit 65 (a typo guard); `--no-cascade` publishes only the exact tag even for
 a full semver.
 
+A cascade never moves a floating tag to a lower version. Before any tag moves,
+grim reads each float's manifest version: a float already on a higher version
+inside its own span stays, with one stderr line, so a `2.3.7` backport after
+`2.9.0` moves `2.3` and keeps `2` and `latest`. The JSON report lists them in
+`floats_kept`. Floats published earlier, or moved by other tools, stay as they
+are. A float stays only while the exact tag of its version still names its
+manifest; versions compare by semver precedence, prereleases included. A
+cascading `--dry-run` reads the registry too and, when it cannot or offline,
+warns once and plans every float moving, exit unchanged. A real release that
+cannot read a float fails before any tag moves. Run releases into one
+repository one at a time, for example in a CI concurrency group. A release
+reads each float before it moves it, and tags have no compare-and-set. So two
+concurrent releases can leave a float on the lower version.
+
 ## Immutability
 
 An exact-version tag is immutable by default: if `1.2.3` already exists
@@ -73,8 +88,8 @@ rewrite history. The guard compares content, not bytes, so for a skill, rule,
 agent or hook equal content under a new manifest digest (a flipped
 `--compression`) is adopted, not refused; see [Compression](#compression).
 Pass `--force` only when you deliberately mean to move it, and note that
-`--force` never adopts. Floating tags (`1.2`, `1`, `latest`) move freely on every cascade —
-that is their job.
+`--force` never adopts. Floating tags (`1.2`, `1`, `latest`) move on a cascade unless that would
+lower them; see [Cascade Tags](#cascade-tags).
 
 ## Compression
 
@@ -258,7 +273,7 @@ everyone already on them.
 Common flags — confirm current spelling with `grim publish --help`:
 
 ```sh
-grim publish --dry-run           # plan without pushing
+grim publish --dry-run           # plan without writing (reads the floats)
 grim publish --only code-review  # publish one entry
 grim publish --version canary    # channel tag on every entry, no cascade
 grim publish --version 1.4.0 --no-cascade  # single exact tag, no floats moved

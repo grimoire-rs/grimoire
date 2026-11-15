@@ -190,16 +190,41 @@ slot: a direct declaration, bundles, and the [dependencies](#dependencies) of
 other artifacts. Grimoire settles it deterministically:
 
 - a **direct** `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]` declaration
-  always wins over every bundle and dependency. This is how you override a single
-  member without forking the bundle. If the declaration comes from a different
-  registry or repository than the request it overrides, `grim lock` warns, in case
-  you meant to switch publishers. A path declaration wins silently, with no warning;
-- claims that **agree** merge into one entry. Two claims agree when their
-  references resolve to the same manifest digest, so `:1` and `:1.2` agree while
-  they point at one digest. Every source is recorded;
+  with a tag, a digest or a path wins over every bundle and dependency. This is
+  how you override a single member without forking the bundle. If the
+  declaration comes from a different registry or repository than the request it
+  overrides, `grim lock` warns, in case you meant to switch publishers. A path
+  declaration wins silently, with no warning.
+- a **bare** direct declaration, with no tag or with `latest`, yields to the
+  `requires` version claims that name its own registry and repository. It follows
+  what they ask for, and stderr says so in one line:
+  `skill/x is declared without a tag, so it follows what skill/a (ghcr.io/acme/x:2), skill/b (ghcr.io/acme/x:2.1) require; declare it with a tag to choose one`.
+  Claims from another registry or repository, literal and digest references and
+  bundle members stay shadowed.
+- claims that **agree** merge into one entry. Version claims from `requires`
+  references ([explained below](#dependencies)) settle on the release the
+  claimed major's cascade tag names, `2` for `x:2`.
+  [`grim release`](./commands.md#release) keeps that tag on the highest release
+  of the major, so `x:2` beside `x:2.1` resolves to one release. Every other
+  claim, such as a bundle member or a non-version tag, agrees when its reference
+  resolves to the same manifest digest. A range claim beside such a claim agrees
+  when that manifest's version satisfies it, and a claim with no tag adds nothing.
 - claims that **disagree** fail closed: `grim lock` stops with exit `78`, lists
   every conflicting source, and asks you to declare the artifact directly to
-  choose one.
+  choose one. Claims in two majors of one artifact, such as `x:1` and `x:2`,
+  always disagree, and grim does not backtrack to find another answer.
+- a **major downgrade** also exits `78`, with reason `major-downgrade`. It
+  happens when version claims would move a held pin to a lower major version
+  and no tagged direct declaration holds the artifact. Pass
+  `--allow-downgrade` to `grim add`, `grim lock` or `grim update` to take the
+  lower release. `grim install` never resolves, so it has no such flag.
+- a claim no release satisfies exits `79`. The message names the claims and the
+  newest release, or says the repository lists none. It prints each claim in caret
+  syntax, such as `^2, ^2.9`, even when you wrote the tags `2` and `2.9`. When a
+  claim in another major arrives later in the walk, the run exits `78` instead.
+- a missing tag or manifest below a dependency exits `79` only when the resolve
+  keeps the release that requires it. A release the version claims pass over
+  refuses nothing for what it required.
 
 Failing closed is deliberate. Silently picking a winner would let an unrelated
 bundle bump change what a project installs without anyone noticing.
@@ -215,8 +240,9 @@ the pin still wins and the run exits `0`. `grim add`, `grim update` and
 `grim lock` then warn once per held artifact, naming the requester, the
 requested reference and the held pin. The warning offers two ways out:
 `grim update -- <name>` re-reads the declared tag, and declaring the requested
-reference chooses it. [`grim status --check`](./commands.md#status) lists the
-cases that still stand.
+reference chooses it. The warning also lists `requires` edges the declaration
+shadows. A held pin that still satisfies every claim is not a held-back case.
+[`grim status --check`](./commands.md#status) lists the cases that still stand.
 
 A conflicting artifact is never expanded, so its own dependencies do not add
 further conflicts. Cycles are a separate failure, covered under
@@ -225,8 +251,10 @@ further conflicts. Cycles are a separate failure, covered under
 ### Floating versus pinned members {#bundle-pinning}
 
 A bundle's members, and the dependencies an artifact declares, can themselves be
-floating tags or exact digests. A floating reference resolves when it first
-enters a consumer's lock. It moves only on that consumer's
+floating tags or exact digests. A bundle member tag stays literal: it names the
+manifest the tag points at. A `requires` tag is a version claim instead, see
+[Dependencies](#dependencies). A floating reference resolves when it
+first enters a consumer's lock. It moves only on that consumer's
 [`grim update`](./commands.md#update), so reproducibility comes from the
 consumer's own lock.
 
@@ -274,10 +302,36 @@ its digest and under its tag, because `remove` resolves nothing. A dependency yo
 cannot undeclare, because you never declared it, is removed by removing the
 artifact that requires it.
 
-**Floating by default.** A dependency written `./gws-shared:1` is a floating tag.
-`grim lock` keeps its pin and `grim update` re-resolves it, like any other. A
-publisher who wants the closure fixed releases with `--pin`, see
-[Floating versus pinned members](#bundle-pinning).
+**Floating by default.** A dependency written
+`./gws-shared:1` is a floating tag, and it is also a version claim: it accepts
+any release from `1.0.0` up to, but not including, `2.0.0`. No tag, or `latest`,
+accepts any version. The full grammar is one table in
+[What the tag claims](./artifacts.md#what-the-tag-claims).
+
+When several artifacts require the same dependency, the claims combine. The
+dependency takes the release the claimed major's cascade tag names, such as `2`
+for `x:2`. [`grim release`](./commands.md#release) keeps that tag on the highest
+release of the major, even after a backport. A publisher who wants the closure fixed
+releases with `--pin`, see [Floating versus pinned members](#bundle-pinning).
+
+**Held pins.** `grim lock` never moves a pin that still satisfies every claim,
+even when its tag differs from the claim's tag. Only `grim update` moves pins,
+each to the release its claimed major's cascade tag names. Three cases need more:
+
+- A pin with no tag and no version annotation takes its version from the edges
+  the previous lock recorded onto it. Where those edges nest, the narrowest
+  counts. Where two do not nest, nothing counts. So a `grim lock` after only the
+  registry moved keeps the pin.
+- A config edit that adds a claim the held pin fails, such as a raised lower
+  bound, moves that pin without a flag. The row reads `moved`, and stderr says
+  why: `skill/x moved from 2.1.4 to 2.3.0 because skill/a (ghcr.io/acme/x:2), skill/b (ghcr.io/acme/x:2.1) require it`.
+- A recorded claim the pin no longer answers, with no config change, exits `78`.
+  So does a pin that would move only because of a claim from a version this
+  resolve dropped. The message names that version and the fix.
+
+A moved or new pin may record the cascade tag, such as `x:2@sha256:…`, where a
+requester wrote `2.1`. Only `grimoire.lock` carries that tag. The JSON `pinned`
+field of `grim lock` and `grim add` shows the reference without it.
 
 A relative reference resolves against the repository the parent was pulled from, so a mirror of the parent
 serves its dependencies from the mirror too. An absolute reference may name
@@ -286,7 +340,8 @@ credential is never sent to a different host.
 
 **Same slot, several claims.** When two artifacts require the same dependency, or
 you declare one that another artifact also requires, the
-[conflict policy](#bundle-conflicts) decides. Your direct declaration wins.
+[conflict policy](#bundle-conflicts) decides. A direct declaration with a tag
+wins. A bare one follows the version claims on its own repository.
 
 ### Cycles {#dependency-cycles}
 
@@ -307,9 +362,20 @@ limits for one lock:
 | Levels below your declarations | 32 |
 | Dependency documents read in total | 32 MiB |
 | Dependencies in one document | 512 members, 512 KiB |
+| Node admissions over every resolve pass | 32,768 |
+| Tag listings read in one run | 32 MiB |
 
 The members of a bundle you declare directly do not count toward the first or
-third limit.
+third limit. The node-admission limit is a work limit: the message says the
+resolve stopped, not that the dependencies have no answer. Claims that cannot
+be satisfied exit `78` or `79` instead, as the
+[conflict policy](#bundle-conflicts) describes.
+
+A tag listing grim cannot read to its end refuses with exit `65`. That covers a
+repeated cursor, an empty page with a next link, a link grim cannot follow, and the
+32 MiB budget. Grim never picks a release from the part it did read. The budget
+counts each tag's length plus the size of a string, plus 256 bytes and the cursor
+per page. Each page of a listing has its own 30 s deadline.
 
 ### Offline and the store {#dependency-offline}
 
@@ -319,10 +385,21 @@ grim keeps the dependencies the previous lock recorded for that exact digest,
 prints a warning that they are carried unverified, and moves on.
 [`grim install`](./commands.md#install) checks them against the pinned manifest
 before it writes anything, so a stale carry cannot install the wrong closure.
+Offline, a store miss never releases a held pin recorded under a cascade float.
+A tag shape that only widens the claim is not evidence.
 A lock grim 0.15.1 wrote records none, so there the artifact counts as
 requiring nothing, as 0.15.1 reads it. What only that artifact requires leaves
 the lock, and the next online `grim lock` resolves it afresh, so its pin moves if
 its tag moved.
+
+A held pin takes its version from the stored manifest. Failing that, it takes
+the version from the shape of its tag, then from the edges the previous lock
+recorded onto it. A store miss never releases a held pin. When no evidence exists, grim keeps the pin and warns
+once.
+
+The cascade tag of a version line, such as `2`, is read from the tag cache, and a
+miss exits `69`. A tag listing is always a miss offline. Grim never picks a
+release from cached tags.
 
 The store can also hold a manifest but not the dependency list it names, as
 0.15.1's `grim add --no-install` and `grim fetch` leave it. The artifact then

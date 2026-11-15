@@ -12,6 +12,7 @@
 
 #[cfg(test)]
 mod agreement_tests;
+pub mod claim_remedy;
 pub mod graph;
 pub mod members;
 pub mod part_bundles;

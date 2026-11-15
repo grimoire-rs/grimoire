@@ -235,9 +235,11 @@ code-review = "ghcr.io/acme/code-review:2"
 ```
 
 Bundle references follow the same rules as skills and rules — a bare reference
-defaults to `:latest`. Per `(kind, name)`, a direct declaration wins over any
-bundle or dependency, agreeing claims coalesce, and disagreeing ones fail
-closed; see the [conflict policy](./concepts.md#bundle-conflicts). A bundle
+defaults to `:latest`. Per `(kind, name)`, a direct declaration with a tag, a
+digest or a path wins over any bundle or dependency. A bare one, with no tag or
+with `latest`, yields to the version claims that dependencies make on its own
+repository. Agreeing claims coalesce, and disagreeing ones fail closed. See the
+[conflict policy](./concepts.md#bundle-conflicts). A bundle
 may itself list bundles, and an artifact may require other artifacts: those
 are not declared here, they are reached through the declared ones, see
 [Dependencies](./concepts.md#dependencies).
@@ -911,7 +913,9 @@ then the digest. A fetch uses the digest alone. A re-lock compares each request
 against the tag, so it can tell a request that still holds from one you changed.
 
 A digest-only request records no tag. A dependency records the request that won,
-resolved against its parent's pin. Version 0.15.1 reads a tagged `pinned` and
+resolved against its parent's pin. A moved or new pin may record a cascade tag,
+such as `x:2@sha256:…`, where its requesters wrote `2.1`. A committed lock keeps
+that tag. Version 0.15.1 reads a tagged `pinned` and
 strips the tag when it next writes the lock.
 
 A member that came from a [bundle](./concepts.md#bundles) additionally carries
@@ -964,7 +968,9 @@ unused:
   publisher wrote it, so a relative `./gws-shared:1` stays relative and is
   resolved against the parent's pinned repository each time the lock is read.
   A mirror switch therefore needs no lock rewrite. An entry from a local path
-  source records its declaration the same way.
+  source records its declaration the same way. No key changed for
+[version claims](./artifacts.md#what-the-tag-claims): the tag in `id` is the
+claim, and the lock schema is the same.
 - `transitive = true` marks a `[[bundle]]` snapshot that no `[bundles]` table
   declares, one reached through a dependency or through another bundle.
 

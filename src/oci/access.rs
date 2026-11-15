@@ -50,6 +50,26 @@ impl From<Vec<String>> for CatalogListing {
     }
 }
 
+/// Fixed memory a tag listing charges per page against its byte budget.
+pub const TAG_PAGE_COST: usize = 256;
+
+/// What one listed tag charges against a byte budget: its text and its `String`.
+pub fn tag_cost(tag: &str) -> usize {
+    tag.len() + size_of::<String>()
+}
+
+/// One repository's tags, as far as a byte budget lets the walk read them.
+/// `bytes` is what the walk charged: [`tag_cost`] per tag, plus
+/// [`TAG_PAGE_COST`] and the cursor per page. `complete` is false when the
+/// walk passed the budget or stopped before the registry's last page, so
+/// `tags` may be a prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagListing {
+    pub tags: Vec<String>,
+    pub bytes: usize,
+    pub complete: bool,
+}
+
 /// Cache/source routing policy, derived once per invocation from the
 /// environment (and the equivalent CLI flags).
 ///
@@ -133,6 +153,23 @@ pub trait OciAccess: Send + Sync {
     /// repository is unknown to the registry.
     async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError>;
 
+    /// [`Self::list_tags`], charging at most `max_bytes` as [`TagListing::bytes`]
+    /// counts them. `Ok(None)` when the repository is unknown.
+    ///
+    /// This default reads the whole listing as one page and measures it
+    /// afterwards; an access that can stop its walk mid-stream overrides it.
+    async fn list_tags_within(&self, id: &Identifier, max_bytes: usize) -> Result<Option<TagListing>, AccessError> {
+        let Some(tags) = self.list_tags(id).await? else {
+            return Ok(None);
+        };
+        let bytes = tags.iter().map(|tag| tag_cost(tag)).sum::<usize>() + TAG_PAGE_COST;
+        Ok(Some(TagListing {
+            tags,
+            bytes,
+            complete: bytes <= max_bytes,
+        }))
+    }
+
     /// List the repository catalog for `registry`. An unsupported or
     /// missing catalog endpoint yields an empty list, not an error.
     ///
@@ -180,6 +217,34 @@ mod tests {
     #[test]
     fn modes_are_distinct() {
         assert_ne!(AccessMode::Online, AccessMode::Offline);
+    }
+
+    /// The default reads every tag and only then compares the total with the budget.
+    #[tokio::test]
+    async fn list_tags_within_measures_the_whole_listing_by_default() {
+        use super::memory_registry::MemoryRegistry;
+        use crate::oci::Algorithm;
+
+        let registry = MemoryRegistry::new();
+        let id = Identifier::parse("ghcr.io/acme/x:1").unwrap();
+        let digest = Algorithm::Sha256.hash(b"x");
+        for tag in ["1", "1.2", "latest"] {
+            registry.put_tag(&id, tag, &digest).await.unwrap();
+        }
+
+        // Charged as a paged walk charges: each name and its `String`, plus one page.
+        let charged = 10 + 3 * size_of::<String>() + 256;
+        let within = registry.list_tags_within(&id, charged).await.unwrap().unwrap();
+        assert_eq!(within.tags, ["1", "1.2", "latest"]);
+        assert_eq!(within.bytes, charged);
+        assert!(within.complete);
+
+        let past = registry.list_tags_within(&id, charged - 1).await.unwrap().unwrap();
+        assert_eq!(past.tags.len(), 3, "the default keeps every tag it read");
+        assert!(!past.complete);
+
+        let unknown = Identifier::parse("ghcr.io/acme/none:1").unwrap();
+        assert_eq!(registry.list_tags_within(&unknown, 10).await.unwrap(), None);
     }
 
     #[test]

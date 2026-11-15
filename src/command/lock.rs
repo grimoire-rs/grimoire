@@ -32,6 +32,7 @@ use crate::lock::refresh::Refresh;
 use crate::oci::PinnedIdentifier;
 use crate::oci::access::OciAccess;
 use crate::oci::text::registry_text;
+use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
 use crate::resolve::resolve_options::ResolveOptions;
 use crate::resolve::resolver::{LockRun, TargetLock, target_lock};
 
@@ -39,7 +40,11 @@ use super::scope_resolution;
 
 /// `grim lock` arguments.
 #[derive(Debug, Args)]
-pub struct LockArgs {}
+pub struct LockArgs {
+    /// `--allow-downgrade`: whether the relock may move a pin to a lower major version.
+    #[command(flatten)]
+    pub downgrade: crate::cli::options::DowngradeOpts,
+}
 
 /// Run `grim lock`.
 ///
@@ -48,7 +53,7 @@ pub struct LockArgs {}
 /// Config (78), a conflict among armed settings packages (78), tag-not-found
 /// (79), auth (80), registry-unreachable (69), flock-contended (75), or
 /// unreadable-lock (78/77/74) failures propagate via the typed error chain.
-pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport, ExitCode)> {
+pub async fn run(ctx: &Context, args: &LockArgs) -> anyhow::Result<(LockReport, ExitCode)> {
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
     // Hold the advisory flock for the resolve+write window. A global
@@ -69,11 +74,15 @@ pub async fn run(ctx: &Context, _args: &LockArgs) -> anyhow::Result<(LockReport,
             prior.as_ref(),
             &Refresh::Nothing,
             &access,
-            &ResolveOptions::default(),
+            &ResolveOptions {
+                downgrade: args.downgrade.downgrade(),
+                ..ResolveOptions::default()
+            },
             scope.config_dir(),
             LockRun::in_scope(ctx.offline(), &scope.invocation),
         )
-        .await,
+        .await
+        .map_err(|e| with_remedy(e.naming(&scope.invocation), &RemedyCommand::Lock)),
     )?;
     // A resolve asks nothing, so only packages a record covers load a layer: a
     // fresh clone locks as it did before the kind, and its conflict meets the run
@@ -188,6 +197,7 @@ pub(crate) mod test_registry {
     use crate::oci::access::memory_registry::MemoryRegistry;
     use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
     use crate::oci::manifest::{Descriptor, OciManifest};
+    use crate::oci::version_evidence::VERSION_ANNOTATION;
     use crate::oci::{ArtifactKind, Digest, Identifier};
 
     pub(crate) const REGISTRY: &str = "localhost:5050";
@@ -242,6 +252,88 @@ pub(crate) mod test_registry {
         push(reg, &id, tag, ArtifactKind::Bundle, layer, build).await
     }
 
+    /// Release `version` of the skill `acme/<name>` as `grim release` pushes it:
+    /// the version annotation, a requires layer listing `requires` as
+    /// `(name, reference)` skills, and the tags `X.Y.Z`, `X.Y`, `X` and `latest`.
+    pub(crate) async fn release_skill(
+        reg: &MemoryRegistry,
+        name: &str,
+        version: &str,
+        requires: &[(&str, &str)],
+    ) -> Digest {
+        let body = format!("---\nname: {name}\ndescription: {version}\n---\n").into_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_data(&mut header, format!("{name}/SKILL.md"), &body[..])
+            .unwrap();
+        let blob = builder.into_inner().unwrap();
+        let id = Identifier::new_registry(format!("acme/{name}"), REGISTRY);
+        let mut layers = vec![Descriptor {
+            digest: reg.push_blob(&id, &blob).await.unwrap(),
+            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+            size: blob.len() as u64,
+            annotations: None,
+        }];
+        if !requires.is_empty() {
+            let edges = requires
+                .iter()
+                .map(|(name, reference)| BundleMember {
+                    kind: ArtifactKind::Skill,
+                    name: (*name).to_string(),
+                    id: (*reference).to_string(),
+                })
+                .collect();
+            let blob = BundleManifest::new(edges).to_layer_bytes().unwrap();
+            layers.push(Descriptor {
+                digest: reg.push_blob(&id, &blob).await.unwrap(),
+                media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+                size: blob.len() as u64,
+                annotations: None,
+            });
+        }
+        let manifest = OciManifest {
+            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers,
+            annotations: [(VERSION_ANNOTATION.to_string(), version.to_string())].into(),
+        };
+        let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+        let v = semver::Version::parse(version).unwrap();
+        for tag in [
+            version.to_string(),
+            format!("{}.{}", v.major, v.minor),
+            v.major.to_string(),
+            "latest".to_string(),
+        ] {
+            reg.put_tag(&id, &tag, &digest).await.unwrap();
+        }
+        digest
+    }
+
+    /// `acme/x` released at 2.6.0 and then 3.1.0, so `latest` names 3.1.0.
+    pub(crate) async fn two_majors_of_x(reg: &MemoryRegistry) -> (Digest, Digest) {
+        let x26 = release_skill(reg, "x", "2.6.0", &[]).await;
+        let x31 = release_skill(reg, "x", "3.1.0", &[]).await;
+        (x26, x31)
+    }
+
+    /// The `MajorDowngrade` refusal's fix in `err`, `None` for any other error.
+    pub(crate) fn downgrade_fix(err: &anyhow::Error) -> Option<&str> {
+        use crate::resolve::resolve_error::ResolveErrorKind;
+        match err.downcast_ref::<crate::error::Error>()? {
+            crate::error::Error::Resolve(re) => match &re.kind {
+                ResolveErrorKind::MajorDowngrade { fix, .. } => Some(fix),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     async fn push(
         reg: &MemoryRegistry,
         id: &Identifier,
@@ -272,6 +364,12 @@ mod tests {
     use crate::lock::locked_artifact::LockedArtifact;
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{ArtifactKind, Digest, Identifier};
+
+    fn no_flags() -> LockArgs {
+        LockArgs {
+            downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: false },
+        }
+    }
 
     fn locked(name: &str, kind: ArtifactKind, byte: char) -> LockedArtifact {
         let id = Identifier::new_registry(name, "localhost:5000")
@@ -433,11 +531,11 @@ mod tests {
         let config = tmp.path().join("grimoire.toml");
         std::fs::write(&config, format!("[bundles]\nb = \"{REGISTRY}/acme/b:1\"\n")).unwrap();
         let ctx = Context::with_access(tmp.path().join("home"), reg).with_config(config.clone());
-        run(&ctx, &LockArgs {}).await.expect("the first lock");
+        run(&ctx, &no_flags()).await.expect("the first lock");
         std::fs::write(&config, format!("[bundles]\nb = \"{REGISTRY}/acme/b:2\"\n")).unwrap();
 
         let capture = crate::catalog::test_hosts::LogCapture::start();
-        run(&ctx, &LockArgs {}).await.expect("the relock");
+        run(&ctx, &no_flags()).await.expect("the relock");
         let logs = capture.text();
 
         let line = format!(
@@ -447,8 +545,66 @@ mod tests {
         );
         assert_eq!(logs.matches(&line).count(), 1, "{logs}");
         let capture = crate::catalog::test_hosts::LogCapture::start();
-        run(&ctx, &LockArgs {}).await.expect("a no-op relock");
+        run(&ctx, &no_flags()).await.expect("a no-op relock");
         assert!(!capture.text().contains("moved its pin"), "nothing moved");
+    }
+
+    /// A new dependent claims `x:2` against a bare direct `x` held at 3.1.0: the
+    /// relock refuses with the lock's fix, and `--allow-downgrade` takes 2.6.0.
+    #[tokio::test]
+    async fn a_major_downgrade_names_the_lock_fix_and_moves_with_the_flag() {
+        use super::test_registry::{REGISTRY, downgrade_fix, release_skill, two_majors_of_x};
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let (x26, x31) = two_majors_of_x(&reg).await;
+        release_skill(&reg, "a", "1.0.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+        let config = tmp.path().join("grimoire.toml");
+        std::fs::write(&config, format!("[skills]\nx = \"{REGISTRY}/acme/x\"\n")).unwrap();
+        let ctx = Context::with_access(tmp.path().join("home"), reg).with_config(config.clone());
+        run(&ctx, &no_flags()).await.expect("x locks at latest");
+        std::fs::write(
+            &config,
+            format!("[skills]\na = \"{REGISTRY}/acme/a:1\"\nx = \"{REGISTRY}/acme/x\"\n"),
+        )
+        .unwrap();
+
+        let err = run(&ctx, &no_flags()).await.expect_err("a major downgrade refuses");
+
+        let grim = crate::config::scope::Invocation::config(&config);
+        let fix = format!(
+            "declare skill x as `{REGISTRY}/acme/x@{x31}` in grimoire.toml, or rerun `{grim} lock \
+             --allow-downgrade` to take 2.6.0"
+        );
+        let classified = crate::error::classify(&err);
+        assert_eq!(classified.exit, ExitCode::ConfigError, "{err:#}");
+        assert_eq!(classified.reason, Some(crate::error::ErrorReason::MajorDowngrade));
+        assert_eq!(downgrade_fix(&err), Some(fix.as_str()), "{err:#}");
+        let printed = crate::error::printed_chain(&err);
+        assert!(printed.ends_with(&format!("; {fix}")), "{printed}");
+
+        let allow = LockArgs {
+            downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: true },
+        };
+        let (report, exit) = run(&ctx, &allow).await.expect("the flag takes the move");
+
+        assert_eq!(exit, ExitCode::Success);
+        let rows = serde_json::to_value(&report).unwrap()["items"].clone();
+        let x = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "x")
+            .expect("x has a row")
+            .clone();
+        assert_eq!(x["disposition"], "moved", "{x}");
+        // The report prints the content identity; the lock keeps the tag that resolved it.
+        assert_eq!(x["pinned"], format!("{REGISTRY}/acme/x@{x26}"), "{x}");
+        let lock = load_previous(&tmp.path().join("grimoire.lock")).unwrap().unwrap();
+        let row = lock.skills.iter().find(|row| row.name == "x").expect("x is locked");
+        assert_eq!(
+            row.source.pinned().map(ToString::to_string),
+            Some(format!("{REGISTRY}/acme/x:2@{x26}"))
+        );
     }
 
     /// A pin's content identity is its repository and digest, so a bundle moved
@@ -465,11 +621,11 @@ mod tests {
         let config = tmp.path().join("grimoire.toml");
         std::fs::write(&config, format!("[bundles]\nb = \"{REGISTRY}/acme/b:1\"\n")).unwrap();
         let ctx = Context::with_access(tmp.path().join("home"), reg).with_config(config.clone());
-        run(&ctx, &LockArgs {}).await.expect("the first lock");
+        run(&ctx, &no_flags()).await.expect("the first lock");
         std::fs::write(&config, format!("[bundles]\nb = \"{REGISTRY}/acme/b2x:1\"\n")).unwrap();
 
         let capture = crate::catalog::test_hosts::LogCapture::start();
-        run(&ctx, &LockArgs {}).await.expect("the relock");
+        run(&ctx, &no_flags()).await.expect("the relock");
         let logs = capture.text();
 
         let short = old.to_short_string();

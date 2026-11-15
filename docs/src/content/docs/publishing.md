@@ -706,9 +706,46 @@ exact tag even for a full semver, for a one-off version that should not move
 `latest`. A prerelease (`1.2.3-rc.1`) is always exact-only, because a release
 candidate never becomes a floating version.
 
+The cascade never moves a float to a lower version. Say 2.9.0 is out and you
+backport a fix as 2.3.7. That release moves `2.3` and leaves `2` and `latest` on
+2.9.0. Moving them would hand every consumer on `:2` a lower release. grim names
+each kept float on stderr and in `floats_kept` in the
+[JSON report](./json-interface.md#report-shapes). `tags` lists only the tags that
+moved.
+
+Before any tag moves, grim reads each float. It creates one that is absent and
+moves one that already names this release. For any other float it reads the
+manifest's version annotation, so a release costs one manifest read per float.
+
+A float stays only when the annotated version lies inside the float's own span and
+is above the one you release. Versions compare by semver precedence, prereleases
+included, so a float on 3.0.0-rc.1 stays against 2.4.1 and 3.0.0 replaces it. The
+exact tag of that version must also still name the float's manifest. That costs
+one more tag resolve per float that would stay. Otherwise the float moves, with
+one stderr line. A float on a manifest grim cannot parse, or one served under
+another digest, moves as before. A failed read stops a real release before any
+tag moves.
+
+The rule trusts the version annotation the publisher wrote, limited by that
+exact-tag check. A publisher who tags both the annotated version and its exact tag
+keeps the float, so retag with another OCI tool to correct one.
+
+Run releases into one repository one at a time, for example in a CI concurrency
+group. A release reads each float before it moves it, and the registry has no
+compare-and-set for tags. So two concurrent releases can leave a float on the
+lower version.
+
+A cascading `--dry-run` reads the floats it would move and never writes. When a
+read fails, or offline, it warns once on stderr and plans every float moving, with
+`floats_kept` `[]`, and keeps its exit code. `--force` still applies the cascade
+and never lowers a float. It only lets the exact tag move. Floats that an
+earlier grim or another tool already moved down are not fixed, and neither are
+floats on third-party artifacts. A consumer on `:2` gets that lower release until
+you publish a higher one.
+
 ### Dry runs and overwrites
 
-Preview the exact push plan without touching the registry. The plan names
+Preview the exact push plan without writing to the registry. The plan names
 every tag and the digest each one will point at:
 
 ```sh
@@ -956,7 +993,9 @@ grim release ./gws-drive ghcr.io/acme/skills/gws-drive:1.0.0 --pin
 `--pin`, or `pin = true` on the `publish.toml` entry, resolves every floating
 reference in the declarations to a digest and freezes it into the published
 artifact, the same as for [bundle members](#pin). A relative reference is
-resolved against the release target first and then pinned absolute.
+resolved against the release target first and then pinned absolute. A tag in
+a requirement is a [version claim](./artifacts.md#what-the-tag-claims), and
+`--pin` freezes it to a digest claim, which names one exact manifest.
 
 ### Publish order {#requires-publish-order}
 
@@ -967,7 +1006,8 @@ registry before the artifact that names it, whichever kinds are involved.
 Entries that require each other in a cycle exit `65` before anything is
 pushed. A relative reference counts as an edge only when it names the exact
 sibling version tag, so declare `./gws-shared:1.0.0` and not a floating tag if
-you rely on the ordering for a first release.
+you rely on the ordering for a first release. That reference is also a
+[claim](./artifacts.md#what-the-tag-claims) of at least 1.0.0 and below 2.0.0.
 
 Nothing checks that a dependency exists when you publish without `--pin`.
 Consumers meet a missing target at [`grim lock`](./commands.md#lock), which
@@ -990,10 +1030,12 @@ rule for a publisher:
   grim later refuses.
 - Publish the first dependency-bearing version under a **new major tag**, and
   let consumers move to it when they upgrade grim.
-- Dependencies stay as shared as the tags they name. A floating reference is
-  resolved when it first enters a consumer's lock and on that consumer's
-  `grim update`. Two artifacts that name different tags of one dependency can
-  therefore [conflict](./concepts.md#bundle-conflicts).
+- Tags in one major do not conflict. Two artifacts that name `1` and `1.2` of
+  one dependency share the release the tag `1` names, which the cascade keeps
+  on the highest release of major 1. Tags in different majors
+  still [conflict](./concepts.md#bundle-conflicts) and exit `78`. A tag is a
+  [version claim](./artifacts.md#what-the-tag-claims), resolved when it first
+  enters a consumer's lock and on that consumer's `grim update`.
 
 ## Batch publishing with a manifest {#batch-publish}
 
@@ -1535,7 +1577,9 @@ wrapper object on stdout:
       "digest": "sha256:…",
       "tags": ["1.2.0", "1.2", "1", "latest"],
       "status": "pushed",
-      "pushed_to": null
+      "pushed_to": null,
+      "compression": "gzip",
+      "floats_kept": []
     }
   ],
   "descriptions": {
@@ -1561,6 +1605,9 @@ wrapper object on stdout:
 order. `pushed_to` is always present. It is the push-side reference actually
 used under a [push/pull registry split](#batch-publish-push-registry), and
 `null` when the split is inactive. The `ref` always stays the pull name.
+`compression` is `none` or `gzip` for skill, rule, agent and hook entries and
+`null` otherwise. `floats_kept` is always present, `[{tag, version}]` for each
+cascade float left on a newer version and `[]` when none.
 
 `descriptions` carries the [description companion](#description-companion)
 pushes this run, one per distinct target repository, in the same

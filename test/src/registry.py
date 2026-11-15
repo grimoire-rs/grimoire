@@ -314,6 +314,16 @@ def fetch_manifest(repo: str, tag: str) -> dict:
         return json.loads(resp.read())
 
 
+def list_tags(repo: str) -> list[str]:
+    """Every tag of ``repo``, sorted, from ``GET /v2/<repo>/tags/list``.
+
+    One unpaginated request: the registry's full list. Raises ``HTTPError``
+    (404) for a repository the registry does not know.
+    """
+    with urllib.request.urlopen(f"{REGISTRY_BASE}/v2/{repo}/tags/list", timeout=30) as resp:
+        return sorted(json.loads(resp.read()).get("tags") or [])
+
+
 def fetch_blob(repo: str, digest: str) -> bytes:
     """Fetch a raw layer blob by digest.
 

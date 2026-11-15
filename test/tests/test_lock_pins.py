@@ -18,7 +18,13 @@ from pathlib import Path
 import pytest
 import tomllib
 
-from src.helpers import make_artifact, make_bundle, make_dependent, write_config
+from src.helpers import (
+    make_artifact,
+    make_bundle,
+    make_dependent,
+    publish_release,
+    write_config,
+)
 from src.registry import REGISTRY_HOST, PublishedArtifact, retag, tag_digest
 from src.runner import GrimRunner
 
@@ -255,8 +261,7 @@ def test_remove_then_lock_keeps_pins(
     """S-004: re-locking after `grim remove` keeps the remaining pins, a diamond's too."""
     kept = _skill(unique_repo, "kept")
     gone = _skill(unique_repo, "gone")
-    target = _skill(unique_repo, "target")
-    retag(f"{unique_repo}/target", "1.2", target.digest)
+    target = publish_release(f"{unique_repo}/target", "1.2.0", _files("target", "v1"))
     left = _dependent(unique_repo, "left", [("skill", "target", "./target:1")])
     right = _dependent(unique_repo, "right", [("skill", "target", "./target:1.2")])
     write_config(
@@ -293,7 +298,7 @@ def test_remove_of_the_diamond_winner_keeps_the_pin(
     would move the pin, or with three holders exit 78. The acceptance test
     earns its place by reading the rewritten pin back through a real lock file.
     """
-    target = _skill(unique_repo, "target")
+    target = publish_release(f"{unique_repo}/target", "1.3.0", _files("target", "v1"))
     survivors = ["1.2", "1.3"][: holders - 1]
     skills = {
         "winner": _dependent(
@@ -324,11 +329,14 @@ def test_remove_of_the_diamond_winner_keeps_the_pin(
 def _direct_over_two_tags(
     grim_at, project_dir: Path, unique_repo: str
 ) -> tuple[object, PublishedArtifact]:
-    """`target:2` declared over `pone` asking for `:1` and `qtwo` for `:2`, one digest."""
-    target = _skill(unique_repo, "target", tag="2")
-    retag(f"{unique_repo}/target", "1", target.digest)
-    pone = _dependent(unique_repo, "pone", [("skill", "target", "./target:1")])
-    qtwo = _dependent(unique_repo, "qtwo", [("skill", "target", "./target:2")])
+    """`target:v2` declared over `pone` asking for `:v1` and `qtwo` for `:v2`, one digest.
+
+    Literal tags: numeric tags in two majors on one node exit 78 before a pin is read.
+    """
+    target = _skill(unique_repo, "target", tag="v2")
+    retag(f"{unique_repo}/target", "v1", target.digest)
+    pone = _dependent(unique_repo, "pone", [("skill", "target", "./target:v1")])
+    qtwo = _dependent(unique_repo, "qtwo", [("skill", "target", "./target:v2")])
     write_config(
         project_dir,
         skills={"target": target.fq, "pone": pone.fq, "qtwo": qtwo.fq},
@@ -343,14 +351,14 @@ def test_remove_of_a_direct_key_keeps_a_pin_both_edges_agree_on(
 ) -> None:
     """The remove deleted the row, so `grim lock` moved the digest.
 
-    The edge at `:1` was never resolved, so the remove leaves the lock stale. It
+    The edge at `:v1` was never resolved, so the remove leaves the lock stale. It
     changes no row, so the hash stays the one those rows were written for. The
-    pin names the edge at `:2`, so it answers every recorded edge, and it stays
+    pin names the edge at `:v2`, so it answers every recorded edge, and it stays
     where it was though both tags moved.
     """
     runner, target = _direct_over_two_tags(grim_at, project_dir, unique_repo)
-    moved = _move_tag(unique_repo, "target", tag="2", body="v2")
-    retag(f"{unique_repo}/target", "1", moved.digest)
+    moved = _move_tag(unique_repo, "target", tag="v2", body="v2")
+    retag(f"{unique_repo}/target", "v1", moved.digest)
     proof = _lock(project_dir)["metadata"]["declaration_hash"]
 
     removed = runner.run("remove", "skill", "target")
@@ -358,20 +366,24 @@ def test_remove_of_a_direct_key_keeps_a_pin_both_edges_agree_on(
     assert "run `grim lock`" in removed.stderr
     runner.run("lock")
 
-    pin = f"{REGISTRY_HOST}/{unique_repo}/target:2@{target.digest}"
+    pin = f"{REGISTRY_HOST}/{unique_repo}/target:v2@{target.digest}"
     assert _pins(project_dir)["target"] == pin
     assert _lock(project_dir)["metadata"]["declaration_hash"] != ""
 
 
 def _direct_over_a_conflict(
-    grim_at, project_dir: Path, unique_repo: str
+    grim_at, project_dir: Path, unique_repo: str, tags: tuple[str, str] = ("1", "2")
 ) -> tuple[object, PublishedArtifact, PublishedArtifact]:
-    """`x:1` declared over `p` asking for `:1` and `q` for `:2`, two digests."""
-    one = _skill(unique_repo, "x", tag="1", body="ONE")
-    two = make_artifact(f"{unique_repo}/x", "skill", _files("x", "TWO"), tag="2")
+    """`x:1` declared over `p` asking for `:1` and `q` for `:2`, two digests.
+
+    A conflict the lock carries needs literal `tags`: numeric ones in two majors exit 78.
+    """
+    low, high = tags
+    one = _skill(unique_repo, "x", tag=low, body="ONE")
+    two = make_artifact(f"{unique_repo}/x", "skill", _files("x", "TWO"), tag=high)
     assert one.digest != two.digest
-    p = _dependent(unique_repo, "p", [("skill", "x", "./x:1")])
-    q = _dependent(unique_repo, "q", [("skill", "x", "./x:2")])
+    p = _dependent(unique_repo, "p", [("skill", "x", f"./x:{low}")])
+    q = _dependent(unique_repo, "q", [("skill", "x", f"./x:{high}")])
     write_config(project_dir, skills={"x": one.fq, "p": p.fq, "q": q.fq})
     runner = grim_at(project_dir)
     runner.run("lock")
@@ -400,9 +412,11 @@ def test_remove_of_a_direct_key_over_a_conflict_keeps_the_pin(
     The pin names the edge `p` recorded, so on the stale hash it answers every
     recorded edge, offline as online. The owner accepted this exit-0 case.
     """
-    runner, one, _ = _direct_over_a_conflict(grim_at, project_dir, unique_repo)
+    runner, one, _ = _direct_over_a_conflict(
+        grim_at, project_dir, unique_repo, tags=("v1", "v2")
+    )
     removed = runner.run("remove", "skill", "x")
-    kept = f"{REGISTRY_HOST}/{unique_repo}/x:1@{one.digest}"
+    kept = f"{REGISTRY_HOST}/{unique_repo}/x:v1@{one.digest}"
     assert _pins(project_dir)["x"] == kept
 
     offline = runner.run("--offline", "lock", check=False)
@@ -417,6 +431,24 @@ def test_remove_of_a_direct_key_over_a_conflict_keeps_the_pin(
     checked = runner.run("update", "--", "x", check=False)
     assert checked.returncode == 78, checked.stderr
     assert _pins(project_dir)["x"] == kept
+
+
+def test_remove_of_a_direct_key_over_a_numeric_two_major_conflict_exits_78(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Numeric tags make `p`'s `x:1` and `q`'s `x:2` claims in two majors, which no
+    pin settles, so once the remove drops the declaration `grim lock` exits 78."""
+    runner, one, _ = _direct_over_a_conflict(grim_at, project_dir, unique_repo)
+    runner.run("remove", "skill", "x")
+    lock = project_dir / "grimoire.lock"
+    before = lock.read_bytes()
+
+    locked = runner.run("lock", check=False)
+
+    assert locked.returncode == 78, locked.stderr
+    assert "conflicting versions" in locked.stderr, locked.stderr
+    assert lock.read_bytes() == before
+    assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:1@{one.digest}"
 
 
 def test_a_global_remove_note_names_the_global_commands(
@@ -452,14 +484,16 @@ def test_hand_deleting_a_direct_line_over_a_conflict_carries(
     A stale hash cannot say why it is stale, and an honest diamond must survive a
     hand edit elsewhere, so `grim lock` carries where a fresh resolve exits 78.
     """
-    runner, one, _ = _direct_over_a_conflict(grim_at, project_dir, unique_repo)
+    runner, one, _ = _direct_over_a_conflict(
+        grim_at, project_dir, unique_repo, tags=("v1", "v2")
+    )
     config = tomllib.loads((project_dir / "grimoire.toml").read_text(encoding="utf-8"))
     del config["skills"]["x"]
     write_config(project_dir, skills=config["skills"])
 
     runner.run("lock")
 
-    assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:1@{one.digest}"
+    assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:v1@{one.digest}"
 
 
 def test_a_no_edit_relock_keeps_a_cross_repository_diamond(
@@ -699,7 +733,8 @@ def test_clean_pre_change_lock_migrates(
     grim_at, grim_home: Path, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """S-012: a clean pre-change lock gains its tags with no tag resolve."""
-    leaf = _skill(unique_repo, "leaf")
+    # A tagless pin answers a numeric edge only through its version annotation.
+    leaf = publish_release(f"{unique_repo}/leaf", "1.0.0", _files("leaf", "v1"))
     parent = _dependent(unique_repo, "parent", [("skill", "leaf", "./leaf:1")])
     solo = _skill(unique_repo, "solo")
     write_config(project_dir, skills={"parent": parent.fq, "solo": solo.fq})
@@ -732,8 +767,9 @@ def test_pre_change_pin_keeps_its_pin_through_every_relock(
 
     The hash proves the declaration and `parent` is read at its pin, so the edge its
     row records is the request that resolved `leaf`. A resolve would show the move.
+    `leaf` carries a version annotation: a tagless pin answers a numeric edge only so.
     """
-    leaf = _skill(unique_repo, "leaf")
+    leaf = publish_release(f"{unique_repo}/leaf", "1.0.0", _files("leaf", "v1"))
     parent = _dependent(unique_repo, "parent", [("skill", "leaf", "./leaf:1")])
     other = _skill(unique_repo, "other")
     write_config(project_dir, skills={"parent": parent.fq})
@@ -827,13 +863,23 @@ def test_drifted_pre_change_lock_resolves_once_and_warns(
 
 
 def _pre_change_part(
-    grim_at, project_dir: Path, unique_repo: str, *, edges: bool = False
+    grim_at,
+    project_dir: Path,
+    unique_repo: str,
+    *,
+    edges: bool = False,
+    annotated: bool = False,
 ) -> tuple[GrimRunner, Path, PublishedArtifact, PublishedArtifact]:
     """Lock one part as a pre-change build would, then move the tag under its pin.
 
     `edges=False` also drops `requires`, a shape no grim writes beside a transitive row.
+    `annotated` gives `leaf` a version annotation, which a tagless pin needs to answer
+    a numeric edge.
     """
-    leaf = _skill(unique_repo, "leaf")
+    if annotated:
+        leaf = publish_release(f"{unique_repo}/leaf", "1.0.0", _files("leaf", "v1"))
+    else:
+        leaf = _skill(unique_repo, "leaf")
     parent = _dependent(unique_repo, "parent", [("skill", "leaf", "./leaf:1")])
     manifest = project_dir / "marketplace.toml"
     manifest.write_text(f"[plugins.team]\ninclude = [{json.dumps(parent.fq)}]\n", encoding="utf-8", newline="\n")
@@ -852,7 +898,7 @@ def test_marketplace_fresh_part_keeps_a_pin_its_edge_records(
 ) -> None:
     """A fresh part proves its include, so a named update keeps the pin below it."""
     runner, manifest, leaf, _ = _pre_change_part(
-        grim_at, project_dir, unique_repo, edges=True
+        grim_at, project_dir, unique_repo, edges=True, annotated=True
     )
 
     result = runner.run("update", "--marketplace", str(manifest), "team:parent")
@@ -888,8 +934,7 @@ def test_diamond_records_the_winning_tag(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """S-014: agreeing edges record their winner, and a moved tag keeps it."""
-    target = _skill(unique_repo, "target")
-    retag(f"{unique_repo}/target", "1.2", target.digest)
+    target = publish_release(f"{unique_repo}/target", "1.2.0", _files("target", "v1"))
     left = _dependent(unique_repo, "left", [("skill", "target", "./target:1")])
     right = _dependent(unique_repo, "right", [("skill", "target", "./target:1.2")])
     write_config(project_dir, skills={"left": left.fq, "right": right.fq})
@@ -910,8 +955,11 @@ def test_diamond_records_the_winning_tag(
 def test_digest_edge_leaves_the_diamond_pin_tagless(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """S-014 error case: a digest-bearing edge wins the diamond with no tag."""
-    target = _skill(unique_repo, "target")
+    """S-014 error case: a digest-bearing edge wins the diamond with no tag.
+
+    The digest's version annotation is what satisfies the numeric edge beside it.
+    """
+    target = publish_release(f"{unique_repo}/target", "1.0.0", _files("target", "v1"))
     left = _dependent(unique_repo, "left", [("skill", "target", "./target:1")])
     right = _dependent(unique_repo, "right", [("skill", "target", target.pinned)])
     write_config(project_dir, skills={"left": left.fq, "right": right.fq})
@@ -951,13 +999,12 @@ def test_moved_tag_does_not_fake_a_conflict(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """S-015: a carried pin that loses a diamond re-resolves instead of exiting 78."""
-    _skill(unique_repo, "target")
+    publish_release(f"{unique_repo}/target", "1.0.0", _files("target", "v1"))
     first = _dependent(unique_repo, "first", [("skill", "target", "./target:1")])
     write_config(project_dir, skills={"first": first.fq})
     runner = grim_at(project_dir)
     runner.run("lock")
-    moved = _move_tag(unique_repo, "target")
-    retag(f"{unique_repo}/target", "1.3", moved.digest)
+    moved = publish_release(f"{unique_repo}/target", "1.3.0", _files("target", "v2"))
     second = _dependent(unique_repo, "second", [("skill", "target", "./target:1.3")])
 
     result = _add(runner, second, "second")
@@ -983,6 +1030,78 @@ def test_real_tag_disagreement_still_exits_78(
 
     assert result.returncode == 78, result.stderr
     assert (project_dir / "grimoire.lock").read_bytes() == lock
+
+
+def test_numeric_claims_in_two_majors_exit_78(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`./target:1` and `./target:2` on one node refuse: grim builds one version."""
+    publish_release(f"{unique_repo}/target", "1.0.0", _files("target", "v1"))
+    publish_release(f"{unique_repo}/target", "2.0.0", _files("target", "v2"))
+    first = _dependent(unique_repo, "first", [("skill", "target", "./target:1")])
+    second = _dependent(unique_repo, "second", [("skill", "target", "./target:2")])
+    write_config(project_dir, skills={"first": first.fq, "second": second.fq})
+
+    result = grim_at(project_dir).run("lock", check=False)
+
+    assert result.returncode == 78, result.stderr
+    assert "conflicting versions" in result.stderr, result.stderr
+    assert not (project_dir / "grimoire.lock").exists()
+
+
+def test_hand_deleting_a_direct_line_releases_a_pin_its_range_claim_refuses(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A recorded Range edge keeps a pin only while the pin satisfies it.
+
+    The typed `x:1` wins over `q`'s `./x:2`. Once the line is gone, 1.0.0 lies
+    outside `^2`, so `grim lock` moves the pin and reports it, where a literal
+    tag's recorded edge would carry it.
+    """
+    one = publish_release(f"{unique_repo}/x", "1.0.0", _files("x", "ONE"))
+    two = publish_release(f"{unique_repo}/x", "2.0.0", _files("x", "TWO"))
+    q = _dependent(unique_repo, "q", [("skill", "x", "./x:2")])
+    write_config(project_dir, skills={"x": one.fq, "q": q.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:1.0.0@{one.digest}"
+    write_config(project_dir, skills={"q": q.fq})
+
+    rows = {r["name"]: r for r in runner.json("lock")["items"]}
+
+    assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:2@{two.digest}"
+    assert rows["x"]["disposition"] == "moved"
+    assert rows["q"]["disposition"] == "carried"
+
+
+def test_lock_keeps_a_tagless_pin_its_recorded_range_edge_shows(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A tagless, unannotated pin shows its version through the edge the lock records.
+
+    `./x:2` read the pin's digest when the lock was written, so the pin stands in
+    `[2, 3)` and answers `^2`. A moved `x:2` alone must not move it.
+    """
+    held = _skill(unique_repo, "x", tag="2")
+    q = _dependent(unique_repo, "q", [("skill", "x", "./x:2")])
+    write_config(project_dir, skills={"q": q.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    tagged = f"{REGISTRY_HOST}/{unique_repo}/x:2@{held.digest}"
+    assert _pins(project_dir)["x"] == tagged
+    lock = project_dir / "grimoire.lock"
+    text = lock.read_text(encoding="utf-8")
+    tagless = f"{REGISTRY_HOST}/{unique_repo}/x@{held.digest}"
+    lock.write_text(text.replace(f'"{tagged}"', f'"{tagless}"'), encoding="utf-8", newline="\n")
+    assert _pins(project_dir)["x"] == tagless
+    _move_tag(unique_repo, "x", tag="2")
+
+    result = runner.run("lock", format="json", check=False)
+
+    assert result.returncode == 0, result.stderr
+    rows = {r["name"]: r for r in json.loads(result.stdout)["items"]}
+    assert _pins(project_dir)["x"] == tagged
+    assert rows["x"]["disposition"] != "moved", rows["x"]
 
 
 def test_lock_repacks_a_changed_path_source(
@@ -1541,10 +1660,11 @@ def test_an_edit_ending_the_proof_stamps_a_pre_change_lock(
     `grim lock` moved a pin the source says stays.
     """
     bystander = _skill(unique_repo, "y", tag="1")
-    target = _skill(unique_repo, "x", tag="1")
-    retag(f"{unique_repo}/x", "2", target.digest)
-    p = _dependent(unique_repo, "p", [("skill", "x", "./x:1")])
-    q = _dependent(unique_repo, "q", [("skill", "x", "./x:2")])
+    # Literal tags: numeric ones in two majors on `x` exit 78 once `x` leaves.
+    target = _skill(unique_repo, "x", tag="v1")
+    retag(f"{unique_repo}/x", "v2", target.digest)
+    p = _dependent(unique_repo, "p", [("skill", "x", "./x:v1")])
+    q = _dependent(unique_repo, "q", [("skill", "x", "./x:v2")])
     skills = {"x": target.fq, "p": p.fq, "q": q.fq, "y": bystander.fq}
     write_config(project_dir, skills=skills)
     runner = grim_at(project_dir)
@@ -1594,21 +1714,22 @@ def test_a_remove_keeps_an_unrelated_diamond_pin(
 
     Found by review: the remove of `z` ended the proof for every key, so with one
     tag of the untouched `x` diamond moved, `grim lock` exited 78. `x` names a
-    recorded edge, and on a stale lock that holds every recorded edge.
+    recorded edge, and on a stale lock that holds every recorded edge. Literal
+    tags: numeric ones in two majors on one node exit 78.
     """
-    kept = _skill(unique_repo, "x", tag="1")
-    retag(f"{unique_repo}/x", "2", kept.digest)
-    p = _dependent(unique_repo, "p", [("skill", "x", "./x:1")])
-    q = _dependent(unique_repo, "q", [("skill", "x", "./x:2")])
-    z = _skill(unique_repo, "z", tag="1")
-    retag(f"{unique_repo}/z", "2", z.digest)
-    r = _dependent(unique_repo, "r", [("skill", "z", "./z:1")])
-    s = _dependent(unique_repo, "s", [("skill", "z", "./z:2")])
+    kept = _skill(unique_repo, "x", tag="v1")
+    retag(f"{unique_repo}/x", "v2", kept.digest)
+    p = _dependent(unique_repo, "p", [("skill", "x", "./x:v1")])
+    q = _dependent(unique_repo, "q", [("skill", "x", "./x:v2")])
+    z = _skill(unique_repo, "z", tag="v1")
+    retag(f"{unique_repo}/z", "v2", z.digest)
+    r = _dependent(unique_repo, "r", [("skill", "z", "./z:v1")])
+    s = _dependent(unique_repo, "s", [("skill", "z", "./z:v2")])
     write_config(project_dir, skills={"p": p.fq, "q": q.fq, "z": z.fq, "r": r.fq, "s": s.fq})
     runner = grim_at(project_dir)
     runner.run("lock")
     runner.run("remove", "skill", "z")
-    _move_tag(unique_repo, "x", tag="2")
+    _move_tag(unique_repo, "x", tag="v2")
 
     relocked = runner.run("lock", check=False)
 
@@ -1624,18 +1745,19 @@ def test_a_stale_pin_naming_no_recorded_edge_moves_with_a_warning(
     """On a stale lock a pin naming none of its recorded edges vouches for none.
 
     Found by review: `x` kept `x:1` beside the surviving edge `x:2`, and after an
-    unrelated hand edit `grim lock` moved it with stderr empty.
+    unrelated hand edit `grim lock` moved it with stderr empty. Literal tags:
+    numeric ones in two majors on one node exit 78.
     """
-    kept = _skill(unique_repo, "x", tag="1")
-    retag(f"{unique_repo}/x", "2", kept.digest)
-    p = _dependent(unique_repo, "p", [("skill", "x", "./x:1")])
-    q = _dependent(unique_repo, "q", [("skill", "x", "./x:2")])
+    kept = _skill(unique_repo, "x", tag="v1")
+    retag(f"{unique_repo}/x", "v2", kept.digest)
+    p = _dependent(unique_repo, "p", [("skill", "x", "./x:v1")])
+    q = _dependent(unique_repo, "q", [("skill", "x", "./x:v2")])
     other = _skill(unique_repo, "other")
     write_config(project_dir, skills={"p": p.fq, "q": q.fq})
     runner = grim_at(project_dir)
     runner.run("lock")
     runner.run("remove", "skill", "p")
-    moved = _move_tag(unique_repo, "x", tag="2")
+    moved = _move_tag(unique_repo, "x", tag="v2")
     write_config(project_dir, skills={"q": q.fq, "other": other.fq})
 
     relocked = runner.run("lock", check=False)

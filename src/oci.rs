@@ -25,6 +25,8 @@ pub mod requires_decl;
 pub mod settings;
 pub mod tag_cache;
 pub mod text;
+pub mod version_claim;
+pub mod version_evidence;
 
 // Convenience re-exports for the subsystems landing in Phases 2–6.
 // Unused until those call sites exist (see the crate-level Phase 1 note).

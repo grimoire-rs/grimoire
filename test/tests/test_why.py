@@ -187,6 +187,34 @@ def test_overrides(grim_at, project_dir: Path) -> None:
     assert "can be removed" in runner.plain("why", "skill", "x").stderr
 
 
+def test_a_bare_declaration_yielding_to_a_claim_overrides_nothing(grim_at, project_dir: Path) -> None:
+    """`x` is declared with no tag and `y` requires `x:1.2`: the pin follows the
+    claim, so nothing is overridden and the declaration is not called removable.
+    A literal tag on the same edge still overrides."""
+    write_config(project_dir, skills={"x": f"{HOST}/skills/x", "y": _ref("y")})
+    _write_lock(
+        project_dir,
+        _entry("x", "a"),
+        _entry("y", "b", requires=[("x", _ref("x", "1.2"))]),
+    )
+    runner = grim_at(project_dir)
+
+    assert _why(runner, "skill", "x")["overrides"] == []
+    plain = runner.plain("why", "skill", "x")
+    assert "overrides:" not in plain.stdout, plain.stdout
+    assert "can be removed" not in plain.stderr, plain.stderr
+
+    _write_lock(
+        project_dir,
+        _entry("x", "a"),
+        _entry("y", "b", requires=[("x", _ref("x", "stable"))]),
+    )
+    assert _why(runner, "skill", "x")["overrides"] == [
+        {"kind": "skill", "name": "y", "id": _ref("x", "stable")}
+    ]
+    assert f"overrides: skill/y asked for {_ref('x', 'stable')}" in runner.plain("why", "skill", "x").stdout
+
+
 def _fan_in(project_dir: Path, parents: int) -> None:
     names = [f"p{i:03d}" for i in range(parents)]
     write_config(project_dir, skills={n: _ref(n) for n in names})

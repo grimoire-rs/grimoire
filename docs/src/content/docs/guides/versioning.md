@@ -24,6 +24,10 @@ one, which follows nothing.
 The first four are all [floating tags](../concepts.md#references-tags-and-digests),
 because a tag can be repointed. Only the digest cannot move.
 
+The ladder describes what you declare in `grimoire.toml`. In a `requires` value
+the tag is a [claim](../artifacts.md#what-the-tag-claims) instead: `1.2` there
+accepts any release from 1.2.0 up to, but not including, 2.0.0.
+
 You pick the rung when you declare the artifact. The reference you hand
 [`grim add`](../commands.md#add) is the whole choice.
 
@@ -66,7 +70,8 @@ that unfreezes them. `grim lock` does not unfreeze a pin, even after its tag
 moved.
 
 Publishing cascades tags on the way out. A release of 1.2.3 points `1.2`,
-`1` and `latest` at that digest as well. A prerelease such as `1.2.3-rc.1`
+`1` and `latest` at that digest as well, but never a float that already names a
+higher version. After 2.9.0, a release of 2.3.7 leaves `2` and `latest` on 2.9.0. A prerelease such as `1.2.3-rc.1`
 is exact-only and moves no floating tag. `grim release` refuses to repoint
 an existing exact-version tag at different bytes unless you pass `--force`.
 

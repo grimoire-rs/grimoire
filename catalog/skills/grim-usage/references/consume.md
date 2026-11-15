@@ -148,7 +148,10 @@ dependency edge disagrees with, a tagless pin nothing vouches for, and a pin on
 a stale lock that names none of its recorded edges. A warning names each pin
 that moves this way.
 
-A direct declaration's pin also wins over what a dependency asks for. When a
+A direct declaration with a tag, a digest or a path also wins over what a
+dependency asks for. A direct line with no tag (or `latest`) yields instead:
+it follows the range claims that name its own registry and repository, and
+stderr says so. When a
 new or moved parent requests a reference that resolves to another digest than
 the held pin, `grim add`, `grim update` and `grim lock` exit 0 with the same
 lock and warn once per held artifact. A path parent counts when it is new or
@@ -157,11 +160,20 @@ and the pin, and offers `grim update -- <name>` or declaring the requested
 reference. A declaration pinned by digest is offered only the second. The probe
 reads at most 64 references and stops after 60 seconds, dropping the rest
 quietly. `grim status --check` lists the cases that stand, a declared bundle's
-included. An offline run and a marketplace part run print none.
+included. An offline run and a marketplace part run print none. A range
+request is judged by the version the pin shows, a literal or digest request by
+digest.
 
 `grim add` at the reference a held pin answers, as a dependency, a bundle member
 or a line you took out, keeps that pin. Typing the line and running `grim lock`
-keeps it too on a lock this grim wrote.
+keeps it too on a lock this grim wrote. A bare line is answered by any tagged
+pin of its repository, so `grim lock` keeps `x:2` after an edit from `x:2` to
+`x`; only `grim update` moves it. A held pin also stays while its version
+satisfies every range claim, even when its tag differs from the claim's tag.
+A config edit that raises a lower bound moves the pin with no flag and prints
+one stderr line. A major downgrade is different: it refuses with exit 78
+(reason `major-downgrade`) until you rerun with `--allow-downgrade` on
+`grim add`, `grim lock` or `grim update`.
 
 On a lock grim 0.15.1 wrote, no pin
 records a tag. A typed or deleted line leaves that lock stale, so the relock
@@ -215,7 +227,9 @@ row and leaves the lock stale. Restoring `grimoire.toml` by hand does not make
 it fresh again, because such an edit writes a hash no declaration produces when
 it changed the lock's rows. An edit that changes no row keeps the hash.
 `grim lock` then keeps that pin and writes the hash back. A pin that names no
-recorded edge can move, and a warning names it. `grim update` exits 78 if the
+recorded edge can move, and a warning names it. If every surviving edge is a
+version claim the pin's tag does not rule out, `remove` keeps the row, and
+`grim lock` keeps the pin when its version answers. `grim update` exits 78 if the
 edges truly disagree.
 
 ## Installing
@@ -277,7 +291,9 @@ Confirm the current flag set with `grim install --help`.
 forward, and re-materializes only what changed. It is the command that moves a
 pin whose reference you did not change. With no names it moves every pin. A name moves that binding's
 pin alone: a dependency keeps its pin even after its tag moved, unless the
-binding's new version changed the edge. A bundle name moves the bundle, and a
+binding's new version changed the edge. A pin chosen by a range claim moves to
+the release the claimed major's cascade tag names (`2` for `x:2`), which
+`grim release` keeps on the highest release of that major. A bundle name moves the bundle, and a
 member whose reference it left alone keeps its pin. A named run installs and
 gates the closure of its names (they, a bundle's members, and all they
 require) and never reaps clients. Its `items` are the closure, pruned rows and
@@ -417,7 +433,8 @@ A `<plugin>:<bundle>` pick keeps a bundle nested in it at the recorded digest, a
 the bundle's members at their pins. A member or bundle pick exits 78 and writes
 nothing where it would keep a dependent beside another version of a row or
 bundle it requires. It refuses only on proof from the lock or a read that
-succeeded. A failed read refuses nothing by itself.
+succeeded. A failed read refuses nothing by itself. A dependent's version-range requirement such as `x:2.1` accepts any version
+inside its range, so a pick that keeps `x` inside it refuses nothing.
 Offline, a member update whose recorded bundle digest the local store lacks
 exits 81 and writes nothing. Confirm the exact selector grammar and flags with
 `grim update --help`.
@@ -507,7 +524,15 @@ even while the bundle itself stays at an unchanged version.
 A **dependency row** answers by the tag its pin records while an edge names
 it, and otherwise by the smallest edge the lock holds. An edge that names a
 digest holds the row to that digest, because `grim update` cannot move past it.
-It answers only while each parent recording an edge onto it is in your local
+When every recorded edge is a range claim of one registry and repository, the
+row resolves the line's cascade tag once and compares that digest with the
+pin. A moved tag gives `true` only when the version its release shows lies in
+the line. A tag moved outside the line gives `false`, as `grim update` passes
+it over, and so does a gone tag. A failed resolve or manifest read gives `null`.
+A direct row with no tag (or `latest`) and no digest answers the same way while
+every edge onto it is such a claim of the repository it declares.
+Two majors on one line read `null` with the split note. Otherwise it
+answers only while each parent recording an edge onto it is in your local
 store at its pin and lists the same edges, else `null`, as on a fresh clone
 until `grim install` or `grim lock` stores the parents.
 A **nested bundle** has no row and never flips `update_available`, which stays
@@ -743,9 +768,22 @@ took out of the lock as `dropped`.
 - **`grim why <kind> <name>`** prints the paths from your declarations to that
   artifact. It reads only the lock, so it works offline. Exit 79 means the
   artifact is not in the effective set.
-- **A direct declaration wins** over a dependency edge. Two edges that name
-  different digests for one slot fail closed with exit 78: declare the
-  artifact directly to choose. An edge onto a directly declared artifact is never
+- **A tag on a `requires` edge is a version claim**, Cargo style: `2.1` asks
+  for 2.1.0 up to, not including, 3.0.0; no tag asks for any version. A tag
+  that is not a version (`stable`, `v2`) or carries a digest keeps the literal
+  meaning. Claims on one artifact combine, and it takes the release the
+  claimed major's cascade tag names (`2` for `x:2`), which `grim release` keeps
+  on the highest release. Bundle member tags stay literal.
+- **A direct declaration with a tag, a digest or a path wins** over a
+  dependency edge; a bare one yields to range claims on its own repository.
+  Two majors of one artifact (`x:1` and `x:2`), or literal edges that name
+  different digests, fail closed with exit 78: declare the artifact directly
+  to choose. No release inside a claim exits 79, or 78 when a claim in another major arrives
+  later in the walk. A missing tag or manifest below a dependency exits 79 only
+  when the resolve keeps the release that requires it. A resolve that outgrows its
+  work or tag-listing budget exits 65. Claim grammar:
+  [Artifact Reference § What the tag claims][claims]; exact limits:
+  [Concepts § Limits][dependency-limits]. An edge onto a directly declared artifact is never
   resolved, so a missing tag on that edge does not fail the lock.
 - **`remove` and `uninstall`** take dependencies only the target needed. One
   another artifact still needs is kept (`uninstall` reports
@@ -1006,6 +1044,8 @@ Confirm the flags with `grim install --help` and `grim hook allow --help`.
 [lock]: https://grimoire.rs/concepts.html#the-lock
 [bundles]: https://grimoire.rs/concepts.html#bundles
 [dependencies]: https://grimoire.rs/concepts.html#dependencies
+[dependency-limits]: https://grimoire.rs/concepts.html#dependency-limits
+[claims]: https://grimoire.rs/artifacts.html#what-the-tag-claims
 [config-toml]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
 [artifact-states]: https://grimoire.rs/commands.html#artifact-states

@@ -39,7 +39,13 @@ pub(crate) struct EditNote {
 #[derive(Debug, PartialEq, Eq)]
 enum NoteKind {
     /// A kept pin whose declaration hid a request this lock never resolved.
-    HiddenRequest { key: NodeKey, unanswered: Identifier },
+    /// `claim`: the pin names no request, and the next relock keeps it only if its
+    /// version answers the claims ([`Answered::MayHold`]).
+    HiddenRequest {
+        key: NodeKey,
+        unanswered: Identifier,
+        claim: bool,
+    },
     /// A pin that left while something else still provides its key.
     Unmasked {
         key: NodeKey,
@@ -199,16 +205,22 @@ impl std::fmt::Display for EditNote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let grim = &self.grim;
         match &self.what {
-            NoteKind::HiddenRequest { key, unanswered } => write!(
-                f,
-                "{} '{}' keeps its pin, but its declaration hid {}, which this lock never resolved. \
-                 The lock is marked stale: run `{grim} lock`, which keeps the pin, then `{}`. \
-                 That update resolves every request and exits 78 if they resolve to different digests",
-                key.0,
-                registry_text(&key.1),
-                registry_text(&unanswered.to_string()),
-                grim.update(&key.1)
-            ),
+            NoteKind::HiddenRequest { key, unanswered, claim } => {
+                let unanswered = registry_text(&unanswered.to_string());
+                let keeps = match claim {
+                    true => format!("keeps the pin if its version answers {unanswered}"),
+                    false => "keeps the pin".to_string(),
+                };
+                write!(
+                    f,
+                    "{} '{}' keeps its pin, but its declaration hid {unanswered}, which this lock never \
+                     resolved. The lock is marked stale: run `{grim} lock`, which {keeps}, then `{}`. \
+                     That update resolves every request and exits 78 if they resolve to different digests",
+                    key.0,
+                    registry_text(&key.1),
+                    grim.update(&key.1)
+                )
+            }
             NoteKind::Unmasked { key, by, version } => f.write_str(&unmasked_note(grim, key, by, version.text())),
             NoteKind::Unsettled { key } => write!(
                 f,
@@ -649,24 +661,29 @@ impl<'g> LockEdit<'g> {
     /// survive, true to keep it. Its edges were shadowed and never resolved, and
     /// after this edit nothing says so, which is why the pin answers only what
     /// its own record names (`adr_lock_pin_stability.md`, § The pin rule).
-    /// `declared` is what the proof held the key at, and `gone` writes the note
-    /// for a dropped row, given how it differs.
+    /// `declared` is what the proof held the key at, `ranges` the requests that
+    /// claim a version, and `gone` writes the note for a dropped row, given how it
+    /// differs.
     fn declaration_left(
         &mut self,
         key: &NodeKey,
         record: Option<PinRecord<'_>>,
         declared: Option<&Identifier>,
         requests: &BTreeSet<Identifier>,
+        ranges: &BTreeSet<Identifier>,
         gone: impl FnOnce(VersionClaim) -> Option<NoteKind>,
     ) -> bool {
-        let answered = record.map_or(Answered::None, |record| record.classify_undeclared(declared, requests));
+        let answered = record.map_or(Answered::None, |record| {
+            record.classify_undeclared(declared, requests, ranges)
+        });
         match answered {
             Answered::All => true,
-            Answered::Some { unanswered } => {
+            Answered::Some { unanswered } | Answered::MayHold { unanswered } => {
                 self.hash = self.hash.max(HashAfter::Stale);
                 self.note(NoteKind::HiddenRequest {
                     key: key.clone(),
                     unanswered: unanswered.clone(),
+                    claim: matches!(answered, Answered::MayHold { .. }),
                 });
                 true
             }
@@ -1004,6 +1021,8 @@ fn drop_rows(
 
     let mut lock = previous.clone();
     let mut edit = LockEdit::new(grim);
+    let (ranges, no_ranges) = (pin_rule::reached_ranges(previous, None), BTreeSet::new());
+    let claims = |key: &NodeKey| ranges.get(key).unwrap_or(&no_ranges);
 
     let mut process = |list: &mut Vec<LockedArtifact>| {
         list.retain_mut(|entry| {
@@ -1034,7 +1053,7 @@ fn drop_rows(
                 ) if once_direct(entry, was_direct) => {
                     let record = artifact_record(entry);
                     let declared = proven_declaration(previous, set_before, entry.kind, &entry.name);
-                    let kept = edit.declaration_left(&key, record, declared, requests, |version| {
+                    let kept = edit.declaration_left(&key, record, declared, requests, claims(&key), |version| {
                         Some(NoteKind::Unmasked {
                             key: key.clone(),
                             by: provider(contributors, required_by),
@@ -1050,7 +1069,7 @@ fn drop_rows(
                     let record = artifact_record(entry);
                     let declared = proven_declaration(previous, set_before, entry.kind, &entry.name);
                     let noted = edit.notes.len();
-                    let kept = edit.declaration_left(&key, record, declared, requests, |_| {
+                    let kept = edit.declaration_left(&key, record, declared, requests, claims(&key), |_| {
                         Some(NoteKind::Unsettled { key: key.clone() })
                     });
                     if kept {
@@ -1123,7 +1142,7 @@ fn drop_rows(
             });
             let declared = proven_declaration(previous, set_before, ArtifactKind::Bundle, &b.name);
             let noted = edit.notes.len();
-            let kept = edit.declaration_left(&key, record, declared, requests, |version| {
+            let kept = edit.declaration_left(&key, record, declared, requests, claims(&key), |version| {
                 Some(NoteKind::Unmasked {
                     key: key.clone(),
                     by: Provider::RequiredBy(Vec::new()),
@@ -1287,6 +1306,7 @@ fn target_only_drop(
     remove_row(&mut lock, kind, name);
     let key = (kind, name.to_string());
     let requests = pin_rule::recorded_requests(&lock).remove(&key).unwrap_or_default();
+    let ranges = pin_rule::reached_ranges(&lock, None).remove(&key).unwrap_or_default();
 
     let mut edit = LockEdit::new(grim);
     let record = match kind {
@@ -1305,7 +1325,7 @@ fn target_only_drop(
     };
     let declared = proven_declaration(previous, set_before, kind, name);
     let kept = edit.kept_for_bundle(rule, &key).kept()
-        || (!requests.is_empty() && edit.declaration_left(&key, record, declared, &requests, |_| None));
+        || (!requests.is_empty() && edit.declaration_left(&key, record, declared, &requests, &ranges, |_| None));
     if kept {
         lock = previous.clone();
         // Only an edge holds it now.
@@ -4142,6 +4162,7 @@ mod tests {
             NoteKind::HiddenRequest {
                 key: key(),
                 unanswered: Identifier::parse("localhost:5000/acme/beta-tools:1").unwrap(),
+                claim: true,
             },
             NoteKind::Unmasked {
                 key: key(),
@@ -5336,6 +5357,38 @@ mod tests {
         assert!(note.contains("exits 78"), "{note}");
     }
 
+    /// A pin whose tag names no surviving request keeps its row while every request
+    /// is a version claim the tag cannot rule out: dropped, the next `grim lock`
+    /// resolves it afresh onto the newest release, where kept it keeps the pin if its
+    /// version answers. A version tag below the claims drops it.
+    #[test]
+    fn a_left_declaration_keeps_a_pin_a_version_claim_may_hold() {
+        let drop_under = |pin: &str| {
+            let (mut prev, after_set) = diamond(&[("h1", M2), ("h2", "localhost:5000/acme/m:2.3")], pin);
+            let mut before = after_set.clone();
+            let declared = Identifier::parse(M2).unwrap();
+            before.skills.insert(
+                "m".to_string(),
+                crate::config::declaration::DeclaredSource::Registry(declared),
+            );
+            before.invalidate_declaration_hash_cache();
+            stamp(&mut prev, &before);
+            (
+                drop_from_lock(&prev, ArtifactKind::Skill, "m", &before, &after_set),
+                prev,
+            )
+        };
+        let stable = "localhost:5000/acme/m:stable";
+        let (out, prev) = drop_under(stable);
+        assert_eq!(pin_of(&out.lock, "m"), &pinned_at(stable));
+        assert_eq!(out.lock.metadata.declaration_hash, edited_from(&prev));
+        let advice = format!("run `grim lock`, which keeps the pin if its version answers {M2}, then");
+        assert!(out.notes.iter().any(|note| note.contains(&advice)), "{:?}", out.notes);
+
+        let (out, _) = drop_under("localhost:5000/acme/m:1.0.0");
+        assert!(!skill_names(&out.lock).contains(&"m"), "{:?}", out.notes);
+    }
+
     /// A global or `--config` edit's notes name that scope: a plain `grim` run
     /// inside a project would lock and update that project instead.
     #[test]
@@ -5372,6 +5425,7 @@ mod tests {
             NoteKind::HiddenRequest {
                 key: key(),
                 unanswered: Identifier::parse(M2).unwrap(),
+                claim: false,
             },
             NoteKind::Unmasked {
                 key: key(),
@@ -5576,6 +5630,45 @@ mod tests {
             let expected = expected.map_or(TAGLESS.to_string(), |tagged| format!("localhost:5000/acme/{tagged}"));
             assert_eq!(pin_of(&out.lock, "t"), &pinned_at(&expected), "{requests:?}");
         }
+    }
+
+    /// Both edges are range claims: `t:2.3`'s caret range lies inside `t:2.1`'s, so
+    /// the relock under the proof stamps `t:2.3`. A stamp of `t:2.1` reads as
+    /// `>=2.1 <2.2` on an unannotated manifest, which `t:2.3` rules out.
+    #[test]
+    fn a_stamp_takes_the_range_edge_that_shows_the_pins_version() {
+        let t = ["localhost:5000/acme/t:2.1", "localhost:5000/acme/t:2.3"];
+        let (mut prev, before, after_set) = pre_change(M2);
+        with_dependency(&mut prev, "localhost:5000/acme/t", t);
+
+        let out = drop_from_lock(&prev, ArtifactKind::Skill, "m", &before, &after_set);
+
+        assert_eq!(pin_of(&out.lock, "t"), &pinned_at(t[1]));
+    }
+
+    /// A left declaration is judged by what the pin's own record names. Read as
+    /// caret ranges, both edges hold a version `>=2.3 <3`, yet the stale lock the
+    /// edit leaves gives the next relock no edge a tagless pin names, so it would
+    /// resolve the pin afresh: the row leaves.
+    #[test]
+    fn a_left_declaration_reads_no_remaining_range_edge_as_a_tagless_pins_version() {
+        let tagless = "localhost:5000/acme/m";
+        let (mut prev, _) = diamond(
+            &[("h1", "localhost:5000/acme/m:2.1"), ("h2", "localhost:5000/acme/m:2.3")],
+            tagless,
+        );
+        let before = beside_a_pack_that_provides_nothing(&declaring_m(&["h1", "h2"], M2));
+        stamp(&mut prev, &before);
+        assert!(crate::lock::effective_set::effective_set(&before, &prev).is_none());
+        let mut after_set = before.clone();
+        after_set.skills.remove("m");
+        after_set.invalidate_declaration_hash_cache();
+        let stored = StoredMembers::holding("pack", &[]);
+
+        let out = drop_beside(&prev, ArtifactKind::Skill, "m", &before, &after_set, &stored);
+
+        assert!(!skill_names(&out.lock).contains(&"m"), "{:?}", out.notes);
+        assert_eq!(out.lock.metadata.declaration_hash, edited_from(&prev));
     }
 
     /// `h1` left with the smaller tag: a pin stamped from it would name no edge
@@ -5783,7 +5876,7 @@ mod tests {
             row: None,
             binding: NAME,
         };
-        assert!(edit.declaration_left(&key, Some(record), None, &requests, |_| None));
+        assert!(edit.declaration_left(&key, Some(record), None, &requests, &BTreeSet::new(), |_| None));
 
         let unmasked = |by: Provider| NoteKind::Unmasked {
             key: key.clone(),
