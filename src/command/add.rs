@@ -848,7 +848,7 @@ fn refused_pin_note(target: &NodeKey, grim: &Invocation) -> String {
     let update = grim.update(name);
     let name = registry_text(name);
     format!(
-        "kept the existing pin of {kind} '{name}'. The manifest its tag names now does not resolve, and `{update}` says why"
+        "kept the existing pin of {kind} '{name}'. What its tag names now cannot be locked, and `{update}` says why"
     )
 }
 
@@ -1546,8 +1546,8 @@ impl PinCheck {
                  `{update}` moves the pin or says why it cannot. `{allow}` consents to the lock as it stands"
             ),
             Self::MovedUnresolved => format!(
-                "its tag now names another digest than the pin this add kept, and that manifest \
-                 does not resolve. `{update}` says why, and `{allow}` consents to the lock as it stands"
+                "its tag now names another digest than the pin this add kept, and that digest \
+                 cannot be locked. `{update}` says why, and `{allow}` consents to the lock as it stands"
             ),
             Self::TagGone => format!(
                 "its repository no longer has the tag the pin this add kept records; \
@@ -2960,7 +2960,7 @@ mod tests {
 
                 assert!(keys.is_empty(), "{kind}: {keys:?}");
                 assert!(logs.contains("stays unconsented"), "{kind}: {logs}");
-                assert!(logs.contains("that manifest does not resolve"), "{kind}: {logs}");
+                assert!(logs.contains("that digest cannot be locked"), "{kind}: {logs}");
                 assert!(logs.contains("`grim update -- t` says why"), "{kind}: {logs}");
                 assert!(!logs.contains("moves the pin"), "{kind}: {logs}");
                 assert!(logs.contains(" allow`"), "{kind}: {logs}");
@@ -3189,8 +3189,8 @@ mod tests {
 
             assert_eq!(
                 note,
-                "kept the existing pin of skill 'target'. The manifest its tag names now does not \
-                 resolve, and `grim update -- target` says why"
+                "kept the existing pin of skill 'target'. What its tag names now cannot be locked, \
+                 and `grim update -- target` says why"
             );
             let global = refused_pin_note(&(ArtifactKind::Bundle, "target".to_string()), &Invocation::GLOBAL);
             assert!(global.contains("bundle 'target'"), "{global}");

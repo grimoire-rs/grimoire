@@ -529,7 +529,7 @@ When the lock already holds a pin that answers the reference you typed, `add`
 keeps it. That pin may be a dependency, a bundle member or a line you typed back.
 One stderr note names `grim update -- <name>`, with the run's `--config` path, or
 `grim --global update -- <name>` in global scope. It says that command moves the pin to the digest its tag names today, or says why it cannot. If that tag is gone, it offers to declare a reference that exists. Where only the manifest its tag names
-refuses, the note says that manifest does not resolve and that the command says why.
+refuses, the note says that manifest cannot be locked and that the command says why.
 When an artifact target's pin does move, `moved` lists it too. A
 moved `[[bundle]]` pin has no row there, so it gets one stderr line instead:
 `bundle '<name>' moved its pin from <old> to <new>`.

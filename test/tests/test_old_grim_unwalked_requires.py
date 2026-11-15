@@ -408,7 +408,7 @@ def test_an_add_keeps_the_pin_where_only_its_moved_manifest_refuses(
         (typed / "grimoire.lock").read_text(encoding="utf-8")
     )
     assert "kept the existing pin of skill 'held'" in added.stderr, added.stderr
-    assert "does not resolve" in added.stderr, added.stderr
+    assert "cannot be locked" in added.stderr, added.stderr
     assert "`grim update -- held` says why" in added.stderr, added.stderr
     assert "moves it to what its tag names now" not in added.stderr, added.stderr
     update = current.run("update", "--", "held", check=False)
