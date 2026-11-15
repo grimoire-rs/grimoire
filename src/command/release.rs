@@ -8,7 +8,7 @@
 //! (reusing `build`), the cascade tag set is computed from the version,
 //! and then via the [`OciAccess`] seam: push the layer blob, push the
 //! manifest (with annotations), then move the cascade tags onto the
-//! manifest digest, never a float to a lower version. The exact version
+//! manifest digest, never a float off a newer release. The exact version
 //! tag goes FIRST so a crash never leaves a float (`1.2`/`1`/`latest`)
 //! on a manifest that has no specific tag. Re-releasing identical content
 //! is an idempotent no-op (same digest). `--dry-run` prints the plan;
@@ -84,7 +84,7 @@ pub struct ReleaseArgs {
     pub pin: bool,
 
     /// Assert the rolling cascade: move `X.Y`, `X`, and `latest` onto this
-    /// release, but never a float to a lower version. Requires a full semver
+    /// release, but never a float off a newer release. Requires a full semver
     /// tag — a non-semver tag with `--cascade` is a data error (65). Default
     /// (neither flag): cascade automatically for full semver, publish a
     /// single tag otherwise.
@@ -92,8 +92,8 @@ pub struct ReleaseArgs {
     pub cascade: bool,
 
     /// Publish only the exact tag; suppress the `X.Y`/`X`/`latest` cascade
-    /// even for a full semver version (the cascade never moves a float to a
-    /// lower version).
+    /// even for a full semver version (the cascade never moves a float off a
+    /// newer release).
     #[arg(long, overrides_with = "cascade")]
     pub no_cascade: bool,
 

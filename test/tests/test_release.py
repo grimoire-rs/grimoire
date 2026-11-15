@@ -13,8 +13,8 @@ from pathlib import Path
 
 from urllib.error import HTTPError
 
-from src.helpers import release_with_grim, write_config
-from src.registry import fetch_manifest, tag_digest
+from src.helpers import publish_release, release_with_grim, write_config
+from src.registry import fetch_manifest, retag, tag_digest
 
 
 def _write(p: Path, body: str) -> None:
@@ -504,6 +504,30 @@ def test_offline_backport_dry_run_exits_0_and_plans_every_float_moving(
     _assert_tag_absent(repo_path, "2.3.7")
     for tag in ("2", "latest"):
         assert tag_digest(repo_path, tag) == newer["manifest_digest"], tag
+
+
+def test_a_float_pushed_onto_a_prerelease_moves_to_a_lower_release(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """``grim release`` never cascades a prerelease, so a float sits on one only
+    when someone pushed it there by hand. The next release takes it whatever
+    the precedence: ``latest`` leaves ``2.0.0-rc.1`` and ``1`` leaves
+    ``1.9.1-rc.1`` for ``1.9.0``."""
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    major = publish_release(repo_path, "2.0.0-rc.1", _skill_files("2.0.0-rc.1"))
+    patch = publish_release(repo_path, "1.9.1-rc.1", _skill_files("1.9.1-rc.1"))
+    retag(repo_path, "latest", major.digest)
+    retag(repo_path, "1", patch.digest)
+
+    release = release_with_grim(runner, repo_path, "1.9.0", _skill_files("1.9.0"))
+
+    assert release["floats_kept"] == []
+    assert release["tags"] == ["1.9.0", "1.9", "1", "latest"]
+    for tag in ("1.9.0", "1.9", "1", "latest"):
+        assert tag_digest(repo_path, tag) == release["manifest_digest"], tag
+    assert tag_digest(repo_path, "2.0.0-rc.1") == major.digest
+    assert tag_digest(repo_path, "1.9.1-rc.1") == patch.digest
 
 
 def test_a_release_that_moves_no_float_keeps_none(
