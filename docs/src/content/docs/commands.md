@@ -1273,8 +1273,10 @@ even after its tag moved. A new include resolves and a removed one drops.
 Only the plugins you picked roll forward. Before it relocks a stale part, grim
 prints one warning on stderr naming the plugin and its lock file. The report
 shows its rows like any resolved part, with `unchanged` for a kept pin. The JSON
-shape is unchanged. A plugin with no lock entry yet stays without one, since the
-run did not pick it.
+shape is unchanged. A declared plugin with no part in the lock yet is locked in
+the same run, resolving fresh, after a stderr line
+`plugin '<name>' has no part in <lock path> yet, so this run locks it too`. With
+no lock at all, a pick of one plugin therefore locks every declared plugin.
 
 A bundle the plugin reaches carries too, at the digest its rows record in
 `bundle_tag`. Only a run with no selector, a bare `<plugin>`, or a
@@ -1373,7 +1375,7 @@ reached through a symbolic link, gets no command, only the reason.
 | A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`), or claims in two majors | `78` |
 | An include's floating tag or a tag below an include needs the network under `--offline`, or a recorded bundle digest the local store lacks | `81` |
 
-A stale part the selector did not pick can fail to relock. The run then exits
+A stale part, or a plugin with no part yet, that the selector did not pick can fail to lock. The run then exits
 with the code a pick of that plugin would give, for example `79` for an include
 whose tag does not exist. It writes nothing. Grim 0.15.1 exited `0` and left
 that part stale.
@@ -3020,7 +3022,7 @@ That reconcile follows [`grim lock`](#lock), not `grim update`. A new include
 resolves, and an unchanged include keeps its pin even after its tag moved.
 
 When an export saves `marketplace.lock` because a selected plugin is stale or a
-part drops, every other stale part is relocked too, each kept pin staying. An
+part drops, every other stale part is relocked too, each kept pin staying, and a declared plugin with no part yet is locked too. An
 export whose selected plugins are in line and that drops nothing reads nothing
 and writes no lock.
 

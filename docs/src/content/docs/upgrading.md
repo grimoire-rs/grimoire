@@ -840,7 +840,9 @@ it, so a later run can compare it with the request.
   include stays, and nothing else refreshes. 0.15.1 copied that part stale and
   exited `0`. A relock that fails exits with its own code, for example `69`,
   `78`, `79`, `80` or `81`, and writes nothing. A `grim export plugin --plugin`
-  that saves `marketplace.lock` relocks stale parts the same way.
+  that saves `marketplace.lock` relocks stale parts the same way. Both also lock
+  a declared plugin with no part yet, which 0.15.1 left out of the lock, and warn
+  once on stderr naming it.
 - The same refusal also covers four more shapes of that pick, which exited `0`
   before. They arise on a part c5e3824 wrote, and the first two also on a part
   0.15.1 wrote. The last one also arises on a part this grim wrote, when the pick
