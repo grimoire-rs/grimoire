@@ -481,10 +481,10 @@ and MCP binding names are unrestricted.
 A renamed skill installs under the binding name, and the installed
 `SKILL.md` frontmatter `name` is rewritten to match it (the Agent Skills
 standard requires the two to agree), so a rename never leaves two
-installed skills claiming the same name. A renamed multi-file rule keeps
-its support directory under the binding name too — relative links inside
-the index that point at the original name may not resolve; grim warns
-when that applies.
+installed skills claiming the same name. A renamed rule published before
+grim 0.16.0 with a support directory keeps that directory under the binding
+name too. Relative links inside the index that point at the original name
+may not resolve, and grim warns when that applies.
 
 Installing an artifact whose `(kind, name)` is already installed at the
 **other** scope for one of the same clients prints a warning: both
@@ -613,6 +613,13 @@ If the reference is [deprecated](./publishing.md#metadata-deprecated), `add`
 prints the publisher's notice on stderr and still completes the add.
 
 ### Local path sources {#add-path}
+
+A rule or agent declared by path follows the packing rule of
+[`grim build`][ref-build]: a stray file in the directory beside it refuses with
+`65`, from `grim lock`, `grim update`, `grim add <path>` and
+`grim install <path>`. `grim status` on an already-locked path rule that gained
+such a file exits `0`, reports the row `outdated` and prints the refusal as a
+warning.
 
 `<reference>` may also be a [local path](./concepts.md#references-tags-and-digests)
 — `./skills/x`, `../shared/rule.md`, or an absolute path — for a skill, rule,
@@ -4248,6 +4255,13 @@ author, and `--no-git` suppresses all of it. The metadata flags
 `--documentation`) fill [annotations](./publishing.md#metadata-flags) the
 artifact file does not author.
 
+A rule or agent packs to its `.md` file alone. Since grim 0.16.0 `build` refuses
+with `65` when the directory beside it sharing its stem (`rules/<name>/`,
+`agents/<name>/`) holds any file other than `README.md`, `logo.png` and
+`logo.svg`, and it packs none of those three. `release` and `publish` refuse
+the same way. See [Rules ship one file][ref-publishing-md-rule-support-dir] and
+[Agents ship one file][ref-publishing-md-agent-companions].
+
 ## grim release {#release}
 
 `grim release <path> <reference>` validates, packs, and pushes an artifact.
@@ -4635,3 +4649,8 @@ registers the same entry — in every detected client, not just Claude Code
 [clap]: https://docs.rs/clap/latest/clap/
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/
 [fzf]: https://github.com/junegunn/fzf
+
+<!-- internal -->
+[ref-build]: #build
+[ref-publishing-md-rule-support-dir]: ./publishing.md#rule-support-dir
+[ref-publishing-md-agent-companions]: ./publishing.md#agent-companions

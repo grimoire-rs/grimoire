@@ -28,8 +28,8 @@ For one worked run of all seven, follow
 ## Author locally
 
 A **skill** is a directory containing a `SKILL.md` and any supporting files.
-A **rule** is a Markdown file, optionally with a
-[sibling support directory](#rule-support-dir). An
+A **rule** is a single Markdown file, with [no support
+directory][ref-rule-support-dir]. An
 [**agent**](./agents.md) is a Markdown file defining a delegatable assistant.
 An [**MCP server**](./mcp-servers.md) is a `mcp/<name>.toml` file describing
 how to launch or reach a Model Context Protocol server. A
@@ -48,80 +48,78 @@ grim never guesses either from content. It only nudges with a hint once the
 file's shape makes the mismatch obvious, such as a `[server]` table or a
 `name` plus `description` pair.
 
-### Rules with a support directory {#rule-support-dir}
+### Rules ship one file {#rule-support-dir}
 
-An index rule often references extra context that does not belong inside the
-rule body, such as examples, a schema, or a script. Put those in a folder
-beside the rule that shares its stem, and Grimoire packs both into the one
-artifact:
+A rule packs to exactly its `.md` file. Since grim 0.16.0 it can no longer
+ship a support directory. Clients that read `rules/` recursively load every
+file in such a directory as a rule. The [upgrade note][ref-upgrading-md-rule-support-dir]
+carries the reason and the migration.
+
+A directory beside the rule that shares its stem (`rules/my-rule/`) may still
+exist, but only for catalog files. It may hold `README.md`, `logo.png` and
+`logo.svg`, and none of them is packed:
 
 ```
 rules/
-  my-rule.md        # the index you pass to build/release
-  my-rule/          # optional support directory, same stem
-    examples.md
-    schema.json
+  my-rule.md        # the rule you pass to build/release
+  my-rule/          # optional, same stem, catalog files only
+    README.md       # shown by catalog UIs, not packed
+    logo.png
 ```
 
-You still point [`grim build`](./commands.md#build) and
-[`grim release`](./commands.md#release) at the index `.md` file. The sibling
-directory is discovered automatically when it exists:
+Any other file in that directory refuses the build with exit `65`. The
+refusal applies to [`grim build`][ref-commands-md-build],
+[`grim release`][ref-commands-md-release], `grim publish`, and to a rule declared
+by local path (`grim lock`, `grim update`, `grim add <path>` and
+`grim install <path>`). It lists up to five of the files, gives the fix, and
+links the [upgrade note][ref-upgrading-md-rule-support-dir]. A
+[`.grimignore`][ref-artifacts-md-grimignore] is not read in this directory, so a
+`.grimignore` there is itself a stray file. Only grim's built-in junk defaults,
+such as `.DS_Store`, are skipped.
 
-```sh
-grim release ./my-rule.md ghcr.io/acme/my-rule:1.0.0
-```
+A rule that needs reference tables, checklists or scripts puts them into a
+skill and requires that skill. See [A rule with lookup
+data][ref-guides-dependencies-md-rule-with-lookup-data].
 
-Every file under `my-rule/` rides along in the same layer and installs beside
-the index (`.claude/rules/my-rule.md` + `.claude/rules/my-rule/…`), so the
-index's relative links resolve on the consumer. Support files are copied
-verbatim for every [client](./concepts.md#clients), and only the index is
-ever transformed. A rule with no support directory packs to exactly the single
-`my-rule.md` it always did.
+A rule republished unchanged from a tree with `rules/my-rule/README.md` gets a
+new digest, because the README no longer rides the package.
 
-A support directory (and, the same way, a skill directory) can drop a
-[`.grimignore`](./artifacts.md#grimignore) at its root to keep runtime junk
-— a `__pycache__/` a bundled script left behind, a `.venv/` built for local
-testing — out of the layer and out of drift detection.
+### Agents ship one file {#agent-companions}
 
-### Agents with a README and logo {#agent-companions}
-
-An [agent](./agents.md) is a single `.md`, but it may carry a `README.md` and a
-`logo.png`/`logo.svg` from a sibling directory sharing its stem. That is the
-same discovery as a rule's support directory, restricted to those well-known
-files:
+An [agent][ref-agents-md] packs to exactly its `.md` file. A directory beside it
+that shares its stem (`agents/code-reviewer/`) may hold only `README.md`,
+`logo.png` and `logo.svg`. These are catalog files: none of them is packed or
+installed.
 
 ```
 agents/
-  code-reviewer.md        # the index you pass to build/release
-  code-reviewer/          # optional companion directory, same stem
-    README.md             # human-facing readme (shown by catalog UIs)
+  code-reviewer.md        # the agent you pass to build/release
+  code-reviewer/          # optional, same stem, catalog files only
+    README.md             # shown by catalog UIs, not packed
     logo.png              # optional icon
 ```
 
-Only `README.md`, `logo.png`, and `logo.svg` ride the layer (any other file in
-the directory is ignored, so an agent never becomes an accidental multi-file
-artifact) — the allowlist already does the job a
-[`.grimignore`](./artifacts.md#grimignore) would, so agents get none. They
-pack under `code-reviewer/…`, so a consumer pulls them with the
-same path shape as a skill or rule:
+Any other file in the directory refuses the build with exit `65`, on every
+source listed for [rules][ref-rule-support-dir]. Before grim 0.16.0 such a file was
+ignored silently. No `.grimignore` is read there. Files an agent needs at run
+time belong in a skill it requires.
 
-```sh
-grim fetch ghcr.io/acme/code-reviewer:1.0.0 --path code-reviewer/README.md
-```
+Before grim 0.16.0 the three catalog files rode the package, and
+`grim fetch <ref> --path code-reviewer/README.md` returned the README. That
+fetch exits `1` since then, with `no file 'code-reviewer/README.md' in this artifact`.
+Read the README through the [description lookup][ref-description-entry-readme]
+instead. See the [upgrade note][ref-upgrading-md-agent-companions].
 
-The companions are **not** installed to a client. An agent installs as its
-lone `.md` file, and the companions exist for `grim fetch` and catalog UIs.
-An agent with no companion directory packs to exactly the single
-`code-reviewer.md` it always did.
-
-MCP servers and bundles publish a single JSON layer with no file tree of their
-own, so they carry no *in-tree* README. For a README that works uniformly across
-every kind, publish a [repository description companion](#description-companion).
+MCP servers, bundles and settings publish a single JSON layer with no file
+tree of their own, so they carry no in-tree README. A skill or hook directory
+packs whole, so a `README.md` inside it ships with the package. For a README
+that works uniformly across every kind, publish a [repository description
+companion][ref-description-companion].
 
 ## Repository description companion {#description-companion}
 
-The in-tree READMEs above ride each artifact's own layer, so they cover the
-tree-backed kinds (skill, rule, agent) but not mcp or bundle. A **description
+A README inside a skill or hook directory rides that artifact's own layer, so
+it covers those two kinds only. A **description
 companion** is a repository-level channel that works for *every* kind. It is
 the one home for all of a repo's descriptive data, meaning a `README.md`, a
 `CHANGELOG.md`, a logo, and any assets the README references. It publishes to
@@ -157,46 +155,51 @@ Every member is optional, so a repo with just a `README.md` publishes a
 one-file companion. Probe misses are silent: a manifest directory with none of
 these files simply publishes no companion, which is not an error.
 
-### Each package's own README {#description-entry-readme}
+### Each package's own README and logo {#description-entry-readme}
 
-A repository that keeps one README per package would otherwise publish the
-root README for every one of them. So by default each entry's own README
-replaces the README of its companion. grim looks in the entry's place under the
-manifest directory:
+A repository that keeps one README and logo per package would otherwise publish
+the root ones for every entry. So each entry's own README and logo replace
+those of its companion. grim takes the first file that exists in the list for
+its kind. `S` is the stem of the source path, not the entry name.
 
-| Kind | Looked up at |
-|------|--------------|
-| skill, hook | `<path>/README.md`, where `<path>` is the entry's source directory |
-| rule, agent | `<path without .md>/README.md`, the directory beside the source file |
-| bundle, mcp, settings | never looked up |
+| Kind | README | Logo |
+|------|--------|------|
+| skill, hook (source directory `P`, named `S`) | `P/README.md`, then `S.README.md` beside `P`, then the root | `P/logo.png`, `P/logo.svg`, then `S.png`, `S.svg` beside `P`, then the root |
+| rule, agent (source `D/S.md`) | `D/S/README.md`, then `D/S.README.md`, then the root | `D/S/logo.png`, `D/S/logo.svg`, then `D/S.png`, `D/S.svg`, then the root |
+| mcp, bundle, settings (source `D/S.toml`) | `D/S.README.md`, then the root | `D/S.png`, `D/S.svg`, then the root |
 
-`<path>` is the entry's resolved source, so an explicit `path` counts. Only the
-README moves. The changelog, the logo and any included files still come from
-the top-level companion. An entry without its own README keeps the top-level
-README, and no artifact's bytes change, so an artifact keeps its digest.
+README and logo fall back to the top-level companion independently, so an
+entry may have its own logo and the root README. The changelog is top-level
+only, as are any included files. A file inside a skill or hook directory ships
+with the package, while a sibling beside it does not. No artifact's bytes
+change, so an artifact keeps its digest.
 
-The file must stay inside the manifest directory and be a regular file.
-Otherwise grim skips it and keeps the top-level README. The warning names the
-file and the cause, and says to make it a regular file inside the manifest
-directory or to set `entry_readme = false`. An entry whose source lies outside the manifest directory is
-never looked up.
+A candidate must be a regular file inside the manifest directory. grim skips
+one that is not, such as a symlink that escapes it. The warning names the file
+and the cause, and the lookup continues with the next candidate.
 
-Two keys in the top-level `[description]` table steer this lookup:
+The README warning also says to make it a regular
+file inside the manifest directory or to set `entry_readme = false`. The logo
+warning says to make it a regular file inside the manifest directory. An entry
+whose source lies outside the manifest directory is never looked up.
+
+One key in the top-level `[description]` table turns the README lookup off:
 
 ```toml
 [description]
-entry_readme = "PACKAGE.md"   # look for this file name instead of README.md
-# entry_readme = false        # turn the lookup off; true is the default
+entry_readme = false          # turn the README lookup off; true is the default
 ```
 
-A name must be a single file name. A separator, `..` or an absolute path exits
-`65` before anything is pushed. A table that sets only `entry_readme` leaves
-the root probe on, and raises no "resolves to no files" error.
+`entry_readme` is a boolean only. A string value is a manifest error and exits
+`65` before anything is pushed. The logo lookup has no toggle. An entry's own
+[`description` table][ref-description-precedence] overrides everything. A table
+that sets only `entry_readme` leaves the root probe on, and raises no
+"resolves to no files" error.
 
-**Upgrading.** A repository with package READMEs publishes a different
-companion on its next `grim publish`, even at an unchanged version. The
-artifacts are skipped, and each companion is re-pointed to its package README.
-See the [upgrade note](./upgrading.md#package-readme-companion).
+**Upgrading.** A repository with per-package READMEs or logos publishes a
+different companion on its next `grim publish`, even at an unchanged version.
+The artifacts are skipped, and each companion is re-pointed. See the [upgrade
+note][ref-upgrading-md-package-readme-companion].
 
 ### The `[description]` table {#description-table}
 
@@ -264,9 +267,9 @@ applies wins:
 3. The conventional files of the [probe](#description-probe), when there is no
    table.
 
-On top of levels 2 and 3, the entry's [own package
-README](#description-entry-readme) takes the README slot. A level 1 table
-turns that off, and so does `entry_readme = false`.
+On top of levels 2 and 3, the entry's [own package README and
+logo][ref-description-entry-readme] take their slots. A level 1 table turns that
+off, and `entry_readme = false` turns off the README half.
 
 A table replaces wholesale, and a present table turns the root probe off for
 the slots it omits. An entry's `path` never changes which top-level companion it
@@ -1686,3 +1689,17 @@ example with `docker login` against
 [settings-publish]: ./settings.md#publish
 [stability-unstable]: ./stability.md#unstable
 [compression-section]: #compression
+
+<!-- internal -->
+[ref-rule-support-dir]: #rule-support-dir
+[ref-upgrading-md-rule-support-dir]: ./upgrading.md#rule-support-dir
+[ref-commands-md-build]: ./commands.md#build
+[ref-commands-md-release]: ./commands.md#release
+[ref-artifacts-md-grimignore]: ./artifacts.md#grimignore
+[ref-guides-dependencies-md-rule-with-lookup-data]: ./guides/dependencies.md#rule-with-lookup-data
+[ref-agents-md]: ./agents.md
+[ref-description-entry-readme]: #description-entry-readme
+[ref-upgrading-md-agent-companions]: ./upgrading.md#agent-companions
+[ref-description-companion]: #description-companion
+[ref-description-precedence]: #description-precedence
+[ref-upgrading-md-package-readme-companion]: ./upgrading.md#package-readme-companion

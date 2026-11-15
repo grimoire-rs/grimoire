@@ -13,7 +13,8 @@ Almost nothing here is a breaking change. Grimoire is [stabilizing toward
 about contracts, not about what you *see*, and every one of these is visible
 enough to look like a bug if you meet it cold. The one exception is
 [`GRIM_RATING_HOST`](#rating-host), removed before the 1.0 freeze takes
-effect and called out as breaking where it appears.
+effect and called out as breaking where it appears. Two more are what grim
+0.16.0 packs for a [rule][ref-rule-support-dir] and an [agent][ref-agent-companions].
 
 ## Adding a client changes what autodetect targets {#autodetect}
 
@@ -1192,24 +1193,106 @@ the global list, so it draws no such warning. To opt out, set a project
 `[options].clients` or pass `--client`. See [the client
 matrix](./clients.md#matrix).
 
-## Each package's own README becomes its description {#package-readme-companion}
+## A rule can no longer ship a support directory {#rule-support-dir}
 
-`grim publish` used to give every entry the repository-level README. It now
-looks for each entry's own `README.md` first: `<path>/README.md` for a skill or
-hook, `<path without .md>/README.md` for a rule or agent.
+**Breaking.** From grim 0.16.0 a rule packs to its `.md` file alone. A
+directory beside it that shares its stem (`rules/<name>/`) may hold only
+`README.md`, `logo.png` and `logo.svg`. None of them is packed. Any other file
+refuses the build with exit `65`.
 
-**What you will see.** A repository with package READMEs publishes a different
-companion on its next run, even at an unchanged version. The artifacts are
-skipped and each companion is re-pointed, so `grim fetch --description` returns
-the package README. Changelog and logo still come from the top level, and no
-artifact's digest changes. A repository without package READMEs publishes as
-before.
+This covers `grim build`, `grim release` and `grim publish`. A rule declared
+by local path is refused the same way by `grim lock`, `grim update`,
+`grim add <path>` and `grim install <path>`. `grim status` on an already-locked
+path rule that gained a file exits `0`, reports it `outdated` and prints the
+refusal as a warning.
 
-To keep the old result, set `[description] entry_readme = false`. Give an entry a
-`[<kind>.<name>.description]` table to pin it. A top-level `[description]` table
-that sets files but no `readme`, next to a root `README.md`, now warns that the
-README is not published. See [the lookup and its
-precedence](./publishing.md#description-entry-readme).
+**Why.** Clients that read `rules/` recursively load every file in a support
+directory as a rule. grim's repair was a `claudeMdExcludes` entry in one Claude
+`settings.json`. Claude ignores it when the repository is loaded from another
+directory. Qoder has no usable exclude key, and the other clients were never
+audited. Dependencies replace the support directory.
+
+**Who is affected.** A publisher whose rule has a `rules/<name>/` directory
+with files other than the three above. A rule with no such directory publishes
+as before. A rule republished unchanged from a tree with `rules/<name>/README.md`
+gets a new digest, because the README no longer rides the package.
+
+No `.grimignore` is read in the directory, so one there is a stray file too.
+Only grim's built-in junk defaults, such as `.DS_Store`, are skipped.
+
+**The fix.** Move the depth files into a skill, require the skill from the
+rule, and name it in the rule body:
+
+```markdown
+---
+metadata:
+  grim.requires.skills.architecture-guide: "ghcr.io/acme/skills/architecture-guide:1"
+---
+
+Load the `architecture-guide` skill for the worked patterns.
+```
+
+The skill must stay model-invocable. For Claude Code, never set
+`claude.disable-model-invocation: "true"` on it. It may set
+`claude.user-invocable: "false"` to hide it from the `/` menu. The
+[worked example][rule-with-lookup-data] has the full files, and the
+[requires grammar][requires] has the reference syntax.
+
+**What consumers of an old package see.** A rule published with a support
+directory installs as before. Its files land under `rules/<name>/`. Claude gets
+its `claudeMdExcludes` entry. grim prints one warning per such rule when it
+writes files, and none on a no-op install:
+
+```text
+rule '<name>' ships a support directory, which is deprecated: its files load as extra rules in some clients. Ask the publisher of <registry>/<repository> to move them into a skill the rule requires; grim 0.16.0 and later no longer publish such a rule (https://grimoire.rs/upgrading.html#rule-support-dir)
+```
+
+Updating to a single-file version removes the directory and the
+`claudeMdExcludes` entry, and the key itself when it empties. See [the Claude
+exclusion][claude-md-excludes].
+
+## An agent's directory may hold only catalog files {#agent-companions}
+
+**Breaking.** From grim 0.16.0 an agent packs to its `.md` file alone. The
+directory beside it sharing its stem (`agents/<name>/`) may hold only
+`README.md`, `logo.png` and `logo.svg`, and none of them is packed. Any other
+file refuses the build with exit `65`, on every source listed under [the rule
+change][ref-rule-support-dir]. A stray file there used to be ignored silently.
+
+**What you will see.** Before 0.16.0 the three files rode the package, and
+`grim fetch <ref> --path <name>/README.md` returned the README. Since 0.16.0
+that fetch exits `1` with `no file '<name>/README.md' in this artifact`. An agent
+republished unchanged from a tree with companions gets a new digest. Catalog
+UIs read the README and logo from the [description lookup][entry-readme]
+instead.
+
+**The fix.** Delete the stray files or move them out of `agents/<name>/`. Files
+the agent needs at run time belong in a skill it requires, which
+[`requires`][requires] declares the same way as for a rule.
+
+## Each package's own README and logo become its description {#package-readme-companion}
+
+`grim publish` used to give every entry the repository-level README and logo.
+Since 0.16.0 it looks for each entry's own first. For a skill or hook that is
+`<path>/README.md` and `<path>/logo.png` or `logo.svg`, then `<stem>.README.md`,
+`<stem>.png` and `<stem>.svg` beside the directory.
+
+A rule or agent looks in `<path without .md>/`, then beside the file. An mcp,
+bundle or settings entry looks only beside its `.toml` file. README and logo
+each fall back to the top level on their own.
+
+**What you will see.** A repository with per-package READMEs or logos publishes
+a different companion on its next run, even at an unchanged version. The
+artifacts are skipped and each companion is re-pointed, so
+`grim fetch --description` returns the package README. The changelog still
+comes from the top level, and no artifact's digest changes. A repository
+without per-package files publishes as before.
+
+To turn the README lookup off, set `[description] entry_readme = false`. The
+logo lookup has no toggle. Give an entry a `[<kind>.<name>.description]` table
+to pin everything for it. A top-level `[description]` table that sets files but
+no `readme`, next to a root `README.md`, now warns that the README is not
+published. See [the lookup and its precedence][entry-readme].
 
 ## Releases stop moving a float to a lower version {#release-floats}
 
@@ -1500,6 +1583,10 @@ one only when someone pushed the tag by hand.
   promise][stability].
 
 <!-- internal -->
+[rule-with-lookup-data]: ./guides/dependencies.md#rule-with-lookup-data
+[requires]: ./artifacts.md#requires
+[claude-md-excludes]: ./vendor-metadata.md#claude-md-excludes
+[entry-readme]: ./publishing.md#description-entry-readme
 [agent-locations]: ./agents.md#locations
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
 [mcp-oauth]: ./mcp-servers.md#server-oauth
@@ -1556,3 +1643,7 @@ one only when someone pushed the tag by hand.
 [search]: ./commands.md#search
 [settings]: ./settings.md
 [json-update]: ./json-interface.md#shapes-items
+
+<!-- internal -->
+[ref-rule-support-dir]: #rule-support-dir
+[ref-agent-companions]: #agent-companions

@@ -220,9 +220,11 @@ grim uninstall agent code-reviewer         # removes files + declaration
   not projectable. Add them by editing the installed file (Claude/Copilot)
   or the client's own config.
 - **No support directory.** An agent packs to exactly one file
-  (`<name>.md`, or `<name>.toml` for [Codex][codex-subagents-docs]); a
-  sibling folder sharing the stem is ignored (unlike
-  [rules](./concepts.md#rule-support-dir)).
+  (`<name>.md`, or `<name>.toml` for [Codex][codex-subagents-docs]). A
+  sibling folder sharing the stem may hold only `README.md`, `logo.png` and
+  `logo.svg`, and none of them is packed. Since grim 0.16.0 any other file
+  refuses the build with exit `65`. See
+  [Agents ship one file][ref-publishing-md-agent-companions].
 - **No model translation.** The common `model` passes through verbatim;
   use `opencode.model` when the OpenCode side needs a
   `provider/model-id` value.
@@ -269,3 +271,6 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [openclaw-docs]: https://github.com/openclaw/openclaw
 [kilo-agents-docs]: https://github.com/Kilo-Org/kilocode/blob/v7.8.1/packages/kilo-docs/pages/customize/custom-subagents.md
 [qoder-subagents-docs]: https://docs.qoder.com/cli/subagent
+
+<!-- internal -->
+[ref-publishing-md-agent-companions]: ./publishing.md#agent-companions
