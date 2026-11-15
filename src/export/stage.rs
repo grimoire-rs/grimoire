@@ -194,8 +194,8 @@ pub(crate) struct ExportOptions<'a> {
 /// AdHoc)`. Declared: `marketplace::load`, `ConfigFileLock::try_acquire(M)`
 /// held to the end, `resolve::load_lock`, `--plugin` checked against M
 /// (`PluginNotFound` 79; none declared → `NoneDeclared` 65), then
-/// `resolve_marketplace` always — `Reconcile{stale}`, which with nothing
-/// stale only carries and drops, no network. Per exported plugin
+/// `resolve_marketplace` always — `Reconcile{stale}`, which with no exported
+/// plugin stale and no part to drop only carries, no network. Per exported plugin
 /// [`plugin_input`], then [`export_plugins`]; after placement, `L` is saved
 /// with `save_marketplace(path, &lock, previous)` when an exported plugin
 /// was stale, `L` holds a part for a plugin no longer in M, or `L` was
@@ -392,8 +392,8 @@ impl DeclaredPlan {
 /// names into [`PluginInput`]s (C-010): `marketplace::load`,
 /// `ConfigFileLock::try_acquire`, `resolve::load_lock`, `select` (the
 /// caller's own emptiness and `--plugin` checks), then `resolve_marketplace`
-/// always — `Reconcile{stale}`, which with no part stale only carries and
-/// drops, no network. `project` plugins take their pins from
+/// always — `Reconcile{stale}`, which with no selected plugin stale and no
+/// part to drop only carries, no network. `project` plugins take their pins from
 /// the project's own lock; the lock and the resolver only ever see the
 /// `include` plugins. `flags` are the `--version` / `--description`
 /// overrides. With `contain` (R2-22, the canonical manifest directory) every

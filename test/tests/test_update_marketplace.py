@@ -339,6 +339,98 @@ def test_a_plugin_export_that_saves_the_lock_relocks_a_stale_part_it_left_out(
         assert again.returncode == 0, f"{pick}: {again.stderr}"
 
 
+def test_a_plugin_pick_locks_a_declared_plugin_that_has_no_part_yet(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The run saves the whole lock, so a declared plugin with no part is locked
+    in the same run, and a later run reads it as in line."""
+    a_repo, b_repo, c_repo = (f"{unique_repo}/{n}" for n in ("pa", "pb", "pc"))
+    _skill(a_repo, "pa", "v1")
+    _skill(b_repo, "pb", "v1")
+    c1 = _skill(c_repo, "pc", "v1")
+    m = project_dir / "marketplace.toml"
+    lock_path = project_dir / "marketplace.lock"
+    plugins = {"a": [f"{registry}/{a_repo}:stable"], "b": [f"{registry}/{b_repo}:stable"]}
+    _write_marketplace(m, plugins)
+    runner = grim_at(project_dir)
+    runner.run("update", "--marketplace", "marketplace.toml")
+    first = _lock(lock_path)
+
+    _write_marketplace(m, {**plugins, "c": [f"{registry}/{c_repo}:stable"]})
+    result = runner.run("update", "--marketplace", "marketplace.toml", "a", check=False)
+    assert result.returncode == 0, result.stderr
+    assert "plugin 'c' has no part in" in result.stderr, result.stderr
+    second = _lock(lock_path)
+    assert _pins(second, "c") == {("skill", "pc"): f"{registry}/{c_repo}:stable@{c1.digest}"}
+    assert _part(second, "b") == _part(first, "b"), "a part in line is carried verbatim"
+
+    # The new part is in line: an export of it saves nothing and notes no relock.
+    locked = lock_path.read_bytes()
+    export = runner.run(
+        "export", "plugin", "--plugin", "c", "--client", "claude", "-o", str(project_dir / "out"),
+        check=False,
+    )
+    assert export.returncode == 0, export.stderr
+    assert "has no part" not in export.stderr, export.stderr
+    assert "no longer matches its part" not in export.stderr, export.stderr
+    assert lock_path.read_bytes() == locked
+    again = runner.run("update", "--marketplace", "marketplace.toml", "c:pc", check=False)
+    assert again.returncode == 0, again.stderr
+
+
+def test_a_plugin_export_that_saves_the_lock_locks_a_plugin_that_has_no_part_yet(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    a_repo, extra_repo, c_repo = (f"{unique_repo}/{n}" for n in ("pa", "extra", "pc"))
+    _skill(a_repo, "pa", "v1")
+    _skill(extra_repo, "extra", "v1")
+    c1 = _skill(c_repo, "pc", "v1")
+    m = project_dir / "marketplace.toml"
+    lock_path = project_dir / "marketplace.lock"
+    _write_marketplace(m, {"a": [f"{registry}/{a_repo}:stable"]})
+    runner = grim_at(project_dir)
+    runner.run("update", "--marketplace", "marketplace.toml")
+
+    _write_marketplace(
+        m,
+        {
+            "a": [f"{registry}/{a_repo}:stable", f"{registry}/{extra_repo}:stable"],
+            "c": [f"{registry}/{c_repo}:stable"],
+        },
+    )
+    result = runner.run(
+        "export", "plugin", "--plugin", "a", "--client", "claude", "-o", str(project_dir / "out"),
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "plugin 'c' has no part in" in result.stderr, result.stderr
+    assert _pins(_lock(lock_path), "c") == {("skill", "pc"): f"{registry}/{c_repo}:stable@{c1.digest}"}
+
+
+def test_a_run_that_changes_nothing_locks_no_plugin_that_has_no_part(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    a_repo, c_repo = f"{unique_repo}/pa", f"{unique_repo}/pc"
+    _skill(a_repo, "pa", "v1")
+    _skill(c_repo, "pc", "v1")
+    m = project_dir / "marketplace.toml"
+    lock_path = project_dir / "marketplace.lock"
+    plugins = {"a": [f"{registry}/{a_repo}:stable"]}
+    _write_marketplace(m, plugins)
+    runner = grim_at(project_dir)
+    runner.run("update", "--marketplace", "marketplace.toml")
+    before = lock_path.read_bytes()
+
+    _write_marketplace(m, {**plugins, "c": [f"{registry}/{c_repo}:stable"]})
+    result = runner.run(
+        "export", "plugin", "--plugin", "a", "--client", "claude", "-o", str(project_dir / "out"),
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "has no part" not in result.stderr, result.stderr
+    assert lock_path.read_bytes() == before
+
+
 def test_s021_plugin_dropped_from_m_yields_no_rows_and_leaves_l(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

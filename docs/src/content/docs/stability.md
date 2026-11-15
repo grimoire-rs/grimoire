@@ -343,7 +343,8 @@ for anyone upgrading:
   `grim export plugin --plugin` that saves `marketplace.lock` relock every other
   plugin whose part is stale, keeping each pin its includes still answer. They
   exit with the relock's code (`69`, `78`, `79`, `80`, `81`) where 0.15.1 copied
-  the stale part and exited `0`. They write nothing then.
+  the stale part and exited `0`. They write nothing then. The same runs also lock
+  a declared plugin that has no part yet, which 0.15.1 left out of the lock.
 - `grim release` and `grim publish` with the cascade on never move `X.Y`, `X` or
   `latest` to a lower version, where they moved every float. A float on a
   prerelease is the exception and always moves. They read each

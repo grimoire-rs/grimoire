@@ -332,13 +332,13 @@ pub(crate) fn declare_failure(
 
 /// The single marketplace resolution seam, anchored at `m.path`'s directory: each
 /// selected plugin relocks from its part, an unselected part in line with its
-/// declaration carries verbatim, a stale one relocks as `Reconcile` does whenever
-/// the run selects a plugin or drops a part, and the part of a plugin `m` no longer
-/// declares drops. `All` takes every plugin whole, `Reconcile` relocks whole with
-/// nothing refreshed, and a member pick relocks a fresh part for those names alone.
-/// No registry is contacted before every pick is found in `m` and every member
-/// pick's part is fresh. Bundle pins come back in memory as well, since a saved
-/// part keeps them only in its stamps (`<tag>@<digest>`).
+/// declaration carries verbatim; whenever the run selects a plugin or drops a part,
+/// a stale one relocks as `Reconcile` does and a plugin with no part locks fresh;
+/// the part of a plugin `m` no longer declares drops. `All` takes every plugin whole,
+/// `Reconcile` relocks whole with nothing refreshed, and a member pick relocks a fresh
+/// part for those names alone. No registry is contacted before every pick is found in
+/// `m` and every member pick's part is fresh. Bundle pins come back in memory as well,
+/// since a saved part keeps them only in its stamps (`<tag>@<digest>`).
 ///
 /// # Errors
 ///
@@ -391,13 +391,13 @@ pub async fn resolve_marketplace(
         }
     }
     // A run that changes the lock also relocks each stale part it left out, refreshing
-    // nothing, so the lock it saves holds no stale part; a run that changes nothing reads
-    // none. A plugin with no part has no pins to carry and stays out of the lock.
+    // nothing, and locks each plugin with no part yet, so the lock it saves holds no stale
+    // part; a run that changes nothing reads none.
     let changes = !picks.is_empty() || previous.is_some_and(|l| l.plugins.keys().any(|p| !m.plugins.contains_key(p)));
     let stale_rest: Vec<&String> = m
         .plugins
         .keys()
-        .filter(|p| changes && !picks.contains_key(*p) && part_of(p).is_some() && is_stale(p, previous, &hashes))
+        .filter(|p| changes && !picks.contains_key(*p) && is_stale(p, previous, &hashes))
         .collect();
     let relocks = picks.iter().map(|(plugin, pick)| (plugin, pick, &whole_refresh)).chain(
         stale_rest
@@ -424,12 +424,21 @@ pub async fn resolve_marketplace(
         //    lock holds it: stamps without their digests, bundle rows rebuilt below.
         if !picks.contains_key(plugin) {
             // An access failure names no plugin, so this line is what names the part.
-            tracing::warn!(
-                "plugin '{}' no longer matches its part of {}, so this run relocks it too, keeping each pin \
-                 its includes still answer",
-                registry_text(plugin),
-                lock_path(&m.path).display()
-            );
+            let lock = lock_path(&m.path);
+            if part_of(plugin).is_some() {
+                tracing::warn!(
+                    "plugin '{}' no longer matches its part of {}, so this run relocks it too, keeping each pin \
+                     its includes still answer",
+                    registry_text(plugin),
+                    lock.display()
+                );
+            } else {
+                tracing::warn!(
+                    "plugin '{}' has no part in {} yet, so this run locks it too",
+                    registry_text(plugin),
+                    lock.display()
+                );
+            }
         }
         let refresh = match (pick, part_of(plugin)) {
             (_, None) => Refresh::All,
@@ -1343,7 +1352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn c009_some_whole_without_lock_resolves_only_the_named_plugin() {
+    async fn c009_some_whole_without_lock_locks_every_declared_plugin() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(tmp.path(), "sa", "v1");
         write_skill(tmp.path(), "sb", "v1");
@@ -1357,8 +1366,8 @@ mod tests {
             .expect("resolve");
         assert_eq!(
             r.lock.plugins.keys().collect::<Vec<_>>(),
-            ["a"],
-            "nothing to carry for b"
+            ["a", "b"],
+            "b has no part, so the run that saves the lock locks it too"
         );
     }
 
@@ -1980,6 +1989,103 @@ mod tests {
         let h = declaration_hashes(&dropped, &scope()).unwrap();
         assert_eq!(part(&r, "a").metadata.declaration_hash, h.per_plugin["a"]);
         assert_eq!(pins(part(&r, "a")).keys().collect::<Vec<_>>(), ["sb", "x"]);
+    }
+
+    /// A pick saves the whole lock, so a declared plugin the lock has no part
+    /// for yet is locked in the same run, and a part in line still carries.
+    #[tokio::test]
+    async fn a_pick_locks_a_plugin_that_has_no_part_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("marketplace.toml");
+        let access = access_over(&MemoryRegistry::new());
+        for s in ["sa", "sb", "sc"] {
+            write_skill(tmp.path(), s, "v1");
+        }
+        let before = market(&path, &[("a", &["./skills/sa"]), ("b", &["./skills/sb"])]);
+        let previous = resolve(&before, None, &PluginSelection::All, &access)
+            .await
+            .unwrap()
+            .lock;
+        let m = market(
+            &path,
+            &[
+                ("a", &["./skills/sa"]),
+                ("b", &["./skills/sb"]),
+                ("c", &["./skills/sc"]),
+            ],
+        );
+
+        let capture = LogCapture::start();
+        let r = resolve(&m, Some(&previous), &whole(&["a"]), &access)
+            .await
+            .expect("resolve");
+
+        let h = declaration_hashes(&m, &scope()).unwrap();
+        assert_eq!(pins(part(&r, "c")).keys().collect::<Vec<_>>(), ["sc"]);
+        assert_eq!(part(&r, "c").metadata.declaration_hash, h.per_plugin["c"]);
+        assert!(!is_stale("c", Some(&r.lock), &h));
+        assert_eq!(
+            part(&r, "b"),
+            &previous.plugins["b"],
+            "a part in line carries byte for byte"
+        );
+        let logs = capture.text();
+        assert_eq!(warnings(&logs).len(), 1, "{logs}");
+        assert!(logs.contains("plugin 'c' has no part in"), "{logs}");
+    }
+
+    /// A run that saves no change to the lock locks no plugin that has no part.
+    #[tokio::test]
+    async fn a_plugin_with_no_part_stays_out_when_the_run_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("marketplace.toml");
+        let reg = MemoryRegistry::new();
+        publish_skill(&reg, "localhost:5000/acme/x:1", "v1").await;
+        let before = market(&path, &[("a", &["acme/x:1"])]);
+        let previous = resolve(&before, None, &PluginSelection::All, &access_over(&reg))
+            .await
+            .unwrap()
+            .lock;
+        let m = market(&path, &[("a", &["acme/x:1"]), ("c", &["acme/c:1"])]);
+
+        let (counter, access) = no_network();
+        for selection in [
+            PluginSelection::Some(BTreeMap::new()),
+            PluginSelection::Reconcile(BTreeSet::new()),
+        ] {
+            let r = resolve(&m, Some(&previous), &selection, &access)
+                .await
+                .expect("carry only");
+            assert_eq!(r.lock.plugins.keys().collect::<Vec<_>>(), ["a"], "{selection:?}");
+            assert_eq!(part(&r, "a"), &previous.plugins["a"], "{selection:?}");
+        }
+        assert_eq!(counter.calls(), 0);
+    }
+
+    /// A plugin with no part that cannot lock fails the run as a pick of it would.
+    #[tokio::test]
+    async fn a_plugin_with_no_part_that_cannot_lock_fails_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("marketplace.toml");
+        let access = access_over(&MemoryRegistry::new());
+        write_skill(tmp.path(), "sa", "v1");
+        let before = market(&path, &[("a", &["./skills/sa"])]);
+        let previous = resolve(&before, None, &PluginSelection::All, &access)
+            .await
+            .unwrap()
+            .lock;
+        let m = market(&path, &[("a", &["./skills/sa"]), ("c", &["acme/missing:1"])]);
+
+        let Err(left_out) = resolve(&m, Some(&previous), &whole(&["a"]), &access).await else {
+            panic!("a plugin the run cannot lock fails it");
+        };
+        assert!(left_out.to_string().contains("plugin 'c'"), "{left_out}");
+        let Err(picked) = resolve(&m, Some(&previous), &whole(&["a", "c"]), &access).await else {
+            panic!("the pick fails too");
+        };
+        assert_eq!(left_out.to_string(), picked.to_string());
+        assert_eq!(classified(picked).exit, ExitCode::NotFound);
+        assert_eq!(classified(left_out).exit, ExitCode::NotFound);
     }
 
     // ── an existing part: what whole and reconcile read from it ────
