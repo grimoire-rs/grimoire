@@ -41,12 +41,16 @@ tasks:
         done
         for r in rules/*.md; do
           [ -e "$r" ] || continue
+          # <name>.README.md is a package's README, not a rule.
+          case "$r" in *.README.md) continue ;; esac
           echo "==> grim build ${r}"
           "{{.GRIM_BINARY}}" build "$r" --kind rule
           found=1
         done
         for a in agents/*.md; do
           [ -e "$a" ] || continue
+          # <name>.README.md is a package's README, not an agent.
+          case "$a" in *.README.md) continue ;; esac
           echo "==> grim build ${a}"
           "{{.GRIM_BINARY}}" build "$a" --kind agent
           found=1

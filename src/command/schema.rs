@@ -393,7 +393,7 @@ mod tests {
             "per-entry must give the order: {entry}"
         );
 
-        // `entry_readme` is an optional string-or-boolean key.
+        // `entry_readme` is an optional boolean key.
         let spec = &v["$defs"]["DescriptionSpec"];
         let readme = &spec["properties"]["entry_readme"];
         assert!(
@@ -401,9 +401,9 @@ mod tests {
                 .as_str()
                 .is_some_and(|d| d.contains("Top-level table only"))
         );
-        let kinds = v["$defs"]["EntryReadme"].to_string();
+        let kinds = readme["type"].to_string();
         assert!(
-            kinds.contains("boolean") && kinds.contains("string"),
+            kinds.contains("boolean") && !kinds.contains("string"),
             "entry_readme types: {kinds}"
         );
         let required = spec.get("required").and_then(|r| r.as_array());
