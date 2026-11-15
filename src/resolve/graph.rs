@@ -1185,10 +1185,7 @@ struct Graph<'a> {
     /// asked for its version. A store miss never releases a held pin, so where its
     /// tag shows nothing either the lock's word answers its line (`Graph::vouched_range`).
     missed_offline: BTreeSet<NodeKey>,
-    /// This run's resolves: requested identifier to the digest its tag
-    /// resolved to. Keyed by identifier so one tag resolves once per run; a
-    /// previous pin belongs to one node and stays out of it.
-    digests: BTreeMap<Identifier, Digest>,
+    memo: RegistryMemo,
     /// The last pass's manifest reads; a pass takes one back for a job at the
     /// same id and digest instead of reading the store again.
     reads: Reads,
@@ -1196,15 +1193,6 @@ struct Graph<'a> {
     transitive: usize,
     /// Layer bytes this pass admitted toward [`MAX_REQUIRES_BYTES`].
     bytes: u64,
-    /// The version each manifest's annotation names, by digest alone: the
-    /// annotation belongs to the manifest, whatever tag a node read it under.
-    evidence: BTreeMap<Digest, Option<Version>>,
-    /// Reads one bounded round made ahead of the loop that asks for them, by digest;
-    /// [`Graph::evidence_of`] takes each once.
-    prefetched: BTreeMap<Digest, AnnotationRead>,
-    /// Each repository's version tags (full semver and `X.Y`), by registry and
-    /// repository, with the version each names.
-    listings: BTreeMap<(String, String), Vec<(Version, String)>>,
     /// The line each line node learned, kept across passes so a claim stays.
     learned: BTreeMap<NodeKey, Learned>,
     /// Each line node's candidate this pass, from its ladder.
@@ -1220,8 +1208,6 @@ struct Graph<'a> {
     /// order they failed. They refuse once a pass keeps every candidate; a pass
     /// that moves a candidate drops them with it.
     postponed: Vec<(NodeKey, ResolveError)>,
-    /// Tags this run found absent, so each resolves once a run.
-    missing: BTreeSet<Identifier>,
     /// Line nodes whose `latest` was absent: from the next pass on their ladder
     /// goes on to the listing.
     deferred: BTreeSet<NodeKey>,
@@ -1240,8 +1226,249 @@ struct Graph<'a> {
     work: usize,
     /// Passes the run started, the one under way included.
     passes: usize,
+}
+
+/// The registry reads this run memoizes across passes: tag resolves and misses,
+/// manifest annotations and tag listings, with the listing bytes they charged.
+#[derive(Default)]
+struct RegistryMemo {
+    /// This run's resolves: requested identifier to the digest its tag
+    /// resolved to. Keyed by identifier so one tag resolves once per run; a
+    /// previous pin belongs to one node and stays out of it.
+    digests: BTreeMap<Identifier, Digest>,
+    /// The version each manifest's annotation names, by digest alone: the
+    /// annotation belongs to the manifest, whatever tag a node read it under.
+    evidence: BTreeMap<Digest, Option<Version>>,
+    /// Reads one bounded round made ahead of the loop that asks for them, by digest;
+    /// [`RegistryMemo::evidence_of`] takes each once.
+    prefetched: BTreeMap<Digest, AnnotationRead>,
+    /// Each repository's version tags (full semver and `X.Y`), by registry and
+    /// repository, with the version each names.
+    listings: BTreeMap<(String, String), Vec<(Version, String)>>,
+    /// Tags this run found absent, so each resolves once a run.
+    missing: BTreeSet<Identifier>,
     /// Bytes the run's listings charged ([`TagListing::bytes`]), toward [`MAX_LISTING_BYTES`].
     listing_bytes: usize,
+}
+
+impl RegistryMemo {
+    /// `id` at the digest its tag names when its evidence satisfies `line`;
+    /// `None` when the tag is absent, its manifest is gone, or it falls outside.
+    async fn tag_in_line(
+        &mut self,
+        key: &NodeKey,
+        id: &Identifier,
+        line: &Line,
+        access: &Arc<dyn OciAccess>,
+        options: &ResolveOptions,
+    ) -> Result<Option<PinnedIdentifier>, ResolveError> {
+        if self.missing.contains(id) {
+            return Ok(None);
+        }
+        let digest = match self.digests.get(id) {
+            Some(digest) => digest.clone(),
+            None => {
+                let reference = ArtifactRef::registry(key.0, key.1.clone(), id.clone());
+                match resolve_tag(&reference, id, access, options).await {
+                    Ok(digest) => {
+                        self.digests.insert(id.clone(), digest.clone());
+                        digest
+                    }
+                    Err(err) if matches!(err.kind, ResolveErrorKind::TagNotFound) => {
+                        self.missing.insert(id.clone());
+                        return Ok(None);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        };
+        let pin = pin_at(id, digest);
+        if line.is_any() {
+            return Ok(Some(pin));
+        }
+        let shown = match self.evidence_of(key, &pin, access, options).await {
+            Ok(shown) => shown,
+            // Offline the store may lack the manifest the tag cache names: its tag's shape decides.
+            Err(err) if is_offline_miss(&err) => Some(evidence(None, &pin)),
+            Err(err) => return Err(err),
+        };
+        Ok(shown.is_some_and(|shown| satisfies(&shown, line)).then_some(pin))
+    }
+
+    /// The evidence for `pin`, its annotation read once per digest; `None` when
+    /// the registry no longer holds the manifest.
+    async fn evidence_of(
+        &mut self,
+        key: &NodeKey,
+        pin: &PinnedIdentifier,
+        access: &Arc<dyn OciAccess>,
+        options: &ResolveOptions,
+    ) -> Result<Option<Evidence>, ResolveError> {
+        let digest = pin.digest();
+        let annotated = match self.evidence.get(&digest) {
+            Some(annotated) => annotated.clone(),
+            None => {
+                let read = match self.prefetched.remove(&digest) {
+                    Some(read) => read,
+                    None => read_annotation(access, pin, options).await,
+                };
+                let reference = || ArtifactRef::registry(key.0, key.1.clone(), pin.as_identifier().clone());
+                let Some(annotated) = read.map_err(|kind| ResolveError::new(reference(), kind))? else {
+                    return Ok(None);
+                };
+                self.evidence.insert(digest, annotated.clone());
+                annotated
+            }
+        };
+        Ok(Some(evidence(annotated.as_ref(), pin)))
+    }
+
+    /// `repo`'s version tags, listed once per run within the run's listing budget.
+    async fn listed_tags(
+        &mut self,
+        key: &NodeKey,
+        repo: &Identifier,
+        access: &Arc<dyn OciAccess>,
+        options: &ResolveOptions,
+    ) -> Result<Vec<String>, ResolveError> {
+        let memo = (repo.registry().to_string(), repo.repository().to_string());
+        if let Some(listed) = self.listings.get(&memo) {
+            return Ok(listed.iter().map(|(_, tag)| tag.clone()).collect());
+        }
+        let reference = ArtifactRef::registry(key.0, key.1.clone(), repo.clone());
+        let remaining = MAX_LISTING_BYTES.saturating_sub(self.listing_bytes);
+        // The registry client holds each listing page to its own deadline, so a whole-walk
+        // deadline here would refuse a long listing that is still making progress.
+        let listing = retry_access(&reference, options, || access.list_tags_within(repo, remaining)).await?;
+        let (tags, bytes) = match listing {
+            None => (Vec::new(), 0),
+            Some(listing) if listing.complete && listing.bytes <= remaining => (listing.tags, listing.bytes),
+            Some(_) => {
+                let limit = GraphLimit::ListingBytes;
+                let via = repo.registry_repository();
+                return Err(ResolveError::new(
+                    reference,
+                    ResolveErrorKind::GraphTooLarge { limit, via },
+                ));
+            }
+        };
+        self.listing_bytes += bytes;
+        let listed = version_tags(tags);
+        let names = listed.iter().map(|(_, tag)| tag.clone()).collect();
+        self.listings.insert(memo, listed);
+        Ok(names)
+    }
+
+    /// The 79 for `key` when nothing in `repo` fits `line`, naming the newest
+    /// release the run's listing of `repo` holds, else its newest prerelease.
+    fn no_matching_version(&self, key: &NodeKey, repo: &Identifier, line: &Line) -> ResolveError {
+        let claims = if line.is_any() {
+            "*".to_string()
+        } else {
+            let reqs: Vec<String> = line.requirements().iter().map(ToString::to_string).collect();
+            reqs.join(", ")
+        };
+        let memo = (repo.registry().to_string(), repo.repository().to_string());
+        let listed = self.listings.get(&memo).map_or(&[][..], Vec::as_slice);
+        // The listing is highest first, so with no release its first entry is the highest prerelease.
+        let newest = listed
+            .iter()
+            .find(|(version, _)| version.pre.is_empty())
+            .or(listed.first());
+        let newest = newest.map(|(version, tag)| match self.annotation_against(repo, tag) {
+            Some(annotated) if version.pre.is_empty() => annotated_newest(tag, annotated),
+            _ => tag.clone(),
+        });
+        ResolveError::new(
+            ArtifactRef::registry(key.0, key.1.clone(), repo.clone()),
+            ResolveErrorKind::NoMatchingVersion {
+                repository: repo.registry_repository(),
+                claims,
+                newest,
+            },
+        )
+    }
+
+    /// The version the manifest at `repo:tag` names, when this run read it and the
+    /// tag's own shape names another. Memos only: the message costs no read.
+    fn annotation_against(&self, repo: &Identifier, tag: &str) -> Option<&Version> {
+        let id = repo.clone_with_tag(tag);
+        let annotated = self.evidence.get(self.digests.get(&id)?)?.as_ref()?;
+        let agrees = match evidence(None, &id) {
+            Evidence::Exact(version) => version.cmp_precedence(annotated).is_eq(),
+            Evidence::Span { lo, hi } => lo <= *annotated && *annotated < hi,
+            Evidence::Unknown | Evidence::Vouched => false,
+        };
+        (!agrees).then_some(annotated)
+    }
+
+    /// Read in one bounded round the version of each of `pins` this run has not read,
+    /// so a wave costs one round of manifest reads instead of one read after another.
+    /// Each outcome waits in `prefetched` for the [`Self::evidence_of`] that asks.
+    async fn prefetch_evidence(
+        &mut self,
+        pins: Vec<PinnedIdentifier>,
+        access: &Arc<dyn OciAccess>,
+        options: &ResolveOptions,
+    ) {
+        self.prefetched.clear();
+        let mut seen = BTreeSet::new();
+        let mut tasks: Vec<Task<(Digest, AnnotationRead)>> = Vec::new();
+        for pin in pins {
+            let digest = pin.digest();
+            if self.evidence.contains_key(&digest) || !seen.insert(digest.clone()) {
+                continue;
+            }
+            let (access, options) = (Arc::clone(access), options.clone());
+            tasks.push(Box::pin(async move {
+                let read = read_annotation(&access, &pin, &options).await;
+                Ok((digest, read))
+            }));
+        }
+        self.prefetched.extend(run_each(tasks).await.into_iter().flatten());
+    }
+
+    /// The dropped parent's version as this run read its annotation, else its digest.
+    fn dropped_label(&self, digest: &Digest) -> String {
+        match self.evidence.get(digest).and_then(Option::as_ref) {
+            Some(version) => version.to_string(),
+            None => digest.to_short_string(),
+        }
+    }
+
+    /// The version this run read `digest` annotated with, else `id`'s tag.
+    fn version_label(&self, digest: &Digest, id: &Identifier) -> String {
+        match self.evidence.get(digest).and_then(Option::as_ref) {
+            Some(version) => version.to_string(),
+            None => id.tag().unwrap_or_default().to_string(),
+        }
+    }
+
+    /// [`Self::version_label`] for the previous pin `held`, which `shown` stands in for
+    /// when it has no tag and no annotation: a version, a span, else its short digest.
+    fn held_label(&self, held: &PinnedIdentifier, shown: &Evidence) -> String {
+        match (self.version_label(&held.digest(), held.as_identifier()), shown) {
+            (label, _) if !label.is_empty() => label,
+            (_, Evidence::Exact(version)) => version.to_string(),
+            (_, Evidence::Span { lo, hi }) => format!(">={lo} <{hi}"),
+            _ => held.digest().to_short_string(),
+        }
+    }
+
+    /// The reference that keeps `held`: by the version tag `from` when the pin records
+    /// it or this run resolved it to the pin's digest, else by digest.
+    fn declare_held(&self, held: &PinnedIdentifier, from: &str) -> String {
+        let repo = held.registry_repository();
+        let resolved = self
+            .digests
+            .iter()
+            .any(|(id, digest)| *digest == held.digest() && id.tag() == Some(from) && id.registry_repository() == repo);
+        if held.tag() == Some(from) || resolved {
+            format!("{repo}:{from}")
+        } else {
+            format!("{repo}@{}", held.digest())
+        }
+    }
 }
 
 /// A line node's learned line and the claims that taught it, each as the
@@ -1285,7 +1512,7 @@ impl Graph<'_> {
             return None;
         }
         let attested = matches!(claim, NodeClaim::Direct(_) | NodeClaim::Any(_)) && self.attested.contains(key);
-        match self.carry.answer_reading(key, claim, &self.evidence) {
+        match self.carry.answer_reading(key, claim, &self.memo.evidence) {
             None if attested || self.vouched_range(key, claim) => {
                 self.carry.pins.get(key).map(|carried| carried.pin.digest())
             }
@@ -1316,7 +1543,7 @@ impl Graph<'_> {
         };
         let resolved = self.confirmed.contains(key);
         let answered = |c: &Claim| {
-            let lands = || self.digests.get(&c.id) == Some(&carried.pin.digest());
+            let lands = || self.memo.digests.get(&c.id) == Some(&carried.pin.digest());
             self.carried(key, c.claim()).is_some() || (resolved && lands())
         };
         node.claims.iter().all(answered) && self.kept_reference(key, &carried.pin) == *id
@@ -1363,14 +1590,14 @@ impl Graph<'_> {
     /// does meet (`a_kept_pin_whose_own_manifest_asks_another_digest_leaves_the_lines_walk`).
     fn confirmable(&self) -> BTreeSet<NodeKey> {
         let lands = |key: &NodeKey, pin: &Digest, c: &Claim| {
-            self.carried(key, c.claim()).is_some() || self.digests.get(&c.id) == Some(pin)
+            self.carried(key, c.claim()).is_some() || self.memo.digests.get(&c.id) == Some(pin)
         };
         let confirms = |key: &NodeKey, node: &Node| {
             let (Some(Direct::Registry(id)), Some(carried)) = (&node.direct, self.carry.pins.get(key)) else {
                 return false;
             };
             let pin = carried.pin.digest();
-            self.unattested.contains(key) && self.may_take_stamp(key, id) && self.digests.contains_key(id) && {
+            self.unattested.contains(key) && self.may_take_stamp(key, id) && self.memo.digests.contains_key(id) && {
                 // The stamp the kept walk takes rests on the edges it meets too.
                 let met = self.walked_without(key);
                 let reached = |c: &Claim| met.contains(&c.parent);
@@ -1443,7 +1670,7 @@ impl Graph<'_> {
     /// the claim, else this run's resolve of the identifier.
     fn digest_of(&self, key: &NodeKey, claim: NodeClaim<'_>) -> Option<Digest> {
         self.carried(key, claim)
-            .or_else(|| self.digests.get(claim.id()).cloned())
+            .or_else(|| self.memo.digests.get(claim.id()).cloned())
     }
 
     /// The pin an agreeing `key` keeps. A released pin keeps nothing.
@@ -1453,7 +1680,7 @@ impl Graph<'_> {
         }
         let node = self.nodes.get(key)?;
         let claims: Vec<NodeClaim<'_>> = node.claims.iter().map(Claim::claim).collect();
-        self.carry.kept(key, &claims, &self.evidence)
+        self.carry.kept(key, &claims, &self.memo.evidence)
     }
 
     /// Whether `key`, read at `digest`, was read as the lock's proof shows it: the
@@ -1703,7 +1930,7 @@ impl Graph<'_> {
                 Err(err) => self.postponed.push((key, err)),
             }
         }
-        self.digests.extend(found);
+        self.memo.digests.extend(found);
         Ok(())
     }
 
@@ -1731,15 +1958,16 @@ impl Graph<'_> {
         }
         if let Some(target) = line.target_tag()
             && let Some(pin) = self
+                .memo
                 .tag_in_line(key, &repo.clone_with_tag(target), line, access, options)
                 .await?
         {
             return Ok(pin);
         }
-        let listed = self.listed_tags(key, repo, access, options).await?;
+        let listed = self.memo.listed_tags(key, repo, access, options).await?;
         for tag in highest_in_line(&listed, line) {
             let id = repo.clone_with_tag(tag);
-            if let Some(pin) = self.tag_in_line(key, &id, line, access, options).await? {
+            if let Some(pin) = self.memo.tag_in_line(key, &id, line, access, options).await? {
                 return Ok(pin);
             }
         }
@@ -1752,13 +1980,14 @@ impl Graph<'_> {
     fn no_release(&self, key: &NodeKey, repo: &Identifier, line: &Line) -> ResolveError {
         let memo = (repo.registry().to_string(), repo.repository().to_string());
         let listed: Vec<String> = self
+            .memo
             .listings
             .get(&memo)
             .map(|listed| listed.iter().map(|(_, tag)| tag.clone()).collect())
             .unwrap_or_default();
         let admits = |rest: &Line| !highest_in_line(&listed, rest).is_empty();
         self.unchosen_conflict(key, admits)
-            .unwrap_or_else(|| self.no_matching_version(key, repo, line))
+            .unwrap_or_else(|| self.memo.no_matching_version(key, repo, line))
     }
 
     /// `key`'s held pin when it is neither selected nor released, lies in `repo`
@@ -1780,7 +2009,7 @@ impl Graph<'_> {
         if line.is_any() {
             return Ok(Some(pin));
         }
-        let shown = match self.evidence_of(key, &pin, access, options).await {
+        let shown = match self.memo.evidence_of(key, &pin, access, options).await {
             Ok(Some(shown)) => self.held_shows(key, &pin, shown),
             Ok(None) => self.held_shows(key, &pin, evidence(None, &pin)),
             Err(err) if is_offline_miss(&err) => self.offline_shows(key, &pin, line),
@@ -1804,156 +2033,6 @@ impl Graph<'_> {
     fn held_elsewhere(&self, key: &NodeKey, pin: &PinnedIdentifier) -> bool {
         self.line_repo(key)
             .is_some_and(|repo| repo.registry_repository() != pin.registry_repository())
-    }
-
-    /// `id` at the digest its tag names when its evidence satisfies `line`;
-    /// `None` when the tag is absent, its manifest is gone, or it falls outside.
-    async fn tag_in_line(
-        &mut self,
-        key: &NodeKey,
-        id: &Identifier,
-        line: &Line,
-        access: &Arc<dyn OciAccess>,
-        options: &ResolveOptions,
-    ) -> Result<Option<PinnedIdentifier>, ResolveError> {
-        if self.missing.contains(id) {
-            return Ok(None);
-        }
-        let digest = match self.digests.get(id) {
-            Some(digest) => digest.clone(),
-            None => {
-                let reference = ArtifactRef::registry(key.0, key.1.clone(), id.clone());
-                match resolve_tag(&reference, id, access, options).await {
-                    Ok(digest) => {
-                        self.digests.insert(id.clone(), digest.clone());
-                        digest
-                    }
-                    Err(err) if matches!(err.kind, ResolveErrorKind::TagNotFound) => {
-                        self.missing.insert(id.clone());
-                        return Ok(None);
-                    }
-                    Err(err) => return Err(err),
-                }
-            }
-        };
-        let pin = pin_at(id, digest);
-        if line.is_any() {
-            return Ok(Some(pin));
-        }
-        let shown = match self.evidence_of(key, &pin, access, options).await {
-            Ok(shown) => shown,
-            // Offline the store may lack the manifest the tag cache names: its tag's shape decides.
-            Err(err) if is_offline_miss(&err) => Some(evidence(None, &pin)),
-            Err(err) => return Err(err),
-        };
-        Ok(shown.is_some_and(|shown| satisfies(&shown, line)).then_some(pin))
-    }
-
-    /// The evidence for `pin`, its annotation read once per digest; `None` when
-    /// the registry no longer holds the manifest.
-    async fn evidence_of(
-        &mut self,
-        key: &NodeKey,
-        pin: &PinnedIdentifier,
-        access: &Arc<dyn OciAccess>,
-        options: &ResolveOptions,
-    ) -> Result<Option<Evidence>, ResolveError> {
-        let digest = pin.digest();
-        let annotated = match self.evidence.get(&digest) {
-            Some(annotated) => annotated.clone(),
-            None => {
-                let read = match self.prefetched.remove(&digest) {
-                    Some(read) => read,
-                    None => read_annotation(access, pin, options).await,
-                };
-                let reference = || ArtifactRef::registry(key.0, key.1.clone(), pin.as_identifier().clone());
-                let Some(annotated) = read.map_err(|kind| ResolveError::new(reference(), kind))? else {
-                    return Ok(None);
-                };
-                self.evidence.insert(digest, annotated.clone());
-                annotated
-            }
-        };
-        Ok(Some(evidence(annotated.as_ref(), pin)))
-    }
-
-    /// `repo`'s version tags, listed once per run within the run's listing budget.
-    async fn listed_tags(
-        &mut self,
-        key: &NodeKey,
-        repo: &Identifier,
-        access: &Arc<dyn OciAccess>,
-        options: &ResolveOptions,
-    ) -> Result<Vec<String>, ResolveError> {
-        let memo = (repo.registry().to_string(), repo.repository().to_string());
-        if let Some(listed) = self.listings.get(&memo) {
-            return Ok(listed.iter().map(|(_, tag)| tag.clone()).collect());
-        }
-        let reference = ArtifactRef::registry(key.0, key.1.clone(), repo.clone());
-        let remaining = MAX_LISTING_BYTES.saturating_sub(self.listing_bytes);
-        // The registry client holds each listing page to its own deadline, so a whole-walk
-        // deadline here would refuse a long listing that is still making progress.
-        let listing = retry_access(&reference, options, || access.list_tags_within(repo, remaining)).await?;
-        let (tags, bytes) = match listing {
-            None => (Vec::new(), 0),
-            Some(listing) if listing.complete && listing.bytes <= remaining => (listing.tags, listing.bytes),
-            Some(_) => {
-                let limit = GraphLimit::ListingBytes;
-                let via = repo.registry_repository();
-                return Err(ResolveError::new(
-                    reference,
-                    ResolveErrorKind::GraphTooLarge { limit, via },
-                ));
-            }
-        };
-        self.listing_bytes += bytes;
-        let listed = version_tags(tags);
-        let names = listed.iter().map(|(_, tag)| tag.clone()).collect();
-        self.listings.insert(memo, listed);
-        Ok(names)
-    }
-
-    /// The 79 for `key` when nothing in `repo` fits `line`, naming the newest
-    /// release the run's listing of `repo` holds, else its newest prerelease.
-    fn no_matching_version(&self, key: &NodeKey, repo: &Identifier, line: &Line) -> ResolveError {
-        let claims = if line.is_any() {
-            "*".to_string()
-        } else {
-            let reqs: Vec<String> = line.requirements().iter().map(ToString::to_string).collect();
-            reqs.join(", ")
-        };
-        let memo = (repo.registry().to_string(), repo.repository().to_string());
-        let listed = self.listings.get(&memo).map_or(&[][..], Vec::as_slice);
-        // The listing is highest first, so with no release its first entry is the highest prerelease.
-        let newest = listed
-            .iter()
-            .find(|(version, _)| version.pre.is_empty())
-            .or(listed.first());
-        let newest = newest.map(|(version, tag)| match self.annotation_against(repo, tag) {
-            Some(annotated) if version.pre.is_empty() => annotated_newest(tag, annotated),
-            _ => tag.clone(),
-        });
-        ResolveError::new(
-            ArtifactRef::registry(key.0, key.1.clone(), repo.clone()),
-            ResolveErrorKind::NoMatchingVersion {
-                repository: repo.registry_repository(),
-                claims,
-                newest,
-            },
-        )
-    }
-
-    /// The version the manifest at `repo:tag` names, when this run read it and the
-    /// tag's own shape names another. Memos only: the message costs no read.
-    fn annotation_against(&self, repo: &Identifier, tag: &str) -> Option<&Version> {
-        let id = repo.clone_with_tag(tag);
-        let annotated = self.evidence.get(self.digests.get(&id)?)?.as_ref()?;
-        let agrees = match evidence(None, &id) {
-            Evidence::Exact(version) => version.cmp_precedence(annotated).is_eq(),
-            Evidence::Span { lo, hi } => lo <= *annotated && *annotated < hi,
-            Evidence::Unknown | Evidence::Vouched => false,
-        };
-        (!agrees).then_some(annotated)
     }
 
     /// The repository `key` claims when it is a line node: no direct declaration,
@@ -2126,7 +2205,7 @@ impl Graph<'_> {
             .filter(|(key, _)| !failed_keys.contains(key))
             .filter_map(|(key, repo)| self.judged_first(key, repo))
             .collect();
-        self.prefetch_evidence(judged, access, options).await;
+        self.memo.prefetch_evidence(judged, access, options).await;
         for (key, repo) in lines {
             if failed_keys.contains(&key) {
                 continue;
@@ -2141,7 +2220,7 @@ impl Graph<'_> {
                 Err(err) => self.line_refused(key, repo, err)?,
             }
         }
-        self.prefetched.clear();
+        self.memo.prefetched.clear();
         Ok(())
     }
 
@@ -2157,33 +2236,7 @@ impl Graph<'_> {
             return (held.pin.registry_repository() == repo.registry_repository()).then(|| held.pin.clone());
         }
         let target = repo.clone_with_tag(line.target_tag()?);
-        Some(pin_at(&target, self.digests.get(&target)?.clone()))
-    }
-
-    /// Read in one bounded round the version of each of `pins` this run has not read,
-    /// so a wave costs one round of manifest reads instead of one read after another.
-    /// Each outcome waits in `prefetched` for the [`Self::evidence_of`] that asks.
-    async fn prefetch_evidence(
-        &mut self,
-        pins: Vec<PinnedIdentifier>,
-        access: &Arc<dyn OciAccess>,
-        options: &ResolveOptions,
-    ) {
-        self.prefetched.clear();
-        let mut seen = BTreeSet::new();
-        let mut tasks: Vec<Task<(Digest, AnnotationRead)>> = Vec::new();
-        for pin in pins {
-            let digest = pin.digest();
-            if self.evidence.contains_key(&digest) || !seen.insert(digest.clone()) {
-                continue;
-            }
-            let (access, options) = (Arc::clone(access), options.clone());
-            tasks.push(Box::pin(async move {
-                let read = read_annotation(&access, &pin, &options).await;
-                Ok((digest, read))
-            }));
-        }
-        self.prefetched.extend(run_each(tasks).await.into_iter().flatten());
+        Some(pin_at(&target, self.memo.digests.get(&target)?.clone()))
     }
 
     /// Leave line node `key` waiting on `err`: a missing release, or offline a
@@ -2258,7 +2311,7 @@ impl Graph<'_> {
                 held.pin.registry_repository() == repo.registry_repository()
                     || self.carried_from_elsewhere(key, &held.pin)
             });
-            let known = self.digests.contains_key(&target) || self.missing.contains(&target);
+            let known = self.memo.digests.contains_key(&target) || self.memo.missing.contains(&target);
             if held || known || self.deferred.contains(key) || !seen.insert(target.clone()) {
                 continue;
             }
@@ -2279,10 +2332,10 @@ impl Graph<'_> {
         for ((key, repo), result) in asked.into_iter().zip(run_each(tasks).await) {
             match result {
                 Ok((target, Some(digest))) => {
-                    self.digests.insert(target, digest);
+                    self.memo.digests.insert(target, digest);
                 }
                 Ok((target, None)) => {
-                    self.missing.insert(target);
+                    self.memo.missing.insert(target);
                 }
                 Err(err) => failed.push((key, repo, err)),
             }
@@ -2308,11 +2361,11 @@ impl Graph<'_> {
             return Ok(Some(pin));
         }
         let latest = repo.clone_with_tag("latest");
-        match self.tag_in_line(key, &latest, &line, access, options).await {
+        match self.memo.tag_in_line(key, &latest, &line, access, options).await {
             Ok(Some(pin)) => return Ok(Some(pin)),
             Ok(None) => {}
             Err(err) if is_offline_miss(&err) => {
-                self.missing.insert(latest);
+                self.memo.missing.insert(latest);
             }
             Err(err) => return Err(err),
         }
@@ -2430,7 +2483,7 @@ impl Graph<'_> {
         }
         // A manifest's annotation wins; else each fixing tag's shape, a failing one
         // first, a bundle member's included; else what the held pin at that digest shows.
-        let shown = match self.evidence.get(&digest) {
+        let shown = match self.memo.evidence.get(&digest) {
             Some(Some(version)) => Evidence::Exact(version.clone()),
             _ => {
                 let known: Vec<Evidence> = fixing
@@ -2450,7 +2503,7 @@ impl Graph<'_> {
                 .find(|e| matches!(e.claim, VersionClaim::Range(_)) && e.requested_id == id);
             claimed
                 .and_then(|e| e.digest.clone())
-                .or_else(|| self.digests.get(&id).cloned())
+                .or_else(|| self.memo.digests.get(&id).cloned())
         });
         Some((digest, shown, target))
     }
@@ -2465,7 +2518,7 @@ impl Graph<'_> {
         if self.holds(key, pin) && self.held_elsewhere(key, pin) && self.carried_from_elsewhere(key, pin) {
             return Evidence::Vouched;
         }
-        if let Some(annotated) = self.evidence.get(&pin.digest()) {
+        if let Some(annotated) = self.memo.evidence.get(&pin.digest()) {
             return self.held_shows(key, pin, evidence(annotated.as_ref(), pin));
         }
         let read = self.nodes.get(key).and_then(|n| n.read.as_ref());
@@ -2735,14 +2788,6 @@ impl Graph<'_> {
             .collect()
     }
 
-    /// The dropped parent's version as this run read its annotation, else its digest.
-    fn dropped_label(&self, digest: &Digest) -> String {
-        match self.evidence.get(digest).and_then(Option::as_ref) {
-            Some(version) => version.to_string(),
-            None => digest.to_short_string(),
-        }
-    }
-
     /// The conflict-form refusal for `key`'s failed line when a version this pass
     /// dropped binds it: without that version's claim, `holds` accepts the line.
     /// The smallest such source names the refusal.
@@ -2756,7 +2801,7 @@ impl Graph<'_> {
         let repo = self.source_repo(key)?;
         let kind = ResolveErrorKind::UnchosenRequirement {
             parent: label(parent),
-            dropped: self.dropped_label(digest),
+            dropped: self.memo.dropped_label(digest),
             claim: tag.clone(),
             shape: Unchosen::Conflict {
                 claims: joined(learned.reqs.requirements()),
@@ -2793,11 +2838,12 @@ impl Graph<'_> {
         }
         let memo = (repo.registry().to_string(), repo.repository().to_string());
         let listed: Vec<String> = self
+            .memo
             .listings
             .get(&memo)
             .map(|listed| listed.iter().map(|(_, tag)| tag.clone()).collect())
             .unwrap_or_default();
-        let resolved = |tag: &String| self.digests.contains_key(&repo.clone_with_tag(tag.as_str()));
+        let resolved = |tag: &String| self.memo.digests.contains_key(&repo.clone_with_tag(tag.as_str()));
         highest_in_line(&listed, rest)
             .into_iter()
             .next()
@@ -2820,40 +2866,6 @@ impl Graph<'_> {
             .or_else(|| self.carry.selected.get(key))
     }
 
-    /// The version this run read `digest` annotated with, else `id`'s tag.
-    fn version_label(&self, digest: &Digest, id: &Identifier) -> String {
-        match self.evidence.get(digest).and_then(Option::as_ref) {
-            Some(version) => version.to_string(),
-            None => id.tag().unwrap_or_default().to_string(),
-        }
-    }
-
-    /// [`Self::version_label`] for the previous pin `held`, which `shown` stands in for
-    /// when it has no tag and no annotation: a version, a span, else its short digest.
-    fn held_label(&self, held: &PinnedIdentifier, shown: &Evidence) -> String {
-        match (self.version_label(&held.digest(), held.as_identifier()), shown) {
-            (label, _) if !label.is_empty() => label,
-            (_, Evidence::Exact(version)) => version.to_string(),
-            (_, Evidence::Span { lo, hi }) => format!(">={lo} <{hi}"),
-            _ => held.digest().to_short_string(),
-        }
-    }
-
-    /// The reference that keeps `held`: by the version tag `from` when the pin records
-    /// it or this run resolved it to the pin's digest, else by digest.
-    fn declare_held(&self, held: &PinnedIdentifier, from: &str) -> String {
-        let repo = held.registry_repository();
-        let resolved = self
-            .digests
-            .iter()
-            .any(|(id, digest)| *digest == held.digest() && id.tag() == Some(from) && id.registry_repository() == repo);
-        if held.tag() == Some(from) || resolved {
-            format!("{repo}:{from}")
-        } else {
-            format!("{repo}@{}", held.digest())
-        }
-    }
-
     /// What the previous pin `held` shows of its version. A manifest the registry or
     /// the store no longer holds shows its tag's shape; a pin that shows nothing
     /// shows what its recorded edges show.
@@ -2864,7 +2876,7 @@ impl Graph<'_> {
         access: &Arc<dyn OciAccess>,
         options: &ResolveOptions,
     ) -> Result<Evidence, ResolveError> {
-        let own = match self.evidence_of(key, held, access, options).await {
+        let own = match self.memo.evidence_of(key, held, access, options).await {
             Ok(Some(shown)) => shown,
             Ok(None) => evidence(None, held),
             Err(err) if is_offline_miss(&err) => evidence(None, held),
@@ -2918,16 +2930,16 @@ impl Graph<'_> {
             let Some((parent, dropped, claim)) = learned.or_else(released_by) else {
                 continue;
             };
-            let from = self.held_label(&held, &shown);
+            let from = self.memo.held_label(&held, &shown);
             let kind = ResolveErrorKind::UnchosenRequirement {
                 parent: label(parent),
-                dropped: self.dropped_label(dropped),
+                dropped: self.memo.dropped_label(dropped),
                 claim: claim.clone(),
                 shape: Unchosen::Move {
                     from: from.clone(),
-                    to: self.version_label(&digest, &id),
+                    to: self.memo.version_label(&digest, &id),
                 },
-                declare: self.declare_held(&held, &from),
+                declare: self.memo.declare_held(&held, &from),
                 fix: String::new(),
             };
             return Ok(Some(ResolveError::new(self.reference_of(&key), kind)));
@@ -2959,7 +2971,7 @@ impl Graph<'_> {
             if !moved || self.line_of(&key).is_any() {
                 continue;
             }
-            let chosen = match evidence(self.evidence.get(&digest).and_then(Option::as_ref), &id) {
+            let chosen = match evidence(self.memo.evidence.get(&digest).and_then(Option::as_ref), &id) {
                 Evidence::Exact(version) | Evidence::Span { lo: version, .. } => version,
                 Evidence::Unknown | Evidence::Vouched => continue,
             };
@@ -2989,7 +3001,7 @@ impl Graph<'_> {
                             format!(
                                 "{} {} (dropped by this resolve)",
                                 label(parent),
-                                self.dropped_label(source)
+                                self.memo.dropped_label(source)
                             )
                         } else {
                             label(parent)
@@ -3006,12 +3018,12 @@ impl Graph<'_> {
                 list.sort();
                 list.dedup();
             }
-            let from = self.held_label(&held, &shown);
+            let from = self.memo.held_label(&held, &shown);
             let kind = ResolveErrorKind::MajorDowngrade {
-                to: self.version_label(&digest, &id),
+                to: self.memo.version_label(&digest, &id),
                 requesters: requesters.join(", "),
                 claim: claims.join(", "),
-                declare: self.declare_held(&held, &from),
+                declare: self.memo.declare_held(&held, &from),
                 from,
                 fix: String::new(),
             };
@@ -3071,7 +3083,7 @@ impl Graph<'_> {
             key: key.clone(),
             line: joined(line.requirements()),
             parent: parent.clone(),
-            dropped: self.dropped_label(dropped),
+            dropped: self.memo.dropped_label(dropped),
             claim: claim.clone(),
         })
     }
@@ -3293,7 +3305,7 @@ impl Graph<'_> {
             if read.from_manifest
                 && let Some(digest) = &read.digest
             {
-                self.evidence.insert(digest.clone(), read.annotated.clone());
+                self.memo.evidence.insert(digest.clone(), read.annotated.clone());
             }
             if let Some(node) = self.nodes.get_mut(&key) {
                 node.read = Some(read);
@@ -3669,7 +3681,7 @@ impl Graph<'_> {
             return None;
         }
         let (lo, _) = self.line_of(key).bounds()?;
-        let annotated = |digest: &Digest| self.evidence.get(digest).and_then(Option::as_ref);
+        let annotated = |digest: &Digest| self.memo.evidence.get(digest).and_then(Option::as_ref);
         let shown = self.held_shows(key, held, evidence(annotated(&held.digest()), held));
         let below = match &shown {
             Evidence::Exact(version) => *version < lo,
@@ -3696,7 +3708,7 @@ impl Graph<'_> {
         requesters.dedup();
         Some(GraphWarning::RaisedBound {
             key: key.clone(),
-            from: self.held_label(held, &shown),
+            from: self.memo.held_label(held, &shown),
             to,
             requesters,
         })
@@ -3919,19 +3931,15 @@ impl<'a> Graph<'a> {
             unattested: BTreeSet::new(),
             confirmed: BTreeSet::new(),
             missed_offline: BTreeSet::new(),
-            digests: BTreeMap::new(),
+            memo: RegistryMemo::default(),
             reads: Reads::default(),
             transitive: 0,
             bytes: 0,
-            evidence: BTreeMap::new(),
-            prefetched: BTreeMap::new(),
-            listings: BTreeMap::new(),
             learned: BTreeMap::new(),
             candidates: BTreeMap::new(),
             waiting: BTreeSet::new(),
             unlisted: BTreeMap::new(),
             postponed: Vec::new(),
-            missing: BTreeSet::new(),
             deferred: BTreeSet::new(),
             mixed: BTreeSet::new(),
             twice: BTreeSet::new(),
@@ -3939,7 +3947,6 @@ impl<'a> Graph<'a> {
             last: false,
             work: 0,
             passes: 0,
-            listing_bytes: 0,
         }
     }
 
@@ -3949,14 +3956,14 @@ impl<'a> Graph<'a> {
     /// kept walk never reads.
     fn kept_walk(&self, confirmable: BTreeSet<NodeKey>) -> Graph<'a> {
         let mut kept = Graph::new(self.carry);
-        kept.digests.clone_from(&self.digests);
-        kept.missing.clone_from(&self.missing);
+        kept.memo.digests.clone_from(&self.memo.digests);
+        kept.memo.missing.clone_from(&self.memo.missing);
         kept.deferred.clone_from(&self.deferred);
-        kept.evidence.clone_from(&self.evidence);
-        kept.listings.clone_from(&self.listings);
+        kept.memo.evidence.clone_from(&self.memo.evidence);
+        kept.memo.listings.clone_from(&self.memo.listings);
         kept.work = self.work;
         kept.passes = self.passes;
-        kept.listing_bytes = self.listing_bytes;
+        kept.memo.listing_bytes = self.memo.listing_bytes;
         kept.attested.clone_from(&confirmable);
         kept.confirmed = confirmable;
         kept
@@ -4020,13 +4027,13 @@ impl<'a> Graph<'a> {
                     NodeClaim::Range(claim) => claim.registry_repository() == held.registry_repository(),
                     _ => false,
                 });
-                (ranged && !self.evidence.contains_key(&held.digest())).then(|| (key.clone(), held.clone()))
+                (ranged && !self.memo.evidence.contains_key(&held.digest())).then(|| (key.clone(), held.clone()))
             })
             .collect();
         let pins = unread.iter().map(|(_, pin)| pin.clone()).collect();
-        self.prefetch_evidence(pins, access, options).await;
+        self.memo.prefetch_evidence(pins, access, options).await;
         for (key, pin) in unread {
-            match self.evidence_of(&key, &pin, access, options).await {
+            match self.memo.evidence_of(&key, &pin, access, options).await {
                 Err(err) if is_offline_miss(&err) => {
                     self.missed_offline.insert(key);
                 }
@@ -4034,7 +4041,7 @@ impl<'a> Graph<'a> {
                 Ok(_) => {}
             }
         }
-        self.prefetched.clear();
+        self.memo.prefetched.clear();
         Ok(())
     }
 
@@ -4127,7 +4134,7 @@ impl<'a> Graph<'a> {
         let mut again = false;
         for (key, digest, target) in retags {
             let line = self.line_of(&key);
-            let at = match self.tag_in_line(&key, &target, &line, access, options).await {
+            let at = match self.memo.tag_in_line(&key, &target, &line, access, options).await {
                 Ok(at) => at,
                 Err(err) if is_offline_miss(&err) => None,
                 Err(err) => {
@@ -8648,7 +8655,7 @@ mod tests {
         assert_eq!(fake.reads_of(&x), 2, "x and y each read the manifest");
         let one = Some(Version::new(1, 0, 0));
         let expected = BTreeMap::from([(x, Some(Version::new(2, 1, 0))), (z, None), (a, one.clone()), (b, one)]);
-        assert_eq!(graph.evidence, expected);
+        assert_eq!(graph.memo.evidence, expected);
     }
 
     /// A line walk's memos, with a listing, a learned line and an admission count set.
@@ -8669,6 +8676,7 @@ mod tests {
         );
         let repository = ("ghcr.io".to_string(), "acme/x".to_string());
         graph
+            .memo
             .listings
             .insert(repository, vec![(Version::new(2, 1, 0), "2.1.0".to_string())]);
         graph.work = 7;
@@ -8681,9 +8689,9 @@ mod tests {
     async fn restart_keeps_the_memos() {
         let carry = Carry::default();
         let mut graph = walked_with_memos(&carry).await;
-        let digests = graph.digests.clone();
-        let evidence = graph.evidence.clone();
-        let listings = graph.listings.clone();
+        let digests = graph.memo.digests.clone();
+        let evidence = graph.memo.evidence.clone();
+        let listings = graph.memo.listings.clone();
         let learned = graph.learned.clone();
         assert!(!graph.nodes.is_empty() && !evidence.is_empty() && graph.transitive > 0);
 
@@ -8691,9 +8699,9 @@ mod tests {
 
         assert!(graph.nodes.is_empty());
         assert_eq!((graph.transitive, graph.bytes), (0, 0));
-        assert_eq!(graph.digests, digests);
-        assert_eq!(graph.evidence, evidence);
-        assert_eq!(graph.listings, listings);
+        assert_eq!(graph.memo.digests, digests);
+        assert_eq!(graph.memo.evidence, evidence);
+        assert_eq!(graph.memo.listings, listings);
         assert_eq!(graph.learned, learned);
         assert_eq!(graph.work, 7);
     }
@@ -8709,9 +8717,9 @@ mod tests {
 
         let kept = graph.kept_walk(confirmable.clone());
 
-        assert_eq!(kept.digests, graph.digests);
-        assert_eq!(kept.evidence, graph.evidence);
-        assert_eq!(kept.listings, graph.listings);
+        assert_eq!(kept.memo.digests, graph.memo.digests);
+        assert_eq!(kept.memo.evidence, graph.memo.evidence);
+        assert_eq!(kept.memo.listings, graph.memo.listings);
         assert_eq!(kept.work, 7, "one admission count per run");
         assert!(!graph.learned.is_empty() && kept.learned.is_empty());
         assert!(kept.nodes.is_empty());
@@ -8909,10 +8917,10 @@ mod tests {
         assert_eq!((second.tag(), second.digest()), (Some("1.3"), digests[1].clone()));
         assert_eq!(fake.listing_reads.load(Ordering::SeqCst), 1);
         assert_eq!(
-            graph.listing_bytes,
+            graph.memo.listing_bytes,
             tag_cost("1") + tag_cost("1.2") + tag_cost("1.3") + TAG_PAGE_COST
         );
-        let memo = &graph.listings[&("ghcr.io".to_string(), "acme/x".to_string())];
+        let memo = &graph.memo.listings[&("ghcr.io".to_string(), "acme/x".to_string())];
         assert_eq!(
             memo,
             &vec![
@@ -8931,12 +8939,12 @@ mod tests {
         let carry = Carry::default();
         let mut graph = Graph::new(&carry);
         // The listing of `1` and `1.2` charges one byte past what the run has left.
-        graph.listing_bytes = MAX_LISTING_BYTES - (tag_cost("1") + tag_cost("1.2") + TAG_PAGE_COST - 1);
+        graph.memo.listing_bytes = MAX_LISTING_BYTES - (tag_cost("1") + tag_cost("1.2") + TAG_PAGE_COST - 1);
 
         let err = pick(&mut graph, &access, &ladder_line(&["^1.2"])).await.unwrap_err();
 
         assert_eq!(too_large(&err), (GraphLimit::ListingBytes, LADDER_REPO.to_string()));
-        assert!(graph.listings.is_empty(), "a listing past the budget is not kept");
+        assert!(graph.memo.listings.is_empty(), "a listing past the budget is not kept");
         assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
     }
 
@@ -8980,8 +8988,8 @@ mod tests {
         let err = pick(&mut graph, &access, &ladder_line(&["^2.5"])).await.unwrap_err();
 
         assert_eq!(too_large(&err), (GraphLimit::ListingBytes, LADDER_REPO.to_string()));
-        assert!(graph.listings.is_empty(), "a cut listing is not kept");
-        assert_eq!(graph.listing_bytes, 0, "a cut listing charges nothing");
+        assert!(graph.memo.listings.is_empty(), "a cut listing is not kept");
+        assert_eq!(graph.memo.listing_bytes, 0, "a cut listing charges nothing");
         assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
     }
 
