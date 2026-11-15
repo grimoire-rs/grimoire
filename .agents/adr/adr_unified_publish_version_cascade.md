@@ -8,6 +8,7 @@
 **Domain Tags:** api, cli
 **Supersedes:** the `--tag` non-semver rule (publish ADR "D1") and the
 channel-tag always-move amendment (publish ADR "D3") for `grim publish`
+**Amended by:** .agents/adr/adr_dependency_version_claims.md (Accepted) — Decision 9: a cascade float (`X.Y`, `X`, `latest`) never moves to a lower version than the one it names; reports gain `floats_kept`; `--force` still moves the exact tag only
 
 ## Context
 
