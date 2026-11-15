@@ -109,6 +109,8 @@ pub struct TuiContext {
     pub access: Arc<dyn OciAccess>,
     /// Whether this invocation is offline (degrade, never crash).
     pub offline: bool,
+    /// `--locked`: a lock-writing action refuses an out-of-sync lock.
+    pub locked: bool,
     /// Whether the initial catalog load force-rebuilds even a fresh cache
     /// (the `--refresh` flag). The interactive `r` key always forces a
     /// reload regardless of this; this governs only the first load.
@@ -3032,6 +3034,17 @@ fn config_guard(ctx: &TuiContext) -> anyhow::Result<ConfigFileLock> {
     ))
 }
 
+/// Under `--locked`, refuse an action that writes the lock when the lock is
+/// missing or no longer matches the declaration on disk; reads nothing
+/// without the flag. Called under [`config_guard`], before any write.
+fn require_in_line(ctx: &TuiContext) -> anyhow::Result<()> {
+    if !ctx.locked {
+        return Ok(());
+    }
+    let (_options, _registries, set) = load_scope_declaration(ctx)?;
+    crate::command::lock::require_in_line_at(&ctx.lock_path, &set, &ctx.invocation)
+}
+
 /// What a row's delete has to report.
 #[derive(Debug, Default)]
 struct Deleted {
@@ -3088,6 +3101,7 @@ async fn perform_uninstall(
     // (between the gate decision and the undeclare) would orphan the kept
     // files. Held to function end.
     let _guard = config_guard(ctx)?;
+    require_in_line(ctx)?;
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
 
     // The install-state records this row owns: itself for a skill/rule;
@@ -3197,6 +3211,7 @@ async fn perform_local_uninstall(
     // Hold the config flock for the whole read-modify-write (file deletion +
     // undeclare see one declaration snapshot), matching the registry path.
     let _guard = config_guard(ctx)?;
+    require_in_line(ctx)?;
 
     let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     // A view another grim outdated still shows the row after its name was bound
@@ -3344,6 +3359,7 @@ async fn perform(
     // The declaration is re-read fresh under the config flock: the config can
     // change while the TUI runs.
     let _guard = config_guard(ctx)?;
+    require_in_line(ctx)?;
     let (options, registries, mut set) = load_scope_declaration(ctx)?;
     let before = set.clone();
     // The lock is judged before anything is written, so a refusal leaves the
@@ -4272,6 +4288,7 @@ async fn perform_local_declared(
     ledger: &mut SettingsLedger,
 ) -> anyhow::Result<InstallSummary> {
     let _guard = config_guard(ctx)?;
+    require_in_line(ctx)?;
     let (_options, _registries, set) = load_scope_declaration(ctx)?;
     let previous = load_previous(&ctx.lock_path)?;
     let prior = previous.as_ref().map(|lock| Prior::checked(lock, &set));
@@ -6332,6 +6349,7 @@ async fn perform_member_uninstall(
     // `grim remove` between the gate and the undeclare could orphan the kept
     // files). Held to function end.
     let _guard = config_guard(ctx)?;
+    require_in_line(ctx)?;
 
     // Delete materialized files + drop the install-state record — UNLESS a
     // declared bundle provides this artifact, in which case the files stay (it
@@ -7357,6 +7375,7 @@ mod tests {
             primary_registry: primary.to_string(),
             access,
             offline: false,
+            locked: false,
             force_refresh: false,
             scope: ConfigScope::Project,
             invocation: crate::config::scope::Invocation::WALKED,
@@ -8501,6 +8520,7 @@ mod tests {
             primary_registry: "localhost:5050".to_string(),
             access,
             offline: false,
+            locked: false,
             force_refresh: false,
             scope: ConfigScope::Project,
             invocation: crate::config::scope::Invocation::WALKED,
@@ -12988,6 +13008,46 @@ mod tests {
         assert!(state.get(ArtifactKind::Skill, "d").is_none());
     }
 
+    /// Under `--locked`, an Install over a lock the declaration moved on from
+    /// refuses before any write, as `grim add --locked` does.
+    #[tokio::test]
+    async fn a_locked_install_on_a_stale_lock_refuses_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        let config = workspace.join("grimoire.toml");
+        std::fs::write(&config, "[skills]\n\n[rules]\n").unwrap();
+        let mut ctx = test_ctx(workspace, registry_with_dependency().await);
+        perform(&ctx, &dependent_row(), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect("install s");
+        let edited = std::fs::read_to_string(&config).unwrap().replacen(
+            "[skills]\n",
+            "[skills]\nhand = \"localhost:5050/acme/d:1\"\n",
+            1,
+        );
+        std::fs::write(&config, edited).unwrap();
+        let lock = ctx.lock_path.clone();
+        let files = || (std::fs::read(&config).unwrap(), std::fs::read(&lock).unwrap());
+        let before = files();
+
+        ctx.locked = true;
+        let mut row = installed_row("localhost:5050/acme/d");
+        row.latest_tag = "1".to_string();
+        row.state = ArtifactState::NotInstalled;
+        let err = perform(&ctx, &row, None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect_err("a stale lock refuses under --locked");
+
+        let class = crate::error::classify(&err);
+        assert_eq!(class.exit, crate::cli::exit_code::ExitCode::DataError, "{err:#}");
+        assert_eq!(class.reason, Some(crate::error::ErrorReason::StaleLock), "{err:#}");
+        assert!(
+            format!("{err:#}").ends_with("run `grim lock` without --locked or GRIM_LOCKED, then this command again"),
+            "{err:#}"
+        );
+        assert_eq!(files(), before, "the refusal wrote nothing");
+    }
+
     /// `p`, declared by hand after the last lock, requires `m`: the lock on disk
     /// has no row for `p`, but the relock resolves it and keeps `m`'s pin.
     #[tokio::test]
@@ -13197,6 +13257,55 @@ mod tests {
         let state = delete_row_a(&ctx).await;
 
         assert_eq!(state.status_line, "uninstalled (1 ok)");
+    }
+
+    /// The `--locked` refusal: 65 `stale-lock`, with the remedy only that refusal names.
+    fn assert_refused_as_locked(err: &anyhow::Error) {
+        let class = crate::error::classify(err);
+        assert_eq!(class.exit, crate::cli::exit_code::ExitCode::DataError, "{err:#}");
+        assert_eq!(class.reason, Some(crate::error::ErrorReason::StaleLock), "{err:#}");
+        assert!(
+            format!("{err:#}").ends_with("run `grim lock` without --locked or GRIM_LOCKED, then this command again"),
+            "{err:#}"
+        );
+    }
+
+    /// Under `--locked`, a delete over a lock a hand edit left behind refuses
+    /// before its relock brings the lock into line, as `grim uninstall --locked` does.
+    #[tokio::test]
+    async fn a_locked_delete_on_a_stale_lock_refuses_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = project_with_a_hand_declared_line(tmp.path(), true).await;
+        let skill = ".claude/skills/a/SKILL.md";
+        let before = delete_witness(&ctx, &[skill]);
+        assert!(before.iter().all(Option::is_some), "every witness exists");
+
+        ctx.locked = true;
+        let err = perform_uninstall(&ctx, &installed_row("localhost:5050/acme/a"))
+            .await
+            .expect_err("a stale lock refuses under --locked");
+
+        assert_refused_as_locked(&err);
+        assert_eq!(delete_witness(&ctx, &[skill]), before, "the refusal wrote nothing");
+    }
+
+    /// Under `--locked`, an Update over a lock a hand edit left behind refuses with
+    /// the `--locked` remedy, as `grim update --locked <name>` does.
+    #[tokio::test]
+    async fn a_locked_update_on_a_stale_lock_refuses_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = project_with_a_hand_declared_line(tmp.path(), true).await;
+        let skill = ".claude/skills/a/SKILL.md";
+        let before = delete_witness(&ctx, &[skill]);
+        assert!(before.iter().all(Option::is_some), "every witness exists");
+
+        ctx.locked = true;
+        let err = perform(&ctx, &skill_row("a"), None, BatchOp::Update, &SilentProgress, false)
+            .await
+            .expect_err("a stale lock refuses under --locked");
+
+        assert_refused_as_locked(&err);
+        assert_eq!(delete_witness(&ctx, &[skill]), before, "the refusal wrote nothing");
     }
 
     /// An offline store holding everything its registry holds: it answers by
@@ -15600,6 +15709,7 @@ mod tests {
             primary_registry: "localhost:5050".to_string(),
             access: Arc::new(MemoryRegistry::new()),
             offline: false,
+            locked: false,
             force_refresh: false,
             scope: ConfigScope::Project,
             invocation: crate::config::scope::Invocation::WALKED,
@@ -19380,6 +19490,7 @@ mod p2_app_member_node_tests {
             primary_registry: "localhost:5050".to_string(),
             access,
             offline: false,
+            locked: false,
             force_refresh: false,
             scope: ConfigScope::Project,
             invocation: crate::config::scope::Invocation::WALKED,

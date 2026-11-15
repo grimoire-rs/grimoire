@@ -140,7 +140,9 @@ To verify a pre-built grim release archive's build provenance:
 > hooks, or that workspace's hooks stay quiet.
 >
 > **Global flags** apply to every subcommand — `--format`, `--global` (`-g`),
-> `--config`, `--registry`, `--offline`, `--log-level`, and `--color
+> `--config`, `--registry`, `--offline`, `--locked` (or `GRIM_LOCKED=1`: a
+command that writes a lock refuses, exit 65, when the lock is out of sync with
+its manifest), `--log-level`, and `--color
 > <auto|always|never>` (default `auto` colorizes clap's help/error output
 > and `--format json` only when stdout is a terminal; `--color always`
 > colorizes unconditionally, so never pass it into a pipeline that parses

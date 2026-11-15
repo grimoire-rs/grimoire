@@ -170,6 +170,23 @@ $ echo $?
 0
 ```
 
+## Refuse a stale lock on every lock-writing command {#locked}
+
+`grim install` already refuses a stale lock. A job that runs a command that
+writes the lock, such as `grim add` or `grim lock`, would instead repair a lock
+that drifted and carry on. Set `GRIM_LOCKED=1` once for the job, or pass
+`--locked` to those commands, and they refuse with exit `65` instead. A missing
+lock exits `79`. The check reads the lock before the run, so the command's own
+edit still updates it. Fix the drift on a branch with a plain `grim lock`, then
+commit the lock. See [`--locked`](../commands.md#locked).
+
+```yaml
+    env:
+      GRIM_LOCKED: "1"
+```
+
+Put the `env:` block on the job, beside `runs-on`.
+
 ## Confirm the install is frozen
 
 A moved tag does not move what CI installs. Publishing `1.0.1` repoints the

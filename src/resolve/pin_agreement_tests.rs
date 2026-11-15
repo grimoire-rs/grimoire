@@ -3334,6 +3334,7 @@ impl World {
             &self.access,
             IncludeOrigin::Declared,
             false,
+            false,
             Downgrade::Refuse,
         )
         .await;

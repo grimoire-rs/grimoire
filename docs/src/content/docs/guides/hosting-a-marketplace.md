@@ -952,6 +952,15 @@ prove where the pins came from. A pull request can swap a pin's repository
 or digest, regenerate the trees to match, and pass. The `marketplace.lock`
 diff is the review surface, so put it under [code owners](#protect).
 
+Set `GRIM_LOCKED=1` in the `verify` job's environment, or pass `--locked` to
+its `grim export marketplace`. The check then refuses a lock that drifted
+instead of regenerating it. A `marketplace.lock` that no longer covers
+`marketplace.toml` then exits `65`, naming the plugin and the
+`grim update --marketplace` run that repairs it. Nothing is written. The
+workflow above leaves the variable unset, so add it yourself. Leave it unset
+in the [regenerate workflow](#regenerate), whose job is to repair that drift.
+See [`--locked`](../commands.md#locked).
+
 ### The curator two-step {#two-step}
 
 A pull request that edits only `marketplace.toml` fails this check. The

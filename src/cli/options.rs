@@ -78,6 +78,12 @@ pub struct GlobalOptions {
     #[arg(long, global = true)]
     pub offline: bool,
 
+    /// Refuse to run when grimoire.lock or marketplace.lock no longer
+    /// matches its manifest, or is missing; nothing is written. A command's
+    /// own edit still updates the lock.
+    #[arg(long, global = true)]
+    pub locked: bool,
+
     /// Override the tracing log level: `off`, `error`, `warn`, `info`, `debug`
     /// or `trace`. Wins over `GRIM_LOG`.
     #[arg(long, global = true)]

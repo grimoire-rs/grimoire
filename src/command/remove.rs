@@ -76,6 +76,7 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
         None => None,
     };
+    super::lock::require_in_line(ctx, &scope)?;
 
     let set_before = scope.set.clone();
     let mut set = scope.set.clone();

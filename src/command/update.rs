@@ -134,6 +134,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
         None => None,
     };
+    super::lock::require_in_line(ctx, &scope)?;
 
     // `update` re-resolves floating tags. The default online seam already
     // resolves fresh from the registry (never the cached pin), so the plain
@@ -1176,6 +1177,7 @@ async fn run_marketplace(
         &access,
         IncludeOrigin::Declared,
         ctx.offline(),
+        ctx.locked(),
         downgrade,
     )
     .await?;

@@ -155,6 +155,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
         None => None,
     };
+    super::lock::require_in_line(ctx, &scope)?;
 
     // A `./`/`../`-prefixed or absolute reference is a local path source —
     // declared verbatim, pinned by content hash, no registry round-trip.

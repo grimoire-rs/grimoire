@@ -15,6 +15,8 @@ const GRIM_HOME: &str = "GRIM_HOME";
 const GRIM_DEFAULT_REGISTRY: &str = "GRIM_DEFAULT_REGISTRY";
 /// Environment variable that, when truthy, disables all network access.
 const GRIM_OFFLINE: &str = "GRIM_OFFLINE";
+/// Environment variable that, when truthy, refuses a run on an out-of-sync lock.
+const GRIM_LOCKED: &str = "GRIM_LOCKED";
 /// Environment variable that, when truthy, arms opt-in usage telemetry.
 const GRIM_TELEMETRY: &str = "GRIM_TELEMETRY";
 /// Environment variable holding the platform path list of config layer files.
@@ -55,6 +57,12 @@ pub fn default_registry() -> Option<String> {
 /// Whether offline mode is requested via `$GRIM_OFFLINE`.
 pub fn offline() -> bool {
     truthy(GRIM_OFFLINE)
+}
+
+/// Whether `--locked` is requested via `$GRIM_LOCKED`. It only makes a run
+/// stricter, so a repository-carried environment cannot loosen anything.
+pub fn locked() -> bool {
+    truthy(GRIM_LOCKED)
 }
 
 /// Raw `$GRIM_CONFIG` path list; unset or blank yields `None`.

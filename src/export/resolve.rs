@@ -338,13 +338,16 @@ pub(crate) fn declare_failure(
 /// `Reconcile` relocks whole with nothing refreshed, and a member pick relocks a fresh
 /// part for those names alone. No registry is contacted before every pick is found in
 /// `m` and every member pick's part is fresh. Bundle pins come back in memory as well,
-/// since a saved part keeps them only in its stamps (`<tag>@<digest>`).
+/// since a saved part keeps them only in its stamps (`<tag>@<digest>`). With `locked`, a
+/// declared run refuses before any registry read when its lock is out of line with `m`.
 ///
 /// # Errors
 ///
 /// `SelectorNotFound` (79) for a plugin `m` lacks or a member the relocked part lacks,
 /// `MemberConflict` (78), the resolver's `StaleLock` (65) for a member pick on a
-/// stale part, `MarketplacePinGone` (79), and every resolver, access and declare
+/// stale part or, with `locked`, for any declared plugin whose part is stale or
+/// missing, then any part `m` no longer declares, `MarketplacePinGone` (79), and every
+/// resolver, access and declare
 /// failure with its existing classification.
 #[expect(
     clippy::too_many_arguments,
@@ -358,6 +361,7 @@ pub async fn resolve_marketplace(
     access: &Arc<dyn OciAccess>,
     origin: IncludeOrigin,
     offline: bool,
+    locked: bool,
     downgrade: Downgrade,
 ) -> Result<MarketplaceResolution, Error> {
     // 1. Hashes, then the selection against `m` — no network yet. An ad-hoc hash
@@ -380,6 +384,17 @@ pub async fn resolve_marketplace(
         .into());
     }
     let part_of = |p: &str| previous.and_then(|l| l.plugins.get(p));
+    // An ad-hoc manifest has no lock to be out of line with. A part of a plugin `m`
+    // no longer declares is out of line too, since the run would drop it.
+    if locked && origin == IncludeOrigin::Declared {
+        if let Some(plugin) = m.plugins.keys().find(|p| is_stale(p, previous, &hashes)) {
+            return Err(out_of_line(&m.path, plugin, part_of(plugin), &hashes.per_plugin[plugin]).into());
+        }
+        let mut parts = previous.into_iter().flat_map(|l| &l.plugins);
+        if let Some((plugin, part)) = parts.find(|(p, _)| !m.plugins.contains_key(*p)) {
+            return Err(out_of_line(&m.path, plugin, Some(part), "").into());
+        }
+    }
 
     // 3. A member pick needs a fresh part. A stale one refuses here, before step 4
     //    builds a set or reads a tag, so the refusal touches no registry.
@@ -639,10 +654,27 @@ pub async fn resolve_marketplace(
 /// The command that rolls the whole of `plugin` forward, backticked. A plugin
 /// name is one shell word by its grammar; the manifest path may need quoting.
 pub(crate) fn update_command(manifest: &Path, plugin: &str) -> String {
-    format!(
-        "`grim update --marketplace {} {plugin}`",
-        shell_word(&manifest.to_string_lossy())
-    )
+    format!("`{} {plugin}`", update_marketplace(manifest))
+}
+
+/// `grim update --marketplace <manifest>`, the path quoted for the shell.
+fn update_marketplace(manifest: &Path) -> String {
+    format!("grim update --marketplace {}", shell_word(&manifest.to_string_lossy()))
+}
+
+/// `--locked`'s refusal of `plugin`, whose `part` is stale or missing, or, with
+/// `current` empty, outlived the plugin's declaration. The retry is the bare
+/// marketplace update, run without the flag, since with it that refuses too.
+fn out_of_line(manifest: &Path, plugin: &str, part: Option<&GrimoireLock>, current: &str) -> ResolveError {
+    let kind = ResolveErrorKind::StaleLock {
+        previous_hash: part.map(|p| p.metadata.declaration_hash.clone()).unwrap_or_default(),
+        current_hash: current.to_string(),
+        retry: format!(
+            "`{}` without --locked or GRIM_LOCKED, then this command again",
+            update_marketplace(manifest)
+        ),
+    };
+    ResolveError::unidentified(ArtifactKind::Skill, plugin, kind)
 }
 
 /// Warn about each row a member pick kept with no tag in a part whose stamps record a
@@ -1040,6 +1072,7 @@ mod tests {
             &scope(),
             access,
             IncludeOrigin::Declared,
+            false,
             false,
             Downgrade::Refuse,
         )
@@ -1682,6 +1715,232 @@ mod tests {
         assert_eq!(counter.calls(), 0, "refused before any DesiredSet is built");
     }
 
+    // ── --locked: a stale or missing part refuses ─────────────────
+
+    async fn resolve_locked(
+        m: &MarketplaceManifest,
+        previous: Option<&MarketplaceLock>,
+        selection: &PluginSelection,
+        access: &Arc<dyn OciAccess>,
+        origin: IncludeOrigin,
+    ) -> Result<MarketplaceResolution, Error> {
+        resolve_marketplace(
+            m,
+            previous,
+            selection,
+            &scope(),
+            access,
+            origin,
+            false,
+            true,
+            Downgrade::Refuse,
+        )
+        .await
+    }
+
+    /// The refusal's retry: the bare update, which itself must run without the flag.
+    fn locked_retry(m: &MarketplaceManifest) -> String {
+        format!(
+            "run `grim update --marketplace {}` without --locked or GRIM_LOCKED, then this command again",
+            shell_word(&m.path.to_string_lossy())
+        )
+    }
+
+    #[tokio::test]
+    async fn locked_refuses_a_stale_part_before_any_registry_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = market(&tmp.path().join("marketplace.toml"), &[("a", &["acme/x:1"])]);
+        let stale = lock_with_parts("sha256:w", &[("a", "sha256:old")]);
+        let current = declaration_hashes(&m, &scope()).unwrap().per_plugin["a"].clone();
+        let (counter, access) = no_network();
+
+        let err = resolve_locked(&m, Some(&stale), &whole(&["a"]), &access, IncludeOrigin::Declared)
+            .await
+            .expect_err("a stale part refuses");
+
+        assert!(
+            matches!(&err, Error::Resolve(re) if matches!(&re.kind,
+                ResolveErrorKind::StaleLock { previous_hash, current_hash, .. }
+                    if previous_hash == "sha256:old" && *current_hash == current)),
+            "{err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.starts_with("'a': "), "{text}");
+        assert!(text.ends_with(&locked_retry(&m)), "{text}");
+        let c = classified(err);
+        assert_eq!((c.exit, c.reason), (ExitCode::DataError, Some(ErrorReason::StaleLock)));
+        assert_eq!(counter.calls(), 0, "refused before any registry read");
+    }
+
+    #[tokio::test]
+    async fn locked_refuses_a_declared_plugin_with_no_part() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = market(
+            &tmp.path().join("marketplace.toml"),
+            &[("a", &["acme/x:1"]), ("c", &["acme/c:1"])],
+        );
+        let h = declaration_hashes(&m, &scope()).unwrap();
+        let previous = lock_with_parts(&h.whole, &[("a", &h.per_plugin["a"])]);
+        let (counter, access) = no_network();
+
+        let err = resolve_locked(&m, Some(&previous), &whole(&["a"]), &access, IncludeOrigin::Declared)
+            .await
+            .expect_err("c has no part");
+
+        let text = err.to_string();
+        assert!(text.starts_with("'c': "), "{text}");
+        assert!(text.contains("(lock hash none, declared hash "), "{text}");
+        assert!(text.ends_with(&locked_retry(&m)), "{text}");
+        assert_eq!(classified(err).reason, Some(ErrorReason::StaleLock));
+        assert_eq!(counter.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn locked_refuses_with_no_lock_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = market(
+            &tmp.path().join("marketplace.toml"),
+            &[("a", &["acme/x:1"]), ("b", &["acme/y:1"])],
+        );
+        let (counter, access) = no_network();
+
+        let err = resolve_locked(&m, None, &PluginSelection::All, &access, IncludeOrigin::Declared)
+            .await
+            .expect_err("no lock");
+
+        let text = err.to_string();
+        assert!(
+            text.starts_with("'a': "),
+            "the first plugin in the manifest's order: {text}"
+        );
+        assert_eq!(classified(err).exit, ExitCode::DataError);
+        assert_eq!(counter.calls(), 0);
+    }
+
+    /// Every declared plugin counts, so a stale one the run does not pick still refuses,
+    /// a run that would carry the lock unchanged included.
+    #[tokio::test]
+    async fn locked_refuses_a_stale_plugin_the_run_does_not_pick() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = market(
+            &tmp.path().join("marketplace.toml"),
+            &[("a", &["acme/x:1"]), ("b", &["acme/y:1"])],
+        );
+        let h = declaration_hashes(&m, &scope()).unwrap();
+        let previous = lock_with_parts(&h.whole, &[("a", &h.per_plugin["a"]), ("b", "sha256:old")]);
+        let (counter, access) = no_network();
+
+        for selection in [
+            whole(&["a"]),
+            PluginSelection::Some(BTreeMap::from([("a".to_string(), members(&["x"]))])),
+            PluginSelection::Some(BTreeMap::new()),
+            PluginSelection::Reconcile(BTreeSet::new()),
+        ] {
+            let err = resolve_locked(&m, Some(&previous), &selection, &access, IncludeOrigin::Declared)
+                .await
+                .expect_err("b is stale");
+            assert!(err.to_string().starts_with("'b': "), "{selection:?}: {err}");
+        }
+        assert_eq!(counter.calls(), 0);
+    }
+
+    /// A part for a plugin the manifest no longer declares is out of line too: the
+    /// run would drop it. Declared plugins refuse first, then such parts.
+    #[tokio::test]
+    async fn locked_refuses_a_part_the_manifest_no_longer_declares() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = market(&tmp.path().join("marketplace.toml"), &[("a", &["acme/x:1"])]);
+        let h = declaration_hashes(&m, &scope()).unwrap();
+        let previous = lock_with_parts(
+            &h.whole,
+            &[
+                ("a", &h.per_plugin["a"]),
+                ("gone", "sha256:gone"),
+                ("old", "sha256:old"),
+            ],
+        );
+        let (counter, access) = no_network();
+
+        for selection in [whole(&["a"]), PluginSelection::Some(BTreeMap::new())] {
+            let err = resolve_locked(&m, Some(&previous), &selection, &access, IncludeOrigin::Declared)
+                .await
+                .expect_err("`gone` is no longer declared");
+            assert!(
+                matches!(&err, Error::Resolve(re) if matches!(&re.kind,
+                    ResolveErrorKind::StaleLock { previous_hash, current_hash, .. }
+                        if previous_hash == "sha256:gone" && current_hash.is_empty())),
+                "{err:?}"
+            );
+            let text = err.to_string();
+            assert!(text.starts_with("'gone': "), "the first such part in order: {text}");
+            assert!(text.contains("(lock hash sha256:gone, declared hash none)"), "{text}");
+            assert!(text.ends_with(&locked_retry(&m)), "{text}");
+            let c = classified(err);
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, Some(ErrorReason::StaleLock)));
+        }
+
+        let stale = lock_with_parts(&h.whole, &[("a", "sha256:a-old"), ("gone", "sha256:gone")]);
+        let err = resolve_locked(&m, Some(&stale), &whole(&["a"]), &access, IncludeOrigin::Declared)
+            .await
+            .expect_err("`a` is stale");
+        assert!(err.to_string().starts_with("'a': "), "a declared plugin first: {err}");
+        assert_eq!(counter.calls(), 0, "refused before any registry read");
+
+        let r = resolve(&m, Some(&previous), &PluginSelection::Some(BTreeMap::new()), &access)
+            .await
+            .expect("without the flag the run drops the part");
+        assert_eq!(r.lock.plugins.keys().collect::<Vec<_>>(), ["a"]);
+        assert_eq!(counter.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn locked_on_a_lock_in_line_is_the_run_without_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        publish_skill(&reg, "localhost:5000/acme/x:1", "v1").await;
+        publish_skill(&reg, "localhost:5000/acme/y:1", "v1").await;
+        let access = access_over(&reg);
+        let m = market(
+            &tmp.path().join("marketplace.toml"),
+            &[("a", &["acme/x:1"]), ("b", &["acme/y:1"])],
+        );
+        let previous = resolve(&m, None, &PluginSelection::All, &access).await.unwrap().lock;
+        let undated = |mut lock: MarketplaceLock| {
+            lock.metadata.generated_at.clear();
+            for part in lock.plugins.values_mut() {
+                part.metadata.generated_at.clear();
+            }
+            lock
+        };
+
+        for selection in [
+            whole(&["a"]),
+            PluginSelection::Some(BTreeMap::new()),
+            PluginSelection::All,
+        ] {
+            let without = resolve(&m, Some(&previous), &selection, &access).await.unwrap();
+            let with = resolve_locked(&m, Some(&previous), &selection, &access, IncludeOrigin::Declared)
+                .await
+                .expect("an in-line lock passes");
+            assert_eq!(undated(with.lock), undated(without.lock), "{selection:?}");
+            assert_eq!(with.bundle_pins, without.bundle_pins, "{selection:?}");
+        }
+    }
+
+    /// An ad-hoc manifest lives in memory and has no lock to be out of line with.
+    #[tokio::test]
+    async fn locked_never_refuses_an_ad_hoc_export() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill(tmp.path(), "sa", "v1");
+        let m = market(&tmp.path().join("sa.toml"), &[("sa", &["./skills/sa"])]);
+        let access = access_over(&MemoryRegistry::new());
+
+        let r = resolve_locked(&m, None, &PluginSelection::All, &access, IncludeOrigin::AdHoc)
+            .await
+            .expect("an ad-hoc export resolves");
+        assert_eq!(pins(part(&r, "sa")).keys().collect::<Vec<_>>(), ["sa"]);
+    }
+
     #[tokio::test]
     async fn c033_stale_refusal_names_the_locked_member_with_its_real_kind() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1778,6 +2037,7 @@ mod tests {
             &scope(),
             &access,
             IncludeOrigin::Declared,
+            false,
             false,
             Downgrade::Refuse,
         )
@@ -2219,6 +2479,7 @@ mod tests {
             &access,
             IncludeOrigin::Declared,
             true,
+            false,
             Downgrade::Refuse,
         )
         .await
@@ -2261,6 +2522,7 @@ mod tests {
             access,
             IncludeOrigin::Declared,
             true,
+            false,
             Downgrade::Refuse,
         )
         .await?;
@@ -2450,6 +2712,7 @@ mod tests {
             &access_over(&reg),
             IncludeOrigin::Declared,
             true,
+            false,
             Downgrade::Refuse,
         )
         .await
@@ -4106,6 +4369,7 @@ mod tests {
             &access,
             IncludeOrigin::Declared,
             true,
+            false,
             Downgrade::Refuse,
         )
         .await

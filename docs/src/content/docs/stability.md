@@ -30,7 +30,7 @@ surface, the experimental [settings][settings] surface, and the
 
 | Area | Guarantee |
 |------|-----------|
-| CLI surface | Subcommand names, arguments, flags (`--allow-downgrade` on `add`, `update` and `lock` joined additively), and the [documented exit codes][exit-codes] (no code was added for dependency version claims) |
+| CLI surface | Subcommand names, arguments, flags (`--allow-downgrade` on `add`, `update` and `lock`, and the global `--locked` flag with its `GRIM_LOCKED` variable, joined additively), and the [documented exit codes][exit-codes] (no code was added for dependency version claims) |
 | `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration], and the rule that [`grim lock`][lock] keeps existing pins. See [Additive fields](#frozen-additive-fields) |
 | `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field, the `[[plugin]]` table and the [`[marketplace]` table][marketplace-table] and the [plugin metadata keys][plugin-metadata] — under the same additive and pin rules as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |

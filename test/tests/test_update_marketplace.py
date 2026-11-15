@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 import tomllib
 
-from src.helpers import make_artifact, write_config
+from src.helpers import make_artifact, printed_argv, write_config
 from src.registry import PublishedArtifact
 
 unix_only = pytest.mark.skipif(
@@ -56,8 +57,8 @@ def _rule(repo: str, name: str, body: str, tag: str = "stable") -> PublishedArti
     return make_artifact(repo, "rule", {f"{name}.md": f"# {body}\n"}, tag=tag)
 
 
-def _write_marketplace(path: Path, plugins: dict[str, list[str]]) -> Path:
-    body = "".join(
+def _write_marketplace(path: Path, plugins: dict[str, list[str]], head: str = "") -> Path:
+    body = head + "".join(
         f"[plugins.{name}]\ninclude = [{', '.join(json.dumps(i) for i in includes)}]\n\n"
         for name, includes in plugins.items()
     )
@@ -836,3 +837,136 @@ def test_s027_held_marketplace_lock_is_75_locked_retryable(
     err = _error(result)
     assert (err["exit"], err["reason"], err["retryable"]) == (75, "locked", True), err
     assert not (project_dir / "marketplace.lock").exists()
+
+
+# ── --locked: a stale or missing part refuses ───────────────────────────
+
+_LOCKED_REMEDY = r"run `([^`]+)` without --locked or GRIM_LOCKED, then this command again"
+# `export marketplace` needs the table; the other readers only validate it.
+_MARKET_TABLE = '[marketplace]\nname = "acme"\n\n[marketplace.owner]\nname = "Acme"\n\n'
+# Each command that saves `marketplace.lock`, as typed after the global flags.
+_LOCKED_COMMANDS = {
+    "update": ("update", "--marketplace", "marketplace.toml", "a"),
+    "export-plugin": ("export", "plugin", "--plugin", "a", "--client", "claude", "-o", "out"),
+    "export-marketplace": ("export", "marketplace", "-o", "out"),
+}
+# What each situation leaves out of line, and the plugin the refusal names.
+_SITUATIONS = {"stale-part": "b", "no-part": "c", "orphan-part": "b"}
+
+
+def _locked_plugins(registry: str, unique_repo: str) -> dict[str, list[str]]:
+    for name in ("pa", "pb", "pc", "extra"):
+        _skill(f"{unique_repo}/{name}", name, "v1")
+    return {p: [f"{registry}/{unique_repo}/p{p}:stable"] for p in "ab"}
+
+
+def _locked_workspace(grim_at, root: Path, plugins: dict[str, list[str]]) -> tuple:
+    """Plugins `a` and `b` declared and locked."""
+    (root / ".claude").mkdir(parents=True, exist_ok=True)
+    _write_marketplace(root / "marketplace.toml", plugins, head=_MARKET_TABLE)
+    runner = grim_at(root)
+    runner.run("update", "--marketplace", "marketplace.toml")
+    return runner, root / "marketplace.lock"
+
+
+def _put_out_of_line(root: Path, plugins: dict[str, list[str]], situation: str, registry: str, unique_repo: str) -> None:
+    edited = dict(plugins)
+    if situation == "stale-part":
+        edited["b"] = [*plugins["b"], f"{registry}/{unique_repo}/extra:stable"]
+    elif situation == "orphan-part":
+        del edited["b"]
+    else:
+        edited["c"] = [f"{registry}/{unique_repo}/pc:stable"]
+    _write_marketplace(root / "marketplace.toml", edited, head=_MARKET_TABLE)
+
+
+def _undated(lock_path: Path) -> str:
+    """The lock without its `generated_at` lines, which two runs never share."""
+    text = lock_path.read_text(encoding="utf-8")
+    return "".join(line for line in text.splitlines(keepends=True) if not line.startswith("generated_at"))
+
+
+def _refused(result, lock_path: Path, before: bytes, plugin: str) -> re.Match:
+    assert result.returncode == 65, (result.stdout, result.stderr)
+    error = _error(result)
+    assert error["reason"] == "stale-lock", error
+    assert f"'{plugin}': " in error["message"], error
+    remedy = re.search(_LOCKED_REMEDY, error["message"])
+    assert remedy, error
+    assert lock_path.read_bytes() == before, "a refusal leaves marketplace.lock as it was"
+    assert not (lock_path.parent / "out").exists(), "and writes no output"
+    return remedy
+
+
+@pytest.mark.parametrize("situation", _SITUATIONS)
+@pytest.mark.parametrize("command", _LOCKED_COMMANDS.values(), ids=_LOCKED_COMMANDS.keys())
+def test_locked_refuses_an_out_of_line_marketplace_lock_and_its_remedy_clears_it(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, command: tuple[str, ...], situation: str
+) -> None:
+    plugins = _locked_plugins(registry, unique_repo)
+    runner, lock_path = _locked_workspace(grim_at, project_dir, plugins)
+    _put_out_of_line(project_dir, plugins, situation, registry, unique_repo)
+    before = lock_path.read_bytes()
+
+    refused = runner.run("--format", "json", "--locked", *command, check=False)
+    remedy = _refused(refused, lock_path, before, _SITUATIONS[situation])
+
+    followed = runner.run(*printed_argv(remedy.group(1))[1:], check=False)
+    assert followed.returncode == 0, followed.stderr
+    again = runner.run("--locked", *command, check=False)
+    assert again.returncode == 0, again.stderr
+
+
+@pytest.mark.parametrize("command", _LOCKED_COMMANDS.values(), ids=_LOCKED_COMMANDS.keys())
+def test_grim_locked_refuses_as_the_flag_and_the_remedy_runs_without_it(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, command: tuple[str, ...]
+) -> None:
+    plugins = _locked_plugins(registry, unique_repo)
+    runner, lock_path = _locked_workspace(grim_at, project_dir, plugins)
+    _put_out_of_line(project_dir, plugins, "stale-part", registry, unique_repo)
+    before = lock_path.read_bytes()
+    runner.env["GRIM_LOCKED"] = "1"
+
+    remedy = _refused(runner.run("--format", "json", *command, check=False), lock_path, before, "b")
+    remedy_argv = printed_argv(remedy.group(1))[1:]
+    still_set = runner.run(*remedy_argv, check=False)
+    assert still_set.returncode == 65, "the remedy itself refuses while GRIM_LOCKED is set"
+
+    del runner.env["GRIM_LOCKED"]
+    followed = runner.run(*remedy_argv, check=False)
+    assert followed.returncode == 0, followed.stderr
+    runner.env["GRIM_LOCKED"] = "1"
+    again = runner.run(*command, check=False)
+    assert again.returncode == 0, again.stderr
+
+
+@pytest.mark.parametrize("command", _LOCKED_COMMANDS.values(), ids=_LOCKED_COMMANDS.keys())
+def test_locked_on_an_in_line_marketplace_lock_is_the_run_without_it(
+    grim_at, tmp_path: Path, registry: str, unique_repo: str, command: tuple[str, ...]
+) -> None:
+    plugins = _locked_plugins(registry, unique_repo)
+    plain, plain_lock = _locked_workspace(grim_at, tmp_path / "plain", plugins)
+    locked, locked_lock = _locked_workspace(grim_at, tmp_path / "locked", plugins)
+
+    without = plain.run(*command, check=False)
+    with_flag = locked.run("--locked", *command, check=False)
+
+    assert with_flag.returncode == without.returncode == 0, (without.stderr, with_flag.stderr)
+    assert _undated(locked_lock) == _undated(plain_lock)
+
+
+def test_locked_leaves_an_ad_hoc_plugin_export_alone(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An ad-hoc export reads no marketplace lock, so a stale one beside it does not matter."""
+    plugins = _locked_plugins(registry, unique_repo)
+    runner, lock_path = _locked_workspace(grim_at, project_dir, plugins)
+    _put_out_of_line(project_dir, plugins, "stale-part", registry, unique_repo)
+    before = lock_path.read_bytes()
+    ref = plugins["a"][0]
+
+    without = runner.run("export", "plugin", ref, "--client", "claude", "-o", "plain", check=False)
+    with_flag = runner.run("--locked", "export", "plugin", ref, "--client", "claude", "-o", "flagged", check=False)
+
+    assert with_flag.returncode == without.returncode == 0, (without.stderr, with_flag.stderr)
+    assert lock_path.read_bytes() == before

@@ -220,7 +220,7 @@ pub async fn run_marketplace(
         force: args.force,
         progress: progress.as_ref(),
     };
-    let report = super::grim(export_marketplace(&request, &scope, &access, ctx.offline()).await)?;
+    let report = super::grim(export_marketplace(&request, &scope, &access, ctx.offline(), ctx.locked()).await)?;
     let mut stderr = std::io::stderr().lock();
     for line in report.file_lines() {
         // A closed stderr is not worth failing a finished export for.
@@ -306,7 +306,7 @@ pub async fn run_plugin(ctx: &Context, args: &ExportPluginArgs) -> anyhow::Resul
         progress: progress.as_ref(),
         logo: logo.as_deref(),
     };
-    let report = super::grim(stage::run(&mode, &opts, &scope, &access, ctx.offline()).await)?;
+    let report = super::grim(stage::run(&mode, &opts, &scope, &access, ctx.offline(), ctx.locked()).await)?;
     Ok((report, ExitCode::Success))
 }
 

@@ -1074,6 +1074,7 @@ mod tests {
             color: crate::cli::color::ColorMode::Auto,
             progress: crate::cli::options::ProgressMode::Auto,
             offline: false,
+            locked: false,
             log_level: None,
             config: None,
             global: false,

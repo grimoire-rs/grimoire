@@ -220,12 +220,14 @@ pub(crate) async fn export_marketplace(
     scope: &FetchScope,
     access: &Arc<dyn OciAccess>,
     offline: bool,
+    locked: bool,
 ) -> Result<MarketplaceExportReport, crate::error::Error> {
     export_marketplace_with(
         req,
         scope,
         access,
         offline,
+        locked,
         Box::new(|from, to| std::fs::rename(from, to)),
     )
     .await
@@ -241,6 +243,7 @@ async fn export_marketplace_with(
     scope: &FetchScope,
     access: &Arc<dyn OciAccess>,
     offline: bool,
+    locked: bool,
     mut rename: RenameFn,
 ) -> Result<MarketplaceExportReport, crate::error::Error> {
     let manifest = std::path::absolute(req.manifest).map_err(|e| io_error(req.manifest, e))?;
@@ -282,6 +285,7 @@ async fn export_marketplace_with(
         scope,
         access,
         offline,
+        locked,
     )
     .await?;
     check_input_overlap(&root_probe, &manifest_dir, &plan)?;
@@ -2640,7 +2644,7 @@ mod tests {
             force,
             progress: &SilentProgress,
         };
-        export_marketplace(&req, &scope(), &access, false).await
+        export_marketplace(&req, &scope(), &access, false, false).await
     }
 
     fn exit_of(err: Error) -> ExitCode {
@@ -2833,7 +2837,7 @@ mod tests {
             manifest: dir.join("marketplace.toml"),
             plugins: Vec::new(),
         };
-        stage::run(&mode, &opts, &scope(), &access, false).await.unwrap();
+        stage::run(&mode, &opts, &scope(), &access, false, false).await.unwrap();
         for (client, _) in clients {
             let flat = archive::tree_inventory(&out.join(format!("team.{client}"))).unwrap();
             let repo = archive::tree_inventory(&dir.join(format!("{client}/team"))).unwrap();
@@ -2902,7 +2906,10 @@ mod tests {
             force: true,
             progress: &SilentProgress,
         };
-        let err = export_marketplace(&req, &scope(), &access, false).await.err().unwrap();
+        let err = export_marketplace(&req, &scope(), &access, false, false)
+            .await
+            .err()
+            .unwrap();
         assert!(
             matches!(export_error(&err), ExportError::Manifest { message, .. } if message.contains("./claude/")),
             "{err:?}"
@@ -2922,7 +2929,10 @@ mod tests {
             force: false,
             progress: &SilentProgress,
         };
-        let err = export_marketplace(&req, &scope(), &access, false).await.err().unwrap();
+        let err = export_marketplace(&req, &scope(), &access, false, false)
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(export_error(&err), ExportError::Manifest { .. }), "{err:?}");
         assert!(!dir.join(OUTPUT_LOCK_SIDECAR).exists());
     }

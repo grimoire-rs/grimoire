@@ -23,12 +23,59 @@ These apply to every subcommand:
 | `--config <path>` | Use an explicit project config file. |
 | `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
 | `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |
+| `--locked` | Refuse a command that would write a lock when the lock no longer matches its manifest; see [`--locked`](#locked). Also `GRIM_LOCKED`. |
 | `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install`, `export plugin` and `export marketplace`, silent elsewhere; the two exports count every member fetched, across all plugins). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
 | `--log-level <level>` | Set the tracing log level: `off`, `error`, `warn`, `info`, `debug` or `trace` (case-insensitive). Wins over [`GRIM_LOG`](./configuration.md#environment-variables). An invalid value prints one line on stderr naming the accepted levels, and the run continues at the `GRIM_LOG` or `warn` level. |
 
 A downstream reader that closes the pipe early — `grim status --format
 json | head` — makes grim exit `0` silently instead of erroring or
 printing noise; see [Broken pipe][json-broken-pipe] for the full contract.
+
+### `--locked` {#locked}
+
+By default a command that writes `grimoire.lock` or `marketplace.lock` brings
+a lock that drifted from its manifest back in line as part of the run. With
+`--locked`, or `GRIM_LOCKED=1` in the environment, it refuses instead and
+changes nothing on disk. The variable accepts `1`, `true`, `yes` and `on`, as
+`GRIM_OFFLINE` does. The flag only ever makes a run stricter.
+
+The check reads the lock as it stands at the start of the run. The command's
+own edit still updates the lock: `grim add x --locked` on a lock in line adds
+`x` and locks it. This differs from Cargo's `--locked`, which means the lock
+file must not change.
+
+```
+$ $EDITOR grimoire.toml            # add a line by hand
+$ grim add skill/foo:1             # relocks everything, exit 0
+$ grim add skill/foo:1 --locked    # exit 65: the lock no longer matches what is declared
+$ grim lock && grim add skill/foo:1 --locked   # exit 0
+```
+
+| Situation under `--locked` | Code |
+|----------------------------|------|
+| `grimoire.toml` edited since the last lock (reason `stale-lock`); the message names `grim lock`, carrying `--global` or `--config` | `65` |
+| No `grimoire.lock` (reason `no-lock`); create it with a plain `grim lock` | `79` |
+| A lock grim cannot read | its [usual code](#lock-unreadable) (`78`, `77` or `74`) |
+| A declared marketplace plugin whose part is stale or missing, or a part for a plugin the manifest no longer declares (reason `stale-lock`) | `65` |
+
+The remedy always reads "without `--locked` or `GRIM_LOCKED`", so it works
+with the variable exported. A lock in line runs exactly as it does without the
+flag.
+
+The flag covers [`add`](#add), [`remove`](#remove) and
+[`uninstall`](#uninstall), also with `--no-relock`, [`lock`](#lock), `update`
+bare or named, [`update --marketplace`](#update-marketplace), the declared
+forms of [`export plugin`](#export-plugin) and
+[`export marketplace`](#export-marketplace), and the [TUI](#tui)'s Install,
+Update and Delete. The check runs per command, right after the config file
+lock and before any registry read, even when the run would write nothing. It
+therefore comes before other refusals, such as an unknown `update` name. The
+marketplace check looks at every declared plugin, not only the selected ones,
+and names the first in manifest order. It writes nothing, reads no registry and
+creates no output tree. An ad-hoc `grim export plugin <refs>` has no lock and
+is unaffected. [`install`](#install) and `export plugin --project` already
+refuse a stale lock, so the flag changes nothing there, and
+[`status`](#status) stays a report.
 
 ## The lifecycle commands
 
@@ -608,11 +655,13 @@ A bundle has no local-path form via `add`: `grim add --kind bundle
 | Success | `0` |
 | A reference naming another repository for an existing binding, an invalid binding name, or a local-path bundle | `64` |
 | A local modification or an untracked destination, or a dependency [cycle](./concepts.md#dependency-cycles) or [limit](./concepts.md#dependency-limits), including the node-admission and tag-listing limits | `65` |
+| With [`--locked`](#locked), a stale lock (reason `stale-lock`) | `65` |
 | Concurrent write on the config file's lock | `75` |
 | Sources claiming different versions of one artifact, claims in two majors, or no client that can host it | `78` |
 | A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`) | `78` |
 | A [lock file grim cannot read](#lock-unreadable) | `78`, `77` or `74` |
 | A tag that does not exist below a release the resolve keeps, a claim no release satisfies, or a [kept pin whose manifest is gone](#lock-exit-codes) | `79` |
+| With [`--locked`](#locked), no lock file (reason `no-lock`) | `79` |
 
 A resolve that fails restores `grimoire.toml`, and an unreadable lock refuses
 before the config is written, so neither leaves a declaration behind. Every other
@@ -625,6 +674,10 @@ Brings `grimoire.lock` in line with `grimoire.toml`. A new declaration, or a
 reference you changed, resolves to a concrete digest, and one you removed leaves
 the lock. Run it after editing the config by hand. `grim add` already locks what
 it declares.
+
+With [`--locked`](#locked), `lock` refuses a stale lock with `65` instead of
+relocking it. A lock in line relocks as usual, and a missing lock exits `79`:
+create it with a plain `grim lock`.
 
 `grim lock [--allow-downgrade]` takes one flag of its own. `--allow-downgrade` lets the run
 move a pin to a lower major version when a dependency's version claim asks for
@@ -771,7 +824,9 @@ case from an earlier run is not repeated here:
 |-----------|------|
 | Success | `0` |
 | A dependency [cycle](./concepts.md#dependency-cycles), a graph past the [limits](./concepts.md#dependency-limits) (including 32,768 node admissions and 32 MiB of tag listings), or an artifact that requires a feature this grim does not know (reason `unsupported-artifact-feature`) | `65` |
+| With [`--locked`](#locked), a stale lock (reason `stale-lock`) | `65` |
 | Concurrent write on the config file's lock | `75` |
+| With [`--locked`](#locked), no lock file (reason `no-lock`) | `79` |
 | Two sources want different versions of one artifact, or claims sit in two majors; the message lists them all and names the direct declaration that settles it, and `grim add --name <binding>` when the binding is not the repository's last segment | `78` |
 | A pin that would move to a lower major version without `--allow-downgrade` (reason `major-downgrade`), a recorded claim the pin no longer answers, or a pin that would move only because of a claim from a version this resolve dropped | `78` |
 | A [lock file grim cannot read](#lock-unreadable) | `78`, `77` or `74` |
@@ -1230,13 +1285,14 @@ nothing.
 |-----------|------|
 | Success | `0` |
 | A locally modified artifact, refused with `refused: true` on its row; the report still prints and the pin has already moved | `65` |
-| A named run on a stale lock (`stale-lock`) | `65` |
+| A named run on a stale lock (`stale-lock`), or any run on a stale lock with [`--locked`](#locked) | `65` |
 | A dependency [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits) (including 32,768 node admissions and 32 MiB of tag listings), or `unsupported-artifact-feature` | `65` |
 | Concurrent write on the config file's lock | `75` |
 | Sources claiming different versions of one artifact, which a moved tag [can cause](./concepts.md#bundle-conflicts), or claims in two majors | `78` |
 | A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`) | `78` |
 | A [lock file grim cannot read](#lock-unreadable) | `78`, `77` or `74` |
 | A name that matches nothing, a tag that does not exist, a claim no release satisfies, or an unselected [pin whose manifest is gone](#lock-exit-codes) | `79` |
+| With [`--locked`](#locked), no lock file (reason `no-lock`) | `79` |
 
 Every other failure, such as an unreachable registry or a rejected credential,
 keeps the classification [`grim export plugin`](#export-plugin-exit-codes)
@@ -1274,7 +1330,7 @@ Only the plugins you picked roll forward. Before it relocks a stale part, grim
 prints one warning on stderr naming the plugin and its lock file. The report
 shows its rows like any resolved part, with `unchanged` for a kept pin. The JSON
 shape is unchanged. A declared plugin with no part in the lock yet is locked in
-the same run, resolving fresh, after a stderr line
+the same run, resolving fresh. Grim first prints the stderr line
 `plugin '<name>' has no part in <lock path> yet, so this run locks it too`. With
 no lock at all, a pick of one plugin therefore locks every declared plugin.
 
@@ -1367,6 +1423,7 @@ reached through a symbolic link, gets no command, only the reason.
 | Success | `0` |
 | `--marketplace` combined with `--global`, `--config`, `--client`, or `--force`; a malformed selector (an empty plugin/member half, or more than one `:`); or a selector naming a `project` plugin | `64` |
 | A missing or malformed marketplace manifest | `65` |
+| With [`--locked`](#locked), a declared plugin whose part is stale or missing, or a part for a plugin the manifest no longer declares (reason `stale-lock`) | `65` |
 | Concurrent write on the manifest's lock file | `75` |
 | A malformed `marketplace.lock` | `78` |
 | A selector naming an undeclared plugin, or a member the plugin does not resolve to | `79` |
@@ -1374,6 +1431,12 @@ reached through a symbolic link, gets no command, only the reason.
 | A dependency graph that cannot be walked: a [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits), or a feature this grim does not know (`unsupported-artifact-feature`) | `65` |
 | A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`), or claims in two majors | `78` |
 | An include's floating tag or a tag below an include needs the network under `--offline`, or a recorded bundle digest the local store lacks | `81` |
+
+With [`--locked`](#locked) the run refuses instead of relocking. It exits `65`
+when any declared plugin's part is stale or missing; no lock file at all counts.
+The message names the plugin and `grim update --marketplace <M>` "without
+--locked or GRIM_LOCKED, then this command again". It writes nothing and reads
+no registry.
 
 A stale part, or a plugin with no part yet, that the selector did not pick can fail to lock. The run then exits
 with the code a pick of that plugin would give, for example `79` for an include
@@ -1943,7 +2006,9 @@ lacks, two majors of one artifact, a forced major downgrade, a settings conflict
 and a gone manifest all fail this way. The error names two remedies: its own, and
 `grim remove --no-relock <kind> <name>`. `--no-relock` edits the manifest and
 the lock rows in place and resolves nothing. The lock may be stale, the notes
-below print, and [`grim lock`](#lock) brings it in line later.
+below print, and [`grim lock`](#lock) brings it in line later. With
+[`--locked`](#locked), `remove` and `uninstall` refuse a stale or missing lock
+first, `--no-relock` included.
 
 The rest of this section describes that in-place edit, which the relock then
 settles. With `--no-relock` it is the whole run.
@@ -3022,8 +3087,8 @@ That reconcile follows [`grim lock`](#lock), not `grim update`. A new include
 resolves, and an unchanged include keeps its pin even after its tag moved.
 
 When an export saves `marketplace.lock` because a selected plugin is stale or a
-part drops, every other stale part is relocked too, each kept pin staying, and a declared plugin with no part yet is locked too. An
-export whose selected plugins are in line and that drops nothing reads nothing
+part drops, every other stale part is relocked, each kept pin staying. A declared plugin
+with no part yet is locked too. An export whose selected plugins are in line and that drops nothing reads nothing
 and writes no lock.
 
 A bundle the plugin reaches keeps its pin too, by include, by `requires` or through
@@ -3302,6 +3367,7 @@ field reference, alongside every other command's `--format json` shape.
 | A missing or malformed manifest, or a malformed `--version`; a `--description` or declared `description` too long for the cap; a stale `grimoire.lock` behind `--project` or a `project` plugin; a locked local member that changed on disk; a manifest declaring zero plugins, regardless of `--plugin` (it is checked first); a bad rename or a stale reference a rename left behind; an unsafe entry name; an admitted member set that is empty for a client; or an existing output without `--force` | `65` |
 | Two references disagreeing on the same member's identity, or a `--client` (explicit or unrecognized) naming a client with no plugin format at all | `78` |
 | A named plugin, a `<plugin>`/`<plugin>:<member>` selector, or an include's tag or manifest, not found; a project's `grimoire.toml` or `grimoire.lock` missing | `79` |
+| With [`--locked`](#locked), a declared run (`--plugin` or `--marketplace`) whose `marketplace.lock` has a stale or missing part, or a part for an undeclared plugin (reason `stale-lock`); the run writes nothing | `65` |
 | Registry unreachable | `69` |
 | Missing or rejected registry credential | `80` |
 | An include's floating tag needs the network under `--offline` — this includes a pinned, already-cached registry member, since export has no manifest cache; only a local path source resolves offline (the same limitation `grim install --offline` has) | `81` |
@@ -3640,6 +3706,7 @@ table][json-shapes-items] for the field reference of the shared members.
 | A flag or positional the command does not take | `64` |
 | A missing `[marketplace]` table, or an invalid name (reserved, malformed), owner, email, description, `repository` or client; a plugin name that is not portable (a Windows reserved device name such as `con`, `aux`, `nul` or `com1`, reported as an unsafe entry); a manifest or lock inside an owned path or itself a symlink; a logo, `path:` member or `project` directory outside the manifest directory, behind a symlink, or under a directory the export owns (matched ignoring ASCII case); a project's `grimoire.toml` or `grimoire.lock` that is a symlink | `65` |
 | A plugin that no selected client can carry | `65` |
+| With [`--locked`](#locked), a stale or missing `marketplace.lock` part, or a part for an undeclared plugin (reason `stale-lock`); no output tree is created | `65` |
 | A symlink, non-directory or reparse point on an owned path; a case collision or reserved name in a rendered tree | `65` |
 | A foreign owned path without `--force` (`untracked-destination`), including a renamed marketplace | `65` |
 | The manifest's lock or the output-root lock is held | `75` |
