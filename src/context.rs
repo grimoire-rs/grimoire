@@ -48,6 +48,8 @@ pub struct Context {
     /// `$GRIM_DEFAULT_REGISTRY`, captured once at construction.
     registry_env: Option<String>,
     offline: bool,
+    /// `--locked` or `$GRIM_LOCKED`: refuse a lock-writing run on an out-of-sync lock.
+    locked: bool,
     /// The `--progress` mode for long-running passes.
     progress: crate::cli::options::ProgressMode,
     /// The `--global` flag: operate on the global scope rather than the
@@ -127,6 +129,7 @@ impl std::fmt::Debug for Context {
             .field("registry_flag", &self.registry_flag)
             .field("registry_env", &self.registry_env)
             .field("offline", &self.offline)
+            .field("locked", &self.locked)
             .field("global", &self.global)
             .field("config", &self.config)
             .field("telemetry", &self.telemetry);
@@ -143,6 +146,7 @@ impl Clone for Context {
             registry_flag: self.registry_flag.clone(),
             registry_env: self.registry_env.clone(),
             offline: self.offline,
+            locked: self.locked,
             progress: self.progress,
             global: self.global,
             config: self.config.clone(),
@@ -193,6 +197,7 @@ impl Context {
             registry_flag: options.registry.clone(),
             registry_env: env::default_registry(),
             offline,
+            locked: options.locked || env::locked(),
             progress: options.progress,
             global: options.global,
             config: options.config.clone(),
@@ -246,6 +251,11 @@ impl Context {
     /// Whether all network access is disabled for this invocation.
     pub fn offline(&self) -> bool {
         self.offline
+    }
+
+    /// Whether a lock-writing command must refuse an out-of-sync lock.
+    pub fn locked(&self) -> bool {
+        self.locked
     }
 
     /// The `--progress` mode for long-running passes.
@@ -411,6 +421,7 @@ impl Context {
             registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
+            locked: false,
             progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
@@ -462,6 +473,12 @@ impl Context {
         self
     }
 
+    /// Mark a hermetic context `--locked`.
+    pub fn with_locked(mut self) -> Self {
+        self.locked = true;
+        self
+    }
+
     /// Every plain-HTTP exception list [`Self::access`] was handed, in call
     /// order. The observable that makes the config→transport wiring
     /// testable — see the field docs.
@@ -488,6 +505,7 @@ impl Context {
             registry_flag: Vec::new(),
             registry_env: None,
             offline: false,
+            locked: false,
             progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
@@ -514,6 +532,7 @@ impl Context {
             registry_flag: vec![registry_flag],
             registry_env: None,
             offline: false,
+            locked: false,
             progress: crate::cli::options::ProgressMode::Auto,
             global: false,
             config: None,
@@ -539,6 +558,7 @@ mod tests {
             color: crate::cli::color::ColorMode::Auto,
             progress: crate::cli::options::ProgressMode::Auto,
             offline: false,
+            locked: false,
             log_level: None,
             config: None,
             global: false,
@@ -553,6 +573,13 @@ mod tests {
         let ctx = Context::new(&o);
         assert!(ctx.offline());
         assert_eq!(ctx.access_mode(), AccessMode::Offline);
+    }
+
+    #[test]
+    fn cli_locked_flag_makes_the_run_locked() {
+        let mut o = opts();
+        o.locked = true;
+        assert!(Context::new(&o).locked());
     }
 
     #[test]

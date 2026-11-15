@@ -78,6 +78,15 @@ keeps existing pins. The
 when a lock's recorded dependencies no longer match the pinned artifacts
 (typically written by a grim older than 0.16.0): run `grim lock`.
 
+Under `--locked` (or `GRIM_LOCKED=1`), every command that writes a lock gives
+the `stale-lock` reason (exit 65) when `grimoire.lock` no longer matches
+`grimoire.toml`, and exit 79 with reason `no-lock` when there is no lock. Fix:
+run a plain `grim lock` without the flag or variable, then the command again.
+For a marketplace the same reason means a declared plugin's part is stale or
+missing: run `grim update --marketplace <manifest>` without the flag. The
+command's own edit still updates the lock, so `grim add x --locked` on a lock
+in line works.
+
 After `grim remove --no-relock` of a key whose declaration hid an edge at another
 version, the lock is stale until `grim lock`, which keeps that key's pin. `grim update`
 exits 78 if the edges truly disagree. Restoring `grimoire.toml` by hand does not

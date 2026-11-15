@@ -22,7 +22,9 @@ use clap::Args;
 use crate::api::artifact_status::LockAction;
 use crate::api::lock_report::{LockEntry, LockReport};
 use crate::cli::exit_code::ExitCode;
+use crate::command::command_error::CommandError;
 use crate::config::declaration::DesiredSet;
+use crate::config::scope::Invocation;
 use crate::context::Context;
 use crate::lock::disposition::LockDisposition;
 use crate::lock::file_lock::ConfigFileLock;
@@ -30,11 +32,12 @@ use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::prior::Prior;
 use crate::lock::refresh::Refresh;
+use crate::oci::ArtifactKind;
 use crate::oci::PinnedIdentifier;
 use crate::oci::access::OciAccess;
 use crate::oci::text::registry_text;
 use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
-use crate::resolve::resolve_error::ResolveError;
+use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 use crate::resolve::resolve_options::{Downgrade, ResolveOptions};
 use crate::resolve::resolver::{LockRun, TargetLock, target_lock};
 
@@ -65,6 +68,7 @@ pub async fn run(ctx: &Context, args: &LockArgs) -> anyhow::Result<(LockReport, 
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
         None => None,
     };
+    require_in_line(ctx, &scope)?;
 
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
     let previous = load_previous(&scope.lock_path)?;
@@ -195,6 +199,54 @@ pub(crate) fn warn_moved_bundle_pins(previous: Option<&GrimoireLock>, lock: &Gri
 /// recovery that keeps the pins.
 pub(crate) fn load_previous(path: &Path) -> anyhow::Result<Option<GrimoireLock>> {
     super::grim(lock_io::load_existing(path))
+}
+
+/// Under `--locked`, refuse a run whose lock is missing or no longer matches
+/// `scope`'s declaration as it stood before the run's own edit. Without the
+/// flag it returns at once and reads nothing.
+///
+/// # Errors
+///
+/// See [`require_in_line_at`].
+pub(crate) fn require_in_line(ctx: &Context, scope: &scope_resolution::ResolvedScope) -> anyhow::Result<()> {
+    if !ctx.locked() {
+        return Ok(());
+    }
+    require_in_line_at(&scope.lock_path, &scope.set, &scope.invocation)
+}
+
+/// [`require_in_line`]'s check for a lock path and a declared set, without
+/// the flag test.
+///
+/// # Errors
+///
+/// `LockMissing` (79), a stale lock (65, `stale-lock`), or what
+/// [`load_previous`] refuses (78/77/74).
+pub(crate) fn require_in_line_at(lock_path: &Path, set: &DesiredSet, grim: &Invocation) -> anyhow::Result<()> {
+    let Some(lock) = load_previous(lock_path)? else {
+        let missing = CommandError::LockMissing {
+            path: lock_path.to_path_buf(),
+            grim: grim.clone(),
+        };
+        // `grim lock` follows the same rule, so the remedy names running it without either.
+        return Err(anyhow::Error::from(crate::error::Error::from(missing)).context(format!(
+            "--locked refuses a missing lock; create it with `{grim} lock` without --locked or GRIM_LOCKED"
+        )));
+    };
+    let current = set.declaration_hash_cached();
+    if lock.metadata.declaration_hash == current {
+        return Ok(());
+    }
+    let kind = ResolveErrorKind::StaleLock {
+        previous_hash: lock.metadata.declaration_hash,
+        current_hash: current.to_string(),
+        retry: format!("`{grim} lock` without --locked or GRIM_LOCKED, then this command again"),
+    };
+    let name = lock_path
+        .file_name()
+        .map_or_else(|| "grimoire.lock".to_string(), |n| n.to_string_lossy().into_owned());
+    let stale = ResolveError::unidentified(ArtifactKind::Skill, name, kind).naming(grim);
+    Err(crate::error::Error::from(stale).into())
 }
 
 /// Build the report from `target`'s dispositions, in `(kind, name)` order: one
@@ -473,6 +525,114 @@ mod tests {
              generated_at = \"2026-01-01T00:00:00Z\"\n",
             "d".repeat(64)
         )
+    }
+
+    /// What `require_in_line_at` answers for the lock at `path` against `set`.
+    fn in_line(path: &Path, set: &DesiredSet, grim: &Invocation) -> Result<(), (ExitCode, Option<String>, String)> {
+        require_in_line_at(path, set, grim).map_err(|err| {
+            let class = crate::error::classify(&err);
+            (class.exit, class.reason.map(|r| r.to_string()), format!("{err:#}"))
+        })
+    }
+
+    #[test]
+    fn a_lock_in_line_with_its_declaration_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        let set = DesiredSet::default();
+        let mut lock = lock_of(vec![]);
+        lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
+        lock_io::save(&path, &lock, None).unwrap();
+
+        assert_eq!(in_line(&path, &set, &Invocation::WALKED), Ok(()));
+    }
+
+    #[test]
+    fn a_stale_lock_refuses_65_naming_the_relock_of_the_run_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        lock_io::save(&path, &lock_of(vec![]), None).unwrap();
+        let set = DesiredSet::default();
+
+        for (grim, remedy) in [
+            (
+                Invocation::WALKED,
+                "run `grim lock` without --locked or GRIM_LOCKED, then this command again",
+            ),
+            (
+                Invocation::GLOBAL,
+                "run `grim --global lock` without --locked or GRIM_LOCKED, then this command again",
+            ),
+        ] {
+            let (exit, reason, text) = in_line(&path, &set, &grim).expect_err("a stale lock refuses");
+            assert_eq!(exit, ExitCode::DataError, "{text}");
+            assert_eq!(reason.as_deref(), Some("stale-lock"), "{text}");
+            assert!(
+                text.starts_with("'grimoire.lock': the lock no longer matches"),
+                "{text}"
+            );
+            assert!(text.ends_with(remedy), "{text}");
+        }
+    }
+
+    /// The printed chain, also the JSON `message`, names the `grim lock` that works
+    /// with the flag and the variable both off, and keeps the shared refusal after it.
+    #[test]
+    fn a_missing_lock_refuses_79_no_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        for (grim, lock) in [
+            (Invocation::WALKED, "grim lock"),
+            (Invocation::GLOBAL, "grim --global lock"),
+        ] {
+            let err = require_in_line_at(&path, &DesiredSet::default(), &grim).expect_err("a missing lock refuses");
+            let class = crate::error::classify(&err);
+            assert_eq!(class.exit, ExitCode::NotFound, "{err:#}");
+            assert_eq!(class.reason, Some(crate::error::ErrorReason::NoLock), "{err:#}");
+            assert_eq!(
+                crate::error::printed_chain(&err),
+                format!(
+                    "--locked refuses a missing lock; create it with `{lock}` without --locked or GRIM_LOCKED: \
+                     no grimoire.lock found at {}; run `{lock}` first",
+                    path.display()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_lock_refuses_with_its_own_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        std::fs::write(&path, "<<<<<<< HEAD\n").unwrap();
+        let (exit, _, text) =
+            in_line(&path, &DesiredSet::default(), &Invocation::WALKED).expect_err("an unreadable lock refuses");
+        assert_eq!(exit, ExitCode::ConfigError, "{text}");
+        assert!(text.contains("restore it from git or repair it"), "{text}");
+    }
+
+    /// Without `--locked` nothing refuses, a stale or a missing lock alike.
+    #[test]
+    fn the_check_runs_only_under_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dunce::canonicalize(dir.path()).unwrap();
+        let config = ws.join("grimoire.toml");
+        std::fs::write(&config, "[skills]\n").unwrap();
+        let ctx = Context::hermetic_scoped(ws.join("home"), false, Some(config.clone()));
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config)).unwrap();
+
+        assert!(
+            require_in_line(&ctx, &scope).is_ok(),
+            "a missing lock passes without the flag"
+        );
+        assert!(require_in_line(&ctx.clone().with_locked(), &scope).is_err());
+        lock_io::save(&scope.lock_path, &lock_of(vec![]), None).unwrap();
+        assert!(
+            require_in_line(&ctx, &scope).is_ok(),
+            "a stale lock passes without the flag"
+        );
+        let err = require_in_line(&ctx.with_locked(), &scope).expect_err("a stale lock refuses under the flag");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError, "{err:#}");
     }
 
     /// A future `lock_version` and a future key are plain parse failures, so

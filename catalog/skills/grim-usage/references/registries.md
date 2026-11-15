@@ -46,6 +46,7 @@ Environment variables that matter here (full table:
 | `GRIM_HOME` | Data root: cache, catalog, global config (default `~/.grimoire`) |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references |
 | `GRIM_OFFLINE` | Same as `--offline` |
+| `GRIM_LOCKED` | Same as `--locked`: a command that writes `grimoire.lock` or `marketplace.lock` refuses an out-of-sync lock (65, or 79 when no lock exists) instead of repairing it |
 | `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry to the OTLP collector named by `OTEL_EXPORTER_OTLP_ENDPOINT` or a `GRIM_CONFIG` file (off by default, no default endpoint; `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline disarm it; unstable until 1.0). Procedure: [telemetry.md](telemetry.md) |
 | `GRIM_TELEMETRY_REPOSITORY` | When telemetry is armed, add the redacted project `origin` remote as `vcs.*` |
 | `GRIM_CONFIG` | Absolute TOML files whose `[telemetry]` table can arm telemetry and name its collector. Procedure: [telemetry.md](telemetry.md) |

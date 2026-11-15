@@ -155,6 +155,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         registries,
         access,
         offline: ctx.offline(),
+        locked: ctx.locked(),
         force_refresh: args.refresh,
         scope: scope.scope,
         invocation: scope.invocation.clone(),

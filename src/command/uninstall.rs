@@ -106,6 +106,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         Some(path) => Some(super::grim(ConfigFileLock::try_acquire(&path))?),
         None => None,
     };
+    super::lock::require_in_line(ctx, &scope)?;
 
     // An artifact a remaining declaration still reaches stays in the effective
     // desired set once its direct declaration is removed: a declared bundle

@@ -521,7 +521,7 @@ pub enum ResolveErrorKind {
     #[error(
         "the lock no longer matches what is declared (lock hash {}, declared hash {}); run {}",
         escape_controls(crate::lock::pin_rule::printed_hash(.previous_hash)),
-        escape_controls(.current_hash),
+        escape_controls(crate::lock::pin_rule::printed_hash(.current_hash)),
         escape_controls(.retry)
     )]
     StaleLock {

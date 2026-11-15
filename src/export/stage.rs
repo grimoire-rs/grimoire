@@ -212,6 +212,7 @@ pub(crate) async fn run(
     scope: &FetchScope,
     access: &Arc<dyn OciAccess>,
     offline: bool,
+    locked: bool,
 ) -> Result<ExportReport, crate::error::Error> {
     let output_dir = std::path::absolute(opts.output_dir).map_err(|e| io_error(opts.output_dir, e))?;
     let request = |plugins, anchor, manifest| ExportRequest {
@@ -262,6 +263,7 @@ pub(crate) async fn run(
                 access,
                 IncludeOrigin::AdHoc,
                 offline,
+                false,
                 Downgrade::Refuse,
             )
             .await?;
@@ -334,6 +336,7 @@ pub(crate) async fn run(
                 scope,
                 access,
                 offline,
+                locked,
             )
             .await
             .map_err(|e| match e {
@@ -404,6 +407,10 @@ impl DeclaredPlan {
 ///
 /// Every failure of the steps above with its existing classification,
 /// lock contention (75) included.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the declared export's inputs plus the run's offline and locked modes"
+)]
 pub(crate) async fn resolve_declared(
     manifest: &Path,
     select: impl FnOnce(&MarketplaceManifest) -> Result<BTreeSet<String>, ExportError>,
@@ -412,6 +419,7 @@ pub(crate) async fn resolve_declared(
     scope: &FetchScope,
     access: &Arc<dyn OciAccess>,
     offline: bool,
+    locked: bool,
 ) -> Result<DeclaredPlan, crate::error::Error> {
     let full = marketplace::load(manifest)?;
     let guard = ConfigFileLock::try_acquire(&full.path)?;
@@ -447,6 +455,7 @@ pub(crate) async fn resolve_declared(
         access,
         IncludeOrigin::Declared,
         offline,
+        locked,
         Downgrade::Refuse,
     )
     .await?;
@@ -5009,7 +5018,7 @@ mod tests {
             let manifest = manifest.clone();
             async move {
                 let select = |m: &MarketplaceManifest| Ok(m.plugins.keys().cloned().collect());
-                resolve_declared(&manifest, select, (None, None), None, &scope, &access, offline)
+                resolve_declared(&manifest, select, (None, None), None, &scope, &access, offline, false)
                     .await
                     .expect("the plugins resolve")
             }
@@ -5053,6 +5062,7 @@ mod tests {
                 Some(&root),
                 &fetch_scope(),
                 &access,
+                false,
                 false,
             )
             .await;
