@@ -1290,6 +1290,30 @@ def test_a_gone_bundle_requirement_tag_refuses_a_pick_on_the_parts_stamps(
     assert lock.read_text(encoding="utf-8") == written
 
 
+@pytest.mark.parametrize("pick", ["team:extra", "team:pk2"])
+def test_a_gone_included_bundle_tag_stops_a_pick_where_the_plugin_records_no_digest(
+    grim_at, work: Path, registry: str, unique_repo: str, pick: str
+) -> None:
+    """The part records no digest for `pack`, and the `pack:1` tag is gone.
+
+    A member or bundle pick still reads every bundle the plugin includes. With no
+    digest to read `pack` at, the pick exits 79 and the part is untouched.
+    """
+    runner, _held1 = _mk_f1(grim_at, work, unique_repo, roll=False)
+    retag(f"{unique_repo}/pack", "keep-first", tag_digest(f"{unique_repo}/pack", "1"))
+    _delete(f"{unique_repo}/pack", "1")
+    lock = work / "marketplace.lock"
+    written = lock.read_text(encoding="utf-8")
+
+    result = runner.run(
+        "update", "--marketplace", "marketplace.toml", pick, check=False
+    )
+
+    assert result.returncode == 79, result.stderr
+    assert "pack:1' was not found" in result.stderr, result.stderr
+    assert lock.read_text(encoding="utf-8") == written
+
+
 @pytest.mark.parametrize(
     ("shape", "expected"), [("c5e3824", 78), ("0.15.1", 0)], ids=["c5e3824", "0.15.1"]
 )
