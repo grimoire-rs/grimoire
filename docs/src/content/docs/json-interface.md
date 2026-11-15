@@ -102,7 +102,7 @@ One row object per item inside `{"items": [...]}`:
 | `config list` | `{key, value, set, type, title, description, default, values, constraints, section, advanced}` — `constraints` is `null` except for keys whose list items carry a shape rule beyond closed-set membership; `section` names the settings panel and `advanced` marks keys a UI may hide | — |
 | `config registry list` | `{alias, oci, index, include, exclude, default, insecure}` — both locator keys present, exactly one non-null; `include`/`exclude` are the entry's authored [browse-filter](./configuration.md#browse-filters) globs in declaration order, always-present arrays, `[]` when unfiltered; `insecure` is the entry's authored [plain-HTTP](./configuration.md#plain-http-registries) opt-in, not the effective transport (a host reached over HTTP through the loopback default or `GRIM_INSECURE_REGISTRIES` reports `false`) | — |
 | `config registry fields` | `{key, type, title, description}` — `key` is the short field name (`oci`, `index`, `default`, `include`, `exclude`, `insecure`), deliberately diverging from `config list`'s dotted `registry.<alias>.<field>` keys; no `value`/`set`/`default`, since a field pattern (not a resolved alias) has no runtime value | — |
-| `publish` | `{ref, kind, digest, tags, status, pushed_to, compression}` (`ref` is the pull name; `pushed_to` is the push-side reference under a [push/pull registry split](./publishing.md#batch-publish-push-registry), `null` when inactive; `compression` is `none` or `gzip` for skill, rule, agent and hook entries and `null` for bundle, mcp and failed entries — see [`release`](#report-shapes) for what a skipped entry reports) + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url, fork}` or `null`; `fork` is itself `{repo, created}` or `null` — populated only when the announce branch landed on an automatically created or reused fork rather than the index repository directly) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
+| `publish` | `{ref, kind, digest, tags, status, pushed_to, compression, floats_kept}` (`floats_kept` is the [`release`](#report-shapes) field of that name, always present and `[]` on skipped and failed entries; `ref` is the pull name; `pushed_to` is the push-side reference under a [push/pull registry split](./publishing.md#batch-publish-push-registry), `null` when inactive; `compression` is `none` or `gzip` for skill, rule, agent and hook entries and `null` for bundle, mcp and failed entries — see [`release`](#report-shapes) for what a skipped entry reports) + sibling envelope keys `descriptions` (`{"items": [...]}` of published/planned [description companion](./publishing.md#description-companion) pushes, `{ref, repository, digest, files}`, `digest` `null` under `--dry-run`; empty `items` when no companion was resolved) and `announce` (`{outcome, branch, url, fork}` or `null`; `fork` is itself `{repo, created}` or `null` — populated only when the announce branch landed on an automatically created or reused fork rather than the index repository directly) — see [publish report][publishing-report] | `status`: `pushed`, `skipped`, `dry-run`, `failed` |
 
 `kind` is one of `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`
 (experimental, see [Hooks](./hooks.md)), or `settings` (experimental, see
@@ -173,7 +173,7 @@ lock, every row is `added`.
 |---|---|---|
 | `added` | Not in the previous lock | `locked` |
 | `carried` | The same content, including a pin that only gained or lost its tag | `unchanged` |
-| `moved` | Different content | `locked` |
+| `moved` | Different content, including a pin that moved because a new or raised lower bound in a dependency's [version claim][artifacts-claims] no longer admitted it | `locked` |
 | `dropped` | In the previous lock, gone from this one | `dropped` |
 
 `action` keeps its meaning. `disposition` is what tells a new pin from a moved
@@ -493,6 +493,24 @@ digest-bearing edge holds the pin wherever a tag beside it moved, so that row
 reads `false`. The answer is for the recorded reference. It does not predict a
 moved parent that switches or drops the edge, or a diamond whose edges diverge.
 
+A dependency row whose recorded edges are all range claims of one registry and
+repository resolves the line's cascade tag once. It compares that digest with the
+pin, so such a row no longer reads as a split. A direct row with no tag (or
+`latest`) and no digest answers the same way. It builds its line from the range
+claims of its own repository only. A literal, bundle-member or other-repository
+edge beside them does not turn it into a `latest` check.
+
+When the tag names another digest whose release lies in the line, the row reads
+`true`. At the pin it reads `false`. It reads `null` where the cascade tag is
+gone, names a release outside the line, or names a manifest without version
+evidence. `grim update` then reads the tag listing, and the check does not.
+A failed resolve or manifest read reads `null`. A key with a literal or digest
+edge judges a split on those fixing references alone, and ignores a claim of no
+version. Every manifest read of one run shares the cap of 2,048 reads, eight at
+a time, and the 300 s run deadline. Two majors on one line
+still read `null` with the split note. A pin recorded from a listing, such as
+`x:2.4.1`, sees a newer release only through that cascade tag.
+
 A dependency row answers only on edges your local store confirms. Each parent
 that records an edge onto it must be in the store at its pin. The manifest stored
 there must list the same edges. Otherwise the row reads `null`, as on a
@@ -520,7 +538,8 @@ its own and never flips one. It answers through `moved_nested_bundles` instead.
 | `true` | registry pin with no answer when the run's 300 s deadline passed, with one warning | `null` |
 | `true` | registry pin whose tag falls outside the OCI grammar, so no request is sent | `null` |
 | `true` | registry pin, re-resolution completed, the declared reference resolves to a digest that **differs** from the lock pin | `true` |
-| `true` | registry pin, re-resolution completed, the declared reference resolves to the lock pin (or the tag vanished) | `false` |
+| `true` | registry pin, re-resolution completed, the declared reference resolves to the lock pin | `false` |
+| `true` | range-claimed row whose cascade tag is gone, names a release outside the line, or names a manifest without version evidence | `null` |
 
 `moved_nested_bundles` is the last key of an item. It is `null`, or a list of
 `{name, reference}` objects sorted by name.
@@ -627,7 +646,7 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `uninstall` | `{kind, name, status, retained, abandoned_entries, settings_changes}` — `retained` is an always-present array of absolute paths (`[]` unless something was deliberately left behind) naming the on-disk footprint grim kept while the install-state record was dropped anyway — either the containment guard refused to delete it, or it is a locally-modified copy stranded at a vendor root a release relocated, which the kept-modified rule preserves; a non-empty array means state and filesystem deliberately diverge and the listed paths must be removed by hand; `abandoned_entries` is `retained`'s counterpart for a managed MCP entry inside a shared, user-owned config file grim never intended to delete — an always-present array of `{path, pointer}` objects (`[]` normally), `path` the config file and `pointer` the two-level JSON pointer of the un-spliced member; a non-empty array means the entry is now unrecorded and grim will never remove it on a later uninstall — the user must splice it out by hand. Each object also carries `element`, the list element a settings piece owned, else `null`. An adopted settings value that still matches its record is named here even under `--force`, as [settings uninstall][settings-uninstall] describes. `settings_changes` is always present, `[]` when no settings value moved | `status`: `uninstalled`, `kept-by-bundle`, `not-installed`, `kept-by-dependency` — `kept-by-bundle` and `kept-by-dependency` both mean the artifact was never declared directly and something still reaches it, a bundle for the first and another artifact's dependency for the second, so nothing was changed; see [`grim uninstall`][commands-uninstall] |
 | `why` | `{kind, name, pinned, direct, paths, path_count, truncated, overrides}` — every field always present; see [the `why` report](#why-report) | — |
 | `build` | `{kind, name, path, layer_digest, annotation_count, status}` — `layer_digest` is always the uncompressed tar digest; it equals the `com.grimoire.uncompressed.digest` of a [gzip release](./publishing.md#compression) of the same content | `status`: `built` |
-| `release` | `{ref, manifest_digest, tags, pushed, pushed_to, compression}` — `ref` is the pull name; `pushed_to` is the push-side reference under a [`--push-registry` split](./publishing.md#batch-publish-push-registry), `null` when inactive; `compression` is the layer [compression](./publishing.md#compression) of the manifest the tag now points at (`none` or `gzip`, the vocabulary of [`describe`](./commands.md#describe)), `null` for bundle and mcp; an adopted manifest reports its own, a `--skip-existing` no-op reports the requested value | `pushed`: bool (`false` = dry run) |
+| `release` | `{ref, manifest_digest, tags, pushed, pushed_to, compression, floats_kept}` — `ref` is the pull name; `pushed_to` is the push-side reference under a [`--push-registry` split](./publishing.md#batch-publish-push-registry), `null` when inactive; `floats_kept` is always present, `[{tag, version}]` for each cascade float left on a newer version and `[]` when none (a kept float is not in `tags`); `compression` is the layer [compression](./publishing.md#compression) of the manifest the tag now points at (`none` or `gzip`, the vocabulary of [`describe`](./commands.md#describe)), `null` for bundle and mcp; an adopted manifest reports its own, a `--skip-existing` no-op reports the requested value | `pushed`: bool (`false` = dry run) |
 | `rate` | `{ref, action, up, url, provider, host, host_source, viewer_up}` — every field always present. `up` is the count after the mutation (or the sidecar's count under `--dry-run`), `null` when the forge's payload carries no total; `url` is the forge thread link; `provider` is the value the index published, verbatim, so an unrecognised one is still reported; `host` is the host the vote was or would be sent to, `null` when none resolves — under `--dry-run` that is the "grim cannot vote here" answer, delivered *before* a client picks an auth provider; `host_source` says who chose it — see [the `host_source` field](#rate-host-source); `viewer_up` is **tri-state** — see [the `viewer_up` field](#rate-viewer-up); see [grim rate][commands-rate] | `action`: `up`, `remove` |
 | `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
 | `logout` | `{registry}` | — |
@@ -1036,13 +1055,13 @@ dispatch uses `code` and `exit`:
 |--------|--------|---------|
 | `failure` | 1 | Generic failure — no specific class applies |
 | `usage` | 64 | Bad invocation (post-parse): unknown config key, conflicting flags |
-| `data` | 65 | Malformed input data: bad reference, invalid digest, integrity refusal |
+| `data` | 65 | Malformed input data: bad reference, invalid digest, integrity refusal, or a dependency graph past the work budget (32,768 node admissions) or the tag-listing budget (32 MiB per run), or a tag listing cut short |
 | `unavailable` | 69 | Required resource unreachable: registry down, announce failure |
 | `io` | 74 | Filesystem I/O failure |
 | `temp-fail` | 75 | Transient failure — retry may succeed |
 | `no-permission` | 77 | Insufficient permission: filesystem `EPERM` |
-| `config` | 78 | Config or lock file invalid or unparseable, or settings packages that conflict |
-| `not-found` | 79 | Resource not found: missing package, absent explicit config path, a carried pin whose manifest the registry no longer holds |
+| `config` | 78 | Config or lock file invalid or unparseable, settings packages that conflict, or dependency version claims that cannot hold: two majors of one artifact, a claim from a version the resolve dropped, a major downgrade |
+| `not-found` | 79 | Resource not found: missing package, absent explicit config path, a carried pin whose manifest the registry no longer holds, or no release that satisfies a dependency's [version claim][artifacts-claims] |
 | `auth` | 80 | Authentication failure: registry 401 or 403, missing credential |
 | `offline-blocked` | 81 | `--offline` (or `GRIM_OFFLINE`) blocked a network operation |
 
@@ -1085,6 +1104,7 @@ recognize. The reasons defined so far:
 | `locked` | `temp-fail` / 75 | A config-file write was refused because another `grim` process holds the `<file>.lock` advisory sidecar. Transient — retry the same command. Cline's own lock on its MCP settings file, held past grim's wait, carries the same reason. So does a settings file that changed during the run, which grim leaves untouched. |
 | `unsupported-layer-media-type` | `data` / 65 | A skill, rule, agent or hook layer has a `+zstd` media type, which this grim cannot decode. Nothing was written. The [layer encoding](./artifacts.md#layers) table lists the types grim reads. Not forceable; upgrade grim. |
 | `unsupported-artifact-feature` | `data` / 65 | A manifest names a required feature this grim does not understand, or its layers are not [one of the accepted shapes](./artifacts.md#requires-layer). The message says to update grim. Raised wherever content or dependencies are read: `install`, `fetch`, `lock`, `update`, `add` and both exports. `describe` still reports such an artifact. Not forceable; upgrade grim. |
+| `major-downgrade` | `config` / 78 | `requires` version claims would move a held pin to a lower major version, and no tagged direct declaration holds it. Nothing was written. Not forceable and not retryable: `--force` does not help. Rerun `grim add`, `grim update` or `grim lock` with `--allow-downgrade`, or declare the artifact with a tag. |
 | `anchor-escape` | `data` / 65 | A recorded install path resolves outside the anchor root it was stored against, and its final component is itself a symlink. grim refuses to read or write through it. **Never forceable** — `--force` does not bypass containment. Remediation: `grim uninstall <kind> <name>`, then install again; files may remain on disk and must be removed manually. |
 
 New reasons may appear in any minor release under the [additive-field
@@ -1134,7 +1154,8 @@ re-run with `--force` can resolve this refusal:
 `forceable` follows the identical rule to `retryable`: **additive and
 omit-when-absent**, present only when `reason` is present *and* that reason
 is forceable, never a bare `false`. Today `modified` and
-`untracked-destination` set it.
+`untracked-destination` set it. `major-downgrade` does not: its remedy is
+`--allow-downgrade`, not `--force`.
 
 Key on `forceable`, **never on the exit code**: `data` / 65 covers both the
 forceable drift refusals *and* the non-forceable `anchor-escape` containment
@@ -1352,3 +1373,4 @@ can ship in a minor release.
 [ripgrep-sigpipe]: https://github.com/BurntSushi/ripgrep/issues/2939
 [cargo-broken-pipe]: https://github.com/rust-lang/cargo/issues/5234
 [cargo-shell-fix]: https://github.com/rust-lang/cargo/pull/8236
+[artifacts-claims]: ./artifacts.md#what-the-tag-claims

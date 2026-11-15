@@ -321,10 +321,10 @@ string.
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp|hook|settings>] [--name <name>] [--no-install] [--force] [--trust-workspace | --no-trust-workspace] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp|hook|settings>] [--name <name>] [--no-install] [--force] [--allow-downgrade] [--trust-workspace | --no-trust-workspace] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
-bundle, or (experimental) [hook](./hooks.md), pins it in the lock, and — by default — materializes it into your
-detected AI clients in one step. `<reference>` is the only required argument —
+bundle, or (experimental) [hook](./hooks.md), and pins it in the lock. By default
+it also materializes the artifact into your detected AI clients in one step. `<reference>` is the only required argument —
 `registry/repo:tag` or `registry/repo@sha256:…`.
 
 A [settings package][settings] is the experimental `settings` kind, behind the
@@ -402,9 +402,13 @@ declaration, the lock, and the installed files to version 2. Pinning a floating
 tag to a digest works the same way, and so does going from a digest-only
 reference back to a tag. Dropping the digest from `:1@sha256:…` back to `:1`
 keeps that digest until [`grim update <name>`](#update).
+A bare reference keeps any tagged pin of the same repository, so `grim add acme/code-review` after
+`grim add acme/code-review:1` leaves the pin on `:1` and reports `added`. Run
+[`grim update <name>`](#update) to move it.
 
 A new dependency can ask for another version of a directly declared artifact.
-The declaration's pin holds, and `add` warns once per held artifact. See
+A declaration with a tag holds its pin, and `add` warns once per held artifact.
+A bare declaration yields to the version claims on its own repository. See
 [a pin that holds back a request](#lock-held-back).
 
 Re-declaring the exact same reference moves nothing, even after its tag moved.
@@ -462,6 +466,12 @@ dependency edge disagrees with a kept pin, grim releases that pin and resolves
 it again, and [`moved`](./json-interface.md#shapes-single) lists it. Plain
 output adds one stderr line naming each pin it moved. If the claims still
 disagree, `add` exits `78`.
+
+Version claims can also move a pin to a lower major version. `add` then exits
+`78` with the reason `major-downgrade`, and the message names the pin, both
+versions and the fix. `--allow-downgrade` takes the lower release for this run.
+`add` never moves a pin to a lower major version otherwise. Two majors of one
+artifact, such as `x:1` and `x:2`, exit `78` whatever the flag.
 
 Some locks hold no member list for a declared bundle: grim 0.3 or earlier wrote
 them, or a hand edit cut their `[[bundle]]` rows. There a new artifact that
@@ -597,11 +607,12 @@ A bundle has no local-path form via `add`: `grim add --kind bundle
 |-----------|------|
 | Success | `0` |
 | A reference naming another repository for an existing binding, an invalid binding name, or a local-path bundle | `64` |
-| A local modification or an untracked destination, or a dependency [cycle](./concepts.md#dependency-cycles) or [limit](./concepts.md#dependency-limits) | `65` |
+| A local modification or an untracked destination, or a dependency [cycle](./concepts.md#dependency-cycles) or [limit](./concepts.md#dependency-limits), including the node-admission and tag-listing limits | `65` |
 | Concurrent write on the config file's lock | `75` |
-| Sources claiming different versions of one artifact, or no client that can host it | `78` |
+| Sources claiming different versions of one artifact, claims in two majors, or no client that can host it | `78` |
+| A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`) | `78` |
 | A [lock file grim cannot read](#lock-unreadable) | `78`, `77` or `74` |
-| A tag that does not exist, or a [kept pin whose manifest is gone](#lock-exit-codes) | `79` |
+| A tag that does not exist below a release the resolve keeps, a claim no release satisfies, or a [kept pin whose manifest is gone](#lock-exit-codes) | `79` |
 
 A resolve that fails restores `grimoire.toml`, and an unreadable lock refuses
 before the config is written, so neither leaves a declaration behind. Every other
@@ -614,6 +625,13 @@ Brings `grimoire.lock` in line with `grimoire.toml`. A new declaration, or a
 reference you changed, resolves to a concrete digest, and one you removed leaves
 the lock. Run it after editing the config by hand. `grim add` already locks what
 it declares.
+
+`grim lock [--allow-downgrade]` takes one flag of its own. `--allow-downgrade` lets the run
+move a pin to a lower major version when a dependency's version claim asks for
+one. Without it, such a move exits `78` with the reason `major-downgrade`. The
+[TUI](#tui) and the export stage never downgrade. Their refusal names the CLI
+command to run, except for an ad-hoc `grim export plugin <refs>`, whose refusal
+carries no remedy.
 
 Every other pin stays, even after its tag moved on the registry. A one-line
 config edit should not change what the rest of the team installs, so only
@@ -637,8 +655,12 @@ state file exits `74`. Neither writes the lock.
 ### Which pins stay {#lock-pins}
 
 A pin stays while the reference it records still answers the request. That means
-the same registry and repository, the same tag, and the same digest when the
-request names one. Dropping the digest from `:1@sha256:…` back to `:1` keeps that
+the same registry and repository, and the same digest when the request names one.
+A request with a tag is answered by the same tag. A bare direct line, with no
+tag, is answered by any tagged pin of its repository, so `grim lock` keeps
+`x:2@…` after you edit `x:2` to `x`. A `requires` version claim is answered by
+any pin whose version satisfies it, even when the tag differs. A pin with no tag
+and no version annotation keeps the version its recorded edges show. Dropping the digest from `:1@sha256:…` back to `:1` keeps that
 digest until [`grim update <name>`](#update).
 
 A dependency no declaration holds can have several requests and only one pin. The
@@ -646,6 +668,16 @@ lock's recorded edges hold the other requests. While the lock's hash matches the
 declaration, every recorded edge answers, because the resolve that wrote the lock
 settled them on one digest. So the pin stays after any of those tags moved, in
 any repository, with no tag resolve.
+
+A plain `grim lock` never moves a held pin that still satisfies every claim.
+Only [`grim update`](#update) moves it, to the release the claimed major's
+cascade tag names, such as `2` for `x:2`. [`grim release`](#release) keeps that
+tag on the highest release of the major.
+
+One kind of config edit moves a pin without `grim update`. An edit that adds a claim the
+pin fails, such as a raised lower bound, moves the pin and reads `moved`. One
+stderr line says why:
+`skill/x moved from 2.1.4 to 2.3.0 because skill/a (ghcr.io/acme/x:2), skill/b (ghcr.io/acme/x:2.1) require it`.
 
 Five cases resolve anyway:
 
@@ -696,7 +728,17 @@ not trust, run [`grim update`](#update) or delete the lock.
 
 ### A pin that holds back a request {#lock-held-back}
 
-A direct declaration's pin wins over what a dependency asks for. Suppose a
+A direct declaration with a tag, a digest or a path holds its pin against what a
+dependency asks for. A bare declaration, with no tag or with `latest`, yields
+instead. It follows the `requires` version claims that name its repository, and
+stderr says so in one line:
+
+```text
+skill/x is declared without a tag, so it follows what skill/a (ghcr.io/acme/x:2), skill/b (ghcr.io/acme/x:2.1) require; declare it with a tag to choose one
+```
+
+Claims from another repository, literal and digest references and bundle members
+stay shadowed, and the warning below covers them. Suppose a
 parent that is new to the lock, or moved in this run, requests a reference. A
 local (path) parent counts when it is new or its content changed.
 
@@ -707,6 +749,9 @@ stderr:
 ```text
 skill/x is requested by skill/p as ghcr.io/acme/x:2, but your declaration holds it at <pin>; run `grim update -- x` to re-read the declared tag, or declare the requested reference
 ```
+
+The warning lists the shadowed `requires` edges. A held pin that still satisfies
+every version claim triggers none.
 
 A key several new parents ask for gets one warning that names all of them.
 `grim add`, `grim update` and `grim lock` print it. A declaration pinned by
@@ -725,13 +770,15 @@ case from an earlier run is not repeated here:
 | Situation | Code |
 |-----------|------|
 | Success | `0` |
-| A dependency [cycle](./concepts.md#dependency-cycles), a graph past the [limits](./concepts.md#dependency-limits), or an artifact that requires a feature this grim does not know (reason `unsupported-artifact-feature`) | `65` |
+| A dependency [cycle](./concepts.md#dependency-cycles), a graph past the [limits](./concepts.md#dependency-limits) (including 32,768 node admissions and 32 MiB of tag listings), or an artifact that requires a feature this grim does not know (reason `unsupported-artifact-feature`) | `65` |
 | Concurrent write on the config file's lock | `75` |
-| Two sources want different versions of one artifact; the message lists them all and names the direct declaration that settles it, and `grim add --name <binding>` when the binding is not the repository's last segment | `78` |
+| Two sources want different versions of one artifact, or claims sit in two majors; the message lists them all and names the direct declaration that settles it, and `grim add --name <binding>` when the binding is not the repository's last segment | `78` |
+| A pin that would move to a lower major version without `--allow-downgrade` (reason `major-downgrade`), a recorded claim the pin no longer answers, or a pin that would move only because of a claim from a version this resolve dropped | `78` |
 | A [lock file grim cannot read](#lock-unreadable) | `78`, `77` or `74` |
 | With the `settings` flag on, settings packages in the lock that [conflict][settings-conflicts] | `78` |
 | With the `settings` flag on and settings in the lock, an install state file grim cannot read | `74` |
-| A tag that does not exist, naming the artifact that required it | `79` |
+| A tag that does not exist, naming the artifact that required it, when the resolve keeps the release that requires it | `79` |
+| A claim no release satisfies, naming the claims and the newest release; a second claim in another major that arrives later in the walk exits `78` instead | `79` |
 | A kept pin whose manifest the registry dropped | `79` |
 
 [`grim update`](#update) is the command that moves a pin whose request held, so
@@ -920,6 +967,10 @@ Rerun it with `--force` to replace the local copy.
 re-materializes only what changed. It is the command that moves a pin whose
 reference you did not change. With no names it updates everything, and binding
 names [scope it](#update-names). Shares `--client` and `--force` with install.
+`--allow-downgrade` lets the run move a pin to a lower major version when a
+dependency's version claim asks for one, and it also works with
+[`--marketplace`](#update-marketplace). Without it, such a move exits `78`
+with the reason `major-downgrade`.
 
 ```sh
 grim update
@@ -927,8 +978,13 @@ grim update code-review rust-style
 ```
 
 A moved parent can ask for another version of a directly declared
-artifact. The declaration's pin holds, and `update` warns once per held
-artifact, as [`lock`](#lock-held-back) does.
+artifact. A declaration with a tag holds its pin, and `update` warns once per
+held artifact, as [`lock`](#lock-held-back) does. A bare declaration yields to
+the version claims on its repository.
+
+A pin chosen by version claims moves to the release its claimed major's cascade
+tag names, such as `2` for `x:2`. [`grim release`](#release) keeps that tag on
+the highest release of the major. That is the move a plain [`grim lock`](#lock-pins) never makes.
 
 A row reads `updated` when its pin is new or moved, and `unchanged` when it held.
 It reads `restored` when the pin held and this run wrote the files, with `old`
@@ -1175,11 +1231,12 @@ nothing.
 | Success | `0` |
 | A locally modified artifact, refused with `refused: true` on its row; the report still prints and the pin has already moved | `65` |
 | A named run on a stale lock (`stale-lock`) | `65` |
-| A dependency [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits), or `unsupported-artifact-feature` | `65` |
+| A dependency [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits) (including 32,768 node admissions and 32 MiB of tag listings), or `unsupported-artifact-feature` | `65` |
 | Concurrent write on the config file's lock | `75` |
-| Sources claiming different versions of one artifact, which a moved tag [can cause](./concepts.md#bundle-conflicts) | `78` |
+| Sources claiming different versions of one artifact, which a moved tag [can cause](./concepts.md#bundle-conflicts), or claims in two majors | `78` |
+| A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`) | `78` |
 | A [lock file grim cannot read](#lock-unreadable) | `78`, `77` or `74` |
-| A name that matches nothing, a tag that does not exist, or an unselected [pin whose manifest is gone](#lock-exit-codes) | `79` |
+| A name that matches nothing, a tag that does not exist, a claim no release satisfies, or an unselected [pin whose manifest is gone](#lock-exit-codes) | `79` |
 
 Every other failure, such as an unreachable registry or a rejected credential,
 keeps the classification [`grim export plugin`](#export-plugin-exit-codes)
@@ -1259,7 +1316,9 @@ to still counts as held against what it named before.
 
 The refusal names the narrow remedy first: add the dependent to the pick. It
 then offers `grim update --marketplace <manifest> <plugin>`, and says that this
-moves every pin of the plugin whose tag moved. The `79` text for a pinned
+moves every pin of the plugin whose tag moved. Where that update would itself
+refuse a major downgrade, the text names `--allow-downgrade` as the alternative.
+The `79` text for a pinned
 manifest the registry no longer holds says the same of its whole-plugin command.
 
 A pick records no digest for a bundle it does not select, except one a bundle it
@@ -1299,6 +1358,7 @@ reached through a symbolic link, gets no command, only the reason.
 | A selector naming an undeclared plugin, or a member the plugin does not resolve to | `79` |
 | A kept pin or a recorded bundle digest whose manifest neither the registry nor the local store holds, on a run that does not move it | `79` |
 | A dependency graph that cannot be walked: a [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits), or a feature this grim does not know (`unsupported-artifact-feature`) | `65` |
+| A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`), or claims in two majors | `78` |
 | An include's floating tag or a tag below an include needs the network under `--offline`, or a recorded bundle digest the local store lacks | `81` |
 
 Every other failure propagates from the resolver with its existing
@@ -1347,7 +1407,7 @@ and what selected each, in the words of [`grim install`](#install). Stdout and
 
 A directly declared artifact may also be required by another artifact at the
 same digest, with no artifact asking for another version of it. Plain output
-then prints a note on stderr that the declaration can be removed. It stays safe to keep: a direct declaration wins over a dependency.
+then prints a note on stderr that the declaration can be removed. It stays safe to keep: a direct declaration with a tag wins over a dependency, and a bare one follows the version claims on its repository.
 
 `--format json` output carries an `outputs` array per artifact: the
 per-[client](./concepts.md#clients) locations the artifact was materialized
@@ -1487,7 +1547,39 @@ Each bundle member row separately re-resolves the id its bundle listed. So a
 member at a floating tag reports an update even while the bundle itself sits at
 an unchanged version.
 
-A dependency row answers too, by the tag its pin carries while an edge names that
+A dependency row may have recorded edges that are all version claims, or
+any-version claims, of one registry and repository. Grim resolves the line's
+cascade tag once for it and compares that digest with the pin. The cascade tag is `2` for a `2.x` line,
+`0.2` for a `0.2.x` line and `latest` for an any-version line. Such a row no
+longer reads as a split.
+
+A direct row declared with no tag, or `latest`, and no digest answers the same
+way. Its line comes from the edges that claim the repository it declares. An
+edge to a literal tag, a bundle member or another repository beside them does
+not turn the row into a `latest` check.
+
+When the tag names a different digest and the version that release shows lies
+in the line, the field is `true`. The note reads
+`update available: skill 'dep': its tag moved, and more than one reference requires it`.
+
+A tag at the pin gives `false`. The field is `null` where `grim update` would
+read the tag listing, which status does not: a cascade tag that is gone, one that
+names a release outside the line, and a manifest with no version evidence. A
+failed resolve or manifest read gives `null` too. Every manifest read of the run
+shares the 2,048 cap, runs 8 at a time and stops at the 300 s run deadline.
+
+A line claimed in two majors, such as `1` and `2`, still reads `null` with the
+note for a split. A pin recorded from a listing, such as `x:2.4.1@…`, sees a
+higher release only through the cascade tag.
+
+A key with a literal or digest edge judges a split on those fixing references
+alone. Its version claims are judged by the evidence of the fixing digest, and
+any-version claims are ignored.
+
+Rows with a literal or digest edge, other direct rows and bundle member rows
+keep the path below.
+
+A dependency row there answers by the tag its pin carries while an edge names that
 tag. A tagless pin, or a kept pin whose tag no edge names any more, answers by the
 smallest edge the lock records. An edge that names a digest holds the row to that
 digest, because `grim update` cannot move past it. The answer covers
@@ -1503,11 +1595,14 @@ A key the lock records under more than one reference re-resolves each of them.
 When they name different digests, the row reads `null` in whatever order they
 are listed. Its stderr note names the references and says `grim update`, with
 the run's `--global` or `--config`, exits `78` until `grimoire.toml` declares
-one.
+one. A line claimed in two majors reads the same way.
 
 Online, `--check` also prints one stderr note per directly declared row, or
 declared bundle, that a recorded request is held back from. The note uses the words of the
-[held-back warning](#lock-held-back). It reads the requests from the lock's
+[held-back warning](#lock-held-back). It judges a version claim by the version the
+pin shows, from its annotation or else its tag, beside the other range claims the
+pin meets. It judges a literal or digest
+request by digest, as the warning does when a run resolves. It reads the requests from the lock's
 recorded edges. The note changes neither the exit code nor the JSON, and an
 offline run or a lock with no recorded edges prints none. The note leaves once
 `grim update -- <name>` moves the row to the requested digest.
@@ -1694,7 +1789,8 @@ one-node chain, beside any chain through an artifact that also requires it.
 Two extra facts can follow the table. When a direct declaration shadows what an
 artifact asked for, plain output adds an `overrides:` line naming the parent and
 the identifier it wanted. The declaration won, as the
-[conflict policy](./concepts.md#bundle-conflicts) says. A declared artifact may
+[conflict policy](./concepts.md#bundle-conflicts) says. A bare declaration may
+yield instead, and then no `overrides:` line appears. A declared artifact may
 also be required at the same digest, with no artifact asking for another version
 of it. A stderr note then says the declaration can be removed.
 
@@ -1891,6 +1987,7 @@ that survive with what the pin's own record names:
 | Every surviving request | Kept | Restamped |
 | Some of them | Kept, with a note | Left stale |
 | None of them | Dropped, with a note | Left stale |
+| None of them, but every surviving request is a version claim the pin's tag does not rule out | Kept, with a note | Left stale |
 
 In the last two rows `grim install` exits `65` until [`grim lock`](#lock). When
 such an edit changes the lock's rows, it writes a hash no declaration produces.
@@ -4039,7 +4136,8 @@ artifact file does not author.
 
 `grim release <path> <reference>` validates, packs, and pushes an artifact.
 By default a full semver reference (e.g. `1.2.3`) applies cascade tags —
-`1.2.3`, `1.2`, `1`, and `latest` are all moved — while a non-version tag
+`1.2.3`, `1.2`, `1`, and `latest` move onto it, but never a float to a lower
+version. A non-version tag
 (e.g. `canary`, `edge`) publishes only that exact tag with no cascade.
 `--cascade` asserts the cascade and requires a full semver: a non-semver tag
 with `--cascade` exits 65 (a typo guard). `--no-cascade` suppresses the
@@ -4088,6 +4186,46 @@ carrying a `[server]` table gets the equivalent nudge toward
 `grim release --kind mcp` — see
 [MCP Server Artifacts](./mcp-servers.md#publishing).
 
+A cascading release first reads each float. A float that is absent is created,
+and one already on this release's digest moves. For any other float, grim reads
+the manifest's version annotation.
+
+The float stays when that version is exact, inside the float's own span and
+higher than the release, and the exact tag of that version still names the
+float's manifest. A prerelease counts, compared by semver precedence: a float on
+3.0.0-rc.1 stays against 2.4.1, and 3.0.0 replaces it. The span of `X.Y` is that minor line. The
+span of `X` is the major line, and `latest` has none.
+
+Otherwise the float moves. A float whose version tag is gone or names another
+manifest moves, with one stderr line. A float whose manifest grim cannot parse,
+or that the registry serves under another digest, has an unknown version and
+moves. That covers an image index and another tool's image.
+
+Take 2.9.0 released and then 2.3.7. The 2.3.7 release moves `2.3` and keeps `2`
+and `latest` on 2.9.0. Stderr carries one line per kept float:
+`kept '2' on 2.9.0, above this release 2.3.7`.
+
+The JSON report lists each kept float in `floats_kept`, as
+`[{"tag": "2", "version": "2.9.0"}]`, and `[]` when none stayed. `tags` keeps its
+meaning, so a kept float is not in it. See
+[`release` in the JSON interface](./json-interface.md#report-shapes).
+
+The reads cost at most three tag resolves and three manifest reads per release,
+plus one tag resolve per float that would be kept. A failed read stops a real
+release before any tag moves, with exit `69`, `80` or `81`. Offline, a real
+cascading release exits `81` before any plan.
+
+Run releases into one repository one at a time, for example in a CI concurrency
+group. Grim reads each float before it moves it, and the registry has no
+compare-and-set for tags. So two concurrent releases can leave a float on the
+lower version.
+
+`--dry-run` runs the same reads and never writes. When a read fails, or offline,
+it warns once on stderr, plans every float moving, reports `floats_kept` as `[]`
+and keeps its exit code. `--force` still applies the cascade and never lowers a
+float; it only lets the exact tag move. `--no-cascade`, a prerelease and a non-semver tag read nothing. Floats
+that other tools or an earlier grim already moved stay as they are.
+
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
 grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
@@ -4101,15 +4239,20 @@ package in kind order (skills → rules → agents →
 except that an entry always follows the same-manifest entries it
 [requires](./publishing.md#requires-publish-order). It
 validates the whole manifest before any push, then composes
-[`grim release`](#release) per entry.
+[`grim release`](#release) per entry. Each entry follows the
+[cascade float rule](#release) of `release`: a float is never moved to a lower
+version. Every JSON entry carries `floats_kept`, and stderr prefixes each kept
+float line with the entry, such as
+`localhost:5000/skills/test-skill:2.3.7: kept '2' on 2.9.0, above this release 2.3.7`.
+A cascading `publish --dry-run` reads the floats too, and never fails on it.
 
 The default behavior skips entries whose exact-version tag already exists,
 making the command idempotent: re-running after a partial failure pushes only
 the remaining entries. Pass `--force` to move existing exact-version tags
 instead. The two modes are mutually exclusive.
 
-`--dry-run` validates the manifest and prints the full push plan without
-touching the registry. `--only <name>` (repeatable) filters to a single
+`--dry-run` validates the manifest and prints the full push plan. It reads the
+floats it would move, and never writes. `--only <name>` (repeatable) filters to a single
 entry; a name absent from the manifest exits 65. `--version <version>` is
 the single version source: a **semver** value overrides the manifest's
 top-level `version` (the catalog-wide value entries inherit) and every entry

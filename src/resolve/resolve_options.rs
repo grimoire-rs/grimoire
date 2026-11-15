@@ -19,6 +19,15 @@ pub const DEFAULT_MAX_RETRIES: u32 = 3;
 /// Default backoff before the first retry; doubled each retry.
 pub const DEFAULT_BASE_BACKOFF: Duration = Duration::from_millis(200);
 
+/// Whether a resolve may move a pin to a lower major version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Downgrade {
+    /// Refuse the move (`--allow-downgrade` not given).
+    Refuse,
+    /// Take the move (`--allow-downgrade`).
+    Allow,
+}
+
 /// Per-pass resolution tuning.
 #[derive(Debug, Clone)]
 pub struct ResolveOptions {
@@ -28,6 +37,8 @@ pub struct ResolveOptions {
     pub max_retries: u32,
     /// Backoff applied before the first retry; doubled each retry.
     pub base_backoff: Duration,
+    /// Whether a lower major version may replace a pin.
+    pub downgrade: Downgrade,
 }
 
 impl Default for ResolveOptions {
@@ -36,6 +47,7 @@ impl Default for ResolveOptions {
             per_artifact_timeout: DEFAULT_PER_ARTIFACT_TIMEOUT,
             max_retries: DEFAULT_MAX_RETRIES,
             base_backoff: DEFAULT_BASE_BACKOFF,
+            downgrade: Downgrade::Refuse,
         }
     }
 }
@@ -50,5 +62,10 @@ mod tests {
         assert_eq!(o.per_artifact_timeout, Duration::from_secs(30));
         assert_eq!(o.max_retries, 3);
         assert_eq!(o.base_backoff, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn resolve_options_default_refuses_downgrades() {
+        assert_eq!(ResolveOptions::default().downgrade, Downgrade::Refuse);
     }
 }

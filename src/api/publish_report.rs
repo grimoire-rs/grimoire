@@ -3,16 +3,18 @@
 
 //! `grim publish` output.
 //!
-//! Plain format: 5-column table (Kind | Ref | Digest | Tags | Status);
-//! the announce outcome stays human prose on stderr.
+//! Plain format: 5-column table (Kind | Ref | Digest | Tags | Status),
+//! plus one stderr line per kept float of each entry; the announce outcome
+//! stays human prose on stderr.
 //!
 //! JSON format: `{"items": [...], "descriptions": {...}, "announce": ...}`
 //! (uniform `items` envelope, per subsystem-cli-api.md). `items` is the
 //! per-entry array (`{kind, ref, digest, tags, status, pushed_to,
-//! compression}` — `pushed_to` is always present and `null` unless a
+//! compression, floats_kept}` — `pushed_to` is always present and `null` unless a
 //! `--push-registry` / manifest `push_registry` split was active;
 //! `compression` is `"none"`/`"gzip"` for tar kinds, `null` for bundle,
-//! mcp and failed entries); `descriptions` is a
+//! mcp and failed entries; `floats_kept` is the release's `[{tag, version}]`,
+//! `[]` for skipped and failed entries); `descriptions` is a
 //! sibling `{"items": [...]}` of published description companions
 //! (`{ref, repository, digest, files}`, digest `null` under `--dry-run`);
 //! `announce` is `{outcome, branch, url, fork}` when the `--announce` step
@@ -24,6 +26,7 @@ use std::io::{self, Write};
 
 use serde::{Serialize, Serializer};
 
+use crate::api::release_report::{KeptFloat, kept_float_lines};
 use crate::cli::printer::{Printable, print_table};
 use crate::oci::ArtifactKind;
 
@@ -176,6 +179,13 @@ pub struct PublishEntry {
     /// Layer compression of the manifest the tag now points at; `null` for
     /// bundle, mcp and failed entries. Additive always-present field.
     pub compression: Option<crate::oci::layer::Compression>,
+    /// The cascade floats this entry's release left on a newer version; `[]`
+    /// for skipped and failed entries. Additive always-present field.
+    pub floats_kept: Vec<KeptFloat>,
+    /// The version this entry released, which its kept-float stderr lines
+    /// name; never serialized.
+    #[serde(skip)]
+    pub release: String,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -229,6 +239,19 @@ impl PublishReport {
     )]
     pub fn items(&self) -> &[PublishEntry] {
         &self.items
+    }
+
+    /// The stderr lines of a plain run, one per kept float of each entry,
+    /// prefixed with that entry's reference.
+    pub fn kept_lines(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .flat_map(|entry| {
+                kept_float_lines(&entry.release, &entry.floats_kept)
+                    .into_iter()
+                    .map(move |line| format!("{}: {line}", entry.reference))
+            })
+            .collect()
     }
 }
 
@@ -287,7 +310,12 @@ impl Printable for PublishReport {
                 .to_string(),
             ]
         }));
-        print_table(w, &["Kind", "Ref", "Digest", "Tags", "Status"], &rows)
+        print_table(w, &["Kind", "Ref", "Digest", "Tags", "Status"], &rows)?;
+        // Notes, not the result: a closed stderr must not fail a publish that happened.
+        for line in self.kept_lines() {
+            let _ = writeln!(io::stderr(), "{line}");
+        }
+        Ok(())
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -324,6 +352,8 @@ mod tests {
             status: PublishStatus::Pushed,
             pushed_to: None,
             compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
         }]);
         let mut buf = Vec::new();
         r.print_plain(&mut buf).unwrap();
@@ -356,6 +386,8 @@ mod tests {
             status: PublishStatus::DryRun,
             pushed_to: None,
             compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
         }])
         .with_descriptions(vec![PublishDescription {
             reference: "registry.example/acme/s:__grimoire".to_string(),
@@ -404,6 +436,8 @@ mod tests {
             status: PublishStatus::DryRun,
             pushed_to: None,
             compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
         }]);
         let mut buf = Vec::new();
         r.print_json(&mut buf).unwrap();
@@ -417,6 +451,23 @@ mod tests {
     }
 
     #[test]
+    fn floats_kept_is_always_present_and_empty_without_the_cascade_on_publish() {
+        let r = PublishReport::new(vec![PublishEntry {
+            reference: "registry.example/acme/s:1.0.0".to_string(),
+            kind: ArtifactKind::Skill,
+            digest: None,
+            tags: vec![],
+            status: PublishStatus::Failed,
+            pushed_to: None,
+            compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["items"][0]["floats_kept"], serde_json::json!([]));
+    }
+
+    #[test]
     fn json_announce_object_carries_branch_and_conditional_url() {
         let entry = || PublishEntry {
             reference: "registry.example/acme/s:1.0.0".to_string(),
@@ -426,6 +477,8 @@ mod tests {
             status: PublishStatus::Pushed,
             pushed_to: None,
             compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
         };
         let pr = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
             outcome: AnnounceStatus::PullRequest,
@@ -464,6 +517,8 @@ mod tests {
             status: PublishStatus::Pushed,
             pushed_to: None,
             compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
         };
         // Upstream push (no fork): the key is present and explicit null.
         let no_fork = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
@@ -506,6 +561,8 @@ mod tests {
             status: PublishStatus::Pushed,
             pushed_to: None,
             compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
         }])
         .with_announce(Some(PublishAnnounce {
             outcome: AnnounceStatus::UpToDate,

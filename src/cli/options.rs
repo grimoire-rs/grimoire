@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 
 use crate::cli::color::ColorMode;
+use crate::resolve::resolve_options::Downgrade;
 
 /// Output rendering format for structured command results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -184,6 +185,28 @@ impl HookTrustOpts {
     }
 }
 
+/// The `--allow-downgrade` switch of the commands that resolve a lock.
+#[derive(Debug, Clone, Copy, Args)]
+pub struct DowngradeOpts {
+    /// Allow this run to move a pin to a lower major version when a
+    /// dependency's version claim asks for one. Without it, such a move
+    /// refuses with exit 78 (reason `major-downgrade`). `grim install` never
+    /// resolves, so it has no such flag.
+    #[arg(long)]
+    pub allow_downgrade: bool,
+}
+
+impl DowngradeOpts {
+    /// The answer the resolve takes: `Allow` only when the flag was typed.
+    pub fn downgrade(self) -> Downgrade {
+        if self.allow_downgrade {
+            Downgrade::Allow
+        } else {
+            Downgrade::Refuse
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +319,65 @@ mod tests {
         assert!(Harness::parse_from(["grim", "-g"]).global.global);
         assert!(Harness::parse_from(["grim", "--global"]).global.global);
         assert!(!Harness::parse_from(["grim"]).global.global);
+    }
+
+    /// What the full CLI parses `argv` to, for the commands that carry the switch.
+    fn downgrade_of(argv: &[&str]) -> Downgrade {
+        use clap::Parser as _;
+
+        let parsed = crate::Cli::try_parse_from(argv).unwrap_or_else(|error| panic!("{argv:?} must parse: {error}"));
+        match parsed.command {
+            Some(crate::Command::Add(args)) => args.downgrade.downgrade(),
+            Some(crate::Command::Update(args)) => args.downgrade.downgrade(),
+            Some(crate::Command::Lock(args)) => args.downgrade.downgrade(),
+            _ => panic!("{argv:?} is not add, update or lock"),
+        }
+    }
+
+    #[test]
+    fn allow_downgrade_parses_on_add_update_and_lock() {
+        let commands: [&[&str]; 4] = [
+            &["grim", "add", "ghcr.io/acme/x:2"],
+            &["grim", "update"],
+            &["grim", "update", "--marketplace", "marketplace.toml"],
+            &["grim", "lock"],
+        ];
+        for argv in commands {
+            assert_eq!(downgrade_of(argv), Downgrade::Refuse, "{argv:?}");
+            let flagged: Vec<&str> = argv.iter().copied().chain(["--allow-downgrade"]).collect();
+            assert_eq!(downgrade_of(&flagged), Downgrade::Allow, "{flagged:?}");
+        }
+    }
+
+    /// Each command's help says what the flag allows, what refuses without it,
+    /// and that `grim install` takes none.
+    #[test]
+    fn allow_downgrade_help_names_the_refusal_and_install() {
+        use clap::CommandFactory as _;
+
+        let mut cli = crate::Cli::command();
+        for name in ["add", "update", "lock"] {
+            let command = cli.find_subcommand_mut(name).expect("a shipped subcommand");
+            let help = command.render_long_help().to_string();
+            let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            for phrase in [
+                "--allow-downgrade Allow this run to move a pin to a lower major version",
+                "refuses with exit 78 (reason `major-downgrade`)",
+                "`grim install` never resolves, so it has no such flag",
+            ] {
+                assert!(help.contains(phrase), "{name}: {phrase:?} missing from\n{help}");
+            }
+        }
+    }
+
+    #[test]
+    fn install_has_no_allow_downgrade() {
+        use clap::Parser as _;
+
+        let refused = crate::Cli::try_parse_from(["grim", "install", "--allow-downgrade"])
+            .err()
+            .expect("install must not take --allow-downgrade");
+        assert_eq!(refused.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

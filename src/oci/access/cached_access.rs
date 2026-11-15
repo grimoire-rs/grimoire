@@ -26,7 +26,7 @@
 
 use async_trait::async_trait;
 
-use super::super::access::{AccessMode, OciAccess, Operation};
+use super::super::access::{AccessMode, OciAccess, Operation, TagListing};
 use super::error::{AccessError, AccessErrorKind};
 use crate::oci::manifest::OciManifest;
 use crate::oci::tag_cache::TagCache;
@@ -215,6 +215,15 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
         }
     }
 
+    async fn list_tags_within(&self, id: &Identifier, max_bytes: usize) -> Result<Option<TagListing>, AccessError> {
+        // The tag cache holds only tags this machine resolved: offline it would
+        // pick a lower version than the registry holds, so a listing is a miss.
+        if self.mode == AccessMode::Offline {
+            return Err(AccessError::with_identifier(id.clone(), AccessErrorKind::OfflineMiss));
+        }
+        self.inner.list_tags_within(id, max_bytes).await
+    }
+
     async fn list_catalog(&self, registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
         if self.mode == AccessMode::Offline {
             // No persistent catalog cache in Phase 3 — degrade to empty.
@@ -364,6 +373,30 @@ mod tests {
             Some(digest)
         );
         assert_eq!(*calls.lock().unwrap(), 0, "offline warm cache must not call inner");
+    }
+
+    /// The tag cache holds only tags this machine resolved, so offline it never
+    /// stands in for a resolve's listing; online the registry answers.
+    #[tokio::test]
+    async fn a_listing_within_a_budget_is_never_served_from_the_tag_cache() {
+        let (_d, tags, blobs) = paths();
+        tags.put_tags(&id(), &["cached".to_string()]).unwrap();
+        let inner = || CountingInner {
+            digest: Algorithm::Sha256.hash(b"d"),
+            calls: Arc::new(Mutex::new(0)),
+            blob: vec![],
+        };
+
+        let offline = CachedAccess::new(inner(), tags.clone(), blobs.clone(), AccessMode::Offline);
+        let err = offline
+            .list_tags_within(&id(), 1024)
+            .await
+            .expect_err("an offline listing is a miss");
+        assert!(matches!(err.kind, AccessErrorKind::OfflineMiss), "{err:?}");
+
+        let online = CachedAccess::new(inner(), tags, blobs, AccessMode::Online);
+        let listing = online.list_tags_within(&id(), 1024).await.unwrap().unwrap();
+        assert_eq!((listing.tags, listing.complete), (vec!["stable".to_string()], true));
     }
 
     #[tokio::test]

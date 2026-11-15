@@ -8,11 +8,12 @@ validate → pack → push → cascade-tag path against the live registry.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from urllib.error import HTTPError
 
-from src.helpers import write_config
+from src.helpers import release_with_grim, write_config
 from src.registry import fetch_manifest, tag_digest
 
 
@@ -409,3 +410,121 @@ def test_release_without_push_registry_reports_null_pushed_to(
     assert "pushed_to" in out, "pushed_to must always be present (additive-field policy)"
     assert out["pushed_to"] is None
     assert tag_digest(repo_path, "1.0.0") == out["manifest_digest"]
+
+
+# ── a backport never pulls a float below a newer release ─────────────────
+
+_KEPT_ON_2_9_0 = [{"tag": "2", "version": "2.9.0"}, {"tag": "latest", "version": "2.9.0"}]
+
+
+def _skill_files(version: str) -> dict[str, str]:
+    return {
+        "code-review/SKILL.md": (
+            f"---\nname: code-review\ndescription: Review code.\n---\n# code-review {version}\n"
+        )
+    }
+
+
+def test_backport_release_keeps_major_and_latest_on_the_newer_release(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    newer = release_with_grim(runner, repo_path, "2.9.0", _skill_files("2.9.0"))
+
+    backport = release_with_grim(runner, repo_path, "2.3.7", _skill_files("2.3.7"))
+
+    assert backport["pushed"] is True
+    assert backport["tags"] == ["2.3.7", "2.3"], "kept floats are not in `tags`"
+    assert backport["floats_kept"] == _KEPT_ON_2_9_0
+    for tag in ("2.3.7", "2.3"):
+        assert tag_digest(repo_path, tag) == backport["manifest_digest"], tag
+    for tag in ("2.9.0", "2.9", "2", "latest"):
+        assert tag_digest(repo_path, tag) == newer["manifest_digest"], tag
+
+
+def test_backport_release_prints_one_stderr_line_per_kept_float(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    release_with_grim(runner, repo_path, "2.9.0", _skill_files("2.9.0"))
+
+    result = runner.run("release", str(_local_skill(project_dir)), f"{registry}/{repo_path}:2.3.7")
+
+    kept = [line for line in result.stderr.splitlines() if "above this release" in line]
+    assert kept == [
+        "kept '2' on 2.9.0, above this release 2.3.7",
+        "kept 'latest' on 2.9.0, above this release 2.3.7",
+    ], result.stderr
+    assert "above this release" not in result.stdout, "the note stays off the result table"
+
+
+def test_backport_dry_run_reports_the_kept_floats_and_moves_nothing(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    newer = release_with_grim(runner, repo_path, "2.9.0", _skill_files("2.9.0"))
+
+    plan = release_with_grim(runner, repo_path, "2.3.7", _skill_files("2.3.7"), flags=["--dry-run"])
+
+    assert plan["pushed"] is False
+    assert plan["tags"] == ["2.3.7", "2.3"]
+    assert plan["floats_kept"] == _KEPT_ON_2_9_0
+    for tag in ("2.3.7", "2.3"):
+        _assert_tag_absent(repo_path, tag)
+    for tag in ("2", "latest"):
+        assert tag_digest(repo_path, tag) == newer["manifest_digest"], tag
+
+
+def test_offline_backport_dry_run_exits_0_and_plans_every_float_moving(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Offline no float can be read: a dry run keeps the exit 0 it always had,
+    plans every float moving and warns once on stderr, while a release still
+    refuses with 81 and moves no tag."""
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    newer = release_with_grim(runner, repo_path, "2.9.0", _skill_files("2.9.0"))
+    skill = str(_local_skill(project_dir))
+    reference = f"{registry}/{repo_path}:2.3.7"
+
+    result = runner.run("--offline", "release", skill, reference, "--dry-run", format="json")
+
+    plan = json.loads(result.stdout)
+    assert plan["pushed"] is False
+    assert plan["tags"] == ["2.3.7", "2.3", "2", "latest"]
+    assert plan["floats_kept"] == []
+    warnings = [line for line in result.stderr.splitlines() if "could not check the floats" in line]
+    assert len(warnings) == 1, result.stderr
+
+    refused = runner.run("--offline", "release", skill, reference, check=False)
+    assert refused.returncode == 81, refused.stderr
+    _assert_tag_absent(repo_path, "2.3.7")
+    for tag in ("2", "latest"):
+        assert tag_digest(repo_path, tag) == newer["manifest_digest"], tag
+
+
+def test_a_release_that_moves_no_float_keeps_none(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """`--skip-existing` on a published backport and `--no-cascade` both leave
+    the floats alone without judging them, so neither reports one as kept."""
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    newer = release_with_grim(runner, repo_path, "2.9.0", _skill_files("2.9.0"))
+    release_with_grim(runner, repo_path, "2.3.7", _skill_files("2.3.7"))
+
+    skipped = release_with_grim(
+        runner, repo_path, "2.3.7", _skill_files("2.3.7"), flags=["--skip-existing"]
+    )
+    assert skipped["pushed"] is False
+    assert skipped["tags"] == []
+    assert skipped["floats_kept"] == []
+
+    exact = release_with_grim(runner, repo_path, "2.3.8", _skill_files("2.3.8"), flags=["--no-cascade"])
+    assert exact["pushed"] is True
+    assert exact["tags"] == ["2.3.8"]
+    assert exact["floats_kept"] == []
+    assert tag_digest(repo_path, "2") == newer["manifest_digest"]

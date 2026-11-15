@@ -4,21 +4,47 @@
 //! `grim release` output.
 //!
 //! Plain format: a single-row 4-column table
-//! (Ref | Manifest Digest | Tags | Pushed).
+//! (Ref | Manifest Digest | Tags | Pushed), plus one stderr line per kept float.
 //!
 //! JSON format: a single object `{ref, manifest_digest, tags, pushed,
 //! pushed_to, compression}` (not an array — `release` concerns exactly one artifact
 //! reference). `pushed_to` is always present and `null` unless a
 //! `--push-registry` split was active (`ref` stays the pull name).
 //! `compression` is always present: `"none"` or `"gzip"` for a tar kind,
-//! `null` for bundle and mcp (they ignore `--compression`).
+//! `null` for bundle and mcp (they ignore `--compression`). `floats_kept`
+//! is always present: `[{tag, version}]`, `[]` when no float stayed put.
 
 use std::io::{self, Write};
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::cli::printer::{Printable, print_table};
 use crate::oci::layer::Compression;
+
+/// A cascade float the release left on a newer version.
+///
+/// JSON format: `{"tag": "2", "version": "2.9.0"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeptFloat {
+    /// The float tag (`X.Y`, `X` or `latest`).
+    pub tag: String,
+    /// The newer version the float stays on.
+    #[serde(serialize_with = "serialize_version")]
+    pub version: semver::Version,
+}
+
+fn serialize_version<S: Serializer>(version: &semver::Version, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_str(version)
+}
+
+/// One line per kept float, for a plain run's stderr: `release` is the version
+/// released and `floats_kept` the floats it left on a newer version.
+pub fn kept_float_lines(release: &str, floats_kept: &[KeptFloat]) -> Vec<String> {
+    floats_kept
+        .iter()
+        .map(|kept| format!("kept '{}' on {}, above this release {release}", kept.tag, kept.version))
+        .collect()
+}
 
 /// The result of a release (or a `--dry-run` plan).
 #[derive(Debug, Serialize)]
@@ -42,6 +68,12 @@ pub struct ReleaseReport {
     /// reports the requested value, not the existing manifest's.
     /// Additive always-present field.
     pub compression: Option<Compression>,
+    /// The cascade floats left on a newer version; such a float is not in
+    /// `tags`. Additive always-present field, `[]` when none.
+    pub floats_kept: Vec<KeptFloat>,
+    /// The version released, which the kept-float stderr lines name; never serialized.
+    #[serde(skip)]
+    pub release: String,
 }
 
 impl ReleaseReport {
@@ -55,7 +87,22 @@ impl ReleaseReport {
             pushed,
             pushed_to: None,
             compression: None,
+            floats_kept: Vec::new(),
+            release: String::new(),
         }
+    }
+
+    /// Attach the cascade floats the release of `release` kept (consuming builder).
+    #[must_use]
+    pub fn with_floats_kept(mut self, release: &str, floats_kept: Vec<KeptFloat>) -> Self {
+        self.release = release.to_string();
+        self.floats_kept = floats_kept;
+        self
+    }
+
+    /// The stderr lines of a plain run, one per kept float.
+    pub fn kept_lines(&self) -> Vec<String> {
+        kept_float_lines(&self.release, &self.floats_kept)
     }
 
     /// Attach the layer compression (consuming builder). Left `None` for
@@ -86,7 +133,12 @@ impl Printable for ReleaseReport {
                 self.tags.join(","),
                 self.pushed.to_string(),
             ]],
-        )
+        )?;
+        // Notes, not the result: a closed stderr must not fail a release that happened.
+        for line in self.kept_lines() {
+            let _ = writeln!(io::stderr(), "{line}");
+        }
+        Ok(())
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -138,6 +190,46 @@ mod tests {
             json(&report().with_compression(Compression::None))["compression"],
             "none"
         );
+    }
+
+    #[test]
+    fn floats_kept_is_always_present_and_empty_without_the_cascade() {
+        let report = ReleaseReport::new("x:1.0.0".into(), "sha256:a".into(), vec!["1.0.0".into()], true);
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["floats_kept"], serde_json::json!([]));
+
+        let kept = report.with_floats_kept(
+            "1.0.0",
+            vec![KeptFloat {
+                tag: "2".to_string(),
+                version: semver::Version::new(2, 9, 0),
+            }],
+        );
+        let v = serde_json::to_value(&kept).unwrap();
+        assert_eq!(v["floats_kept"], serde_json::json!([{"tag": "2", "version": "2.9.0"}]));
+    }
+
+    #[test]
+    fn kept_lines_name_the_release_passed_in_whatever_the_tag_order() {
+        let report = ReleaseReport::new(
+            "x:2.4.1".into(),
+            "sha256:a".into(),
+            vec!["2.4".into(), "2.4.1".into()],
+            true,
+        )
+        .with_floats_kept(
+            "2.4.1",
+            vec![KeptFloat {
+                tag: "latest".to_string(),
+                version: semver::Version::new(3, 0, 0),
+            }],
+        );
+        assert_eq!(
+            report.kept_lines(),
+            ["kept 'latest' on 3.0.0, above this release 2.4.1"]
+        );
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(v.get("release").is_none(), "the release version is stderr only");
     }
 
     #[test]

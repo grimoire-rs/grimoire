@@ -18,8 +18,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use semver::VersionReq;
+
 use super::graph::{
-    CarriedPin, Carry, ExpandedGraph, GraphNode, GraphRoot, GraphWarning, PartCarry, RootSource, expand_graph,
+    CarriedPin, Carry, ExpandedGraph, GraphNode, GraphRoot, GraphWarning, PartCarry, RootSource, edge_origin,
+    expand_graph,
 };
 use super::part_bundles::{PartBundles, PartInputs, sort_part_bundles};
 use super::resolve_error::{ResolveError, ResolveErrorKind};
@@ -44,12 +47,14 @@ use crate::lock::prior::{Prior, direct_keys};
 use crate::lock::refresh::{Refresh, Selected};
 use crate::oci::access::OciAccess;
 use crate::oci::access::Operation;
-use crate::oci::access::error::AccessErrorKind;
+use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::bundle::{BundleManifest, BundleMember, MAX_BUNDLE_MEMBERS};
 use crate::oci::member_ref::MemberRef;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::requires_decl;
 use crate::oci::text::registry_text;
+use crate::oci::version_claim::{Claim as VersionClaim, EdgeOrigin, Line, claim_of};
+use crate::oci::version_evidence::{Evidence, evidence, satisfies};
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::skill::SkillName;
 
@@ -284,12 +289,27 @@ async fn held_back_warnings(
             _ => pins.artifacts.get(parent).map(LockedSource::content_digest),
         }
     };
-    let mut asked: BTreeMap<&NodeKey, Vec<(NodeKey, Identifier)>> = BTreeMap::new();
+    // Each request with whether the pin's own version already fails it: a range is
+    // judged on that evidence, with no read; only a literal or a digest is read.
+    let mut asked: BTreeMap<&NodeKey, Vec<(NodeKey, Identifier, bool)>> = BTreeMap::new();
     for (key, node) in graph.nodes.iter().filter(|(_, node)| node.direct) {
         let declared = set.table(key.0).get(&key.1).and_then(DeclaredSource::identifier);
         let (Some(held), Some(declared)) = (&node.pinned, declared) else {
             continue;
         };
+        let shown = evidence(node.version.as_ref(), held);
+        let ranges: Vec<VersionReq> = node
+            .parents
+            .iter()
+            .filter_map(|parent| Some((parent, graph.nodes.get(parent)?)))
+            .flat_map(|(parent, read)| {
+                let onto = read.edges.iter().filter(|edge| edge.key == *key);
+                onto.filter_map(move |edge| match claim_of(&edge.id, edge_origin(parent)) {
+                    VersionClaim::Range(req) => Some(req),
+                    _ => None,
+                })
+            })
+            .collect();
         for parent in &node.parents {
             let Some(read) = graph.nodes.get(parent) else { continue };
             let new_or_moved = now(parent, read).is_some_and(|now| locked(parent) != Some(now));
@@ -298,7 +318,12 @@ async fn held_back_warnings(
                 edge.key == *key && edge.id != *declared && edge.id.registry_repository() == held.registry_repository()
             });
             for edge in edges.filter(|_| new_or_moved) {
-                let ask = (parent.clone(), edge.id.clone());
+                let fails = match held_request(declared, &edge.id, parent, &shown, &ranges) {
+                    HeldRequest::Answered => continue,
+                    HeldRequest::Refused => true,
+                    HeldRequest::ByDigest => false,
+                };
+                let ask = (parent.clone(), edge.id.clone(), fails);
                 let list = asked.entry(key).or_default();
                 if !list.contains(&ask) {
                     list.push(ask);
@@ -306,7 +331,11 @@ async fn held_back_warnings(
             }
         }
     }
-    let ids = asked.values().flatten().map(|(_, id)| id);
+    let ids = asked
+        .values()
+        .flatten()
+        .filter(|(_, _, fails)| !fails)
+        .map(|(_, id, _)| id);
     let reads = read_requests(ids, access, options.per_artifact_timeout, ReadBudget::HELD_BACK).await;
     let mut warnings = Vec::new();
     for (key, requests) in asked {
@@ -319,7 +348,11 @@ async fn held_back_warnings(
             continue;
         };
         let differs = |id: &Identifier| reads.get(id).and_then(Option::as_ref).is_some_and(|read| *read != held);
-        let requests: Vec<(NodeKey, Identifier)> = requests.into_iter().filter(|(_, id)| differs(id)).collect();
+        let requests: Vec<(NodeKey, Identifier)> = requests
+            .into_iter()
+            .filter(|(_, id, fails)| *fails || differs(id))
+            .map(|(parent, id, _)| (parent, id))
+            .collect();
         if !requests.is_empty() {
             let declared = set.table(key.0).get(&key.1).and_then(DeclaredSource::identifier);
             warnings.push(GraphWarning::HeldBack {
@@ -331,6 +364,49 @@ async fn held_back_warnings(
         }
     }
     warnings
+}
+
+/// What a request of the pinned repository asks of a direct key's pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldRequest {
+    /// Any version, a range the pin's version satisfies beside the ranges it
+    /// meets alone, or a range a bare declaration yields to: nothing is held back.
+    Answered,
+    /// A range the version the pin shows fails: held back, with no read.
+    Refused,
+    /// A literal tag or a digest: held back when it names another manifest.
+    ByDigest,
+}
+
+/// How the pin of `declared`, showing `shown`, meets request `edge` from
+/// `parent`, with `ranges` every range claim made of the key. A range is judged
+/// beside the ranges `shown` meets alone, which lend it their prerelease
+/// comparators as the lock's settle reads the set (`merge_policy`'s lenders).
+/// `grim status --check` judges the lock's recorded requests by this same rule,
+/// so its notes agree with the run-time warning.
+pub fn held_request(
+    declared: &Identifier,
+    edge: &Identifier,
+    parent: &NodeKey,
+    shown: &Evidence,
+    ranges: &[VersionReq],
+) -> HeldRequest {
+    match claim_of(edge, edge_origin(parent)) {
+        VersionClaim::Any => HeldRequest::Answered,
+        VersionClaim::Range(_) if matches!(claim_of(declared, EdgeOrigin::Requires), VersionClaim::Any) => {
+            HeldRequest::Answered
+        }
+        VersionClaim::Range(req) => {
+            let meets = |req: &VersionReq| satisfies(shown, &Line::of([req.clone()]));
+            let lenders = ranges.iter().filter(|lender| meets(lender)).cloned();
+            if satisfies(shown, &Line::of(lenders.chain([req]))) {
+                HeldRequest::Answered
+            } else {
+                HeldRequest::Refused
+            }
+        }
+        VersionClaim::Literal | VersionClaim::Digest => HeldRequest::ByDigest,
+    }
 }
 
 /// What the held-back probe may spend on one run: it is advisory, so past either
@@ -1171,7 +1247,9 @@ fn build_carry(prior: &Prior<'_>, set: &DesiredSet, refresh: &Refresh, stamps: O
             );
         }
     }
-    let mut edges = pin_rule::reached_requests(previous, reached_rows(set, previous, prior.proof).as_ref());
+    let reached = reached_rows(set, previous, prior.proof);
+    let mut edges = pin_rule::reached_requests(previous, reached.as_ref());
+    let mut ranges = pin_rule::reached_ranges(previous, reached.as_ref());
     let twice = pin_rule::listed_twice(previous);
     let artifacts = previous
         .iter_artifacts()
@@ -1188,6 +1266,7 @@ fn build_carry(prior: &Prior<'_>, set: &DesiredSet, refresh: &Refresh, stamps: O
             carry.proven.insert(key.clone(), Some(pin.digest()));
         }
         if refresh.selects(&key) {
+            carry.selected.insert(key, pin.clone());
             continue;
         }
         let direct = prior.proof.and_then(|proof| proof.table(key.0).get(&key.1));
@@ -1199,11 +1278,13 @@ fn build_carry(prior: &Prior<'_>, set: &DesiredSet, refresh: &Refresh, stamps: O
         };
         let recorded = edges.remove(&key).unwrap_or_default();
         let in_a_stamp = part_stamps.is_some_and(|stamps| stamps.rows.contains_key(&key));
+        let mut evidence = pin_rule::stamped_edge_evidence(record, proof, recorded, in_a_stamp);
+        evidence.ranges = ranges.remove(&key).unwrap_or_default();
         let carried = CarriedPin {
             pin: pin.clone(),
             declared: direct.and_then(DeclaredSource::identifier).cloned(),
             snapshot: snapshot.cloned(),
-            evidence: pin_rule::stamped_edge_evidence(record, proof, recorded, in_a_stamp),
+            evidence,
         };
         carry.pins.insert(key, carried);
     }
@@ -1212,6 +1293,7 @@ fn build_carry(prior: &Prior<'_>, set: &DesiredSet, refresh: &Refresh, stamps: O
             stamps: stamps.clone(),
             refresh: refresh.clone(),
             recorded: edges,
+            ranges,
             declared: prior.proof.map(direct_keys),
         });
     }
@@ -1307,23 +1389,44 @@ pub(super) const RESOLVE_CONCURRENCY: usize = 32;
 
 /// Run the retry chain for one artifact.
 ///
-/// Match on [`AccessErrorKind`] is **exhaustive** so a new access-error
-/// variant is a compile error here until it is explicitly routed.
+/// # Errors
+///
+/// As [`retry_access`], plus `TagNotFound` when the registry holds no such tag.
 pub(super) async fn retry_chain(
     reference: &ArtifactRef,
     id: &Identifier,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
 ) -> Result<crate::oci::Digest, ResolveError> {
+    retry_access(reference, options, || access.resolve_digest(id, Operation::Resolve))
+        .await?
+        .ok_or_else(|| ResolveError::new(reference.clone(), ResolveErrorKind::TagNotFound))
+}
+
+/// Run one registry read under the retry chain: transient registry and I/O
+/// failures retry with backoff up to `options.max_retries`.
+///
+/// Match on [`AccessErrorKind`] is **exhaustive** so a new access-error
+/// variant is a compile error here until it is explicitly routed.
+///
+/// # Errors
+///
+/// `AuthFailure` for a refused credential, else `RegistryUnreachable`.
+pub(super) async fn retry_access<T, F, Fut>(
+    reference: &ArtifactRef,
+    options: &ResolveOptions,
+    mut read: F,
+) -> Result<T, ResolveError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, AccessError>>,
+{
     let mut attempt: u32 = 0;
     let mut backoff = options.base_backoff;
 
     loop {
-        match access.resolve_digest(id, Operation::Resolve).await {
-            Ok(Some(digest)) => return Ok(digest),
-            Ok(None) => {
-                return Err(ResolveError::new(reference.clone(), ResolveErrorKind::TagNotFound));
-            }
+        match read().await {
+            Ok(found) => return Ok(found),
             Err(err) => {
                 // Decide retry vs terminal by the error kind. The match is
                 // exhaustive: adding an `AccessErrorKind` variant forces a
@@ -1400,6 +1503,7 @@ mod tests {
     use crate::oci::{Algorithm, Digest};
     use crate::resolve::graph::NodeClaim;
     use crate::resolve::members::fetch_bundle_members;
+    use crate::resolve::resolve_options::Downgrade;
 
     // ── Scripted mock OciAccess ──────────────────────────────────────────
 
@@ -1532,6 +1636,7 @@ mod tests {
             per_artifact_timeout: Duration::from_secs(2),
             max_retries: 3,
             base_backoff: Duration::from_millis(1),
+            downgrade: Downgrade::Refuse,
         }
     }
 
@@ -1721,6 +1826,7 @@ mod tests {
             per_artifact_timeout: Duration::from_millis(40),
             max_retries: 0,
             base_backoff: Duration::from_millis(1),
+            downgrade: Downgrade::Refuse,
         };
         let start = std::time::Instant::now();
         let err = resolve_lock(&set, &access, ConfigScope::Project, &options, std::path::Path::new("."))
@@ -3826,7 +3932,8 @@ mod tests {
     #[tokio::test]
     async fn a_path_skill_locks_its_declared_edge_as_a_transitive_registry_entry() {
         let dir = tempfile::tempdir().unwrap();
-        write_skill_requiring(dir.path(), "local", "dep", "ghcr.io/acme/dep:1");
+        // A literal tag: a version claim would also read its target tag, which the script lacks.
+        write_skill_requiring(dir.path(), "local", "dep", "ghcr.io/acme/dep:v1");
 
         let lock = resolve_lock(
             &path_skill_set("local"),
@@ -3859,6 +3966,7 @@ mod tests {
         use crate::lock::disposition::LockDisposition;
         use crate::lock::stored_members::StoredMembers;
         use crate::oci::bundle::BUNDLE_LAYER_MEDIA_TYPE;
+        use crate::oci::version_evidence::VERSION_ANNOTATION;
 
         /// The lock edit in a walked-up project with a cold store.
         fn drop_from_lock(
@@ -3884,15 +3992,17 @@ mod tests {
             crate::lock::edit::drop_from_lock(previous, kind, name, before, after, &project, stored)
         }
 
-        const X1: &str = "ghcr.io/acme/x:1";
-        const X2: &str = "ghcr.io/acme/x:2";
+        // These tests pin the carry rule, which holds for non-semver tags; spelled `x:1`,
+        // a tag becomes a version claim and the line rules decide instead.
+        const X1: &str = "ghcr.io/acme/x:v1";
+        const X2: &str = "ghcr.io/acme/x:v2";
         /// The form a pre-change lock holds: the tag stripped.
         const TAGLESS: &str = "ghcr.io/acme/x";
-        const OTHER: &str = "ghcr.io/other/x:1";
+        const OTHER: &str = "ghcr.io/other/x:v1";
         const M: &str = "ghcr.io/acme/m:1";
-        const P: &str = "ghcr.io/acme/p:1";
-        const Q: &str = "ghcr.io/acme/q:1";
-        const PACK: &str = "ghcr.io/acme/pack:1";
+        const P: &str = "ghcr.io/acme/p:v1";
+        const Q: &str = "ghcr.io/acme/q:v1";
+        const PACK: &str = "ghcr.io/acme/pack:v1";
 
         fn x() -> NodeKey {
             (ArtifactKind::Skill, "x".to_string())
@@ -4000,6 +4110,30 @@ mod tests {
 
         /// Publish `content` as a skill at `id` requiring `edges`, moving its tag.
         async fn skill(store: &Store, id: &str, content: &str, edges: Vec<BundleMember>) -> Digest {
+            skill_annotated(store, id, content, edges, BTreeMap::new()).await
+        }
+
+        /// Release `version` of `repo` as `grim release` pushes it: the version
+        /// annotation, the exact tag, then `X.Y`, `X` and `latest`.
+        async fn release(store: &Store, repo: &str, version: &str, content: &str) -> Digest {
+            let annotations = BTreeMap::from([(VERSION_ANNOTATION.to_string(), version.to_string())]);
+            let id = format!("{repo}:{version}");
+            let digest = skill_annotated(store, &id, content, vec![], annotations).await;
+            let v = semver::Version::parse(version).unwrap();
+            let id = Identifier::parse(&id).unwrap();
+            for float in [format!("{}.{}", v.major, v.minor), v.major.to_string(), "latest".into()] {
+                store.put_tag(&id, &float, &digest).await.unwrap();
+            }
+            digest
+        }
+
+        async fn skill_annotated(
+            store: &Store,
+            id: &str,
+            content: &str,
+            edges: Vec<BundleMember>,
+            annotations: BTreeMap<String, String>,
+        ) -> Digest {
             let id = Identifier::parse(id).unwrap();
             let mut layers = vec![Descriptor {
                 digest: Algorithm::Sha256.hash(content.as_bytes()),
@@ -4021,7 +4155,7 @@ mod tests {
                 artifact_type: None,
                 config_media_type: None,
                 layers,
-                annotations: BTreeMap::new(),
+                annotations,
             };
             let digest = store.push_manifest(&id, &manifest).await.unwrap();
             store.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
@@ -4044,7 +4178,7 @@ mod tests {
                 name: name.to_string(),
                 source: LockedBundleSource::Registry {
                     repo: pinned.registry_repository(),
-                    tag: "1".to_string(),
+                    tag: "v1".to_string(),
                     pinned,
                 },
                 members,
@@ -4233,7 +4367,7 @@ mod tests {
             assert_eq!(
                 warnings[0].to_string(),
                 format!(
-                    "skill/x is requested by skill/p as ghcr.io/acme/x:2, but your declaration holds it at {}; \
+                    "skill/x is requested by skill/p as ghcr.io/acme/x:v2, but your declaration holds it at {}; \
                      run `grim update -- x` to re-read the declared tag, or declare the requested reference",
                     old.to_short_string()
                 )
@@ -4247,7 +4381,7 @@ mod tests {
         async fn a_flood_of_distinct_requests_is_read_up_to_the_cap() {
             let store = Store::default();
             let old = skill(&store, TAGLESS, "v1", vec![]).await;
-            let asks: Vec<BundleMember> = (0..80).map(|n| edge(&format!("ghcr.io/acme/x:{}", n + 2))).collect();
+            let asks: Vec<BundleMember> = (0..80).map(|n| edge(&format!("ghcr.io/acme/x:v{}", n + 2))).collect();
             skill(&store, P, "p", asks).await;
             let before = declared(&[("x", TAGLESS)]);
             let previous = lock_of(&before, vec![row("x", TAGLESS, &old, vec![])]);
@@ -4296,7 +4430,7 @@ mod tests {
             assert_eq!(
                 warnings[0].to_string(),
                 format!(
-                    "skill/x is requested by skill/p as ghcr.io/acme/x:2, but your declaration holds it at {}; \
+                    "skill/x is requested by skill/p as ghcr.io/acme/x:v2, but your declaration holds it at {}; \
                      declare the requested reference to take it",
                     old.to_short_string()
                 )
@@ -4403,7 +4537,10 @@ mod tests {
         async fn a_request_that_resolves_to_the_held_pin_is_not_warned() {
             let store = Store::default();
             let (after, before, previous, old) = p_asks_for(&store, X2, false).await;
-            store.put_tag(&Identifier::parse(X2).unwrap(), "2", &old).await.unwrap();
+            store
+                .put_tag(&Identifier::parse(X2).unwrap(), "v2", &old)
+                .await
+                .unwrap();
             let prior = Prior::edited(&previous, &before, &after);
             let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
             let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
@@ -4428,13 +4565,13 @@ mod tests {
         #[tokio::test]
         async fn a_request_for_a_tag_that_is_gone_warns_nothing() {
             let store = Store::default();
-            let (after, before, previous, _) = p_asks_for(&store, "ghcr.io/acme/x:3", false).await;
+            let (after, before, previous, _) = p_asks_for(&store, "ghcr.io/acme/x:v3", false).await;
             let prior = Prior::edited(&previous, &before, &after);
             let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
             let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
 
             assert_eq!(warnings, []);
-            assert_eq!(probed, ["ghcr.io/acme/x:3"]);
+            assert_eq!(probed, ["ghcr.io/acme/x:v3"]);
         }
 
         #[tokio::test]
@@ -4493,6 +4630,93 @@ mod tests {
             let (warnings, probed) = held_back_at(&graph, &set, &previous, &store, LockRun::project(false)).await;
             assert_eq!(warnings.len(), 1, "a moved parent");
             assert_eq!(probed, [X2]);
+        }
+
+        /// `x` declared `x:2` and locked at 2.0.0 after 2.0.1 and 2.1.0 shipped; `p`,
+        /// new, asks for `ask`. Returns the declaration after the add, the one before,
+        /// the lock before and `x`'s pin.
+        async fn typed_x_asked(store: &Store, ask: &str) -> (DesiredSet, DesiredSet, GrimoireLock, Digest) {
+            const TYPED: &str = "ghcr.io/acme/x:2";
+            let held = release(store, TAGLESS, "2.0.0", "x 2.0.0").await;
+            release(store, TAGLESS, "2.0.1", "x 2.0.1").await;
+            release(store, TAGLESS, "2.1.0", "x 2.1.0").await;
+            skill(store, P, "p", vec![edge(ask)]).await;
+            let before = declared(&[("x", TYPED)]);
+            let previous = lock_of(&before, vec![row("x", TYPED, &held, vec![])]);
+            (declared(&[("x", TYPED), ("p", P)]), before, previous, held)
+        }
+
+        /// `x:2.0` now names 2.0.1, but the pin's 2.0.0 is in that range: nothing is
+        /// held back, so nothing is read.
+        #[tokio::test]
+        async fn the_held_back_warning_ignores_a_satisfied_range_edge() {
+            let store = Store::default();
+            let (after, before, previous, held) = typed_x_asked(&store, "ghcr.io/acme/x:2.0").await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(
+                graph.nodes[&x()].pinned.as_ref().map(PinnedIdentifier::digest),
+                Some(held)
+            );
+            assert_eq!(warnings, []);
+            assert_eq!(probed, Vec::<String>::new(), "a range is judged on the pin's version");
+        }
+
+        /// `x:2.1` asks for at least 2.1.0, which the pin's 2.0.0 is not: warned from
+        /// the version alone, with no read.
+        #[tokio::test]
+        async fn the_held_back_warning_names_a_range_edge_the_pin_fails() {
+            let store = Store::default();
+            let (after, before, previous, held) = typed_x_asked(&store, "ghcr.io/acme/x:2.1").await;
+            let prior = Prior::edited(&previous, &before, &after);
+            let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+            let (warnings, probed) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+
+            assert_eq!(
+                warnings,
+                [GraphWarning::HeldBack {
+                    key: x(),
+                    held,
+                    requests: vec![(
+                        (ArtifactKind::Skill, "p".to_string()),
+                        Identifier::parse("ghcr.io/acme/x:2.1").unwrap()
+                    )],
+                    update: Some("grim update -- x".to_string()),
+                }]
+            );
+            assert_eq!(probed, Vec::<String>::new(), "a range is judged on the pin's version");
+        }
+
+        /// `x` is held at 2.1.0-rc.2. `p` asks for `x:2`, which admits no prerelease
+        /// alone, so it is held back; beside `q`'s `x:2.1.0-rc.1` the set admits the
+        /// pin, as the lock's own settle reads it, and nothing is held back.
+        #[tokio::test]
+        async fn the_held_back_warning_reads_a_range_beside_the_ranges_the_pin_meets() {
+            const RC: &str = "ghcr.io/acme/x:2.1.0-rc.2";
+            let store = Store::default();
+            let annotations = BTreeMap::from([(VERSION_ANNOTATION.to_string(), "2.1.0-rc.2".to_string())]);
+            let held = skill_annotated(&store, RC, "x rc.2", vec![], annotations).await;
+            skill(&store, P, "p", vec![edge("ghcr.io/acme/x:2")]).await;
+            skill(&store, Q, "q", vec![edge("ghcr.io/acme/x:2.1.0-rc.1")]).await;
+            let before = declared(&[("x", RC)]);
+            let previous = lock_of(&before, vec![row("x", RC, &held, vec![])]);
+
+            let mut warned = Vec::new();
+            for asks in [&[("x", RC), ("p", P)][..], &[("x", RC), ("p", P), ("q", Q)]] {
+                let after = declared(asks);
+                let prior = Prior::edited(&previous, &before, &after);
+                let graph = graph_at(&after, &prior, &Refresh::Nothing, &store).await;
+                let (warnings, _) = held_back_at(&graph, &after, &previous, &store, LockRun::project(false)).await;
+                warned.push(warnings.len());
+            }
+
+            assert_eq!(
+                warned,
+                [1, 0],
+                "`x:2` alone is held back, beside `x:2.1.0-rc.1` it is not"
+            );
         }
 
         #[tokio::test]
@@ -4609,7 +4833,7 @@ mod tests {
                 let store = Store::default();
                 let old = skill(&store, X1, "old", vec![]).await;
                 let tag_two = Identifier::parse(X2).unwrap();
-                store.put_tag(&tag_two, "2", &old).await.unwrap();
+                store.put_tag(&tag_two, "v2", &old).await.unwrap();
                 let m = skill(&store, M, "m", vec![edge(far)]).await;
                 let edges = [edge(near), bundle_member(ArtifactKind::Skill, "m", M)];
                 let (set, mut previous) = routed(&store, route, &edges, (X1, &old)).await;
@@ -4631,7 +4855,7 @@ mod tests {
                 let store = Store::default();
                 let old = skill(&store, X1, "old", vec![]).await;
                 let tag_two = Identifier::parse(X2).unwrap();
-                store.put_tag(&tag_two, "2", &old).await.unwrap();
+                store.put_tag(&tag_two, "v2", &old).await.unwrap();
                 let m = skill(&store, M, "m", vec![edge(far)]).await;
                 let edges = [edge(near), bundle_member(ArtifactKind::Skill, "m", M)];
                 let (set, mut previous) = routed(&store, route, &edges, (X1, &old)).await;
@@ -4720,11 +4944,11 @@ mod tests {
                 )
                 .await;
                 let rows = vec![row("m", M, &m, vec![]), row("q", Q, &q, vec![])];
-                let locked = pack_row("1", pinned(PACK, &one));
+                let locked = pack_row("v1", pinned(PACK, &one));
                 let (set, mut previous) = claiming_pack(&store, route, PACK, locked, rows).await;
                 let side = LockedBundle {
                     transitive: previous.bundles[0].transitive,
-                    ..pack_row("1", pinned(PACK, &other))
+                    ..pack_row("v1", pinned(PACK, &other))
                 };
                 previous.bundles.push(side);
 
@@ -4950,7 +5174,7 @@ mod tests {
             assert_eq!(store.take_resolves(), [X2]);
 
             // A tag on the pin says what it answered, and it is not the declaration.
-            let other_tag = lock_of(&set, vec![row("x", "ghcr.io/acme/x:9", &old, vec![])]);
+            let other_tag = lock_of(&set, vec![row("x", "ghcr.io/acme/x:v9", &old, vec![])]);
             let lock = relock_nothing(&set, &Prior::checked(&other_tag, &set), &store).await;
             assert_eq!(pin_of(&lock, "x").digest(), moved, "the declaration is no pass");
             assert_eq!(store.take_resolves(), [X1]);
@@ -4983,7 +5207,7 @@ mod tests {
             for route in EDGES {
                 let store = Store::default();
                 let old = skill(&store, X1, "old", vec![]).await;
-                let (set, previous) = routed(&store, route, &[edge("./x:1")], (TAGLESS, &old)).await;
+                let (set, previous) = routed(&store, route, &[edge("./x:v1")], (TAGLESS, &old)).await;
                 skill(&store, X1, "moved", vec![]).await;
 
                 let lock = relock_nothing(&set, &Prior::checked(&previous, &set), &store).await;
@@ -5061,7 +5285,7 @@ mod tests {
         /// The stale row is still the one record of `x:1`, so the pin holds.
         #[tokio::test]
         async fn a_retyped_lines_stale_edge_holds_the_pin() {
-            const P2: &str = "ghcr.io/acme/p:2";
+            const P2: &str = "ghcr.io/acme/p:v2";
             let store = Store::default();
             let old = skill(&store, X1, "old", vec![]).await;
             skill(&store, X2, "x two", vec![]).await;
@@ -5265,8 +5489,8 @@ mod tests {
 
         #[tokio::test]
         async fn update_names_a_bundle_binding() {
-            const N1: &str = "ghcr.io/acme/n:1";
-            const N2: &str = "ghcr.io/acme/n:2";
+            const N1: &str = "ghcr.io/acme/n:v1";
+            const N2: &str = "ghcr.io/acme/n:v2";
             let members = |n: &str| {
                 vec![
                     bundle_member(ArtifactKind::Skill, "m", M),
@@ -5328,7 +5552,7 @@ mod tests {
         #[tokio::test]
         async fn a_declared_bundle_defers_unknown_names_to_the_graph() {
             let store = Store::default();
-            let m = skill(&store, M, "m", vec![]).await;
+            let m = release(&store, "ghcr.io/acme/m", "1.0.0", "m").await;
             let pack = publish(&store.reg, PACK, "", vec![bundle_member(ArtifactKind::Skill, "m", M)]).await;
 
             let mut set = declared(&[]);
@@ -5359,7 +5583,7 @@ mod tests {
         /// writer walked, `p`'s request kept `x:1`'s digest under `x:0`, at exit 0.
         #[tokio::test]
         async fn an_edge_a_lock_never_recorded_answers_no_tagless_pin() {
-            const X0: &str = "ghcr.io/acme/x:0";
+            const X0: &str = "ghcr.io/acme/x:v0";
             for other in [X0, X2] {
                 let store = Store::default();
                 let old = skill(&store, X1, "x one", vec![]).await;
@@ -5370,7 +5594,7 @@ mod tests {
                 before.skills.insert("p".to_string(), registry(P));
                 before.invalidate_declaration_hash_cache();
                 let member = LockedArtifact {
-                    bundles: vec![BundleProvenance::new("ghcr.io/acme/pack", "1")],
+                    bundles: vec![BundleProvenance::new("ghcr.io/acme/pack", "v1")],
                     ..row("x", TAGLESS, &old, vec![])
                 };
                 let previous = GrimoireLock {
@@ -5483,10 +5707,10 @@ mod tests {
             assert_eq!(pin_of(&lock, "x"), &pinned(X2, &at_two));
         }
 
-        const HELD0: &str = "ghcr.io/acme/held:0";
-        const HELD1: &str = "ghcr.io/acme/held:1";
-        const HELD2: &str = "ghcr.io/acme/held:2";
-        const PK2: &str = "ghcr.io/acme/pk2:1";
+        const HELD0: &str = "ghcr.io/acme/held:v0";
+        const HELD1: &str = "ghcr.io/acme/held:v1";
+        const HELD2: &str = "ghcr.io/acme/held:v2";
+        const PK2: &str = "ghcr.io/acme/pk2:v1";
 
         fn held_edge(id: &str) -> BundleMember {
             bundle_member(ArtifactKind::Skill, "held", id)
@@ -5515,7 +5739,7 @@ mod tests {
         /// `held` as a part grim 0.15.1 wrote holds it: tagless, stamped by `bundles` at tag `1`.
         fn old_held(digest: &Digest, bundles: &[&str]) -> LockedArtifact {
             LockedArtifact {
-                bundles: bundles.iter().map(|repo| BundleProvenance::new(*repo, "1")).collect(),
+                bundles: bundles.iter().map(|repo| BundleProvenance::new(*repo, "v1")).collect(),
                 ..row("held", "ghcr.io/acme/held", digest, vec![])
             }
         }
@@ -5532,8 +5756,8 @@ mod tests {
                     let store = Store::default();
                     let held = skill(&store, HELD1, "held one", vec![]).await;
                     skill(&store, HELD2, "held two", vec![]).await;
-                    let b = skill(&store, "ghcr.io/acme/b:1", "b", vec![]).await;
-                    let b_edge = bundle_member(ArtifactKind::Skill, "b", "ghcr.io/acme/b:1");
+                    let b = skill(&store, "ghcr.io/acme/b:v1", "b", vec![]).await;
+                    let b_edge = bundle_member(ArtifactKind::Skill, "b", "ghcr.io/acme/b:v1");
                     publish(&store.reg, PK2, "", vec![b_edge, held_edge(HELD1)]).await;
                     publish(&store.reg, PACK, "", vec![held_edge(moved)]).await;
                     let mut set = declared(&[]);
@@ -5541,7 +5765,7 @@ mod tests {
                     set.bundles.insert("pk2".to_string(), registry(PK2));
                     set.invalidate_declaration_hash_cache();
                     let old_b = LockedArtifact {
-                        bundles: vec![BundleProvenance::new("ghcr.io/acme/pk2", "1")],
+                        bundles: vec![BundleProvenance::new("ghcr.io/acme/pk2", "v1")],
                         ..row("b", "ghcr.io/acme/b", &b, vec![])
                     };
                     let both = ["ghcr.io/acme/pack", "ghcr.io/acme/pk2"];
@@ -5596,7 +5820,7 @@ mod tests {
         /// A skill row stamped by `bundles` at tag `1`, as a part that records no digest holds it.
         fn stamped(name: &str, digest: &Digest, bundles: &[&str]) -> LockedArtifact {
             LockedArtifact {
-                bundles: bundles.iter().map(|repo| BundleProvenance::new(*repo, "1")).collect(),
+                bundles: bundles.iter().map(|repo| BundleProvenance::new(*repo, "v1")).collect(),
                 ..row(name, &format!("ghcr.io/acme/{name}"), digest, vec![])
             }
         }
@@ -5608,17 +5832,17 @@ mod tests {
         /// `held:2` replaced `pack`'s member at exit 0.
         #[tokio::test]
         async fn a_pick_over_an_unrecorded_part_reads_the_root_that_nests_the_row() {
-            const TOP: &str = "ghcr.io/acme/top:1";
+            const TOP: &str = "ghcr.io/acme/top:v1";
             for pick in ["pk2", "held"] {
                 let store = Store::default();
                 let held = skill(&store, HELD1, "held one", vec![]).await;
                 skill(&store, HELD2, "held two", vec![]).await;
-                let b = skill(&store, "ghcr.io/acme/b:1", "b", vec![]).await;
-                let t = skill(&store, "ghcr.io/acme/t:1", "t", vec![]).await;
+                let b = skill(&store, "ghcr.io/acme/b:v1", "b", vec![]).await;
+                let t = skill(&store, "ghcr.io/acme/t:v1", "t", vec![]).await;
                 publish(&store.reg, PACK, "", vec![held_edge(HELD1)]).await;
-                let t_edge = bundle_member(ArtifactKind::Skill, "t", "ghcr.io/acme/t:1");
+                let t_edge = bundle_member(ArtifactKind::Skill, "t", "ghcr.io/acme/t:v1");
                 publish(&store.reg, TOP, "", vec![pack_edge(PACK), t_edge]).await;
-                let b_edge = bundle_member(ArtifactKind::Skill, "b", "ghcr.io/acme/b:1");
+                let b_edge = bundle_member(ArtifactKind::Skill, "b", "ghcr.io/acme/b:v1");
                 publish(&store.reg, PK2, "", vec![held_edge(HELD2), b_edge]).await;
                 let mut set = declared(&[]);
                 set.bundles.insert("top".to_string(), registry(TOP));
@@ -5648,14 +5872,14 @@ mod tests {
         /// does. Left unread, the pick settled `held` at exit 0.
         #[tokio::test]
         async fn a_pick_over_an_old_part_reads_a_sibling_whose_moved_tag_newly_names_the_row() {
-            const HELD3: &str = "ghcr.io/acme/held:3";
+            const HELD3: &str = "ghcr.io/acme/held:v3";
             for pick in ["pack", "held"] {
                 let store = Store::default();
                 let held = skill(&store, HELD1, "held one", vec![]).await;
                 skill(&store, HELD3, "held three", vec![]).await;
-                let b = skill(&store, "ghcr.io/acme/b:1", "b", vec![]).await;
+                let b = skill(&store, "ghcr.io/acme/b:v1", "b", vec![]).await;
                 publish(&store.reg, PACK, "", vec![held_edge(HELD1)]).await;
-                let b_edge = bundle_member(ArtifactKind::Skill, "b", "ghcr.io/acme/b:1");
+                let b_edge = bundle_member(ArtifactKind::Skill, "b", "ghcr.io/acme/b:v1");
                 publish(&store.reg, PK2, "", vec![b_edge, held_edge(HELD3)]).await;
                 let mut set = declared(&[]);
                 set.bundles.insert("pack".to_string(), registry(PACK));
@@ -5707,7 +5931,7 @@ mod tests {
         /// bundle and records neither.
         #[tokio::test]
         async fn a_bundle_pick_does_not_hold_a_bundle_it_nests() {
-            const TOP: &str = "ghcr.io/acme/top:1";
+            const TOP: &str = "ghcr.io/acme/top:v1";
             let store = Store::default();
             let x = skill(&store, X1, "x", vec![]).await;
             publish(&store.reg, PACK, "", vec![edge(X1)]).await;
@@ -5738,8 +5962,8 @@ mod tests {
         /// for its plain stamp, `inner` stopped the walk, and `outer`'s digest never reached `x`.
         #[tokio::test]
         async fn a_bundle_pick_keeps_a_bundle_it_newly_nests_though_a_row_stamps_it() {
-            const OUTER: &str = "ghcr.io/acme/outer:1";
-            const INNER: &str = "ghcr.io/acme/inner:1";
+            const OUTER: &str = "ghcr.io/acme/outer:v1";
+            const INNER: &str = "ghcr.io/acme/inner:v1";
             let store = Store::default();
             let x = skill(&store, X1, "x", vec![]).await;
             publish(&store.reg, INNER, "", vec![edge(X1)]).await;
@@ -5795,7 +6019,7 @@ mod tests {
         /// edit re-declared lists a request no pin answered.
         #[tokio::test]
         async fn an_edge_of_a_moved_parent_answers_no_tagless_pin() {
-            const P2: &str = "ghcr.io/acme/p:2";
+            const P2: &str = "ghcr.io/acme/p:v2";
             let store = Store::default();
             let old = skill(&store, X1, "old", vec![]).await;
             let at_two = skill(&store, X2, "x two", vec![]).await;
@@ -5844,7 +6068,7 @@ mod tests {
         /// no row nothing says its member list is the one the proof met.
         #[tokio::test]
         async fn a_member_of_a_redeclared_bundle_with_no_row_resolves() {
-            const PACK_2: &str = "ghcr.io/acme/pack:2";
+            const PACK_2: &str = "ghcr.io/acme/pack:v2";
             let store = Store::default();
             let old = skill(&store, X1, "old", vec![]).await;
             let at_two = skill(&store, X2, "x two", vec![]).await;
@@ -5931,7 +6155,7 @@ mod tests {
         /// A pin never carries into another repository, listed edge or not.
         #[tokio::test]
         async fn a_listed_edge_in_another_repository_answers_no_tagless_pin() {
-            const MIRROR: &str = "ghcr.io/zz/x:1";
+            const MIRROR: &str = "ghcr.io/zz/x:v1";
             let store = Store::default();
             let old = skill(&store, X1, "old", vec![]).await;
             let mirrored = skill(&store, MIRROR, "mirrored", vec![]).await;
@@ -6150,7 +6374,7 @@ mod tests {
             let at_one = skill(&store, X1, "x", vec![]).await;
             let p = skill(&store, P, "p", vec![edge(X1)]).await;
             let set = declared(&[("p", P)]);
-            let unpublished = bundle_member(ArtifactKind::Skill, "y", "ghcr.io/acme/y:1");
+            let unpublished = bundle_member(ArtifactKind::Skill, "y", "ghcr.io/acme/y:v1");
             skill(&store, P, "the tag moved", vec![]).await;
 
             // A lock missing the edge gains it; one naming another edge loses that.
@@ -6281,7 +6505,7 @@ mod tests {
             set.bundles.insert("pack".to_string(), registry(PACK));
             let nested = LockedBundle {
                 transitive: true,
-                ..bundle_row("inner", "ghcr.io/acme/inner:1", &old_digest(), vec![])
+                ..bundle_row("inner", "ghcr.io/acme/inner:v1", &old_digest(), vec![])
             };
             let previous = GrimoireLock {
                 bundles: vec![bundle_row("pack", PACK, &old_digest(), vec![]), nested],
@@ -6309,10 +6533,10 @@ mod tests {
 
         // ── Carrying a bundle ────────────────────────────────────────────
 
-        const PACK_TWO: &str = "ghcr.io/acme/pack:2";
+        const PACK_TWO: &str = "ghcr.io/acme/pack:v2";
         /// A request with no tag, which the row records as `latest`.
         const PACK_BARE: &str = "ghcr.io/acme/pack";
-        const FOREIGN_PACK: &str = "ghcr.io/evil/pack:1";
+        const FOREIGN_PACK: &str = "ghcr.io/evil/pack:v1";
 
         /// How a claim reaches the bundle `pack`.
         #[derive(Debug, Clone, Copy)]
@@ -6399,7 +6623,7 @@ mod tests {
         async fn bundle_carries_by_digest_while_repo_and_tag_hold() {
             let cases = BUNDLE_ROUTES
                 .iter()
-                .flat_map(|r| [(*r, PACK, "1"), (*r, PACK_BARE, "latest")]);
+                .flat_map(|r| [(*r, PACK, "v1"), (*r, PACK_BARE, "latest")]);
             for (route, id, tag) in cases {
                 let store = Store::default();
                 let m = skill(&store, M, "m", vec![]).await;
@@ -6428,7 +6652,7 @@ mod tests {
             let store = Store::default();
             let m = skill(&store, M, "m", vec![]).await;
             let old = publish(&store.reg, PACK, "", skill_member("m", M)).await;
-            let locked = pack_row("1", pinned(PACK, &old));
+            let locked = pack_row("v1", pinned(PACK, &old));
             let rows = vec![row("m", M, &m, vec![])];
             let (set, previous) = claiming_pack(&store, BundleRoute::Declared, PACK, locked, rows).await;
             skill(&store, Q, "q", vec![]).await;
@@ -6476,7 +6700,7 @@ mod tests {
         /// holds by digest: that digest is still nobody's tag cache.
         #[tokio::test]
         async fn a_digest_a_declaration_names_stays_unblamed_below_a_tag_read() {
-            const P: &str = "ghcr.io/acme/p:1";
+            const P: &str = "ghcr.io/acme/p:v1";
             let store = Store::default();
             let old = skill(&store, X1, "old", vec![]).await;
             let new = skill(&store, X2, "new", vec![]).await;
@@ -6508,7 +6732,7 @@ mod tests {
             let rows = || vec![row("m", M, &m, vec![]), row("q", Q, &q, vec![])];
             let old = publish(&store.reg, PACK, "", skill_member("m", M)).await;
             let at_two = publish(&store.reg, PACK_TWO, "", skill_member("q", Q)).await;
-            let locked = || pack_row("1", pinned(PACK, &old));
+            let locked = || pack_row("v1", pinned(PACK, &old));
 
             let (before, previous) = claiming_pack(&store, BundleRoute::Declared, PACK, locked(), rows()).await;
             let after = declaring_pack(PACK_TWO);
@@ -6521,7 +6745,7 @@ mod tests {
                     .expect("relock succeeds");
                 let moved = pack_of(&target.lock);
                 assert_eq!(moved.pinned().unwrap().digest(), at_two);
-                assert_eq!(moved.tag(), Some("2"));
+                assert_eq!(moved.tag(), Some("v2"));
                 assert_eq!(moved.members, skill_member("q", Q));
                 assert_eq!(store.take_resolves(), [PACK_TWO]);
                 assert_eq!(target.tagless_resolved, [], "the row names what it answered");
@@ -6535,7 +6759,7 @@ mod tests {
                 .await
                 .expect("relock succeeds");
             assert_eq!(pack_of(&target.lock).pinned().unwrap().digest(), at_two);
-            assert_eq!(pack_of(&target.lock).tag(), Some("2"));
+            assert_eq!(pack_of(&target.lock).tag(), Some("v2"));
             assert_eq!(store.take_resolves(), [P, PACK_TWO]);
             assert_eq!(target.tagless_resolved, [], "the edge moved, the lock is not old");
         }
@@ -6548,7 +6772,7 @@ mod tests {
                 let q = skill(&store, Q, "q", vec![]).await;
                 let rows = vec![row("m", M, &m, vec![]), row("q", Q, &q, vec![])];
                 let old = publish(&store.reg, PACK, "", skill_member("m", M)).await;
-                let locked = pack_row("9", pinned(PACK, &old));
+                let locked = pack_row("v9", pinned(PACK, &old));
                 let (set, previous) = claiming_pack(&store, route, PACK, locked, rows).await;
                 let moved = publish(&store.reg, PACK, "", skill_member("q", Q)).await;
 
@@ -6583,7 +6807,7 @@ mod tests {
                 let foreign = publish(&store.reg, FOREIGN_PACK, "", skill_member("q", Q)).await;
                 let current = publish(&store.reg, PACK, "", skill_member("m", M)).await;
                 let rows = vec![row("m", M, &m, vec![]), row("q", Q, &q, vec![])];
-                let locked = pack_row("1", pinned(FOREIGN_PACK, &foreign));
+                let locked = pack_row("v1", pinned(FOREIGN_PACK, &foreign));
                 let (set, previous) = claiming_pack(&store, route, PACK, locked, rows).await;
 
                 for prior in [Prior::checked(&previous, &set), Prior::unproven(&previous)] {
@@ -6599,13 +6823,13 @@ mod tests {
 
         #[tokio::test]
         async fn bundle_claimed_by_two_tags_carries() {
-            for (near, tag) in [(PACK, "1"), (PACK_BARE, "latest")] {
+            for (near, tag) in [(PACK, "v1"), (PACK_BARE, "latest")] {
                 let store = Store::default();
                 let m = skill(&store, M, "m", vec![]).await;
                 let members = skill_member("m", M);
                 let old = publish(&store.reg, near, "", members.clone()).await;
                 let two = Identifier::parse(PACK_TWO).unwrap();
-                store.put_tag(&two, "2", &old).await.unwrap();
+                store.put_tag(&two, "v2", &old).await.unwrap();
                 let p = skill(&store, P, "p", vec![pack_edge(near)]).await;
                 let q = skill(&store, Q, "q", vec![pack_edge(PACK_TWO)]).await;
 
@@ -6684,7 +6908,7 @@ mod tests {
                 let frozen = publish(&store.reg, PACK, "", skill_member("q", Q)).await;
                 let claim = format!("{PACK}@{frozen}");
                 let rows = vec![row("m", M, &m, vec![]), row("q", Q, &q, vec![])];
-                let locked = pack_row("1", pinned(PACK, &old));
+                let locked = pack_row("v1", pinned(PACK, &old));
                 let (set, previous) = claiming_pack(&store, route, &claim, locked, rows).await;
 
                 for prior in [Prior::checked(&previous, &set), Prior::unproven(&previous)] {
@@ -6705,7 +6929,7 @@ mod tests {
                 let old = publish(&store.reg, PACK, "", skill_member("m", M)).await;
                 let claim = format!("{PACK}@{old}");
                 let rows = vec![row("m", M, &m, vec![]), row("q", Q, &q, vec![])];
-                let locked = pack_row("1", pinned(PACK, &old));
+                let locked = pack_row("v1", pinned(PACK, &old));
                 let (set, previous) = claiming_pack(&store, route, &claim, locked, rows).await;
                 publish(&store.reg, PACK, "", skill_member("q", Q)).await;
 
@@ -6729,19 +6953,19 @@ mod tests {
             let frozen = publish(&store.reg, PACK_TWO, "", skill_member("q", Q)).await;
             let claim = format!("{PACK}@{frozen}");
             let p = skill(&store, P, "p", vec![pack_edge(&claim)]).await;
-            let n = skill(&store, "ghcr.io/acme/n:1", "n", vec![pack_edge(PACK_TWO)]).await;
+            let n = skill(&store, "ghcr.io/acme/n:v1", "n", vec![pack_edge(PACK_TWO)]).await;
 
-            let set = declared(&[("n", "ghcr.io/acme/n:1"), ("p", P)]);
+            let set = declared(&[("n", "ghcr.io/acme/n:v1"), ("p", P)]);
             let previous = GrimoireLock {
                 bundles: vec![LockedBundle {
                     transitive: true,
-                    ..pack_row("1", pinned(PACK, &old))
+                    ..pack_row("v1", pinned(PACK, &old))
                 }],
                 ..lock_of(
                     &set,
                     vec![
                         row("m", M, &m, vec![]),
-                        row("n", "ghcr.io/acme/n:1", &n, vec![pack_edge(PACK_TWO)]),
+                        row("n", "ghcr.io/acme/n:v1", &n, vec![pack_edge(PACK_TWO)]),
                         row("p", P, &p, vec![pack_edge(&claim)]),
                         row("q", Q, &q, vec![]),
                     ],
@@ -6762,7 +6986,7 @@ mod tests {
                 let current = publish(&store.reg, PACK, "", skill_member("m", M)).await;
                 let gone = Algorithm::Sha256.hash(b"gone");
                 let rows = vec![row("m", M, &m, vec![])];
-                let locked = pack_row("1", pinned(PACK, &gone));
+                let locked = pack_row("v1", pinned(PACK, &gone));
                 let (set, previous) = claiming_pack(&store, route, PACK, locked, rows).await;
                 let prior = Prior::checked(&previous, &set);
 
@@ -6796,7 +7020,7 @@ mod tests {
             let id = id.replace("{digest}", &old.to_string());
             let locked = LockedBundle {
                 members,
-                ..pack_row("1", pinned(PACK, &old))
+                ..pack_row("v1", pinned(PACK, &old))
             };
             let rows = vec![row("m", M, &m, vec![])];
             let (set, previous) = claiming_pack(store, route, &id, locked, rows).await;
@@ -6818,7 +7042,7 @@ mod tests {
         async fn carried_bundle_offline_takes_its_members_from_the_lock_row() {
             let claims = BUNDLE_ROUTES
                 .iter()
-                .flat_map(|r| [(*r, PACK), (*r, "ghcr.io/acme/pack:1@{digest}")]);
+                .flat_map(|r| [(*r, PACK), (*r, "ghcr.io/acme/pack:v1@{digest}")]);
             for (route, id) in claims {
                 let store = Store::default();
                 let (set, previous, _) = locked_pack(&store, route, id).await;
@@ -6837,7 +7061,7 @@ mod tests {
 
         #[tokio::test]
         async fn carried_nested_bundle_offline_takes_each_row() {
-            const OUTER: &str = "ghcr.io/acme/outer:1";
+            const OUTER: &str = "ghcr.io/acme/outer:v1";
             let store = Store::default();
             let m = skill(&store, M, "m", vec![]).await;
             let members = skill_member("m", M);
@@ -6853,7 +7077,7 @@ mod tests {
                     LockedBundle {
                         transitive: true,
                         members,
-                        ..pack_row("1", pinned(PACK, &inner))
+                        ..pack_row("v1", pinned(PACK, &inner))
                     },
                 ],
                 ..lock_of(&set, vec![row("m", M, &m, vec![])])
@@ -6983,7 +7207,7 @@ mod tests {
                 let digest = publish(&store.reg, PACK, "", skill_member("m", M)).await;
                 let locked = LockedBundle {
                     members: skill_member("q", Q),
-                    ..pack_row("1", pinned(FOREIGN_PACK, &digest))
+                    ..pack_row("v1", pinned(FOREIGN_PACK, &digest))
                 };
                 let claim = format!("{PACK}@{digest}");
                 let rows = vec![row("m", M, &m, vec![])];
@@ -7002,13 +7226,13 @@ mod tests {
         /// offline for an edge in any other, as it answers that edge online.
         #[tokio::test]
         async fn a_kept_row_stands_in_offline_for_an_edge_in_another_repository() {
-            const ELSEWHERE: &str = "ghcr.io/other/pack:1";
+            const ELSEWHERE: &str = "ghcr.io/other/pack:v1";
             let store = Store::default();
             let m = skill(&store, M, "m", vec![]).await;
             let digest = publish(&store.reg, PACK, "", skill_member("m", M)).await;
             let locked = LockedBundle {
                 members: skill_member("m", M),
-                ..pack_row("1", pinned(PACK, &digest))
+                ..pack_row("v1", pinned(PACK, &digest))
             };
             let rows = vec![row("m", M, &m, vec![])];
             let (set, previous) = claiming_pack(&store, BundleRoute::Required, ELSEWHERE, locked, rows).await;
@@ -7079,13 +7303,13 @@ mod tests {
 
         // ── Releasing a conflict ─────────────────────────────────────────
 
-        const X13: &str = "ghcr.io/acme/x:1.3";
-        const Y1: &str = "ghcr.io/acme/y:1";
-        const Y13: &str = "ghcr.io/acme/y:1.3";
-        const A1: &str = "ghcr.io/acme/a:1";
-        const A13: &str = "ghcr.io/acme/a:1.3";
-        const R: &str = "ghcr.io/acme/r:1";
-        const PACK_13: &str = "ghcr.io/acme/pack:1.3";
+        const X13: &str = "ghcr.io/acme/x:v1.3";
+        const Y1: &str = "ghcr.io/acme/y:v1";
+        const Y13: &str = "ghcr.io/acme/y:v1.3";
+        const A1: &str = "ghcr.io/acme/a:v1";
+        const A13: &str = "ghcr.io/acme/a:v1.3";
+        const R: &str = "ghcr.io/acme/r:v1";
+        const PACK_13: &str = "ghcr.io/acme/pack:v1.3";
 
         fn claim(name: &str, id: &str) -> BundleMember {
             bundle_member(ArtifactKind::Skill, name, id)
@@ -7268,7 +7492,7 @@ mod tests {
             skill(&store, Q, "q", vec![claim("r", R)]).await;
 
             let rows = vec![row("m", M, &m, vec![]), row("x", X1, &old_x, vec![])];
-            let locked = pack_row("1", pinned(PACK, &old));
+            let locked = pack_row("v1", pinned(PACK, &old));
             let (before, previous) = claiming_pack(&store, BundleRoute::Required, PACK, locked, rows).await;
             let after = declared(&[("p", P), ("q", Q)]);
 
@@ -7334,10 +7558,10 @@ mod tests {
 
         // ── What a remove leaves for the next relock ─────────────────────
 
-        const X3: &str = "ghcr.io/acme/x:3";
-        const R3: &str = "ghcr.io/acme/r:1";
-        const O: &str = "ghcr.io/acme/o:1";
-        const FRESH: &str = "ghcr.io/acme/fresh:1";
+        const X3: &str = "ghcr.io/acme/x:v3";
+        const R3: &str = "ghcr.io/acme/r:v1";
+        const O: &str = "ghcr.io/acme/o:v1";
+        const FRESH: &str = "ghcr.io/acme/fresh:v1";
 
         /// `lock` and `add` of a bystander after a remove: each keeps `x`, and
         /// only the bystander's own tag is asked for.
@@ -7459,10 +7683,10 @@ mod tests {
         /// the repository that resolved them, not a surviving edge's.
         #[tokio::test]
         async fn a_kept_row_keeps_the_anchor_of_its_relative_children() {
-            const CHILD: &str = "ghcr.io/acme/child:1";
-            const CHILD_ELSEWHERE: &str = "ghcr.io/other/child:1";
+            const CHILD: &str = "ghcr.io/acme/child:v1";
+            const CHILD_ELSEWHERE: &str = "ghcr.io/other/child:v1";
             let store = Store::default();
-            let relative = vec![bundle_member(ArtifactKind::Skill, "child", "./child:1")];
+            let relative = vec![bundle_member(ArtifactKind::Skill, "child", "./child:v1")];
             let old = skill(&store, X1, "old", relative.clone()).await;
             assert_eq!(skill(&store, OTHER, "old", relative.clone()).await, old);
             let child = skill(&store, CHILD, "child", vec![]).await;
@@ -7501,14 +7725,14 @@ mod tests {
 
         #[tokio::test]
         async fn two_flat_bundles_keep_the_shared_pin_a_remove_left() {
-            const LEFT: &str = "ghcr.io/acme/left:1";
-            const RIGHT: &str = "ghcr.io/acme/right:1";
+            const LEFT: &str = "ghcr.io/acme/left:v1";
+            const RIGHT: &str = "ghcr.io/acme/right:v1";
             let store = Store::default();
             let old = skill(&store, X1, "old", vec![]).await;
             let bystander = skill(&store, O, "o", vec![]).await;
             let left = publish(&store.reg, LEFT, "", vec![edge(X1)]).await;
             let right = publish(&store.reg, RIGHT, "", vec![edge(X2)]).await;
-            let stamp = |repo: &str| BundleProvenance::new(repo, "1");
+            let stamp = |repo: &str| BundleProvenance::new(repo, "v1");
             let x = LockedArtifact {
                 bundles: vec![stamp("ghcr.io/acme/left"), stamp("ghcr.io/acme/right")],
                 ..row("x", X1, &old, vec![])
@@ -7537,8 +7761,8 @@ mod tests {
         /// `p` and `q` nest `pack` at two tags of one digest, and `p`'s tag won.
         /// `o` is a bystander so a relock has something else to name.
         async fn pack_held_by_two_bundles(store: &Store) -> (DesiredSet, DesiredSet, GrimoireLock, Digest) {
-            const BUNDLE_P: &str = "ghcr.io/acme/bundle-p:1";
-            const BUNDLE_Q: &str = "ghcr.io/acme/bundle-q:1";
+            const BUNDLE_P: &str = "ghcr.io/acme/bundle-p:v1";
+            const BUNDLE_Q: &str = "ghcr.io/acme/bundle-q:v1";
             let m = skill(store, M, "m", vec![]).await;
             let bystander = skill(store, O, "o", vec![]).await;
             let members = skill_member("m", M);
@@ -7556,7 +7780,7 @@ mod tests {
             after.invalidate_declaration_hash_cache();
 
             let locked_m = LockedArtifact {
-                bundles: vec![BundleProvenance::new("ghcr.io/acme/pack", "1")],
+                bundles: vec![BundleProvenance::new("ghcr.io/acme/pack", "v1")],
                 ..row("m", M, &m, vec![])
             };
             let previous = GrimoireLock {
@@ -7566,7 +7790,7 @@ mod tests {
                     LockedBundle {
                         transitive: true,
                         members,
-                        ..pack_row("1", pinned(PACK, &old))
+                        ..pack_row("v1", pinned(PACK, &old))
                     },
                 ],
                 ..lock_of(&before, vec![locked_m, row("o", O, &bystander, vec![])])
@@ -7593,7 +7817,7 @@ mod tests {
             let online = relock_nothing(&after, &prior, &store).await;
             assert_eq!(store.take_resolves(), Vec::<String>::new(), "the row answers its edge");
             assert_eq!(pack_of(&online).pinned(), Some(&pinned(PACK, &old)));
-            assert_eq!(pack_of(&online).tag(), Some("1"));
+            assert_eq!(pack_of(&online).tag(), Some("v1"));
             assert_eq!(offline.bundles, online.bundles);
             assert_eq!(offline.skills, online.skills, "the member's stamp too");
         }
@@ -7703,14 +7927,14 @@ mod tests {
         /// `pack`, and the lock restamps as on 0.15.1; the member keeps its pin.
         #[tokio::test]
         async fn a_remove_beside_a_bundle_with_no_row_drops_a_key_it_stamped_none_of() {
-            const Y: &str = "ghcr.io/acme/y:1";
+            const Y: &str = "ghcr.io/acme/y:v1";
             let warm = StoredMembers::holding("pack", &[(ArtifactKind::Skill, "m".to_string())]);
             for stored in [StoredMembers::default(), warm] {
                 let store = Store::default();
                 let old = skill(&store, M, "m", vec![]).await;
                 let y = skill(&store, Y, "y", vec![]).await;
                 let member = LockedArtifact {
-                    bundles: vec![BundleProvenance::new("ghcr.io/acme/pack", "1")],
+                    bundles: vec![BundleProvenance::new("ghcr.io/acme/pack", "v1")],
                     ..row("m", M, &old, vec![])
                 };
                 let rows = vec![member, row("y", Y, &y, vec![])];

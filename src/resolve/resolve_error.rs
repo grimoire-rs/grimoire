@@ -27,6 +27,10 @@ pub const MAX_TRANSITIVE_NODES: usize = 2048;
 pub const MAX_REQUIRES_BYTES: u64 = 32 * 1024 * 1024;
 /// Most breadth-first levels below the roots.
 pub const MAX_DEPTH: usize = 32;
+/// Most node admissions, summed over every pass, in one resolve.
+pub const MAX_WORK_ADMISSIONS: usize = 16 * MAX_TRANSITIVE_NODES;
+/// Most bytes of tag names read from listings in one resolve.
+pub const MAX_LISTING_BYTES: usize = 32 * 1024 * 1024;
 
 /// The graph cap a resolve crossed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +41,10 @@ pub enum GraphLimit {
     RequiresBytes,
     /// [`MAX_DEPTH`].
     Depth,
+    /// [`MAX_WORK_ADMISSIONS`], crossed after `passes` passes.
+    Work { passes: usize },
+    /// [`MAX_LISTING_BYTES`].
+    ListingBytes,
 }
 
 impl std::fmt::Display for GraphLimit {
@@ -45,8 +53,91 @@ impl std::fmt::Display for GraphLimit {
             Self::Nodes => write!(f, "more than {MAX_TRANSITIVE_NODES} transitive artifacts"),
             Self::RequiresBytes => write!(f, "more than {MAX_REQUIRES_BYTES} bytes of requires layers"),
             Self::Depth => write!(f, "deeper than {MAX_DEPTH} levels"),
+            Self::Work { passes } => write!(
+                f,
+                "the resolve stopped after {MAX_WORK_ADMISSIONS} node admissions in {passes} passes"
+            ),
+            Self::ListingBytes => write!(f, "tag listings passed {MAX_LISTING_BYTES} bytes"),
         }
     }
+}
+
+/// What follows a crossed cap: whose edges or listing crossed it, or, for the
+/// work budget, that no publisher is to blame.
+fn cap_remedy(limit: GraphLimit, via: &str) -> String {
+    match limit {
+        GraphLimit::Nodes | GraphLimit::RequiresBytes | GraphLimit::Depth => format!(
+            "the edges of {} crossed the limit; contact that publisher",
+            registry_text(via)
+        ),
+        GraphLimit::ListingBytes => format!(
+            "the listing of {} crossed the limit; contact that publisher",
+            registry_text(via)
+        ),
+        GraphLimit::Work { .. } => "this is a work limit, not proof the dependencies have no answer".to_string(),
+    }
+}
+
+/// `; the newest is {newest}`, `; it lists only prereleases, the newest is
+/// {newest}` for a prerelease tag, or `; it lists no release`.
+fn newest_release(newest: Option<&str>) -> String {
+    match newest {
+        None => "; it lists no release".to_string(),
+        Some(tag) if is_prerelease(tag) => {
+            format!("; it lists only prereleases, the newest is {}", registry_text(tag))
+        }
+        Some(newest) => format!("; the newest is {}", registry_text(newest)),
+    }
+}
+
+/// Whether `tag` reads as a semver prerelease, `_` read as `+`.
+fn is_prerelease(tag: &str) -> bool {
+    semver::Version::parse(&tag.replace('_', "+")).is_ok_and(|version| !version.pre.is_empty())
+}
+
+/// The `newest` of [`ResolveErrorKind::NoMatchingVersion`] for a release `tag`
+/// whose manifest names `annotated`, another version than the tag does.
+pub fn annotated_newest(tag: &str, annotated: &semver::Version) -> String {
+    format!("{tag}, whose manifest names version {annotated}")
+}
+
+/// `; {fix}`, or nothing when no fix is known yet.
+fn fix_tail(fix: &str) -> String {
+    if fix.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", escape_controls(fix))
+    }
+}
+
+/// The text of [`ResolveErrorKind::UnchosenRequirement`] in either shape.
+fn unchosen_text(shape: &Unchosen, parent: &str, dropped: &str, claim: &str, fix: &str) -> String {
+    let (parent, dropped, claim) = (
+        escape_controls(parent),
+        escape_controls(dropped),
+        escape_controls(claim),
+    );
+    let body = match shape {
+        Unchosen::Move { from, to } => format!(
+            "would move from {} to {} only because {parent} {dropped}, which this resolve dropped, required {claim}",
+            escape_controls(from),
+            escape_controls(to)
+        ),
+        Unchosen::Conflict { claims } => format!(
+            "{} cannot all hold, and {parent} {dropped}, which claimed {claim}, is no longer in the graph",
+            escape_controls(claims)
+        ),
+    };
+    format!("{body}{}", fix_tail(fix))
+}
+
+/// Which refusal [`ResolveErrorKind::UnchosenRequirement`] reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unchosen {
+    /// A held pin would move only because a dropped version claimed it.
+    Move { from: String, to: String },
+    /// A learned line holds no release while a dropped version's claim binds it.
+    Conflict { claims: String },
 }
 
 /// `skill/a -> skill/b -> skill/a`: the cycle closed back on its first node.
@@ -320,14 +411,15 @@ pub enum ResolveErrorKind {
 
     /// The same `(kind, name)` is claimed by two or more bundles or requires
     /// edges that resolve to different digests. Fail-closed: the user resolves
-    /// it by declaring the artifact directly to choose one.
+    /// it by declaring the artifact directly, with a tag, to choose one; a bare
+    /// declaration yields to the range claims of its dependents.
     ///
     /// `others` names every *further* conflicting artifact found in the same
     /// pass (empty when this is the only one), so one run reports the whole
     /// set instead of one per run. It sits before the fix so the message
     /// always ends with it.
     #[error(
-        "conflicting versions ({}){}; declare {kind} {} directly in grimoire.toml to choose one",
+        "conflicting versions ({}){}; declare {kind} {} directly in grimoire.toml with a tag to choose one",
         escape_controls(.sources),
         escape_controls(.others),
         registry_text(.name)
@@ -407,11 +499,9 @@ pub enum ResolveErrorKind {
     },
 
     /// A graph cap was crossed. `via` names the parent whose edges crossed
-    /// it, with its publisher repository, so the user knows whom to contact.
-    #[error(
-        "dependency graph too large: {limit}; the edges of {} crossed the limit; contact that publisher",
-        registry_text(.via)
-    )]
+    /// it, or the line node whose listing did, with its publisher repository,
+    /// so the user knows whom to contact. The work budget names no one.
+    #[error("dependency graph too large: {limit}; {}", cap_remedy(*.limit, .via))]
     GraphTooLarge { limit: GraphLimit, via: String },
 
     /// The artifact needs features, or uses a layer layout, this grim does not know.
@@ -438,6 +528,62 @@ pub enum ResolveErrorKind {
         previous_hash: String,
         current_hash: String,
         retry: String,
+    },
+
+    /// No release satisfies a node's learned line: the target tag and every
+    /// listed candidate fell outside it. `newest` is the highest non-prerelease
+    /// entry of the repository's listing, else its highest prerelease; a release
+    /// the run read whose manifest names another version carries that version
+    /// ([`annotated_newest`]). Classified 79.
+    #[error(
+        "no release of {} satisfies {}{}",
+        registry_text(.repository),
+        escape_controls(.claims),
+        newest_release(.newest.as_deref())
+    )]
+    NoMatchingVersion {
+        repository: String,
+        /// The line's requirements in `Line` order, joined by `, `.
+        claims: String,
+        newest: Option<String>,
+    },
+
+    /// A pin would move, or a line holds no release, only because of a claim
+    /// from a version this resolve dropped. `fix` is empty until the command
+    /// seam fills it in. Classified 78.
+    #[error("{}", unchosen_text(.shape, .parent, .dropped, .claim, .fix))]
+    UnchosenRequirement {
+        /// The dropped parent, as its kind and name.
+        parent: String,
+        /// The dropped parent's version.
+        dropped: String,
+        /// The tag the dropped parent claimed.
+        claim: String,
+        shape: Unchosen,
+        /// The reference the fix tells the user to declare.
+        declare: String,
+        fix: String,
+    },
+
+    /// A pin held in a higher major version would move down to satisfy
+    /// `requires` range claims. `fix` is empty until the command seam fills it
+    /// in, and names `--allow-downgrade`. Classified 78 with a reason.
+    #[error(
+        "would move from {} to {}, a lower major version, because {} require {}{}",
+        escape_controls(.from),
+        escape_controls(.to),
+        escape_controls(.requesters),
+        escape_controls(.claim),
+        fix_tail(.fix)
+    )]
+    MajorDowngrade {
+        from: String,
+        to: String,
+        requesters: String,
+        claim: String,
+        /// The reference the fix tells the user to declare.
+        declare: String,
+        fix: String,
     },
 }
 
@@ -646,8 +792,36 @@ mod tests {
             manifest: std::path::PathBuf::from(FORGED),
         };
         let invalid = ResolveErrorKind::BundleInvalid(FORGED.to_string());
+        let no_release = ResolveErrorKind::NoMatchingVersion {
+            repository: FORGED.to_string(),
+            claims: FORGED.to_string(),
+            newest: Some(FORGED.to_string()),
+        };
+        let unchosen = ResolveErrorKind::UnchosenRequirement {
+            parent: FORGED.to_string(),
+            dropped: FORGED.to_string(),
+            claim: FORGED.to_string(),
+            shape: Unchosen::Move {
+                from: FORGED.to_string(),
+                to: FORGED.to_string(),
+            },
+            declare: FORGED.to_string(),
+            fix: FORGED.to_string(),
+        };
+        let downgrade = ResolveErrorKind::MajorDowngrade {
+            from: FORGED.to_string(),
+            to: FORGED.to_string(),
+            requesters: FORGED.to_string(),
+            claim: FORGED.to_string(),
+            declare: FORGED.to_string(),
+            fix: FORGED.to_string(),
+        };
+        let listing = ResolveErrorKind::GraphTooLarge {
+            limit: GraphLimit::ListingBytes,
+            via: FORGED.to_string(),
+        };
 
-        for kind in [conflict, stale, gone, invalid] {
+        for kind in [conflict, stale, gone, invalid, no_release, unchosen, downgrade, listing] {
             let text = kind.to_string();
             assert!(!text.contains('\n'), "{text:?}");
             assert!(!text.contains('\u{202e}'), "{text:?}");
@@ -718,6 +892,169 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn the_work_budget_says_it_is_a_limit_and_names_no_publisher() {
+        let text = ResolveErrorKind::GraphTooLarge {
+            limit: GraphLimit::Work { passes: 16 },
+            via: "skill/a (ghcr.io/acme/a)".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            text,
+            "dependency graph too large: the resolve stopped after 32768 node admissions in 16 passes; \
+             this is a work limit, not proof the dependencies have no answer"
+        );
+    }
+
+    #[test]
+    fn the_listing_budget_names_the_listing_that_crossed_it() {
+        let text = ResolveErrorKind::GraphTooLarge {
+            limit: GraphLimit::ListingBytes,
+            via: "skill/x (ghcr.io/acme/x)".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            text,
+            "dependency graph too large: tag listings passed 33554432 bytes; the listing of skill/x \
+             (ghcr.io/acme/x) crossed the limit; contact that publisher"
+        );
+    }
+
+    #[test]
+    fn no_matching_version_names_the_claims_and_the_newest_release() {
+        let no_release = |newest: Option<&str>| {
+            ResolveError::new(
+                ArtifactRef::registry(
+                    ArtifactKind::Skill,
+                    "x",
+                    Identifier::parse("ghcr.io/acme/x:2.9").unwrap(),
+                ),
+                ResolveErrorKind::NoMatchingVersion {
+                    repository: "ghcr.io/acme/x".to_string(),
+                    claims: "^2, ^2.9".to_string(),
+                    newest: newest.map(str::to_string),
+                },
+            )
+            .to_string()
+        };
+
+        assert_eq!(
+            no_release(Some("2.4.0")),
+            "skill 'x' (ghcr.io/acme/x:2.9): no release of ghcr.io/acme/x satisfies ^2, ^2.9; the newest is 2.4.0"
+        );
+        assert_eq!(
+            no_release(None),
+            "skill 'x' (ghcr.io/acme/x:2.9): no release of ghcr.io/acme/x satisfies ^2, ^2.9; it lists no release"
+        );
+        assert_eq!(
+            no_release(Some("2.0.0-rc.2")),
+            "skill 'x' (ghcr.io/acme/x:2.9): no release of ghcr.io/acme/x satisfies ^2, ^2.9; \
+             it lists only prereleases, the newest is 2.0.0-rc.2"
+        );
+        assert_eq!(
+            no_release(Some(&annotated_newest("2.4.0", &semver::Version::new(3, 1, 0)))),
+            "skill 'x' (ghcr.io/acme/x:2.9): no release of ghcr.io/acme/x satisfies ^2, ^2.9; \
+             the newest is 2.4.0, whose manifest names version 3.1.0"
+        );
+        assert_eq!(
+            no_release(Some("2.4")),
+            "skill 'x' (ghcr.io/acme/x:2.9): no release of ghcr.io/acme/x satisfies ^2, ^2.9; the newest is 2.4"
+        );
+    }
+
+    fn unchosen(shape: Unchosen, fix: &str) -> String {
+        ResolveErrorKind::UnchosenRequirement {
+            parent: "skill/q".to_string(),
+            dropped: "1.6.0".to_string(),
+            claim: "1.5".to_string(),
+            shape,
+            declare: "ghcr.io/acme/r:2".to_string(),
+            fix: fix.to_string(),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn an_unchosen_move_names_the_dropped_version_and_its_claim() {
+        let shape = || Unchosen::Move {
+            from: "2.1.0".to_string(),
+            to: "2.4.0".to_string(),
+        };
+
+        assert_eq!(
+            unchosen(shape(), "declare skill r as `ghcr.io/acme/r:2.1.0` in grimoire.toml"),
+            "would move from 2.1.0 to 2.4.0 only because skill/q 1.6.0, which this resolve dropped, required 1.5; \
+             declare skill r as `ghcr.io/acme/r:2.1.0` in grimoire.toml"
+        );
+        assert_eq!(
+            unchosen(shape(), ""),
+            "would move from 2.1.0 to 2.4.0 only because skill/q 1.6.0, which this resolve dropped, required 1.5"
+        );
+    }
+
+    #[test]
+    fn an_unchosen_conflict_names_the_claims_and_the_dropped_version() {
+        let shape = || Unchosen::Conflict {
+            claims: "^1.5, ^2".to_string(),
+        };
+
+        assert_eq!(
+            unchosen(shape(), "run `grim update`"),
+            "^1.5, ^2 cannot all hold, and skill/q 1.6.0, which claimed 1.5, is no longer in the graph; \
+             run `grim update`"
+        );
+        assert_eq!(
+            unchosen(shape(), ""),
+            "^1.5, ^2 cannot all hold, and skill/q 1.6.0, which claimed 1.5, is no longer in the graph"
+        );
+    }
+
+    #[test]
+    fn a_major_downgrade_names_both_versions_the_requesters_and_the_fix() {
+        let downgrade = |fix: &str| {
+            ResolveErrorKind::MajorDowngrade {
+                from: "3.1.0".to_string(),
+                to: "2.6.0".to_string(),
+                requesters: "skill/a".to_string(),
+                claim: "2".to_string(),
+                declare: "ghcr.io/acme/x:3.1.0".to_string(),
+                fix: fix.to_string(),
+            }
+            .to_string()
+        };
+
+        assert_eq!(
+            downgrade("or rerun `grim lock --allow-downgrade` to take 2.6.0"),
+            "would move from 3.1.0 to 2.6.0, a lower major version, because skill/a require 2; \
+             or rerun `grim lock --allow-downgrade` to take 2.6.0"
+        );
+        assert_eq!(
+            downgrade(""),
+            "would move from 3.1.0 to 2.6.0, a lower major version, because skill/a require 2"
+        );
+    }
+
+    /// A bare declaration yields to its dependents' range claims, so only a
+    /// declaration with a tag chooses one side of a conflict.
+    #[test]
+    fn a_conflict_asks_for_a_declaration_with_a_tag() {
+        let text = ResolveErrorKind::BundleConflict {
+            kind: ArtifactKind::Skill,
+            name: "x".to_string(),
+            sources: "acme/x:1, acme/x:2".to_string(),
+            others: String::new(),
+            locations: Vec::new(),
+            from_bundles: false,
+        }
+        .to_string();
+
+        assert_eq!(
+            text,
+            "conflicting versions (acme/x:1, acme/x:2); declare skill x directly in grimoire.toml with a tag to \
+             choose one"
+        );
     }
 
     #[test]

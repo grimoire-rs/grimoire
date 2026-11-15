@@ -69,14 +69,16 @@ pub struct PublishArgs {
     pub tag: Option<String>,
 
     /// Assert the rolling cascade (`X.Y.Z` → `X.Y`, `X`, `latest`) for every
-    /// entry. Requires semver versions — combining it with a non-semver
-    /// `--version` channel is a data error (65). Default (neither flag):
-    /// cascade automatically for semver, single tag for a channel.
+    /// entry, but never a float to a lower version. Requires semver versions —
+    /// combining it with a non-semver `--version` channel is a data error (65).
+    /// Default (neither flag): cascade automatically for semver, single tag for
+    /// a channel.
     #[arg(long, overrides_with = "no_cascade")]
     pub cascade: bool,
 
     /// Publish only each entry's exact version tag; suppress the
-    /// `X.Y`/`X`/`latest` cascade.
+    /// `X.Y`/`X`/`latest` cascade (the cascade never moves a float to a lower
+    /// version).
     #[arg(long, overrides_with = "cascade")]
     pub no_cascade: bool,
 
@@ -1326,6 +1328,8 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                     status: PublishStatus::Failed,
                     pushed_to: None,
                     compression: None,
+                    floats_kept: Vec::new(),
+                    release: String::new(),
                 };
                 report_entries.push(failed_entry);
                 let code = classify_error(&err);
@@ -2669,6 +2673,8 @@ fn publish_entry_from_release(
         // push/pull split is inactive) — report actual results.
         pushed_to: report.pushed_to.clone(),
         compression: report.compression,
+        floats_kept: report.floats_kept.clone(),
+        release: report.release.clone(),
     }
 }
 
@@ -4487,6 +4493,47 @@ mod tests {
         );
         // Skipped entry digest is the existing tag digest (populated from registry)
         let _ = first_digest; // verified via status above
+    }
+
+    #[tokio::test]
+    async fn a_backport_entry_reports_its_kept_floats_and_one_line_each() {
+        use crate::api::release_report::KeptFloat;
+        use crate::cli::printer::Printable;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        make_test_manifest_sources(dir);
+        let manifest_path = dir.join("publish.toml");
+        // No entry version, so `--version` decides the release.
+        std::fs::write(&manifest_path, "registry = \"localhost:5000\"\n\n[skills.test-skill]\n").unwrap();
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(dir.to_path_buf(), registry);
+        let publish =
+            |version: &str| make_publish_args(manifest_path.clone(), vec![], Some(version.into()), false, false);
+        run(&ctx, &publish("2.9.0")).await.expect("2.9.0");
+
+        let (report, _) = run(&ctx, &publish("2.3.7")).await.expect("2.3.7");
+        let entry = &report.items()[0];
+        assert_eq!(entry.tags, ["2.3.7", "2.3"]);
+        let kept = |tag: &str| KeptFloat {
+            tag: tag.to_string(),
+            version: semver::Version::new(2, 9, 0),
+        };
+        assert_eq!(entry.floats_kept, [kept("2"), kept("latest")]);
+        assert_eq!(
+            report.kept_lines(),
+            [
+                "localhost:5000/skills/test-skill:2.3.7: kept '2' on 2.9.0, above this release 2.3.7",
+                "localhost:5000/skills/test-skill:2.3.7: kept 'latest' on 2.9.0, above this release 2.3.7",
+            ]
+        );
+        let (mut table, mut json) = (Vec::new(), Vec::new());
+        report.print_plain(&mut table).unwrap();
+        report.print_json(&mut json).unwrap();
+        for out in [table, json] {
+            assert!(!String::from_utf8(out).unwrap().contains("above this release"));
+        }
     }
 
     #[tokio::test]

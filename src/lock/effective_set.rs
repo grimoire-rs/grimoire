@@ -18,10 +18,12 @@ use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::{BundleProvenance, LockedArtifact};
 use crate::lock::locked_bundle::LockedBundle;
-use crate::lock::merge_policy::{EdgeClaim, Settled, settle};
+use crate::lock::merge_policy::{Candidate, EdgeClaim, Settled, validate, winning_request};
 use crate::lock::pin_rule::{PinRecord, snapshot_matches};
 pub use crate::oci::NodeKey;
 use crate::oci::bundle::BundleMember;
+use crate::oci::version_claim::{EdgeOrigin, claim_of};
+use crate::oci::version_evidence::Evidence;
 use crate::oci::{ArtifactKind, Digest, Identifier};
 
 /// Most paths [`why_paths`] returns.
@@ -359,21 +361,40 @@ fn settle_origin(group: &[Claim], locked: Option<Digest>) -> Option<Origin> {
     }
     let edges: Vec<EdgeClaim> = group
         .iter()
-        .zip(ids)
+        .zip(&ids)
         .map(|(c, id)| EdgeClaim {
             parent: c.parent.clone(),
-            requested_id: id.clone(),
+            requested_id: (*id).clone(),
             digest: locked.clone(),
+            claim: claim_of(id, origin(c)),
         })
         .collect();
-    match settle(None, &edges)? {
-        Settled::Agreed { winner_id, parents } => Some(Origin::Implied {
-            id: winner_id,
-            contributors,
-            required_by: parents,
-            requests,
-        }),
-        Settled::Conflict { .. } | Settled::Direct { .. } => None,
+    // The lock vouches for its pin, so no manifest is read to judge it.
+    let candidate = locked.as_ref().map(|digest| Candidate {
+        digest,
+        evidence: &Evidence::Vouched,
+        line_target: None,
+    });
+    let parents = match validate(None, &edges, candidate)? {
+        Settled::Agreed { parents, .. } | Settled::InLine { parents } => parents,
+        Settled::Conflict { .. } | Settled::Direct { .. } | Settled::Yielded { .. } | Settled::OutOfLine { .. } => {
+            return None;
+        }
+    };
+    Some(Origin::Implied {
+        id: winning_request(ids)?.clone(),
+        contributors,
+        required_by: parents,
+        requests,
+    })
+}
+
+/// A bundle's edges are its member list, whose tags keep their literal meaning.
+fn origin(claim: &Claim) -> EdgeOrigin {
+    if claim.parent.0 == ArtifactKind::Bundle {
+        EdgeOrigin::BundleMember
+    } else {
+        EdgeOrigin::Requires
     }
 }
 

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::graph::{Carry, ExpandedGraph, GraphRoot, RootSource, expand_graph};
-use super::resolve_options::ResolveOptions;
+use super::resolve_options::{Downgrade, ResolveOptions};
 use super::resolver::{LockRun, resolve_lock, target_lock};
 use crate::config::declaration::{DeclaredSource, DesiredSet};
 use crate::config::scope::ConfigScope;
@@ -23,7 +23,8 @@ use crate::oci::access::memory_registry::MemoryRegistry;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
 use crate::oci::manifest::{Descriptor, OciManifest};
-use crate::oci::{Algorithm, ArtifactKind, ArtifactKind::*, Identifier};
+use crate::oci::version_evidence::VERSION_ANNOTATION;
+use crate::oci::{Algorithm, ArtifactKind, ArtifactKind::*, Digest, Identifier};
 
 /// `(kind, name, id)` of one edge.
 type Edge = (ArtifactKind, &'static str, &'static str);
@@ -32,6 +33,31 @@ const TAR: &str = "application/vnd.grimoire.artifact.layer.v1.tar";
 
 /// Publish one artifact whose `requires` (or bundle members) are `edges`.
 async fn publish(reg: &MemoryRegistry, kind: ArtifactKind, id: &str, edges: &[Edge]) {
+    publish_annotated(reg, kind, id, edges, BTreeMap::new()).await;
+}
+
+/// Release `version` of `repo` as `grim release` pushes it: the version
+/// annotation, the exact tag, then for a full release `X.Y`, `X` and `latest`.
+async fn release(reg: &MemoryRegistry, kind: ArtifactKind, repo: &str, version: &str, edges: &[Edge]) {
+    let annotations = BTreeMap::from([(VERSION_ANNOTATION.to_string(), version.to_string())]);
+    let id = format!("{repo}:{version}");
+    let digest = publish_annotated(reg, kind, &id, edges, annotations).await;
+    let v = semver::Version::parse(version).unwrap();
+    if v.pre.is_empty() {
+        let id = Identifier::parse(&id).unwrap();
+        for float in [format!("{}.{}", v.major, v.minor), v.major.to_string(), "latest".into()] {
+            reg.put_tag(&id, &float, &digest).await.unwrap();
+        }
+    }
+}
+
+async fn publish_annotated(
+    reg: &MemoryRegistry,
+    kind: ArtifactKind,
+    id: &str,
+    edges: &[Edge],
+    annotations: BTreeMap<String, String>,
+) -> Digest {
     let id = Identifier::parse(id).unwrap();
     let members: Vec<BundleMember> = edges
         .iter()
@@ -65,10 +91,11 @@ async fn publish(reg: &MemoryRegistry, kind: ArtifactKind, id: &str, edges: &[Ed
         artifact_type: None,
         config_media_type: None,
         layers,
-        annotations: BTreeMap::new(),
+        annotations,
     };
     let digest = reg.push_manifest(&id, &manifest).await.unwrap();
     reg.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
+    digest
 }
 
 fn registry(id: &str) -> DeclaredSource {
@@ -82,71 +109,71 @@ async fn fixture() -> (MemoryRegistry, DesiredSet) {
     let all: [(ArtifactKind, &str, &[Edge]); 13] = [
         (
             Skill,
-            "ghcr.io/acme/top:1",
+            "ghcr.io/acme/top:v1",
             &[
-                (Skill, "shared", "ghcr.io/acme/shared:1"),
-                (Skill, "over", "ghcr.io/acme/over:1"),
-                (Skill, "lib", "./lib:1"),
-                // Asked for as `:2` here, as `:1` (a smaller id, a later wave) by `m1`.
-                (Skill, "tagged", "ghcr.io/acme/tagged:2"),
+                (Skill, "shared", "ghcr.io/acme/shared:v1"),
+                (Skill, "over", "ghcr.io/acme/over:v1"),
+                (Skill, "lib", "./lib:v1"),
+                // Asked for as `:v2` here, as `:v1` (a smaller id, a later wave) by `m1`.
+                (Skill, "tagged", "ghcr.io/acme/tagged:v2"),
                 // Declared directly from another publisher below.
-                (Skill, "xrepo", "ghcr.io/acme/xrepo:1"),
+                (Skill, "xrepo", "ghcr.io/acme/xrepo:v1"),
             ],
         ),
         (
             Skill,
-            "ghcr.io/acme/lib:1",
-            &[(Rule, "policy", "ghcr.io/acme/policy:1")],
+            "ghcr.io/acme/lib:v1",
+            &[(Rule, "policy", "ghcr.io/acme/policy:v1")],
         ),
-        (Rule, "ghcr.io/acme/policy:1", &[]),
-        (Skill, "ghcr.io/acme/shared:1", &[]),
-        (Skill, "ghcr.io/acme/over:1", &[]),
-        (Skill, "ghcr.io/acme/over:2", &[]),
+        (Rule, "ghcr.io/acme/policy:v1", &[]),
+        (Skill, "ghcr.io/acme/shared:v1", &[]),
+        (Skill, "ghcr.io/acme/over:v1", &[]),
+        (Skill, "ghcr.io/acme/over:v2", &[]),
         (
             Skill,
-            "ghcr.io/acme/m1:1",
+            "ghcr.io/acme/m1:v1",
             &[
-                (Skill, "shared", "ghcr.io/acme/shared:1"),
-                (Skill, "tagged", "ghcr.io/acme/tagged:1"),
+                (Skill, "shared", "ghcr.io/acme/shared:v1"),
+                (Skill, "tagged", "ghcr.io/acme/tagged:v1"),
             ],
         ),
-        (Skill, "ghcr.io/acme/deep:1", &[]),
-        (Skill, "ghcr.io/acme/tagged:1", &[]),
-        (Skill, "ghcr.io/acme/xrepo:1", &[]),
-        (Skill, "ghcr.io/other/xrepo:1", &[]),
+        (Skill, "ghcr.io/acme/deep:v1", &[]),
+        (Skill, "ghcr.io/acme/tagged:v1", &[]),
+        (Skill, "ghcr.io/acme/xrepo:v1", &[]),
+        (Skill, "ghcr.io/other/xrepo:v1", &[]),
         (
             Bundle,
-            "ghcr.io/acme/inner:1",
+            "ghcr.io/acme/inner:v1",
             &[
-                (Skill, "deep", "ghcr.io/acme/deep:1"),
-                (Skill, "shared", "ghcr.io/acme/shared:1"),
+                (Skill, "deep", "ghcr.io/acme/deep:v1"),
+                (Skill, "shared", "ghcr.io/acme/shared:v1"),
             ],
         ),
         (
             Bundle,
-            "ghcr.io/acme/pack:1",
+            "ghcr.io/acme/pack:v1",
             &[
-                (Skill, "m1", "ghcr.io/acme/m1:1"),
-                (Bundle, "inner", "ghcr.io/acme/inner:1"),
+                (Skill, "m1", "ghcr.io/acme/m1:v1"),
+                (Bundle, "inner", "ghcr.io/acme/inner:v1"),
             ],
         ),
     ];
     for (kind, id, edges) in all {
         publish(&reg, kind, id, edges).await;
     }
-    // `tagged:2` is a second tag on the digest `tagged:1` serves.
-    let tagged = Identifier::parse("ghcr.io/acme/tagged:1").unwrap();
+    // `tagged:v2` is a second tag on the digest `tagged:v1` serves.
+    let tagged = Identifier::parse("ghcr.io/acme/tagged:v1").unwrap();
     let digest = reg.resolve_digest(&tagged, Operation::Resolve).await.unwrap().unwrap();
-    let alias = Identifier::parse("ghcr.io/acme/tagged:2").unwrap();
-    reg.put_tag(&alias, "2", &digest).await.unwrap();
+    let alias = Identifier::parse("ghcr.io/acme/tagged:v2").unwrap();
+    reg.put_tag(&alias, "v2", &digest).await.unwrap();
     let skills = BTreeMap::from([
-        ("top".to_string(), registry("ghcr.io/acme/top:1")),
-        // Overrides the edge `top` -> `over` (which asks for `:1`).
-        ("over".to_string(), registry("ghcr.io/acme/over:2")),
+        ("top".to_string(), registry("ghcr.io/acme/top:v1")),
+        // Overrides the edge `top` -> `over` (which asks for `:v1`).
+        ("over".to_string(), registry("ghcr.io/acme/over:v2")),
         // Overrides the edge `top` -> `xrepo` from a different publisher.
-        ("xrepo".to_string(), registry("ghcr.io/other/xrepo:1")),
+        ("xrepo".to_string(), registry("ghcr.io/other/xrepo:v1")),
     ]);
-    let bundles = BTreeMap::from([("pack".to_string(), registry("ghcr.io/acme/pack:1"))]);
+    let bundles = BTreeMap::from([("pack".to_string(), registry("ghcr.io/acme/pack:v1"))]);
     let set = DesiredSet::from_parts_with_bundles(skills, BTreeMap::new(), bundles);
     (reg, set)
 }
@@ -177,6 +204,7 @@ fn opts() -> ResolveOptions {
         per_artifact_timeout: std::time::Duration::from_secs(30),
         max_retries: 0,
         base_backoff: std::time::Duration::from_millis(1),
+        downgrade: Downgrade::Refuse,
     }
 }
 
@@ -278,18 +306,29 @@ async fn online_offline_agree() {
 #[tokio::test]
 async fn path_direct_wins_online_and_offline() {
     let reg = MemoryRegistry::new();
-    for (kind, id, edges) in [
-        (Skill, "ghcr.io/acme/shared:1", &[][..]),
-        (Bundle, "ghcr.io/acme/pk:1", &[]),
+    for (kind, repo, version, edges) in [
+        (Skill, "ghcr.io/acme/shared", "1.0.0", &[][..]),
+        (Bundle, "ghcr.io/acme/pk", "1.0.0", &[]),
         (
             Bundle,
-            "ghcr.io/acme/pk:2",
+            "ghcr.io/acme/pk",
+            "2.0.0",
             &[(Skill, "shared", "ghcr.io/acme/shared:1")],
         ),
-        (Skill, "ghcr.io/acme/h1:1", &[(Bundle, "pk", "ghcr.io/acme/pk:1")]),
-        (Skill, "ghcr.io/acme/h2:1", &[(Bundle, "pk", "ghcr.io/acme/pk:2")]),
+        (
+            Skill,
+            "ghcr.io/acme/h1",
+            "1.0.0",
+            &[(Bundle, "pk", "ghcr.io/acme/pk:1")],
+        ),
+        (
+            Skill,
+            "ghcr.io/acme/h2",
+            "1.0.0",
+            &[(Bundle, "pk", "ghcr.io/acme/pk:2")],
+        ),
     ] {
-        publish(&reg, kind, id, edges).await;
+        release(&reg, kind, repo, version, edges).await;
     }
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("bundles")).unwrap();
@@ -377,24 +416,25 @@ fn pin_of<'a>(lock: &'a GrimoireLock, name: &str) -> &'a crate::oci::PinnedIdent
 #[tokio::test]
 async fn a_relock_after_a_crash_in_remove_resolves_the_surviving_edge() {
     let reg = MemoryRegistry::new();
-    publish(&reg, Skill, "ghcr.io/acme/x:1", &[]).await;
+    publish(&reg, Skill, "ghcr.io/acme/x:v1", &[]).await;
     let x = reg
-        .resolve_digest(&id("ghcr.io/acme/x:1"), Operation::Resolve)
+        .resolve_digest(&id("ghcr.io/acme/x:v1"), Operation::Resolve)
         .await
         .unwrap()
         .unwrap();
-    reg.put_tag(&id("ghcr.io/acme/x:2"), "2", &x).await.unwrap();
-    publish(&reg, Skill, "ghcr.io/acme/p:1", &[(Skill, "x", "ghcr.io/acme/x:1")]).await;
-    publish(&reg, Skill, "ghcr.io/acme/q:1", &[(Skill, "x", "ghcr.io/acme/x:2")]).await;
+    reg.put_tag(&id("ghcr.io/acme/x:v2"), "v2", &x).await.unwrap();
+    publish(&reg, Skill, "ghcr.io/acme/p:1", &[(Skill, "x", "ghcr.io/acme/x:v1")]).await;
+    publish(&reg, Skill, "ghcr.io/acme/q:1", &[(Skill, "x", "ghcr.io/acme/x:v2")]).await;
     let both = skills(&["p", "q"]);
     let access: Arc<dyn OciAccess> = Arc::new(reg.clone());
     let lock = resolve_lock(&both, &access, ConfigScope::Project, &opts(), std::path::Path::new("."))
         .await
         .expect("lock");
-    assert_eq!(pin_of(&lock, "x").tag(), Some("1"), "`p` holds the winning tag");
-    publish(&reg, Skill, "ghcr.io/acme/x:2", &[]).await;
+    // Two numeric tags on one node are two majors (78), so the edges name literal tags.
+    assert_eq!(pin_of(&lock, "x").tag(), Some("v1"), "`p` holds the winning tag");
+    publish(&reg, Skill, "ghcr.io/acme/x:v2", &[]).await;
     let moved = reg
-        .resolve_digest(&id("ghcr.io/acme/x:2"), Operation::Resolve)
+        .resolve_digest(&id("ghcr.io/acme/x:v2"), Operation::Resolve)
         .await
         .unwrap()
         .unwrap();

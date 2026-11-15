@@ -119,7 +119,9 @@ def current(grim_at, work: Path, registry: str) -> GrimRunner:
     return grim_at(work)
 
 
-@pytest.mark.parametrize("other", ["0", "2"])
+# Literal tags: a numeric `x` edge is a version range, which no recorded edge can
+# answer, so it would refuse even if the unwalked edge were read as walked.
+@pytest.mark.parametrize("other", ["v0", "v2"])
 def test_grim_lock_refuses_a_conflict_the_old_lock_never_walked(
     old: GrimRunner, current: GrimRunner, work: Path, unique_repo: str, other: str
 ) -> None:
@@ -265,16 +267,16 @@ def test_an_add_at_the_lists_tag_keeps_the_pin_grim_lock_keeps(
 ) -> None:
     """`grim add held:1` keeps the pin `grim lock` keeps once `held:1` moved.
 
-    `pack:1` lists `held:1`, and `x:1` requires `held:2`, an edge 0.15.1 never
+    `pack:1` lists `held:1`, and `x:1` requires `held:v2`, an edge 0.15.1 never
     read, at the digest `held:1` named when 0.15.1 locked. `grim lock` resolves
     that edge onto the pin and keeps it. The add resolved only its line and moved
     the pin to the tag's new digest. With `held:1` gone the add still refuses with
-    79, and with `held:2` gone it follows the line, as 0.15.1's add does.
+    79, and with `held:v2` gone it follows the line, as 0.15.1's add does.
     """
     repo = f"{unique_repo}/held"
     held = _skill(unique_repo, "held", "v1")
-    retag(repo, "2", held.digest)
-    asked = f"{REGISTRY_HOST}/{repo}:2"
+    retag(repo, "v2", held.digest)
+    asked = f"{REGISTRY_HOST}/{repo}:v2"
     pack = make_bundle(f"{unique_repo}/pack", [("skill", "held", held.fq)], tag="1")
     x = _dependent(unique_repo, "x", [("skill", "held", asked)])
     write_config(work, skills={"x": x.fq}, bundles={"pack": pack.fq})
@@ -284,7 +286,7 @@ def test_an_add_at_the_lists_tag_keeps_the_pin_grim_lock_keeps(
     if case == "listed-tag-gone":
         _delete_tag(repo, "1")
     if case == "asked-tag-gone":
-        _delete_tag(repo, "2")
+        _delete_tag(repo, "v2")
     first = tmp_path / "lock-first"
     shutil.copytree(work, first)
     old_dir = tmp_path / "old-add"
@@ -352,7 +354,7 @@ def test_an_add_keeps_the_pin_where_only_its_moved_manifest_refuses(
 ) -> None:
     """`grim add held:1` keeps the pin `grim lock` keeps, whatever the moved manifest asks.
 
-    `pack:1` lists `held:1` and `x:1` requires `held:2`, at the digest 0.15.1
+    `pack:1` lists `held:1` and `x:1` requires `held:v2`, at the digest 0.15.1
     locked. Then `held:1` moves to a manifest that asks `w:1`, which asks `held:7`
     (a cycle back at another digest), or that asks a tag which is gone, directly or
     under `w`. `grim lock` never reads that manifest and keeps the pin, before the
@@ -362,14 +364,14 @@ def test_an_add_keeps_the_pin_where_only_its_moved_manifest_refuses(
     """
     repo = f"{unique_repo}/held"
     held = _skill(unique_repo, "held", "v1")
-    retag(repo, "2", held.digest)
+    retag(repo, "v2", held.digest)
     pack = make_bundle(f"{unique_repo}/pack", [("skill", "held", held.fq)], tag="1")
-    x = _dependent(unique_repo, "x", [("skill", "held", f"{REGISTRY_HOST}/{repo}:2")])
+    x = _dependent(unique_repo, "x", [("skill", "held", f"{REGISTRY_HOST}/{repo}:v2")])
     write_config(work, skills={"x": x.fq}, bundles={"pack": pack.fq})
     assert old.run("lock").returncode == 0
     retag(repo, "keep", held.digest)
-    gone = _skill(unique_repo, "gone", "g")
-    _delete_tag(f"{unique_repo}/gone", "1")
+    gone = _skill(unique_repo, "gone", "g", tag="v1")
+    _delete_tag(f"{unique_repo}/gone", "v1")
     if case == "cycle-at-another-digest":
         _skill(unique_repo, "held", "v7", tag="7")
         w = _dependent(unique_repo, "w", [("skill", "held", f"{REGISTRY_HOST}/{repo}:7")])
@@ -433,9 +435,9 @@ def test_an_add_keeps_its_exit_where_the_moved_manifest_reaches_an_unreachable_r
     """
     repo = f"{unique_repo}/held"
     held = _skill(unique_repo, "held", "v1")
-    retag(repo, "2", held.digest)
+    retag(repo, "v2", held.digest)
     pack = make_bundle(f"{unique_repo}/pack", [("skill", "held", held.fq)], tag="1")
-    x = _dependent(unique_repo, "x", [("skill", "held", f"{REGISTRY_HOST}/{repo}:2")])
+    x = _dependent(unique_repo, "x", [("skill", "held", f"{REGISTRY_HOST}/{repo}:v2")])
     write_config(work, skills={"x": x.fq}, bundles={"pack": pack.fq})
     assert old.run("lock").returncode == 0
     retag(repo, "keep", held.digest)

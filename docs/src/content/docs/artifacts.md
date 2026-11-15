@@ -574,7 +574,10 @@ declared under when the bundle is added) to a fully-qualified reference —
 `registry/repo:tag` or `registry/repo@sha256:…` — or a
 [deployment-relative reference](#bundle-relative-refs). Floating tags
 re-resolve on `grim update`; digest pins never move
-([floating versus pinned members](./concepts.md#bundle-pinning)).
+([floating versus pinned members](./concepts.md#bundle-pinning)). A member
+tag stays literal: it names the manifest the tag points at, and it never
+claims a version range
+([what the tag claims](#what-the-tag-claims)).
 
 Limits enforced at parse time: at most 512 members per bundle, and the
 members document is capped at 512 KiB.
@@ -687,6 +690,41 @@ that resolves against the repository the declaring artifact was pulled from.
 Prefer the relative form for artifacts published side by side, because it
 survives a mirror.
 
+### What the tag claims {#what-the-tag-claims}
+
+The tag of a `requires` reference is a claim about which versions the
+artifact accepts. Resolution reads the claims of every artifact that requires
+the same registry and repository and picks the highest version that satisfies
+all of them. See [Dependencies](./concepts.md#dependencies) for how the pick
+is made.
+
+Only a `requires` reference claims a range. A direct declaration in
+`grimoire.toml` is not a claim. A bundle member never is one either. The
+`[skills]`, `[rules]` and other member tags keep their literal meaning, the
+manifest the tag names. Before matching, grim turns `_` into `+` and drops build metadata.
+
+| Reference | Claim |
+|-----------|-------|
+| No tag, or `latest` | Any version |
+| `2`, `2.1`, `2.1.3` | `>=2.0.0 <3.0.0`, `>=2.1.0 <3.0.0`, `>=2.1.3 <3.0.0` (caret, as in Cargo) |
+| `0`, `0.2`, `0.2.5` | `>=0.0.0 <1.0.0`, `>=0.2.0 <0.3.0`, `>=0.2.5 <0.3.0` |
+| `0.0`, `0.0.3` | `>=0.0.0 <0.1.0`, exactly `0.0.3` |
+| `2.1.0-rc.1` | A range that admits prereleases of `2.1.0` only |
+| `2.x`, `x`, `v2`, `stable`, `02`, `2.1.0.1` | Literal tag: the manifest that tag names. A version tag whose caret upper bound cannot be written is literal too: the part the caret raises is 18446744073709551615 |
+| `@sha256:…` digest | That exact manifest |
+
+A literal tag and a digest keep the literal rule: two references agree when
+they name the same manifest digest. Beside one of them, a range claim agrees
+when that manifest's version satisfies it, and needs no tag of its own. A
+claim with no tag, or `latest`, adds no constraint there.
+
+Range claims on one artifact agree when some version satisfies all of them, and
+the artifact settles on the highest one. The claims match together. A prerelease such as `2.1.0-rc.2` satisfies
+them only when one claim names a prerelease of `2.1.0`. So `x:2` beside
+`x:2.1.0-rc.1` settles on the highest such prerelease, or on a later release
+once one exists. Two claims in different majors never agree, because `x:1` and `x:2`
+admit no common release.
+
 Where the declaration lives depends on the kind:
 
 | Kind | Declaration |
@@ -729,7 +767,9 @@ descriptor is packed, so it never changes the descriptor's bytes.
 the same `(kind, name)` declared twice, or an artifact that requires itself. [`grim release`](./commands.md#release) additionally checks that each
 relative reference stays under the registry root of the release target. Without
 `--pin` neither looks the dependency up in a registry, so a dependency may be
-published after the artifact that needs it.
+published after the artifact that needs it. Neither checks a
+[claim](#what-the-tag-claims) against a release: whether some release
+satisfies the tag is decided at resolve time, never at build time or offline.
 
 Declared dependencies are stored sorted by kind, in the order skill, rule,
 agent, bundle, mcp, hook, settings, and then by name. That order is part of the

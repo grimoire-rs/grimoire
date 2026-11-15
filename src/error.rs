@@ -211,6 +211,10 @@ pub enum ErrorReason {
     /// not know (`ArtifactFeatureError`). Updating grim, not `--force`, is
     /// the remedy.
     UnsupportedArtifactFeature,
+    /// A resolve refused to move a pin to a lower major version that
+    /// `requires` range claims ask for. `--allow-downgrade`, not `--force`,
+    /// takes the move.
+    MajorDowngrade,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -225,6 +229,7 @@ impl std::fmt::Display for ErrorReason {
             Self::UnsupportedLayerMediaType => "unsupported-layer-media-type",
             Self::NoLock => "no-lock",
             Self::UnsupportedArtifactFeature => "unsupported-artifact-feature",
+            Self::MajorDowngrade => "major-downgrade",
         })
     }
 }
@@ -579,7 +584,7 @@ fn unsupported_feature() -> Classification {
 }
 
 /// Map a resolution-tier error to a classification. The arms carrying a
-/// reason subtype (`StaleLock`, `UnsupportedFeature`) assign it right here,
+/// reason subtype (`StaleLock`, `UnsupportedFeature`, `MajorDowngrade`) assign it right here,
 /// in the same match arm that decides the exit code, so the two can never
 /// drift apart.
 fn classify_resolve(err: &ResolveError) -> Classification {
@@ -589,7 +594,8 @@ fn classify_resolve(err: &ResolveError) -> Classification {
         | ResolveErrorKind::NotDeclared
         | ResolveErrorKind::BundleNotFound
         | ResolveErrorKind::PinnedManifestGone { .. }
-        | ResolveErrorKind::MarketplacePinGone { .. } => Classification::new(ExitCode::NotFound),
+        | ResolveErrorKind::MarketplacePinGone { .. }
+        | ResolveErrorKind::NoMatchingVersion { .. } => Classification::new(ExitCode::NotFound),
         ResolveErrorKind::AuthFailure(_) => Classification::new(ExitCode::AuthError),
         ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => {
             Classification::new(ExitCode::Unavailable)
@@ -608,7 +614,12 @@ fn classify_resolve(err: &ResolveError) -> Classification {
         // declaration (two bundles disagree), not malformed external data.
         ResolveErrorKind::BundleConflict { .. }
         | ResolveErrorKind::PluginConflict { .. }
-        | ResolveErrorKind::HeldRequirement { .. } => Classification::new(ExitCode::ConfigError),
+        | ResolveErrorKind::HeldRequirement { .. }
+        | ResolveErrorKind::UnchosenRequirement { .. } => Classification::new(ExitCode::ConfigError),
+        ResolveErrorKind::MajorDowngrade { .. } => Classification {
+            exit: ExitCode::ConfigError,
+            reason: Some(ErrorReason::MajorDowngrade),
+        },
     }
 }
 
@@ -1049,6 +1060,7 @@ mod tests {
             "unsupported-layer-media-type"
         );
         assert_eq!(ErrorReason::NoLock.to_string(), "no-lock");
+        assert_eq!(ErrorReason::MajorDowngrade.to_string(), "major-downgrade");
     }
 
     #[test]
@@ -1068,6 +1080,7 @@ mod tests {
         assert!(!ErrorReason::AnchorEscape.retryable());
         assert!(!ErrorReason::UnsupportedLayerMediaType.retryable());
         assert!(!ErrorReason::NoLock.retryable());
+        assert!(!ErrorReason::MajorDowngrade.retryable());
     }
 
     /// A1: `forceable` is keyed on the reason, and this variant-by-variant
@@ -1089,6 +1102,8 @@ mod tests {
         assert!(!ErrorReason::AnchorEscape.forceable());
         assert!(!ErrorReason::UnsupportedLayerMediaType.forceable());
         assert!(!ErrorReason::NoLock.forceable());
+        // `--allow-downgrade` takes the move; `--force` never does.
+        assert!(!ErrorReason::MajorDowngrade.forceable());
     }
 
     /// A2: an escaped anchor classifies as bad on-disk state data (65) AND
@@ -1779,7 +1794,7 @@ mod tests {
 
     /// Every `ErrorReason` slug at 520c6540, then each slug added since,
     /// appended in order.
-    const FROZEN_REASON_SLUGS: [&str; 9] = [
+    const FROZEN_REASON_SLUGS: [&str; 10] = [
         "stale-lock",
         "modified",
         "untracked-destination",
@@ -1789,6 +1804,7 @@ mod tests {
         "unsupported-layer-media-type",
         "no-lock",
         "unsupported-artifact-feature",
+        "major-downgrade",
     ];
 
     #[test]
@@ -1873,6 +1889,7 @@ mod tests {
                 ErrorReason::UnsupportedLayerMediaType => 6,
                 ErrorReason::NoLock => 7,
                 ErrorReason::UnsupportedArtifactFeature => 8,
+                ErrorReason::MajorDowngrade => 9,
             }
         }
         let every = [
@@ -1885,6 +1902,7 @@ mod tests {
             ErrorReason::UnsupportedLayerMediaType,
             ErrorReason::NoLock,
             ErrorReason::UnsupportedArtifactFeature,
+            ErrorReason::MajorDowngrade,
         ];
         for (i, r) in every.iter().enumerate() {
             assert_eq!(position(*r), i);
@@ -1938,6 +1956,66 @@ mod tests {
             pointer: "/claude/model".to_string(),
         })));
         assert_eq!((other.exit, other.reason), (ExitCode::DataError, None));
+    }
+
+    /// A claim no release answers is a missing release (79), a refusal the user
+    /// settles in `grimoire.toml` is a config error (78; only the downgrade
+    /// carries a reason, since only it has a flag), and both new budgets are
+    /// limits of the data (65).
+    #[test]
+    fn version_claim_refusals_classify_78_79_and_65() {
+        use crate::oci::ArtifactKind;
+        use crate::resolve::resolve_error::{GraphLimit, Unchosen};
+
+        let no_release = ResolveErrorKind::NoMatchingVersion {
+            repository: "ghcr.io/acme/x".to_string(),
+            claims: "^2.9".to_string(),
+            newest: Some("2.4.0".to_string()),
+        };
+        let unchosen = ResolveErrorKind::UnchosenRequirement {
+            parent: "skill 'q'".to_string(),
+            dropped: "1.6.0".to_string(),
+            claim: "1.5".to_string(),
+            shape: Unchosen::Conflict {
+                claims: "^1.5, ^2".to_string(),
+            },
+            declare: "ghcr.io/acme/r:2".to_string(),
+            fix: String::new(),
+        };
+        let downgrade = ResolveErrorKind::MajorDowngrade {
+            from: "3.1.0".to_string(),
+            to: "2.6.0".to_string(),
+            requesters: "skill/a".to_string(),
+            claim: "2".to_string(),
+            declare: "ghcr.io/acme/x:3.1.0".to_string(),
+            fix: String::new(),
+        };
+        let cases = [
+            (no_release, ExitCode::NotFound, None),
+            (unchosen, ExitCode::ConfigError, None),
+            (downgrade, ExitCode::ConfigError, Some(ErrorReason::MajorDowngrade)),
+            (
+                ResolveErrorKind::GraphTooLarge {
+                    limit: GraphLimit::Work { passes: 16 },
+                    via: "skill/a (ghcr.io/acme/a)".to_string(),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+            (
+                ResolveErrorKind::GraphTooLarge {
+                    limit: GraphLimit::ListingBytes,
+                    via: "skill/x (ghcr.io/acme/x)".to_string(),
+                },
+                ExitCode::DataError,
+                None,
+            ),
+        ];
+        for (kind, exit, reason) in cases {
+            let err = ResolveError::unidentified(ArtifactKind::Skill, "x", kind);
+            let c = classify(&anyhow::Error::from(Error::from(err)));
+            assert_eq!((c.exit, c.reason), (exit, reason));
+        }
     }
 
     #[test]

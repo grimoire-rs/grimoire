@@ -25,13 +25,13 @@ no stderr parsing needed:
 | 0 | Success | — |
 | 1 | Failure | unclassified fall-through |
 | 64 | Usage error | bad invocation; `grim init` when the config already exists; invalid `grim fetch` flag combinations; a release/publish tag colliding with the reserved `__grimoire` namespace; a dotted config key naming a client that does not exist (`options.vendors.<typo>.shared_skills` is an *unknown key*, not a bad value) |
-| 65 | Data error | validation failures of any kind — see below |
+| 65 | Data error | validation failures of any kind — see below; a dependency graph over the resolve's work or tag-listing budget |
 | 69 | Unavailable | registry unreachable, resolve timeout; an offline `grim lock`, `add --kind <kind>` or `update` whose resolve needs a tag or manifest the cache lacks (offline, `add` without `--kind` exits 65 and `update --marketplace` exits 81) |
 | 74 | I/O error | filesystem read/write failure (non-permission) |
 | 75 | Temporary failure | another grim process holds the lock; Cline's own lock on its MCP settings file; a settings file changed during the run, left untouched; credential-helper timeout — retry |
 | 77 | No permission | permission denied anywhere in the chain |
-| 78 | Config error | malformed `grimoire.toml`/lock, no registry for `grim login`/`logout`, bundle conflict, a settings conflict across packages (never forceable), `grim build` of a settings document without `--kind settings`, unsupported client, credential helper missing; **no client can host what you are installing** (see below); a hand-authored `options.vendors.<name>.shared_skills = true` on a client that does not read the shared pool |
-| 79 | Not found | tag/manifest/blob 404, no config discovered, lock missing; a kept pin whose manifest the registry dropped (run the `grim update -- <name>` the message names); a missing description companion on `grim fetch --description` |
+| 78 | Config error | malformed `grimoire.toml`/lock, no registry for `grim login`/`logout`, bundle conflict, a dependency version-claim conflict (two majors of one artifact), a major downgrade a claim would force (`--allow-downgrade`), a claim from a version the resolve dropped, a recorded claim the pin no longer answers, a settings conflict across packages (never forceable), `grim build` of a settings document without `--kind settings`, unsupported client, credential helper missing; **no client can host what you are installing** (see below); a hand-authored `options.vendors.<name>.shared_skills = true` on a client that does not read the shared pool |
+| 79 | Not found | tag/manifest/blob 404, no release satisfies a dependency's version claim, no config discovered, lock missing; a kept pin whose manifest the registry dropped (run the `grim update -- <name>` the message names); a missing description companion on `grim fetch --description` |
 | 80 | Auth error | registry authentication failed |
 | 81 | Offline blocked | `--offline`/`GRIM_OFFLINE` blocked a network operation (deliberate policy, distinct from 69) — includes `fetch`/`describe` against an uncached reference, which is 81, not 79 |
 
@@ -51,6 +51,9 @@ after grim wrote it; retry with `--force`),
 `untracked-destination` (exit 65 — an install refused to clobber an
 unrecorded pre-existing destination, or a settings value grim never wrote;
 retry with `--force`),
+`major-downgrade` (exit 78 — a dependency's range claim would move a pin to a
+lower major; not forceable, not retryable; rerun `grim add`, `grim lock` or
+`grim update` with `--allow-downgrade`, or declare the artifact with a tag),
 `unsupported-layer-media-type` (exit 65 — a skill, rule, agent or hook layer
 has a `+zstd` media type this grim cannot decode; not forceable, not
 retryable, upgrade grim),
@@ -214,7 +217,11 @@ A warning that `skill/x is requested by skill/p as <ref>, but your declaration
 holds it at <pin>` is not an error: the declaration's pin won and the exit is
 0. Run `grim update -- x` to re-read the declared tag, or declare the
 requested reference. A declaration pinned by digest gets only the second
-remedy. `grim status --check` lists the requests still held back, a declared
+remedy. A declaration with no tag is not held back: it yields to the range
+claims on its own repository and stderr names them; declare a tag to choose
+one. A pin a claim would move to a lower major refuses with exit 78 and
+`major-downgrade`: declare the artifact with a tag, or rerun with
+`--allow-downgrade`. `grim status --check` lists the requests still held back, a declared
 bundle's included.
 
 ## When grim Declines, It Stays Declined
@@ -500,7 +507,8 @@ Symptom, cause, fix for `grim export marketplace` and the manifests it reads
   writes nothing:** the pick would keep a dependent at its pin beside another
   version of a row or bundle it requires. Add the dependent to the pick, or
   run the whole plugin; the text says that the whole-plugin update moves
-  every pin of the plugin whose tag moved.
+  every pin of the plugin whose tag moved, and offers `--allow-downgrade` where
+  that update refuses a major downgrade.
 - **75:** another export holds the manifest lock or the output-root
   `.grim-export.lock`.
 - **CI, required `verify` check stays pending on the bot PR:** the PR was

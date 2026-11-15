@@ -37,6 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
+use semver::VersionReq;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -70,15 +71,19 @@ use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::lock::locked_source::LockedSource;
+use crate::lock::merge_policy;
 use crate::lock::pin_rule::recorded_reference;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::AccessError;
 use crate::oci::identifier::is_valid_oci_tag;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::text::{escape_controls, registry_text};
-use crate::resolve::graph::GraphWarning;
+use crate::oci::version_claim::{Claim as VersionClaim, Line, claim_of};
+use crate::oci::version_evidence::{Evidence, annotated_version, evidence, satisfies};
+use crate::resolve::graph::{GraphWarning, edge_origin};
 use crate::resolve::resolve_error::MAX_TRANSITIVE_NODES;
 use crate::resolve::resolve_options::DEFAULT_PER_ARTIFACT_TIMEOUT;
+use crate::resolve::resolver::{HeldRequest, held_request};
 
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 
@@ -99,10 +104,9 @@ const UPDATE_CHECK_CONCURRENCY: usize = 8;
 /// times bundles at worst, so past this every row reads `null`.
 const NESTED_LISTING_BUDGET: usize = 1 << 20;
 
-/// Wall time one `--check` sweep may spend re-resolving. A full sweep of 2048
-/// references, 8 at a time, leaves about 1.2 s for each, several registry round
-/// trips, so a healthy registry finishes well inside it and a stalling one costs
-/// this, not hours.
+/// Wall time one `--check` run may spend on registries. Its re-resolves and the
+/// manifest reads that judge them all go 8 at a time, at most 2048 a sweep, and
+/// all stop here, so a stalling registry costs this, not hours.
 const CHECK_RUN_DEADLINE: Duration = Duration::from_secs(300);
 
 /// One reference scheduled for a fresh update-availability re-resolution:
@@ -829,6 +833,13 @@ async fn check_updates(
         })
     });
     let nested_checks: Vec<UpdateCheck> = nested_checks.collect();
+    let claims = lock.map_or_else(BTreeMap::new, recorded_claims);
+    let Targeted {
+        rows,
+        lines,
+        floats,
+        mut split,
+    } = at_target_tags(rows, &claims, entries, &scope.grim);
 
     let mut scheduled: BTreeMap<usize, usize> = BTreeMap::new();
     for check in &rows {
@@ -837,18 +848,11 @@ async fn check_updates(
     let mut room = limits.checks;
     let mut skipped = 0;
     let rows = within_cap(rows, &mut room, &mut skipped);
-    let nested_checks = within_cap(nested_checks, &mut room, &mut skipped);
-    if skipped > 0 {
-        tracing::warn!(
-            "`--check` re-resolves at most {} references a run; {skipped} more are not checked",
-            limits.checks
-        );
-    }
 
     let deadline = limits.deadline();
     let Swept {
         answers: row_answers,
-        late: late_rows,
+        late: mut late_rows,
     } = fresh_digests(access, rows, limits.per_call, deadline).await;
     let mut by_row: BTreeMap<usize, Vec<ReferenceAnswer>> = BTreeMap::new();
     for (check, fresh) in row_answers {
@@ -857,13 +861,37 @@ async fn check_updates(
             .or_default()
             .push((check, fresh.and_then(Result::ok)));
     }
-    let mut split = Vec::new();
+    let mut releases = Vec::new();
     for (index, mut answers) in by_row {
         answers.sort_by(|(a, _), (b, _)| a.declared.cmp(&b.declared));
         match row_answer(&answers, scheduled[&index]) {
+            RowAnswer::Read(Some(true)) => match moved_release(&answers, lines.get(&index)) {
+                Some((release, line)) => releases.push((index, release, line)),
+                None => entries[index].update_available = Some(true),
+            },
+            // `grim update` passes a gone float over for the tag listing, which
+            // this sweep does not read.
+            RowAnswer::Read(Some(false))
+                if floats.contains(&index) && answers.iter().any(|(_, fresh)| *fresh == Some(None)) =>
+            {
+                entries[index].update_available = None;
+            }
             RowAnswer::Read(avail) => entries[index].update_available = avail,
-            RowAnswer::Split => split.push(split_note(&entries[index], &answers, &scope.grim)),
+            RowAnswer::Split => {
+                let references = answers.iter().map(|(check, _)| &check.declared);
+                split.insert(index, split_note(&entries[index], references, &scope.grim));
+            }
         }
+    }
+    // A release past the cap is not read, and its row stays `null`.
+    let releases = take_room(releases, &mut room, &mut skipped);
+    judge_releases(access, releases, limits, entries, &mut late_rows).await;
+    let nested_checks = within_cap(nested_checks, &mut room, &mut skipped);
+    if skipped > 0 {
+        tracing::warn!(
+            "`--check` re-resolves at most {} references a run; {skipped} more are not checked",
+            limits.checks
+        );
     }
     let (answers, late_nested) = resolve_update_availability(access, nested_checks, limits.per_call, deadline).await;
     if !late_rows.is_empty() || !late_nested.is_empty() {
@@ -871,7 +899,7 @@ async fn check_updates(
     }
     let advice = NoteAdvice::of(scope, lock);
     let mut notes = update_notes(entries, &advice);
-    notes.extend(split);
+    notes.extend(split.into_values());
     notes.extend(apply_nested_answers(
         &nested,
         &answers.into_iter().collect(),
@@ -965,6 +993,212 @@ fn row_references(lock: &GrimoireLock, key: &NodeKey, declared: Identifier) -> V
     }
 }
 
+/// Every reference the lock records onto each key, with what it claims. A key
+/// one of whose edges has no readable reference maps to `None`.
+fn recorded_claims(lock: &GrimoireLock) -> BTreeMap<NodeKey, Option<Vec<(Identifier, VersionClaim)>>> {
+    let artifacts = lock
+        .iter_artifacts()
+        .map(|a| ((a.kind, a.name.clone()), a.source.pinned(), &a.requires));
+    let bundles = lock
+        .bundles
+        .iter()
+        .map(|b| ((ArtifactKind::Bundle, b.name.clone()), b.pinned(), &b.members));
+    let mut claims: BTreeMap<NodeKey, Option<Vec<(Identifier, VersionClaim)>>> = BTreeMap::new();
+    for (parent, pin, members) in artifacts.chain(bundles) {
+        let origin = edge_origin(&parent);
+        for member in members {
+            let id = member.absolute_id(pin.map(PinnedIdentifier::as_identifier));
+            let slot = claims
+                .entry((member.kind, member.name.clone()))
+                .or_insert_with(|| Some(Vec::new()));
+            match (slot.as_mut(), id) {
+                (Some(edges), Some(id)) => {
+                    let claim = claim_of(&id, origin);
+                    edges.push((id, claim));
+                }
+                _ => *slot = None,
+            }
+        }
+    }
+    claims
+}
+
+/// How a row's recorded claims settle it, as the resolver reads them.
+enum RowLine {
+    /// The row's references answer for it as they are.
+    Plain,
+    /// One re-resolve of the line's target tag in this repository answers.
+    Target(Identifier, Line),
+    /// Literal and digest references fix the manifest and the line judges it,
+    /// so the `judging` references, ranges and bare ones, are not compared.
+    Fixed { judging: BTreeSet<Identifier>, line: Line },
+}
+
+/// The [`RowLine`] of a row, `direct` holding its declaration when it has one.
+/// A bare declaration takes the line of its own repository's range claims
+/// alone ([`merge_policy::yields_to`]); a dependency takes a line only while
+/// every claim names one repository.
+fn row_line(direct: Option<&Identifier>, edges: Option<&[(Identifier, VersionClaim)]>) -> RowLine {
+    let Some(edges) = edges else {
+        return RowLine::Plain;
+    };
+    let ranges = |keep: &dyn Fn(&Identifier, &VersionClaim) -> bool| {
+        Line::of(edges.iter().filter_map(|(id, claim)| match claim {
+            VersionClaim::Range(req) if keep(id, claim) => Some(req.clone()),
+            _ => None,
+        }))
+    };
+    if let Some(declared) = direct {
+        let line = ranges(&|id, claim| merge_policy::yields_to(declared, id, claim));
+        return if line.is_any() {
+            RowLine::Plain
+        } else {
+            RowLine::Target(declared.clone(), line)
+        };
+    }
+    let Some((first, _)) = edges.first() else {
+        return RowLine::Plain;
+    };
+    if edges
+        .iter()
+        .any(|(id, _)| id.registry_repository() != first.registry_repository())
+    {
+        return RowLine::Plain;
+    }
+    let line = ranges(&|_, _| true);
+    let fixes = |claim: &VersionClaim| matches!(claim, VersionClaim::Literal | VersionClaim::Digest);
+    let fixing: BTreeSet<&Identifier> = edges.iter().filter(|(_, c)| fixes(c)).map(|(id, _)| id).collect();
+    if !fixing.is_empty() {
+        let judging = edges
+            .iter()
+            .filter(|(id, claim)| !fixes(claim) && !fixing.contains(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        return RowLine::Fixed { judging, line };
+    }
+    match edges.iter().map(|(id, _)| id).min() {
+        Some(least) if !line.is_any() => RowLine::Target(least.clone(), line),
+        _ => RowLine::Plain,
+    }
+}
+
+/// What [`at_target_tags`] sends, and how each row's answer is judged.
+struct Targeted {
+    rows: Vec<UpdateCheck>,
+    /// The line a row's moved release must lie in.
+    lines: BTreeMap<usize, Line>,
+    /// The rows that read their line's target tag.
+    floats: BTreeSet<usize>,
+    /// The split notes of rows whose line no version satisfies, keyed by row.
+    split: BTreeMap<usize, String>,
+}
+
+/// `rows` as `grim update` reads them ([`row_line`]): a range-claimed row's
+/// references replaced by one re-resolve of its line's target tag, and a row a
+/// literal or digest fixes compared by those references alone. A line no
+/// version satisfies sends nothing and gets the split note.
+fn at_target_tags(
+    rows: Vec<UpdateCheck>,
+    claims: &BTreeMap<NodeKey, Option<Vec<(Identifier, VersionClaim)>>>,
+    entries: &[StatusEntry],
+    grim: &Invocation,
+) -> Targeted {
+    let mut targeted = Targeted {
+        rows: Vec::new(),
+        lines: BTreeMap::new(),
+        floats: BTreeSet::new(),
+        split: BTreeMap::new(),
+    };
+    let mut unsatisfiable: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+    for check in rows {
+        let row = entries.get(check.index).map_or(RowLine::Plain, |entry| {
+            let edges = claims.get(&(entry.kind, entry.name.clone())).and_then(Option::as_deref);
+            row_line(entry.direct.then_some(&check.declared), edges)
+        });
+        let line = match &row {
+            RowLine::Plain => None,
+            RowLine::Target(_, line) | RowLine::Fixed { line, .. } => Some(line),
+        };
+        if line.is_some_and(Line::is_unsatisfiable) {
+            unsatisfiable.entry(check.index).or_default().push(check.declared);
+            continue;
+        }
+        match row {
+            RowLine::Plain => targeted.rows.push(check),
+            RowLine::Fixed { judging, .. } if judging.contains(&check.declared) => {}
+            RowLine::Fixed { line, .. } => {
+                if !line.is_any() {
+                    targeted.lines.insert(check.index, line);
+                }
+                targeted.rows.push(check);
+            }
+            RowLine::Target(repository, line) => match line.target_tag() {
+                Some(tag) => {
+                    if targeted.lines.insert(check.index, line).is_none() {
+                        targeted.floats.insert(check.index);
+                        targeted.rows.push(UpdateCheck {
+                            declared: repository.clone_with_tag(tag),
+                            ..check
+                        });
+                    }
+                }
+                None => targeted.rows.push(check),
+            },
+        }
+    }
+    targeted.split = unsatisfiable
+        .into_iter()
+        .filter_map(|(index, mut references)| {
+            references.sort();
+            Some((index, split_note(entries.get(index)?, &references, grim)))
+        })
+        .collect();
+    targeted
+}
+
+/// The release a row's reference moved to, with the line it must lie in. Every
+/// answer names the one digest, so the smallest reference stands for them.
+fn moved_release(answers: &[ReferenceAnswer], line: Option<&Line>) -> Option<(PinnedIdentifier, Line)> {
+    let (line, Some((check, Some(Some(digest))))) = (line?, answers.first()) else {
+        return None;
+    };
+    let release = PinnedIdentifier::try_from(check.declared.clone_with_digest(digest.clone())).ok()?;
+    Some((release, line.clone()))
+}
+
+/// Settles each row whose reference moved: `grim update` takes the release only
+/// when its version evidence lies in the line. Past one outside it, or gone, it
+/// reads the tag listing or refuses, which this sweep does not judge, so the row
+/// reads `null`, as on a failed read; a read the run's deadline cuts off joins `late`.
+async fn judge_releases(
+    access: &Arc<dyn OciAccess>,
+    releases: Vec<(usize, PinnedIdentifier, Line)>,
+    limits: &CheckLimits,
+    entries: &mut [StatusEntry],
+    late: &mut BTreeSet<usize>,
+) {
+    let reads = bounded_reads(releases, limits.per_call, limits.deadline(), |(_, release, _)| {
+        let access = Arc::clone(access);
+        let digest_only = release.strip_advisory();
+        async move { access.fetch_manifest(&digest_only).await }
+    });
+    for ((index, release, line), read, cut) in reads.await {
+        if cut {
+            late.insert(index);
+        }
+        let in_line = match read {
+            Some(Ok(Some(manifest))) => {
+                let version = annotated_version(&manifest.annotations);
+                satisfies(&evidence(version.as_ref(), release.as_identifier()), &line)
+            }
+            _ => false,
+        };
+        if let Some(entry) = entries.get_mut(index) {
+            entry.update_available = in_line.then_some(true);
+        }
+    }
+}
+
 /// One reference and its fresh digest: `None` when the resolve failed, `Some(None)`
 /// when its tag is gone.
 type ReferenceAnswer = (UpdateCheck, Option<Option<Digest>>);
@@ -1007,8 +1241,11 @@ struct HeldEdge {
     declared: Identifier,
     parent: NodeKey,
     request: Identifier,
-    /// The digest the declaration's pin holds.
-    locked: Digest,
+    /// The pin the declaration holds.
+    pinned: PinnedIdentifier,
+    /// Every range claim the lock records onto `key`, which `held_request` judges
+    /// a range beside.
+    ranges: Vec<VersionReq>,
 }
 
 /// Every recorded request onto the direct row `key` that names another reference
@@ -1028,12 +1265,16 @@ fn held_candidates(
         .iter()
         .map(|b| (ArtifactKind::Bundle, &b.name, b.pinned(), &b.members));
     let mut found: Vec<HeldEdge> = Vec::new();
+    let mut ranges = Vec::new();
     for (kind, name, parent_pin, members) in artifacts.chain(bundles) {
         for member in members.iter().filter(|m| m.kind == key.0 && m.name == key.1) {
             let Some(request) = member.absolute_id(parent_pin.map(PinnedIdentifier::as_identifier)) else {
                 continue;
             };
             let parent = (kind, name.clone());
+            if let VersionClaim::Range(req) = claim_of(&request, edge_origin(&parent)) {
+                ranges.push(req);
+            }
             let seen = found.iter().any(|f| f.parent == parent && f.request == request);
             if request != *declared && request.registry_repository() == pinned.registry_repository() && !seen {
                 found.push(HeldEdge {
@@ -1041,47 +1282,60 @@ fn held_candidates(
                     declared: declared.clone(),
                     parent,
                     request,
-                    locked: pinned.digest(),
+                    pinned: pinned.clone(),
+                    ranges: Vec::new(),
                 });
             }
         }
     }
+    for edge in &mut found {
+        edge.ranges.clone_from(&ranges);
+    }
     found
 }
 
-/// One note per direct row a recorded request is held back from: the request's
-/// reference now names a digest other than the row's pin. `--check` is online
-/// already, so this reads only what it reads. A read that fails or runs past the
-/// deadline says nothing, and so does the cap, which keeps the sweep bounded.
+/// One note per direct row a recorded request is held back from, by the rule the
+/// run-time warning uses: a range the version the pin shows fails, or a literal
+/// or digest whose reference now names another digest than the pin. A read that
+/// fails or runs past the deadline says nothing, and so does the cap, which
+/// keeps the sweep bounded.
 async fn held_back_notes(
     access: &Arc<dyn OciAccess>,
     held: Vec<HeldEdge>,
     limits: &CheckLimits,
     grim: &Invocation,
 ) -> Vec<String> {
-    let checks: Vec<UpdateCheck> = held
-        .iter()
-        .enumerate()
-        .map(|(index, edge)| UpdateCheck {
-            index,
-            declared: edge.request.clone(),
-            locked: edge.locked.clone(),
-        })
-        .collect();
     let (mut room, mut skipped) = (limits.checks, 0);
-    let checks = within_cap(checks, &mut room, &mut skipped);
-    let mut answers = fresh_digests(access, checks, limits.per_call, limits.deadline())
-        .await
-        .answers;
-    answers.sort_by_key(|(check, _)| check.index);
-    let mut asked: BTreeMap<&NodeKey, Vec<(NodeKey, Identifier)>> = BTreeMap::new();
-    for (check, fresh) in answers {
-        let Some(Ok(Some(now))) = fresh else { continue };
-        let edge = &held[check.index];
-        if now != edge.locked {
-            let requests = asked.entry(&edge.key).or_default();
-            requests.push((edge.parent.clone(), edge.request.clone()));
+    let shown = held_versions(access, &held, limits, &mut room, &mut skipped).await;
+    let mut held_back = BTreeSet::new();
+    let mut checks = Vec::new();
+    for (index, edge) in held.iter().enumerate() {
+        let shown = shown.get(&edge.key).unwrap_or(&Evidence::Vouched);
+        match held_request(&edge.declared, &edge.request, &edge.parent, shown, &edge.ranges) {
+            HeldRequest::Answered => {}
+            HeldRequest::Refused => {
+                held_back.insert(index);
+            }
+            HeldRequest::ByDigest => checks.push(UpdateCheck {
+                index,
+                declared: edge.request.clone(),
+                locked: edge.pinned.digest(),
+            }),
         }
+    }
+    let checks = within_cap(checks, &mut room, &mut skipped);
+    for (check, fresh) in fresh_digests(access, checks, limits.per_call, limits.deadline())
+        .await
+        .answers
+    {
+        if matches!(fresh, Some(Ok(Some(now))) if now != check.locked) {
+            held_back.insert(check.index);
+        }
+    }
+    let mut asked: BTreeMap<&NodeKey, Vec<(NodeKey, Identifier)>> = BTreeMap::new();
+    for edge in held_back.into_iter().filter_map(|index| held.get(index)) {
+        let requests = asked.entry(&edge.key).or_default();
+        requests.push((edge.parent.clone(), edge.request.clone()));
     }
     asked
         .into_iter()
@@ -1090,7 +1344,7 @@ async fn held_back_notes(
             let first = held.iter().find(|edge| edge.key == *key)?;
             Some(GraphWarning::HeldBack {
                 key: key.clone(),
-                held: first.locked.clone(),
+                held: first.pinned.digest(),
                 requests,
                 update: GraphWarning::held_back_update(&first.declared, grim.update(&key.1)),
             })
@@ -1099,11 +1353,55 @@ async fn held_back_notes(
         .collect()
 }
 
-/// The note of a row whose references name different digests.
-fn split_note(entry: &StatusEntry, answers: &[ReferenceAnswer], grim: &Invocation) -> String {
-    let references: Vec<String> = answers
+/// The version each held pin shows, read once per key a range asks of: its
+/// manifest's version annotation, else its tag, as the run-time warning reads
+/// it. A read that fails, runs past the deadline or finds no `room` left leaves
+/// its key out, which vouches for the pin, so no range onto it is held back on
+/// no evidence.
+async fn held_versions(
+    access: &Arc<dyn OciAccess>,
+    held: &[HeldEdge],
+    limits: &CheckLimits,
+    room: &mut usize,
+    skipped: &mut usize,
+) -> BTreeMap<NodeKey, Evidence> {
+    let mut read_keys = BTreeSet::new();
+    let ranged: Vec<(NodeKey, PinnedIdentifier)> = held
         .iter()
-        .map(|(check, _)| registry_text(&check.declared.to_string()))
+        .filter(|edge| {
+            matches!(
+                claim_of(&edge.request, edge_origin(&edge.parent)),
+                VersionClaim::Range(_)
+            )
+        })
+        .filter(|edge| read_keys.insert(&edge.key))
+        .map(|edge| (edge.key.clone(), edge.pinned.clone()))
+        .collect();
+    let ranged = take_room(ranged, room, skipped);
+    let reads = bounded_reads(ranged, limits.per_call, limits.deadline(), |(_, pinned)| {
+        let access = Arc::clone(access);
+        let pinned = pinned.clone();
+        async move { access.fetch_manifest(&pinned).await }
+    });
+    let mut shown = BTreeMap::new();
+    for ((key, pinned), read, _) in reads.await {
+        if let Some(Ok(Some(manifest))) = read {
+            let version = annotated_version(&manifest.annotations);
+            shown.insert(key, evidence(version.as_ref(), &pinned));
+        }
+    }
+    shown
+}
+
+/// The note of a row whose references name different digests.
+fn split_note<'a>(
+    entry: &StatusEntry,
+    references: impl IntoIterator<Item = &'a Identifier>,
+    grim: &Invocation,
+) -> String {
+    let references: Vec<String> = references
+        .into_iter()
+        .map(|id| registry_text(&id.to_string()))
         .collect();
     let references = match references.split_last() {
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
@@ -1116,14 +1414,22 @@ fn split_note(entry: &StatusEntry, answers: &[ReferenceAnswer], grim: &Invocatio
     )
 }
 
-/// The `checks` a registry can answer, up to `room`, which shrinks by what is
-/// kept; what the cap turned away adds to `skipped`, and its row stays `null`.
+/// The `checks` a registry can answer, up to `room` ([`take_room`]).
 fn within_cap(checks: Vec<UpdateCheck>, room: &mut usize, skipped: &mut usize) -> Vec<UpdateCheck> {
-    let mut kept: Vec<UpdateCheck> = checks.into_iter().filter(|c| answerable(&c.declared)).collect();
-    *skipped += kept.len().saturating_sub(*room);
-    kept.truncate(*room);
-    *room -= kept.len();
-    kept
+    take_room(
+        checks.into_iter().filter(|c| answerable(&c.declared)).collect(),
+        room,
+        skipped,
+    )
+}
+
+/// The first `room` of `items`, which shrinks by what is kept; what the cap
+/// turned away adds to `skipped`, and its row stays `null`.
+fn take_room<T>(mut items: Vec<T>, room: &mut usize, skipped: &mut usize) -> Vec<T> {
+    *skipped += items.len().saturating_sub(*room);
+    items.truncate(*room);
+    *room -= items.len();
+    items
 }
 
 /// One line per row whose reference moved: the plain table has no column for
@@ -1190,50 +1496,75 @@ async fn fresh_digests(
     per_call: Duration,
     deadline: Instant,
 ) -> Swept {
+    let reads = bounded_reads(checks, per_call, deadline, |check| {
+        let access = Arc::clone(access);
+        let declared = check.declared.clone();
+        async move { resolve_declared_digest(&*access, &declared).await }
+    });
+    let mut swept = Swept {
+        answers: Vec::new(),
+        late: BTreeSet::new(),
+    };
+    for (check, fresh, late) in reads.await {
+        if late {
+            swept.late.insert(check.index);
+        }
+        swept.answers.push((check, fresh));
+    }
+    swept
+}
+
+/// Every registry read of one `--check` run: `read` of each item, at most
+/// [`UPDATE_CHECK_CONCURRENCY`] at once, each under `per_call` and all under
+/// `deadline`. Each item comes back, in completion order, with its answer,
+/// `None` past a timeout, and whether the run's deadline cut it off.
+async fn bounded_reads<K, T, Fut>(
+    items: Vec<K>,
+    per_call: Duration,
+    deadline: Instant,
+    read: impl Fn(&K) -> Fut,
+) -> Vec<(K, Option<T>, bool)>
+where
+    K: Send + 'static,
+    T: Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
     let permits = Arc::new(Semaphore::new(UPDATE_CHECK_CONCURRENCY));
     let mut set = JoinSet::new();
-    for check in checks {
-        let access = Arc::clone(access);
+    for item in items {
         let permits = Arc::clone(&permits);
+        let call = read(&item);
         set.spawn(async move {
             // The timeout below polls the call once before it fires, so a task
             // that starts past the deadline would still send a request.
             if Instant::now() >= deadline {
-                return (check, None, true);
+                return (item, None, true);
             }
-            let call = async {
+            let bounded = async {
                 // Hold a permit for the lifetime of the registry call so
                 // concurrency stays bounded. `acquire_owned` fails only on a
                 // closed semaphore, which never happens (we hold the `Arc`);
                 // degrade that impossible case to a null result.
                 let _permit = permits.acquire_owned().await.ok()?;
-                tokio::time::timeout(per_call, resolve_declared_digest(&*access, &check.declared))
-                    .await
-                    .ok()
+                tokio::time::timeout(per_call, call).await.ok()
             };
             // A call still waiting or open at the run's deadline is dropped, so
             // one sweep ends in bounded wall time (CWE-400).
-            match tokio::time::timeout_at(deadline, call).await {
-                Ok(fresh) => (check, fresh, false),
-                Err(_) => (check, None, true),
+            match tokio::time::timeout_at(deadline, bounded).await {
+                Ok(answer) => (item, answer, false),
+                Err(_) => (item, None, true),
             }
         });
     }
-    let mut swept = Swept {
-        answers: Vec::new(),
-        late: BTreeSet::new(),
-    };
+    let mut answers = Vec::new();
     while let Some(joined) = set.join_next().await {
-        // A panicked task degrades to no result for that row (`update_available`
-        // stays null); a read-only status report never fails on a check.
-        if let Ok((check, fresh, late)) = joined {
-            if late {
-                swept.late.insert(check.index);
-            }
-            swept.answers.push((check, fresh));
+        // A panicked task degrades to no result for that item (its row stays
+        // null); a read-only status report never fails on a check.
+        if let Ok(answer) = joined {
+            answers.push(answer);
         }
     }
-    swept
+    answers
 }
 
 /// The warning of a sweep its run deadline cut short.
@@ -3471,9 +3802,10 @@ mod tests {
         }
     }
 
-    /// `p` asks `dep:1` and `q` asks `dep:2`, each re-resolved for the one row.
+    /// `p` asks `dep:v1` and `q` asks `dep:v2`, each re-resolved for the one row.
+    /// Literal tags: a numeric pair is a version claim, which answers by its line.
     fn diamond_checks() -> Vec<UpdateCheck> {
-        ["1", "2"]
+        ["v1", "v2"]
             .iter()
             .map(|tag| UpdateCheck {
                 index: 0,
@@ -3483,12 +3815,12 @@ mod tests {
             .collect()
     }
 
-    /// A registry where `dep:1` and `dep:2` name the given digests.
+    /// A registry where `dep:v1` and `dep:v2` name the given digests.
     async fn diamond_registry(one: &Digest, two: &Digest) -> Arc<dyn OciAccess> {
         let access = ScriptedAccess::default();
         let repo = Identifier::new_registry("acme/dep", "ghcr.io");
-        access.inner.put_tag(&repo, "1", one).await.unwrap();
-        access.inner.put_tag(&repo, "2", two).await.unwrap();
+        access.inner.put_tag(&repo, "v1", one).await.unwrap();
+        access.inner.put_tag(&repo, "v2", two).await.unwrap();
         Arc::new(access)
     }
 
@@ -3496,7 +3828,7 @@ mod tests {
     /// digests and exits 78, so the row answers nothing and the note says why.
     #[tokio::test]
     async fn a_key_whose_references_name_different_digests_reads_null() {
-        let lock = diamond_lock("1", "2");
+        let lock = diamond_lock("v1", "v2");
         let pin = Digest::Sha256("d".repeat(64));
         let other = Algorithm::Sha256.hash(b"two");
         for (one, two) in [(&pin, &other), (&other, &pin)] {
@@ -3517,7 +3849,7 @@ mod tests {
             assert_eq!(entries[0].update_available, None, "{notes:?}");
             assert_eq!(notes.len(), 1, "{notes:?}");
             assert!(
-                notes[0].contains("ghcr.io/acme/dep:1 and ghcr.io/acme/dep:2 name different digests"),
+                notes[0].contains("ghcr.io/acme/dep:v1 and ghcr.io/acme/dep:v2 name different digests"),
                 "{notes:?}"
             );
             assert!(
@@ -3532,7 +3864,7 @@ mod tests {
     /// shared key's note promises no command.
     #[tokio::test]
     async fn a_key_whose_references_agree_answers_for_its_pin() {
-        let lock = diamond_lock("1", "2");
+        let lock = diamond_lock("v1", "v2");
         let moved = Algorithm::Sha256.hash(b"moved");
         let access = diamond_registry(&moved, &moved).await;
         let mut entries = [dependency_row()];
@@ -3559,7 +3891,7 @@ mod tests {
     /// A cap that sends one of a row's two references leaves nothing to compare.
     #[tokio::test]
     async fn a_row_the_cap_cuts_short_reads_null() {
-        let lock = diamond_lock("1", "2");
+        let lock = diamond_lock("v1", "v2");
         let pin = Digest::Sha256("d".repeat(64));
         let access = diamond_registry(&pin, &Algorithm::Sha256.hash(b"two")).await;
         let mut entries = [dependency_row()];
@@ -3583,16 +3915,481 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
     }
 
+    /// What `run` sends for [`diamond_lock`]'s `dep`: every reference recorded onto it.
+    fn recorded_checks(lock: &GrimoireLock) -> Vec<UpdateCheck> {
+        let key = (ArtifactKind::Skill, "dep".to_string());
+        let declared = Identifier::parse("ghcr.io/acme/dep:1").unwrap();
+        row_references(lock, &key, declared)
+            .into_iter()
+            .map(|declared| UpdateCheck {
+                index: 0,
+                declared,
+                locked: Digest::Sha256("d".repeat(64)),
+            })
+            .collect()
+    }
+
+    /// Edges `1` and `1.2` claim one line, and its float `1` names the release
+    /// `grim update` would take, so the row reads that one tag and never splits.
+    #[tokio::test]
+    async fn a_range_claimed_row_answers_by_the_target_tag() {
+        let lock = diamond_lock("1", "1.2");
+        let pin = Digest::Sha256("d".repeat(64));
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        // A manifest's digest is its content's, so every registry below holds this one.
+        let moved = push_release(&ScriptedAccess::default(), &repo, "1.3.0").await;
+        // What `dep:1` names (none: the tag is gone), whether `dep` is down, the answer.
+        for (one, down, expected) in [
+            (Some(&moved), false, Some(true)),
+            (Some(&pin), false, Some(false)),
+            (None, false, None),
+            (Some(&moved), true, None),
+        ] {
+            let mut access = ScriptedAccess::default();
+            push_release(&access, &repo, "1.3.0").await;
+            if let Some(one) = one {
+                access.inner.put_tag(&repo, "1", one).await.unwrap();
+            }
+            access.inner.put_tag(&repo, "1.2", &pin).await.unwrap();
+            if down {
+                access.down = BTreeSet::from(["dep".to_string()]);
+            }
+            let access = Arc::new(access);
+            let shared: Arc<dyn OciAccess> = access.clone();
+            let mut entries = [dependency_row()];
+
+            let notes = check_updates(
+                &shared,
+                recorded_checks(&lock),
+                Some(&lock),
+                None,
+                &mut entries,
+                &CheckLimits::default(),
+                PROJECT,
+            )
+            .await;
+
+            assert_eq!(entries[0].update_available, expected, "{one:?} {down}: {notes:?}");
+            assert_eq!(access.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let moved_note = ["update available: skill 'dep': its tag moved, and more than one reference requires it"];
+            let expected_notes: &[&str] = if expected == Some(true) { &moved_note } else { &[] };
+            assert_eq!(notes, expected_notes);
+        }
+    }
+
+    /// Edges `1` and `2` claim two majors, so `grim update` exits 78 and the row
+    /// keeps its split note, with nothing sent.
+    #[tokio::test]
+    async fn an_unsatisfiable_range_row_still_reads_as_a_split() {
+        let lock = diamond_lock("1", "2");
+        let pin = Digest::Sha256("d".repeat(64));
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        let access = ScriptedAccess::default();
+        access.inner.put_tag(&repo, "1", &pin).await.unwrap();
+        access.inner.put_tag(&repo, "2", &pin).await.unwrap();
+        let access = Arc::new(access);
+        let shared: Arc<dyn OciAccess> = access.clone();
+        let mut entries = [dependency_row()];
+
+        let notes = check_updates(
+            &shared,
+            recorded_checks(&lock),
+            Some(&lock),
+            None,
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(entries[0].update_available, None, "{notes:?}");
+        assert_eq!(
+            notes,
+            [
+                "skill 'dep': ghcr.io/acme/dep:1 and ghcr.io/acme/dep:2 name different digests; \
+              `grim update` exits 78 until grimoire.toml declares one"
+            ]
+        );
+        assert_eq!(access.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A manifest annotated `version`, pushed to `repo` of `access`.
+    async fn push_release(access: &ScriptedAccess, repo: &Identifier, version: &str) -> Digest {
+        let manifest = crate::oci::manifest::OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: Vec::new(),
+            annotations: BTreeMap::from([(
+                crate::oci::version_evidence::VERSION_ANNOTATION.to_string(),
+                version.to_string(),
+            )]),
+        };
+        access.inner.push_manifest(repo, &manifest).await.unwrap()
+    }
+
+    /// `grim update` takes a line's float only when the release it names lies in
+    /// the line; past a float `1` moved onto 2.0.0 it reads the tag listing,
+    /// which the row does not, and a manifest that fails to read leaves nothing
+    /// to judge either.
+    #[tokio::test]
+    async fn a_target_tag_answers_only_for_a_release_in_its_line() {
+        let lock = diamond_lock("1", "1");
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        // The release tag `1` names, whether manifests fail to read, the answer.
+        for (version, manifests_down, expected) in [
+            ("2.0.0", false, None),
+            ("1.3.0", false, Some(true)),
+            ("1.3.0", true, None),
+        ] {
+            let mut access = ScriptedAccess::default();
+            let release = push_release(&access, &repo, version).await;
+            access.inner.put_tag(&repo, "1", &release).await.unwrap();
+            access.manifests_down = manifests_down;
+            let shared: Arc<dyn OciAccess> = Arc::new(access);
+            let mut entries = [dependency_row()];
+
+            let notes = check_updates(
+                &shared,
+                recorded_checks(&lock),
+                Some(&lock),
+                None,
+                &mut entries,
+                &CheckLimits::default(),
+                PROJECT,
+            )
+            .await;
+
+            assert_eq!(
+                entries[0].update_available, expected,
+                "{version} {manifests_down}: {notes:?}"
+            );
+            let moved = ["update available: skill 'dep': `grim update -- dep` moves its pin"];
+            let expected_notes: &[&str] = if expected == Some(true) { &moved } else { &[] };
+            assert_eq!(notes, expected_notes);
+        }
+    }
+
+    /// `x` pinned on 2.x and declared bare, while `a` requires `edge` of it.
+    fn yielding_lock(edge: &str) -> GrimoireLock {
+        let pin = "d".repeat(64);
+        GrimoireLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"x\"\npinned = \"ghcr.io/acme/x:2@sha256:{pin}\"\n\n\
+             [[skill]]\nname = \"a\"\npinned = \"ghcr.io/acme/a@sha256:{pin}\"\n\n\
+             [[skill.requires]]\nkind = \"skill\"\nname = \"x\"\nid = \"{edge}\"\n"
+        ))
+        .unwrap()
+    }
+
+    /// A bare declaration yields to a range claim of its own repository, so
+    /// `grim update -- x` reads that claim's float, not `latest`: 3.1.0 under
+    /// `latest` is no update, 2.7.0 under `2` is one. A tagged declaration, a
+    /// claim on another repository and a literal tag still read the declared tag.
+    #[tokio::test]
+    async fn a_bare_declaration_answers_by_the_claim_it_yields_to() {
+        let repo = Identifier::new_registry("acme/x", "ghcr.io");
+        let pin = Digest::Sha256("d".repeat(64));
+        // The declaration, the edge onto it, whether 2.7.0 shipped, the answer.
+        for (declared, edge, shipped, expected) in [
+            ("ghcr.io/acme/x", "ghcr.io/acme/x:2", false, Some(false)),
+            ("ghcr.io/acme/x:latest", "ghcr.io/acme/x:2", false, Some(false)),
+            ("ghcr.io/acme/x", "ghcr.io/acme/x:2", true, Some(true)),
+            ("ghcr.io/acme/x:3", "ghcr.io/acme/x:2", false, Some(true)),
+            ("ghcr.io/acme/x", "ghcr.io/other/x:2", false, Some(true)),
+            ("ghcr.io/acme/x", "ghcr.io/acme/x:stable", false, Some(true)),
+        ] {
+            let access = ScriptedAccess::default();
+            let three = push_release(&access, &repo, "3.1.0").await;
+            for tag in ["latest", "3"] {
+                access.inner.put_tag(&repo, tag, &three).await.unwrap();
+            }
+            let two = if shipped {
+                push_release(&access, &repo, "2.7.0").await
+            } else {
+                pin.clone()
+            };
+            access.inner.put_tag(&repo, "2", &two).await.unwrap();
+            let lock = yielding_lock(edge);
+            let checks = vec![UpdateCheck {
+                index: 0,
+                declared: Identifier::parse(declared).unwrap(),
+                locked: pin.clone(),
+            }];
+            let shared: Arc<dyn OciAccess> = Arc::new(access);
+            let mut entries = [skill_entry("x")];
+
+            let notes = check_updates(
+                &shared,
+                checks,
+                Some(&lock),
+                None,
+                &mut entries,
+                &CheckLimits::default(),
+                PROJECT,
+            )
+            .await;
+
+            assert_eq!(
+                entries[0].update_available, expected,
+                "{declared} {edge} {shipped}: {notes:?}"
+            );
+            let moved = ["update available: skill 'x': `grim update -- x` moves its pin"];
+            let expected_notes: &[&str] = if expected == Some(true) { &moved } else { &[] };
+            assert_eq!(notes, expected_notes);
+        }
+    }
+
+    /// [`yielding_lock`] with `b` requiring `beside` of `x` too.
+    fn yielding_lock_beside(edge: &str, beside: &str) -> GrimoireLock {
+        let pin = "d".repeat(64);
+        GrimoireLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"x\"\npinned = \"ghcr.io/acme/x:2@sha256:{pin}\"\n\n\
+             [[skill]]\nname = \"a\"\npinned = \"ghcr.io/acme/a@sha256:{pin}\"\n\n\
+             [[skill.requires]]\nkind = \"skill\"\nname = \"x\"\nid = \"{edge}\"\n\n\
+             [[skill]]\nname = \"b\"\npinned = \"ghcr.io/acme/b@sha256:{pin}\"\n\n\
+             [[skill.requires]]\nkind = \"skill\"\nname = \"x\"\nid = \"{beside}\"\n"
+        ))
+        .unwrap()
+    }
+
+    /// The resolver yields a bare declaration to the range claims of its own
+    /// repository alone, so a literal, another repository's claim or a digest
+    /// beside them leaves the row answering by the line's float, not `latest`.
+    #[tokio::test]
+    async fn a_bare_declaration_yields_to_its_own_ranges_beside_other_edges() {
+        let repo = Identifier::new_registry("acme/x", "ghcr.io");
+        let pin = Digest::Sha256("d".repeat(64));
+        let by_digest = format!("ghcr.io/acme/x@sha256:{}", "e".repeat(64));
+        for beside in ["ghcr.io/acme/x:stable", "ghcr.io/other/x:2", by_digest.as_str()] {
+            let access = ScriptedAccess::default();
+            let three = push_release(&access, &repo, "3.1.0").await;
+            for tag in ["latest", "3", "stable"] {
+                access.inner.put_tag(&repo, tag, &three).await.unwrap();
+            }
+            access.inner.put_tag(&repo, "2", &pin).await.unwrap();
+            let checks = vec![UpdateCheck {
+                index: 0,
+                declared: Identifier::parse("ghcr.io/acme/x").unwrap(),
+                locked: pin.clone(),
+            }];
+            let lock = yielding_lock_beside("ghcr.io/acme/x:2", beside);
+            let shared: Arc<dyn OciAccess> = Arc::new(access);
+            let mut entries = [skill_entry("x")];
+
+            let notes = check_updates(
+                &shared,
+                checks,
+                Some(&lock),
+                None,
+                &mut entries,
+                &CheckLimits::default(),
+                PROJECT,
+            )
+            .await;
+
+            assert_eq!(entries[0].update_available, Some(false), "{beside}: {notes:?}");
+            assert!(notes.is_empty(), "{beside}: {notes:?}");
+        }
+    }
+
+    /// A literal beside a range fixes the manifest and the range only judges it,
+    /// as the resolver settles the key: the row reads the literal alone, so a
+    /// moved `2` is no split, and a moved literal is an update only in the line.
+    #[tokio::test]
+    async fn a_literal_beside_a_range_answers_by_the_literal_alone() {
+        let lock = diamond_lock("stable", "2");
+        let pin = Digest::Sha256("d".repeat(64));
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        // The release `stable` names now (none: still the pin), the answer.
+        for (version, expected) in [(None, Some(false)), (Some("2.3.0"), Some(true)), (Some("3.0.0"), None)] {
+            let access = ScriptedAccess::default();
+            let two = push_release(&access, &repo, "2.4.0").await;
+            access.inner.put_tag(&repo, "2", &two).await.unwrap();
+            let stable = match version {
+                Some(version) => push_release(&access, &repo, version).await,
+                None => pin.clone(),
+            };
+            access.inner.put_tag(&repo, "stable", &stable).await.unwrap();
+            let access = Arc::new(access);
+            let shared: Arc<dyn OciAccess> = access.clone();
+            let mut entries = [dependency_row()];
+
+            let notes = check_updates(
+                &shared,
+                recorded_checks(&lock),
+                Some(&lock),
+                None,
+                &mut entries,
+                &CheckLimits::default(),
+                PROJECT,
+            )
+            .await;
+
+            assert_eq!(entries[0].update_available, expected, "{version:?}: {notes:?}");
+            assert_eq!(access.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let moved = ["update available: skill 'dep': its tag moved, and more than one reference requires it"];
+            let expected_notes: &[&str] = if expected == Some(true) { &moved } else { &[] };
+            assert_eq!(notes, expected_notes, "{version:?}");
+        }
+    }
+
+    /// A float naming a gone manifest is passed over by `grim update`, which then
+    /// reads the tag listing, so the row cannot say whether it moves.
+    #[tokio::test]
+    async fn a_target_tag_naming_a_gone_manifest_reads_null() {
+        let lock = diamond_lock("1", "1");
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        let access = ScriptedAccess::default();
+        access
+            .inner
+            .put_tag(&repo, "1", &Algorithm::Sha256.hash(b"gone"))
+            .await
+            .unwrap();
+        let shared: Arc<dyn OciAccess> = Arc::new(access);
+        let mut entries = [dependency_row()];
+
+        let notes = check_updates(
+            &shared,
+            recorded_checks(&lock),
+            Some(&lock),
+            None,
+            &mut entries,
+            &CheckLimits::default(),
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(entries[0].update_available, None, "{notes:?}");
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// A release's manifest read counts against the cap as a re-resolve does:
+    /// past it the row reads `null` and no manifest is read.
+    #[tokio::test]
+    async fn a_release_read_counts_against_the_cap() {
+        let lock = diamond_lock("1", "1");
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        let access = ScriptedAccess::default();
+        let release = push_release(&access, &repo, "1.3.0").await;
+        access.inner.put_tag(&repo, "1", &release).await.unwrap();
+        let access = Arc::new(access);
+        let shared: Arc<dyn OciAccess> = access.clone();
+        let mut entries = [dependency_row()];
+        let limits = CheckLimits {
+            checks: 1,
+            ..CheckLimits::default()
+        };
+
+        check_updates(
+            &shared,
+            recorded_checks(&lock),
+            Some(&lock),
+            None,
+            &mut entries,
+            &limits,
+            PROJECT,
+        )
+        .await;
+
+        assert_eq!(entries[0].update_available, None);
+        assert_eq!(access.manifest_reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// `count` direct rows `x0`…, each held on 1.0.0 and asked for by a range of
+    /// its own repository, so a held-back note reads each pin's version.
+    fn ranged_held_edges(count: usize) -> Vec<HeldEdge> {
+        (0..count)
+            .map(|i| HeldEdge {
+                key: (ArtifactKind::Skill, format!("x{i}")),
+                declared: Identifier::parse(&format!("ghcr.io/acme/x{i}:1.0.0")).unwrap(),
+                parent: (ArtifactKind::Skill, "p".to_string()),
+                request: Identifier::parse(&format!("ghcr.io/acme/x{i}:1")).unwrap(),
+                pinned: PinnedIdentifier::try_from(
+                    Identifier::parse(&format!("ghcr.io/acme/x{i}:1.0.0@sha256:{}", "d".repeat(64))).unwrap(),
+                )
+                .unwrap(),
+                ranges: vec![semver::VersionReq::parse("^1").unwrap()],
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_held_version_read_counts_against_the_cap() {
+        let access = Arc::new(ScriptedAccess::default());
+        let shared: Arc<dyn OciAccess> = access.clone();
+        let limits = CheckLimits {
+            checks: 0,
+            ..CheckLimits::default()
+        };
+
+        held_back_notes(&shared, ranged_held_edges(1), &limits, &Invocation::WALKED).await;
+
+        assert_eq!(access.manifest_reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Manifest reads share the re-resolves' bound: never one at a time, never
+    /// more than [`UPDATE_CHECK_CONCURRENCY`] at once.
+    #[tokio::test]
+    async fn manifest_reads_run_concurrently_within_the_bound() {
+        let slow = || ScriptedAccess {
+            manifest_delay: Duration::from_millis(50),
+            ..ScriptedAccess::default()
+        };
+        let access = Arc::new(slow());
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        let mut releases = Vec::new();
+        for minor in 0..16 {
+            let digest = push_release(&access, &repo, &format!("1.{minor}.0")).await;
+            let release = PinnedIdentifier::try_from(repo.clone_with_tag("1").clone_with_digest(digest)).unwrap();
+            releases.push((minor, release, Line::of([semver::VersionReq::parse("^1").unwrap()])));
+        }
+        let shared: Arc<dyn OciAccess> = access.clone();
+        let mut entries: Vec<StatusEntry> = (0..16).map(|_| dependency_row()).collect();
+        let mut late = BTreeSet::new();
+
+        judge_releases(&shared, releases, &CheckLimits::default(), &mut entries, &mut late).await;
+
+        assert!(entries.iter().all(|e| e.update_available == Some(true)));
+        let most = access.most_open_reads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(most, UPDATE_CHECK_CONCURRENCY, "release reads");
+
+        let access = Arc::new(slow());
+        let shared: Arc<dyn OciAccess> = access.clone();
+        held_back_notes(
+            &shared,
+            ranged_held_edges(16),
+            &CheckLimits::default(),
+            &Invocation::WALKED,
+        )
+        .await;
+        assert_eq!(access.manifest_reads.load(std::sync::atomic::Ordering::SeqCst), 16);
+        let most = access.most_open_reads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(most, UPDATE_CHECK_CONCURRENCY, "held version reads");
+    }
+
     /// A registry that answers every tag, except it fails the `down` tags, never
     /// returns on `stuck` ones, and counts the calls that reach it. With
-    /// `stuck_catalog` its catalog listing never returns either.
+    /// `stuck_catalog` its catalog listing never returns either, and with
+    /// `manifests_down` every manifest read fails. Each manifest read takes
+    /// `manifest_delay` and is counted, with the most that were open at once.
     #[derive(Default)]
     struct ScriptedAccess {
         inner: crate::oci::access::memory_registry::MemoryRegistry,
         down: BTreeSet<String>,
         stuck: BTreeSet<String>,
         stuck_catalog: bool,
+        manifests_down: bool,
         calls: std::sync::atomic::AtomicUsize,
+        manifest_delay: Duration,
+        manifest_reads: std::sync::atomic::AtomicUsize,
+        open_reads: std::sync::atomic::AtomicUsize,
+        most_open_reads: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -3619,6 +4416,20 @@ mod tests {
             &self,
             id: &PinnedIdentifier,
         ) -> Result<Option<crate::oci::manifest::OciManifest>, AccessError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.manifest_reads.fetch_add(1, SeqCst);
+            let open = self.open_reads.fetch_add(1, SeqCst) + 1;
+            self.most_open_reads.fetch_max(open, SeqCst);
+            if !self.manifest_delay.is_zero() {
+                tokio::time::sleep(self.manifest_delay).await;
+            }
+            self.open_reads.fetch_sub(1, SeqCst);
+            if self.manifests_down {
+                return Err(AccessError::with_identifier(
+                    id.as_identifier().clone(),
+                    crate::oci::access::error::AccessErrorKind::OfflineMiss,
+                ));
+            }
             self.inner.fetch_manifest(id).await
         }
         async fn fetch_blob(
@@ -6540,8 +7351,9 @@ mod tests {
         assert_eq!(logs.trim_end().lines().count(), 1, "{logs:?}");
     }
 
-    /// `dep` is held at `d…`; `p` asks for `dep:2`, `q` for the declared reference
-    /// itself, and `r` for another repository's `dep:3`.
+    /// `dep` is held at `d…`; `p` asks for `dep:v2`, `q` for the declared reference
+    /// itself, and `r` for another repository's `dep:3`. `v2` is a literal tag, so
+    /// it is judged by the digest it names.
     fn held_lock() -> GrimoireLock {
         let pin = "d".repeat(64);
         let parent = |name: &str, id: &str| {
@@ -6555,7 +7367,7 @@ mod tests {
              declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
              generated_at = \"2026-04-19T00:00:00Z\"\n\n\
              [[skill]]\nname = \"dep\"\npinned = \"ghcr.io/acme/dep@sha256:{pin}\"\n{}{}{}",
-            parent("p", "ghcr.io/acme/dep:2"),
+            parent("p", "ghcr.io/acme/dep:v2"),
             parent("q", "ghcr.io/acme/dep"),
             parent("r", "ghcr.io/other/dep:3"),
         );
@@ -6577,7 +7389,7 @@ mod tests {
             .iter()
             .map(|e| (e.parent.1.as_str(), e.request.to_string()))
             .collect();
-        assert_eq!(asked, [("p", "ghcr.io/acme/dep:2".to_string())]);
+        assert_eq!(asked, [("p", "ghcr.io/acme/dep:v2".to_string())]);
     }
 
     #[test]
@@ -6593,7 +7405,7 @@ mod tests {
     async fn dep_registry(two: &Digest) -> ScriptedAccess {
         let access = ScriptedAccess::default();
         let repo = Identifier::new_registry("acme/dep", "ghcr.io");
-        access.inner.put_tag(&repo, "2", two).await.unwrap();
+        access.inner.put_tag(&repo, "v2", two).await.unwrap();
         access
     }
 
@@ -6610,7 +7422,7 @@ mod tests {
         assert_eq!(
             notes,
             [
-                "skill/dep is requested by skill/p as ghcr.io/acme/dep:2, but your declaration holds it at \
+                "skill/dep is requested by skill/p as ghcr.io/acme/dep:v2, but your declaration holds it at \
               sha256:dddddddddddd; run `grim update -- dep` to re-read the declared tag, or declare the requested reference"
             ]
         );
@@ -6631,7 +7443,7 @@ mod tests {
         assert_eq!(
             notes,
             [
-                "skill/dep is requested by skill/p as ghcr.io/acme/dep:2, but your declaration holds it at \
+                "skill/dep is requested by skill/p as ghcr.io/acme/dep:v2, but your declaration holds it at \
               sha256:dddddddddddd; declare the requested reference to take it"
             ]
         );
@@ -6655,5 +7467,163 @@ mod tests {
         let notes = held_back_notes(&access, held_edges_of(&held_lock()), &limits(), &Invocation::WALKED).await;
 
         assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// The notes for `dep` declared as `declared` (`{held}` stands for the pin's
+    /// digest) and pinned with `pin_tag` at a pushed manifest annotated with
+    /// `version`, when `p` asks for `dep:2` and tag `2` names another digest
+    /// (`moved`) or the pin. Also returns how many tags were read.
+    async fn range_request_notes(
+        declared: &str,
+        pin_tag: Option<&str>,
+        version: Option<&str>,
+        moved: bool,
+    ) -> (Vec<String>, usize) {
+        let access = ScriptedAccess::default();
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        let annotations = version
+            .map(|v| BTreeMap::from([("org.opencontainers.image.version".to_string(), v.to_string())]))
+            .unwrap_or_default();
+        let manifest = crate::oci::manifest::OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: Vec::new(),
+            annotations,
+        };
+        let held = access.inner.push_manifest(&repo, &manifest).await.unwrap();
+        let two = if moved {
+            Algorithm::Sha256.hash(b"two")
+        } else {
+            held.clone()
+        };
+        access.inner.put_tag(&repo, "2", &two).await.unwrap();
+        let pinned = match pin_tag {
+            Some(tag) => format!("ghcr.io/acme/dep:{tag}@{held}"),
+            None => format!("ghcr.io/acme/dep@{held}"),
+        };
+        let lock = GrimoireLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{hash}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"dep\"\npinned = \"{pinned}\"\n\n\
+             [[skill]]\nname = \"p\"\npinned = \"ghcr.io/acme/p@sha256:{hash}\"\n\n\
+             [[skill.requires]]\nkind = \"skill\"\nname = \"dep\"\nid = \"ghcr.io/acme/dep:2\"\n",
+            hash = "d".repeat(64),
+        ))
+        .unwrap();
+        let declared = Identifier::parse(&declared.replace("{held}", &held.to_string())).unwrap();
+        let row = find_locked(&lock, ArtifactKind::Skill, "dep").unwrap();
+        let held_edges = held_candidates(
+            &lock,
+            &(ArtifactKind::Skill, "dep".to_string()),
+            &declared,
+            row.source.pinned().unwrap(),
+        );
+        assert_eq!(held_edges.len(), 1, "the request is a candidate");
+        let access = Arc::new(access);
+        let shared: Arc<dyn OciAccess> = access.clone();
+
+        let notes = held_back_notes(&shared, held_edges, &limits(), &Invocation::WALKED).await;
+
+        (notes, access.calls.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    const RANGE_HELD: &str =
+        "skill/dep is requested by skill/p as ghcr.io/acme/dep:2, but your declaration holds it at sha256:";
+
+    /// The run-time held-back warning judges a range by the version the held pin
+    /// shows, so `--check` does too: a satisfied range is not held back wherever
+    /// its tag moved, and a failed one is, with no tag read.
+    #[tokio::test]
+    async fn a_range_request_is_judged_by_the_version_the_pin_shows() {
+        let (notes, reads) = range_request_notes("ghcr.io/acme/dep:2.1.0", Some("2.1.0"), None, true).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(reads, 0);
+
+        let (notes, reads) = range_request_notes("ghcr.io/acme/dep:1.4.0", Some("1.4.0"), None, false).await;
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with(RANGE_HELD), "{notes:?}");
+        assert!(
+            notes[0].ends_with(
+                "; run `grim update -- dep` to re-read the declared tag, or declare the requested reference"
+            ),
+            "{notes:?}"
+        );
+        assert_eq!(reads, 0);
+    }
+
+    /// A tagless pin shows the version its manifest is annotated with.
+    #[tokio::test]
+    async fn a_digest_declaration_is_judged_by_its_annotated_version() {
+        let declared = "ghcr.io/acme/dep@{held}";
+        let (notes, _) = range_request_notes(declared, None, Some("2.3.0"), true).await;
+        assert!(notes.is_empty(), "{notes:?}");
+
+        let (notes, _) = range_request_notes(declared, None, Some("3.0.0"), true).await;
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with(RANGE_HELD), "{notes:?}");
+        assert!(
+            notes[0].ends_with("; declare the requested reference to take it"),
+            "{notes:?}"
+        );
+    }
+
+    /// `dep` is held at 2.1.0-rc.2. `p` asks for `dep:2`, which admits no prerelease
+    /// alone, so it gets a note; beside `q`'s `dep:2.1.0-rc.1` the set admits the
+    /// pin, as the lock's own settle reads it, and no note names `p`.
+    #[tokio::test]
+    async fn a_range_request_is_judged_beside_the_ranges_the_pin_meets() {
+        let access = ScriptedAccess::default();
+        let repo = Identifier::new_registry("acme/dep", "ghcr.io");
+        let manifest = crate::oci::manifest::OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: Vec::new(),
+            annotations: BTreeMap::new(),
+        };
+        let held = access.inner.push_manifest(&repo, &manifest).await.unwrap();
+        let access: Arc<dyn OciAccess> = Arc::new(access);
+        let parent = |name: &str, id: &str| {
+            format!(
+                "\n[[skill]]\nname = \"{name}\"\npinned = \"ghcr.io/acme/{name}@sha256:{hash}\"\n\n\
+                 [[skill.requires]]\nkind = \"skill\"\nname = \"dep\"\nid = \"{id}\"\n",
+                hash = "d".repeat(64),
+            )
+        };
+        let p = parent("p", "ghcr.io/acme/dep:2");
+        let q = parent("q", "ghcr.io/acme/dep:2.1.0-rc.1");
+        let declared = Identifier::parse("ghcr.io/acme/dep:2.1.0-rc.2").unwrap();
+
+        let mut noted = Vec::new();
+        for parents in [p.clone(), format!("{p}{q}")] {
+            let lock = GrimoireLock::from_toml_str(&format!(
+                "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+                 declaration_hash = \"sha256:{hash}\"\ngenerated_by = \"grim 0.1.0\"\n\
+                 generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+                 [[skill]]\nname = \"dep\"\npinned = \"ghcr.io/acme/dep:2.1.0-rc.2@{held}\"\n{parents}",
+                hash = "d".repeat(64),
+            ))
+            .unwrap();
+            let row = find_locked(&lock, ArtifactKind::Skill, "dep").unwrap();
+            let key = (ArtifactKind::Skill, "dep".to_string());
+            let held_edges = held_candidates(&lock, &key, &declared, row.source.pinned().unwrap());
+            noted.push(held_back_notes(&access, held_edges, &limits(), &Invocation::WALKED).await);
+        }
+
+        assert_eq!(noted[0].len(), 1, "{noted:?}");
+        assert!(noted[0][0].starts_with(RANGE_HELD), "{noted:?}");
+        assert!(noted[1].is_empty(), "{noted:?}");
+    }
+
+    /// A bare declaration yields to a range of its own repository, so the range
+    /// is never held back, even by a pin that shows no version.
+    #[tokio::test]
+    async fn a_bare_declaration_is_not_held_back_by_a_range() {
+        let (notes, reads) = range_request_notes("ghcr.io/acme/dep", None, None, true).await;
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(reads, 0);
     }
 }

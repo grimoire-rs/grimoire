@@ -2,10 +2,11 @@
 # Copyright 2026 The Grimoire Authors
 """A declaration that holds back a dependency's request says so.
 
-`x` is declared with no tag and locked at v1; `y` asks for `x:2`. The declaration
-wins, as it always has, and `add`, `update` and `lock` now print one line naming
-the update that re-reads the declared tag. `grim status --check` lists the same
-requests from the lock's recorded edges. Exits, JSON and the lock are untouched.
+`x` is declared at `x:1` and locked at v1; `y` asks for `x:2`. A tagged
+declaration wins, and `add`, `update` and `lock` print one line naming the update
+that re-reads the declared tag. `grim status --check` lists the same requests from
+the lock's recorded edges. Exits, JSON and the lock are untouched. A declaration
+with no tag follows `y`'s request instead.
 """
 
 from __future__ import annotations
@@ -17,7 +18,13 @@ from pathlib import Path
 import pytest
 import tomllib
 
-from src.helpers import make_artifact, make_bundle, make_dependent, write_config
+from src.helpers import (
+    make_artifact,
+    make_bundle,
+    make_dependent,
+    publish_release,
+    write_config,
+)
 from src.registry import REGISTRY_HOST, PublishedArtifact, retag
 from src.runner import GrimRunner
 
@@ -51,8 +58,13 @@ def _y(unique_repo: str, wants: str, body: str = "v1") -> PublishedArtifact:
     )
 
 
-def _declare_x(project_dir: Path, unique_repo: str, **more: str) -> None:
-    write_config(project_dir, skills={"x": f"{REGISTRY_HOST}/{unique_repo}/x", **more})
+def _declare_x(
+    project_dir: Path, unique_repo: str, tag: str = ":1", **more: str
+) -> None:
+    # A declaration with no tag yields to a dependency's version claim on `x`.
+    write_config(
+        project_dir, skills={"x": f"{REGISTRY_HOST}/{unique_repo}/x{tag}", **more}
+    )
 
 
 def _pins(project_dir: Path) -> dict[str, str]:
@@ -180,9 +192,11 @@ def _status(runner: GrimRunner, unique_repo: str, *flags: str, fmt: bool = False
 def test_status_check_lists_the_request_until_x_moves(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """The note stays until `x` moves, then goes."""
+    """The note stays until `x` moves, then goes. Declared with no tag, `x` follows
+    `y`'s request, and the run says so in place of the note."""
     runner, x1, x2 = _scene(grim_at, project_dir, unique_repo)
-    added = _add_y(runner, _y(unique_repo, "2"))
+    y = _y(unique_repo, "2")
+    added = _add_y(runner, y)
     assert added.returncode == 0, added.stderr
 
     listed = _status(runner, unique_repo, "--check")
@@ -192,13 +206,73 @@ def test_status_check_lists_the_request_until_x_moves(
     assert len(held) == 1, listed.stderr
     assert _held(added.stderr)[0].endswith(held[0]), "the run and the note say the same thing"
 
-    retag(f"{unique_repo}/x", "latest", x2.digest)
-    moved = runner.run("update", "--", "x", check=False)
+    _declare_x(project_dir, unique_repo, tag="", y=y.fq)
+    # `grim lock`: a named update refuses a lock the edit left stale.
+    moved = runner.run("lock", check=False)
     assert moved.returncode == 0, moved.stderr
     assert _pins(project_dir)["x"].endswith(x2.digest)
+    yielded = [
+        line
+        for line in moved.stderr.splitlines()
+        if "is declared without a tag" in line
+    ]
+    assert len(yielded) == 1, moved.stderr
+    assert "so it follows what skill/y" in yielded[0]
+    assert "declare it with a tag to choose one" in yielded[0]
+    assert _held(moved.stderr) == [], moved.stderr
     gone = _status(runner, unique_repo, "--check")
     assert gone.returncode == 0, gone.stderr
     assert _held(gone.stderr) == [], gone.stderr
+
+
+def _requested(held: str) -> str:
+    """The reference the note says the parent requests."""
+    match = re.search(r" as (\S+), but your declaration holds it at ", held)
+    assert match is not None, held
+    return match.group(1)
+
+
+def test_declaring_the_requested_reference_clears_the_note(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The note's second remedy: declare `x` as the reference it names, then `grim lock`."""
+    runner, _, x2 = _scene(grim_at, project_dir, unique_repo)
+    y = _y(unique_repo, "2")
+    held = _held(_add_y(runner, y).stderr)
+    assert len(held) == 1 and "or declare the requested reference" in held[0], held
+    write_config(project_dir, skills={"x": _requested(held[0]), "y": y.fq})
+
+    relocked = runner.run("lock", check=False)
+
+    assert relocked.returncode == 0, relocked.stderr
+    assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:2@{x2.digest}"
+    assert _held(relocked.stderr) == [], relocked.stderr
+    checked = _status(runner, unique_repo, "--check")
+    assert checked.returncode == 0, checked.stderr
+    assert _held(checked.stderr) == [], checked.stderr
+
+
+def test_rereading_an_overlapping_declared_tag_clears_the_note(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The note's first remedy: once the declared `x:1` names 1.2.0, which `y`'s
+    `x:1.2` also names, the update the note names takes it and the note goes."""
+    runner, _, _ = _scene(grim_at, project_dir, unique_repo)
+    shipped = publish_release(f"{unique_repo}/x", "1.2.0", _files("x", "v12"))
+    y = _y(unique_repo, "1.2")
+    added = _add_y(runner, y)
+    held = _held(added.stderr)
+    assert added.returncode == 0, added.stderr
+    assert len(held) == 1 and _REMEDY in held[0], added.stderr
+
+    updated = runner.run("update", "--", "x", check=False)
+
+    assert updated.returncode == 0, updated.stderr
+    assert _pins(project_dir)["x"] == f"{REGISTRY_HOST}/{unique_repo}/x:1@{shipped.digest}"
+    assert _held(updated.stderr) == [], updated.stderr
+    checked = _status(runner, unique_repo, "--check")
+    assert checked.returncode == 0, checked.stderr
+    assert _held(checked.stderr) == [], checked.stderr
 
 
 def test_status_check_adds_nothing_where_it_must_not(
@@ -260,7 +334,7 @@ def test_a_marketplace_part_run_prints_no_held_back_warning(
     y = _y(unique_repo, "2")
     control = _add_y(runner, y)
     assert len(_held(control.stderr)) == 1, control.stderr
-    x_ref = f"{REGISTRY_HOST}/{unique_repo}/x"
+    x_ref = f"{REGISTRY_HOST}/{unique_repo}/x:1"
     manifest = project_dir / "marketplace.toml"
     manifest.write_text(
         f"[plugins.team]\ninclude = [{json.dumps(x_ref)}]\n", encoding="utf-8", newline="\n"

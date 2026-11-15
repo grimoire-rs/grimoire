@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use super::resolve_error::{ResolveError, ResolveErrorKind};
-use super::resolve_options::ResolveOptions;
+use super::resolve_error::{GraphLimit, ResolveError, ResolveErrorKind, Unchosen};
+use super::resolve_options::{Downgrade, ResolveOptions};
 use super::resolver::{LockRun, refuse_stale_names, target_lock};
 use crate::catalog::test_hosts::LogCapture;
 use crate::cli::exit_code::ExitCode;
@@ -45,6 +45,9 @@ use crate::oci::access::{CatalogListing, OciAccess, Operation};
 use crate::oci::artifact_kind::KIND_ANNOTATION;
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
 use crate::oci::manifest::{Descriptor, OciManifest};
+use crate::oci::release::{FloatVerdict, float_verdict, publish_tags};
+use crate::oci::version_claim::{Claim, EdgeOrigin, Line, claim_of};
+use crate::oci::version_evidence::{Evidence, VERSION_ANNOTATION, evidence, satisfies};
 use crate::oci::{Algorithm, ArtifactKind, ArtifactKind::*, Digest, Identifier, PinnedIdentifier};
 use crate::tui::app::{RowAction, RowPlan, plan_row};
 use crate::tui::state::BatchOp;
@@ -161,6 +164,9 @@ struct Art {
     id: &'static str,
     content: &'static str,
     edges: &'static [Edge],
+    /// The release it is: its manifest carries this version, and the tags a release
+    /// of it cascades to point at it too.
+    version: Option<&'static str>,
 }
 
 const fn art(kind: ArtifactKind, id: &'static str, content: &'static str, edges: &'static [Edge]) -> Art {
@@ -169,6 +175,21 @@ const fn art(kind: ArtifactKind, id: &'static str, content: &'static str, edges:
         id,
         content,
         edges,
+        version: None,
+    }
+}
+
+impl Art {
+    /// This artifact published as release `version`.
+    const fn released(self, version: &'static str) -> Self {
+        Self {
+            version: Some(version),
+            ..self
+        }
+    }
+
+    fn version(&self) -> Option<semver::Version> {
+        self.version.map(|version| semver::Version::parse(version).unwrap())
     }
 }
 
@@ -221,9 +242,12 @@ impl Spec {
 }
 
 const X: (ArtifactKind, &str) = (Skill, "x");
-const X1: &str = "ghcr.io/acme/x:1";
-const X2: &str = "ghcr.io/acme/x:2";
-const X3: &str = "ghcr.io/acme/x:3";
+// A repository a shape requests at two tags is spelled with tags that claim no
+// version: as `x:1` and `x:2` they would claim two majors of one node, which every
+// resolve refuses before the carry rule these shapes pin is reached.
+const X1: &str = "ghcr.io/acme/x:v1";
+const X2: &str = "ghcr.io/acme/x:v2";
+const X3: &str = "ghcr.io/acme/x:v3";
 const BASE: Spec = Spec {
     name: "",
     arts: &[],
@@ -269,11 +293,11 @@ const DECLARE_C: (ArtifactKind, &str, &str) = (Skill, "c", "ghcr.io/acme/c:1");
 const NEWCOMER: Art = art(Skill, "ghcr.io/acme/z:1", "z", &[(Skill, "x", X1)]);
 const B1_X2: Art = art(Bundle, "ghcr.io/acme/b1:1", "b1", &[(Skill, "x", X2)]);
 const DECLARE_B1: (ArtifactKind, &str, &str) = (Bundle, "b1", "ghcr.io/acme/b1:1");
-const PACK1: &str = "ghcr.io/acme/pack:1";
-const PACK2: &str = "ghcr.io/acme/pack:2";
+const PACK1: &str = "ghcr.io/acme/pack:v1";
+const PACK2: &str = "ghcr.io/acme/pack:v2";
 const OTHER1: &str = "ghcr.io/acme/other:1";
-const HELD1: &str = "ghcr.io/acme/held:1";
-const HELD2: &str = "ghcr.io/acme/held:2";
+const HELD1: &str = "ghcr.io/acme/held:v1";
+const HELD2: &str = "ghcr.io/acme/held:v2";
 const M: Art = art(Skill, "ghcr.io/acme/m:1", "m", &[]);
 const DEEP: Art = art(Skill, "ghcr.io/acme/d:1", "d", &[(Skill, "e", "ghcr.io/acme/e:1")]);
 const DECLARE_DEEP: (ArtifactKind, &str, &str) = (Skill, "d", "ghcr.io/acme/d:1");
@@ -348,8 +372,8 @@ static SPECS: &[Spec] = &[
         arts: &[
             X1_SAME,
             X2_SAME,
-            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "x", "./x:1")]),
-            art(Skill, "ghcr.io/acme/q:1", "q", &[(Skill, "x", "./x:2")]),
+            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "x", "./x:v1")]),
+            art(Skill, "ghcr.io/acme/q:1", "q", &[(Skill, "x", "./x:v2")]),
         ],
         declare: &[DIRECT_X2, DECLARE_P, DECLARE_Q],
         ..BASE
@@ -363,7 +387,7 @@ static SPECS: &[Spec] = &[
                 Skill,
                 "ghcr.io/acme/q:1",
                 "q",
-                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:1}")],
+                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:v1}")],
             ),
         ],
         declare: &[DIRECT_X1, DECLARE_P, DECLARE_Q],
@@ -380,7 +404,7 @@ static SPECS: &[Spec] = &[
                 Skill,
                 "ghcr.io/acme/q:1",
                 "q",
-                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:2}")],
+                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:v2}")],
             ),
         ],
         declare: &[DIRECT_X1, DECLARE_P, DECLARE_Q],
@@ -421,16 +445,16 @@ static SPECS: &[Spec] = &[
         arts: &[
             X1_SAME,
             X2_SAME,
-            art(Bundle, "ghcr.io/acme/inner:1", "inner", &[(Skill, "x", X1)]),
+            art(Bundle, "ghcr.io/acme/inner:v1", "inner", &[(Skill, "x", X1)]),
             art(
                 Bundle,
-                "ghcr.io/acme/outer:1",
+                "ghcr.io/acme/outer:v1",
                 "outer",
-                &[(Bundle, "inner", "ghcr.io/acme/inner:1")],
+                &[(Bundle, "inner", "ghcr.io/acme/inner:v1")],
             ),
             Q_X2,
         ],
-        declare: &[DIRECT_X2, (Bundle, "outer", "ghcr.io/acme/outer:1"), DECLARE_Q],
+        declare: &[DIRECT_X2, (Bundle, "outer", "ghcr.io/acme/outer:v1"), DECLARE_Q],
         ..BASE
     },
     Spec {
@@ -439,13 +463,13 @@ static SPECS: &[Spec] = &[
             art(Skill, "ghcr.io/acme/m:1", "m", &[]),
             art(
                 Bundle,
-                "ghcr.io/acme/pack:1",
+                "ghcr.io/acme/pack:v1",
                 "pack",
                 &[(Skill, "m", "ghcr.io/acme/m:1")],
             ),
             art(
                 Bundle,
-                "ghcr.io/acme/pack:2",
+                "ghcr.io/acme/pack:v2",
                 "pack",
                 &[(Skill, "m", "ghcr.io/acme/m:1")],
             ),
@@ -453,18 +477,18 @@ static SPECS: &[Spec] = &[
                 Skill,
                 "ghcr.io/acme/p:1",
                 "p",
-                &[(Bundle, "pack", "ghcr.io/acme/pack:1")],
+                &[(Bundle, "pack", "ghcr.io/acme/pack:v1")],
             ),
             art(
                 Skill,
                 "ghcr.io/acme/q:1",
                 "q",
-                &[(Bundle, "pack", "ghcr.io/acme/pack:2")],
+                &[(Bundle, "pack", "ghcr.io/acme/pack:v2")],
             ),
         ],
-        declare: &[(Bundle, "pack", "ghcr.io/acme/pack:2"), DECLARE_P, DECLARE_Q],
+        declare: &[(Bundle, "pack", "ghcr.io/acme/pack:v2"), DECLARE_P, DECLARE_Q],
         key: (Bundle, "pack"),
-        tags: &["ghcr.io/acme/pack:1", "ghcr.io/acme/pack:2"],
+        tags: &["ghcr.io/acme/pack:v1", "ghcr.io/acme/pack:v2"],
         ..BASE
     },
     Spec {
@@ -474,13 +498,13 @@ static SPECS: &[Spec] = &[
             art(Skill, "ghcr.io/acme/n:1", "n", &[]),
             art(
                 Bundle,
-                "ghcr.io/acme/pack:1",
+                "ghcr.io/acme/pack:v1",
                 "pack1",
                 &[(Skill, "m", "ghcr.io/acme/m:1")],
             ),
             art(
                 Bundle,
-                "ghcr.io/acme/pack:2",
+                "ghcr.io/acme/pack:v2",
                 "pack2",
                 &[(Skill, "n", "ghcr.io/acme/n:1")],
             ),
@@ -488,18 +512,18 @@ static SPECS: &[Spec] = &[
                 Skill,
                 "ghcr.io/acme/p:1",
                 "p",
-                &[(Bundle, "pack", "ghcr.io/acme/pack:1")],
+                &[(Bundle, "pack", "ghcr.io/acme/pack:v1")],
             ),
             art(
                 Skill,
                 "ghcr.io/acme/q:1",
                 "q",
-                &[(Bundle, "pack", "ghcr.io/acme/pack:2")],
+                &[(Bundle, "pack", "ghcr.io/acme/pack:v2")],
             ),
         ],
-        declare: &[(Bundle, "pack", "ghcr.io/acme/pack:2"), DECLARE_P, DECLARE_Q],
+        declare: &[(Bundle, "pack", "ghcr.io/acme/pack:v2"), DECLARE_P, DECLARE_Q],
         key: (Bundle, "pack"),
-        tags: &["ghcr.io/acme/pack:1", "ghcr.io/acme/pack:2"],
+        tags: &["ghcr.io/acme/pack:v1", "ghcr.io/acme/pack:v2"],
         ..BASE
     },
     Spec {
@@ -596,7 +620,7 @@ static SPECS: &[Spec] = &[
         declare: &[(Bundle, "pack", PACK1), DECLARE_B],
         key: (Bundle, "pack"),
         tags: &[PACK1, PACK2],
-        repoint: Some(("pack", "ghcr.io/acme/pack:1@{ghcr.io/acme/pack:2}")),
+        repoint: Some(("pack", "ghcr.io/acme/pack:v1@{ghcr.io/acme/pack:v2}")),
         ..BASE
     },
     Spec {
@@ -636,7 +660,7 @@ static SPECS: &[Spec] = &[
                 Skill,
                 "ghcr.io/acme/e:1",
                 "e",
-                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:2}")],
+                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:v2}")],
             ),
             DEEP,
         ],
@@ -713,14 +737,20 @@ static SPECS: &[Spec] = &[
         ..BASE
     },
     // A tagless pin in the repository the winning request is not from: only the
-    // pin's own repository can stamp it.
+    // pin's own repository can stamp it. Spelled `y:v1`, since as `y:1` the tag
+    // claims a version a tagless, unannotated pin can never show.
     Spec {
         name: "pre-change-cross-repository-diamond",
-        arts: &[Y_LEFT, Y_RIGHT, L, R],
+        arts: &[
+            art(Skill, "ghcr.io/aa/y:v1", "y", &[]),
+            art(Skill, "ghcr.io/zz/y:v1", "y", &[]),
+            art(Skill, "ghcr.io/acme/l:1", "l", &[(Skill, "y", "ghcr.io/aa/y:v1")]),
+            art(Skill, "ghcr.io/acme/r:1", "r", &[(Skill, "y", "ghcr.io/zz/y:v1")]),
+        ],
         declare: &[DECLARE_L, DECLARE_R],
         key: (Skill, "y"),
-        tags: &["ghcr.io/aa/y:1", "ghcr.io/zz/y:1"],
-        pin: Some("ghcr.io/zz/y:1"),
+        tags: &["ghcr.io/aa/y:v1", "ghcr.io/zz/y:v1"],
+        pin: Some("ghcr.io/zz/y:v1"),
         pre_change: true,
         ..BASE
     },
@@ -746,8 +776,8 @@ static SPECS: &[Spec] = &[
         name: "alias-bindings",
         arts: &[
             X1_SAME,
-            art(Skill, "ghcr.io/acme/w:1", "w", &[]),
-            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "dep", "ghcr.io/acme/w:1")]),
+            art(Skill, "ghcr.io/acme/w:v1", "w", &[]),
+            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "dep", "ghcr.io/acme/w:v1")]),
             BYSTANDER,
         ],
         declare: &[(Skill, "alias", X1), DECLARE_P, DECLARE_B],
@@ -781,16 +811,16 @@ static SPECS: &[Spec] = &[
                 Skill,
                 "ghcr.io/acme/q:1",
                 "q",
-                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:1}")],
+                &[(Skill, "x", "ghcr.io/acme/x@{ghcr.io/acme/x:v1}")],
             ),
-            art(Skill, "ghcr.io/acme/y:1", "y", &[]),
-            art(Skill, "ghcr.io/acme/y:2", "y", &[]),
-            art(Skill, "ghcr.io/acme/c:1", "c", &[(Skill, "y", "ghcr.io/acme/y:1")]),
-            art(Skill, "ghcr.io/acme/d:1", "d", &[(Skill, "y", "ghcr.io/acme/y:2")]),
+            art(Skill, "ghcr.io/acme/y:v1", "y", &[]),
+            art(Skill, "ghcr.io/acme/y:v2", "y", &[]),
+            art(Skill, "ghcr.io/acme/c:1", "c", &[(Skill, "y", "ghcr.io/acme/y:v1")]),
+            art(Skill, "ghcr.io/acme/d:1", "d", &[(Skill, "y", "ghcr.io/acme/y:v2")]),
             BYSTANDER,
         ],
         declare: &[
-            (Skill, "y", "ghcr.io/acme/y:1"),
+            (Skill, "y", "ghcr.io/acme/y:v1"),
             DECLARE_P,
             DECLARE_Q,
             DECLARE_C,
@@ -833,8 +863,8 @@ static SPECS: &[Spec] = &[
     },
 ];
 
-/// grim 0.15.1's lock of `pack:1`, which lists `held:1`, and of `p`, whose unwalked
-/// edge asks `pack` at the digest `pack:2` serves, where `pack:1` later moves.
+/// grim 0.15.1's lock of `pack:v1`, which lists `held:v1`, and of `p`, whose unwalked
+/// edge asks `pack` at the digest `pack:v2` serves, where `pack:v1` later moves.
 const A_0151_DEPENDENT_ASKS_A_BUNDLE_DIGEST: Spec = Spec {
     name: "a-0.15.1-dependent-asks-a-bundle-digest-its-tag-moves-to",
     arts: &[
@@ -847,7 +877,7 @@ const A_0151_DEPENDENT_ASKS_A_BUNDLE_DIGEST: Spec = Spec {
     declare: &[(Bundle, "pack", PACK1), DECLARE_P],
     unwalked: &[(
         "ghcr.io/acme/p:1",
-        (Bundle, "pack", "ghcr.io/acme/pack@{ghcr.io/acme/pack:2}"),
+        (Bundle, "pack", "ghcr.io/acme/pack@{ghcr.io/acme/pack:v2}"),
     )],
     key: (Bundle, "pack"),
     tags: &[PACK1, PACK2],
@@ -868,7 +898,7 @@ static PART_SPECS: &[Spec] = &[
             art(Skill, "ghcr.io/acme/n:1", "n", &[]),
             art(
                 Bundle,
-                "ghcr.io/acme/inner:1",
+                "ghcr.io/acme/inner:v1",
                 "inner",
                 &[(Skill, "m", "ghcr.io/acme/m:1")],
             ),
@@ -880,21 +910,21 @@ static PART_SPECS: &[Spec] = &[
             ),
             art(
                 Bundle,
-                "ghcr.io/acme/outer:1",
+                "ghcr.io/acme/outer:v1",
                 "outer",
-                &[(Bundle, "inner", "ghcr.io/acme/inner:1")],
+                &[(Bundle, "inner", "ghcr.io/acme/inner:v1")],
             ),
             art(
                 Bundle,
-                "ghcr.io/acme/outer:2",
+                "ghcr.io/acme/outer:v2",
                 "outer2",
                 &[(Bundle, "other", "ghcr.io/acme/other:1")],
             ),
             BYSTANDER,
         ],
-        declare: &[(Bundle, "outer", "ghcr.io/acme/outer:1"), DECLARE_B],
+        declare: &[(Bundle, "outer", "ghcr.io/acme/outer:v1"), DECLARE_B],
         key: (Bundle, "outer"),
-        tags: &["ghcr.io/acme/outer:1", "ghcr.io/acme/outer:2"],
+        tags: &["ghcr.io/acme/outer:v1", "ghcr.io/acme/outer:v2"],
         ..BASE
     },
     // The tag of a bundle a skill requires moves onto a list that names another tag
@@ -904,10 +934,10 @@ static PART_SPECS: &[Spec] = &[
     Spec {
         name: "bundle-moved-onto-another-tag-of-its-member",
         arts: &[
-            art(Skill, "ghcr.io/acme/held:1", "held1", &[]),
-            art(Skill, "ghcr.io/acme/held:2", "held2", &[]),
-            art(Bundle, PACK1, "pack1", &[(Skill, "held", "ghcr.io/acme/held:1")]),
-            art(Bundle, PACK2, "pack2", &[(Skill, "held", "ghcr.io/acme/held:2")]),
+            art(Skill, "ghcr.io/acme/held:v1", "held1", &[]),
+            art(Skill, "ghcr.io/acme/held:v2", "held2", &[]),
+            art(Bundle, PACK1, "pack1", &[(Skill, "held", "ghcr.io/acme/held:v1")]),
+            art(Bundle, PACK2, "pack2", &[(Skill, "held", "ghcr.io/acme/held:v2")]),
             art(Skill, "ghcr.io/acme/p:1", "p", &[(Bundle, "pack", PACK1)]),
             BYSTANDER,
         ],
@@ -916,8 +946,8 @@ static PART_SPECS: &[Spec] = &[
         tags: &[PACK1, PACK2],
         ..BASE
     },
-    // `pack` and `pk2` both list `held:1`, and `pack:1` moves onto a list that names
-    // `held:2`. A pick of `pack` still meets pk2's claim on `held`, so it refuses as a
+    // `pack` and `pk2` both list `held:v1`, and `pack:v1` moves onto a list that names
+    // `held:v2`. A pick of `pack` still meets pk2's claim on `held`, so it refuses as a
     // write of the part from nothing does, rather than drop pk2's stamp.
     Spec {
         name: "a-bundle-moved-beside-a-sibling-sharing-its-member",
@@ -956,27 +986,27 @@ static FUZZ_SPECS: &[Spec] = &[
             M,
             art(
                 Bundle,
-                "ghcr.io/acme/inner:1",
+                "ghcr.io/acme/inner:v1",
                 "inner1",
                 &[(Skill, "m", "ghcr.io/acme/m:1")],
             ),
             art(
                 Bundle,
-                "ghcr.io/acme/inner:2",
+                "ghcr.io/acme/inner:v2",
                 "inner2",
                 &[(Skill, "m", "ghcr.io/acme/m:1")],
             ),
             art(
                 Bundle,
-                "ghcr.io/acme/outer:1",
+                "ghcr.io/acme/outer:v1",
                 "outer",
-                &[(Bundle, "inner", "ghcr.io/acme/inner:1")],
+                &[(Bundle, "inner", "ghcr.io/acme/inner:v1")],
             ),
             BYSTANDER,
         ],
-        declare: &[(Bundle, "outer", "ghcr.io/acme/outer:1"), DECLARE_B],
+        declare: &[(Bundle, "outer", "ghcr.io/acme/outer:v1"), DECLARE_B],
         key: (Bundle, "inner"),
-        tags: &["ghcr.io/acme/inner:1", "ghcr.io/acme/inner:2"],
+        tags: &["ghcr.io/acme/inner:v1", "ghcr.io/acme/inner:v2"],
         ..BASE
     },
     Spec {
@@ -1049,8 +1079,8 @@ static FUZZ_SPECS: &[Spec] = &[
     },
 ];
 
-const SETTINGS_S1: &str = "ghcr.io/acme/s:1";
-const SETTINGS_S2: &str = "ghcr.io/acme/s:2";
+const SETTINGS_S1: &str = "ghcr.io/acme/s:v1";
+const SETTINGS_S2: &str = "ghcr.io/acme/s:v2";
 const SETTINGS_T: Art = art(ArtifactKind::Settings, "ghcr.io/acme/t:1", "t", &[]);
 const DECLARE_T: (ArtifactKind, &str, &str) = (ArtifactKind::Settings, "t", "ghcr.io/acme/t:1");
 
@@ -1190,8 +1220,8 @@ static TABLE_SPECS: &[Spec] = &[
         ..BASE
     },
     // `pack`'s line retyped to a tag that lists another member, beside a second
-    // declared bundle: the edit that takes `other` out keeps `pack`'s row at pack:1's
-    // tag and digest, and the next relock moves `pack` to what pack:2 serves.
+    // declared bundle: the edit that takes `other` out keeps `pack`'s row at pack:v1's
+    // tag and digest, and the next relock moves `pack` to what pack:v2 serves.
     Spec {
         name: "a-bundle-retagged-by-hand-beside-another",
         arts: &[
@@ -1271,17 +1301,18 @@ static STORE_SPECS: &[Spec] = &[
     },
     // grim 0.15.1's lock of `pack`, which lists `m`, beside `p`, which requires `m`
     // at that tag, added with no install: removing `pack` drops `m`, as on 0.15.1,
-    // and names `p`.
+    // and names `p`. Spelled `m:v1`, since as `m:1` `p`'s edge claims a version
+    // the tagless, unannotated pin a 0.15.1 lock holds can never show.
     Spec {
         name: "a-0.15.1-dependent-beside-the-bundle-that-lists-its-requirement",
         arts: &[
-            M,
-            art(Bundle, PACK1, "pack", &[(Skill, "m", M1)]),
-            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "m", M1)]),
+            art(Skill, "ghcr.io/acme/m:v1", "m", &[]),
+            art(Bundle, PACK1, "pack", &[(Skill, "m", "ghcr.io/acme/m:v1")]),
+            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "m", "ghcr.io/acme/m:v1")]),
         ],
         declare: &[(Bundle, "pack", PACK1), DECLARE_P],
         key: (Skill, "m"),
-        tags: &[M1],
+        tags: &["ghcr.io/acme/m:v1"],
         installed: &["m"],
         ..A_0151_DEPENDENT
     },
@@ -1354,7 +1385,7 @@ static STORE_SPECS: &[Spec] = &[
 /// out of every fuzz draw. A fresh resolve of each refuses, so the cold relock judges
 /// only the rows whose online relock accepts.
 static UNWALKED_SPECS: &[Spec] = &[
-    // `x` requires `held:1`, and `pack` lists `held:2`, which serves other bytes.
+    // `x` requires `held:v1`, and `pack` lists `held:v2`, which serves other bytes.
     Spec {
         name: "a-0.15.1-dependent-asks-a-lower-tag-of-a-member",
         arts: &[
@@ -1394,33 +1425,286 @@ static UNWALKED_SPECS: &[Spec] = &[
 /// Shapes whose first move republishes a tag with an edge its old manifest lacked:
 /// the tag, and the edge it gains. Kept out of every fuzz draw, as the table's are.
 static EDGE_SPECS: &[(Spec, &str, Edge)] = &[
-    // A lock grim 0.15.1 wrote before `[[bundle]]` rows, two tagless members: `x:1`
-    // comes to require `y:2`, a tag of the other member.
+    // A lock grim 0.15.1 wrote before `[[bundle]]` rows, two tagless members: `x:v1`
+    // comes to require `y:v2`, a tag of the other member.
     (
         Spec {
             name: "pre-change-pre-cache-bundle-whose-member-gains-an-edge",
             arts: &[
                 X1_SAME,
-                art(Skill, "ghcr.io/acme/y:1", "y", &[]),
-                art(Skill, "ghcr.io/acme/y:2", "y2", &[]),
+                art(Skill, "ghcr.io/acme/y:v1", "y", &[]),
+                art(Skill, "ghcr.io/acme/y:v2", "y2", &[]),
                 art(
                     Bundle,
                     PACK1,
                     "pack",
-                    &[(Skill, "x", X1), (Skill, "y", "ghcr.io/acme/y:1")],
+                    &[(Skill, "x", X1), (Skill, "y", "ghcr.io/acme/y:v1")],
                 ),
                 BYSTANDER,
             ],
             declare: &[(Bundle, "pack", PACK1), DECLARE_B],
             key: (Skill, "y"),
-            tags: &["ghcr.io/acme/y:1", "ghcr.io/acme/y:2"],
+            tags: &["ghcr.io/acme/y:v1", "ghcr.io/acme/y:v2"],
             no_snapshot: Some("pack"),
             pre_change: true,
             ..BASE
         },
         X1,
-        (Skill, "y", "ghcr.io/acme/y:2"),
+        (Skill, "y", "ghcr.io/acme/y:v2"),
     ),
+];
+
+/// Shapes whose requests claim a version line onto a pin that shows no version of
+/// its own: a tagless or literal-tagged pin of an unannotated manifest, which only
+/// the lock's recorded edges onto it can show. Only the claim fuzz draws them.
+static CLAIM_SPECS: &[Spec] = &[
+    // The diamond above at the numeric tags it had before claims existed.
+    Spec {
+        name: "pre-change-cross-repository-diamond-at-numeric-tags",
+        arts: &[Y_LEFT, Y_RIGHT, L, R],
+        declare: &[DECLARE_L, DECLARE_R],
+        key: (Skill, "y"),
+        tags: &["ghcr.io/aa/y:1", "ghcr.io/zz/y:1"],
+        pin: Some("ghcr.io/zz/y:1"),
+        pre_change: true,
+        ..BASE
+    },
+    // The 0.15.1 shape above, with `m` at the numeric tag it had.
+    Spec {
+        name: "a-0.15.1-dependent-beside-the-bundle-that-lists-its-requirement-at-a-numeric-tag",
+        arts: &[
+            M,
+            art(Bundle, PACK1, "pack", &[(Skill, "m", M1)]),
+            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "m", M1)]),
+        ],
+        declare: &[(Bundle, "pack", PACK1), DECLARE_P],
+        key: (Skill, "m"),
+        tags: &[M1],
+        installed: &["m"],
+        ..A_0151_DEPENDENT
+    },
+    // `p` asks `x:stable` and `q` asks `x:2` of one unannotated manifest, pinned at
+    // `stable`: the recorded `x:2` shows the pin in [2, 3), so a moved `2` leaves it
+    // where a fresh resolve exits 78.
+    Spec {
+        name: "a-literal-pin-a-recorded-claim-shows",
+        arts: &[
+            art(Skill, "ghcr.io/acme/x:stable", "x", &[]),
+            art(Skill, "ghcr.io/acme/x:2", "x", &[]),
+            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "x", "ghcr.io/acme/x:stable")]),
+            art(Skill, "ghcr.io/acme/q:1", "q", &[(Skill, "x", "ghcr.io/acme/x:2")]),
+            BYSTANDER,
+        ],
+        declare: &[DECLARE_P, DECLARE_Q, DECLARE_B],
+        tags: &["ghcr.io/acme/x:stable", "ghcr.io/acme/x:2"],
+        pin: Some("ghcr.io/acme/x:stable"),
+        ..BASE
+    },
+    // The same from a lock written before `pinned` recorded a tag.
+    Spec {
+        name: "pre-change-tagless-pin-a-recorded-claim-shows",
+        arts: &[
+            art(Skill, "ghcr.io/acme/x:stable", "x", &[]),
+            art(Skill, "ghcr.io/acme/x:2", "x", &[]),
+            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "x", "ghcr.io/acme/x:stable")]),
+            art(Skill, "ghcr.io/acme/q:1", "q", &[(Skill, "x", "ghcr.io/acme/x:2")]),
+            BYSTANDER,
+        ],
+        declare: &[DECLARE_P, DECLARE_Q, DECLARE_B],
+        tags: &["ghcr.io/acme/x:stable", "ghcr.io/acme/x:2"],
+        pin: Some("ghcr.io/acme/x:stable"),
+        pre_change: true,
+        ..BASE
+    },
+];
+
+/// Shapes whose artifacts are releases at numeric tags, so a request onto one claims
+/// a version line. The sweep runs each through `grim lock` and a bare `grim update`,
+/// each with and without `--allow-downgrade`.
+static RELEASE_SPECS: &[Spec] = &[
+    // Two claims in one major, one nested in the other.
+    Spec {
+        name: "release-line",
+        arts: &[
+            art(Skill, "ghcr.io/acme/y:1.0.0", "y 1.0.0", &[]).released("1.0.0"),
+            art(Skill, "ghcr.io/acme/y:1.2.0", "y 1.2.0", &[]).released("1.2.0"),
+            art(Skill, "ghcr.io/acme/p:v1", "p", &[(Skill, "y", "ghcr.io/acme/y:1")]),
+            art(Skill, "ghcr.io/acme/q:v1", "q", &[(Skill, "y", "ghcr.io/acme/y:1.2")]),
+        ],
+        declare: &[(Skill, "p", "ghcr.io/acme/p:v1"), (Skill, "q", "ghcr.io/acme/q:v1")],
+        key: (Skill, "y"),
+        tags: &["ghcr.io/acme/y:1", "ghcr.io/acme/y:1.2"],
+        ..BASE
+    },
+    // `p` retyped to a version that claims the major below `x`'s pin. The higher
+    // release comes first, so `latest` stays on it.
+    Spec {
+        name: "release-a-parent-takes-down-a-major",
+        arts: &[
+            art(Skill, "ghcr.io/acme/x:2.0.0", "x 2.0.0", &[]).released("2.0.0"),
+            art(Skill, "ghcr.io/acme/x:1.0.0", "x 1.0.0", &[]).released("1.0.0"),
+            art(Skill, "ghcr.io/acme/p:v1", "p", &[(Skill, "x", "ghcr.io/acme/x:2")]),
+            art(Skill, "ghcr.io/acme/p:v2", "p2", &[(Skill, "x", "ghcr.io/acme/x:1")]),
+            BYSTANDER,
+        ],
+        declare: &[(Skill, "p", "ghcr.io/acme/p:v1"), DECLARE_B],
+        repoint: Some(("p", "ghcr.io/acme/p:v2")),
+        tags: &["ghcr.io/acme/x:1", "ghcr.io/acme/x:2"],
+        ..BASE
+    },
+    // `a` retyped to ask `p:1`, whose cascade and `latest` point at 1.2.0, which claims
+    // `c:2.5`, and `y:1.1`, which asks `p:1.4`: `p` moves to 1.5.0, which claims only
+    // `c:2`, so the held `c` 2.3.0 would move only for the dropped 1.2.0's claim. `a`
+    // asked `c` and `y` by literal tags, so the lock holds their older releases.
+    Spec {
+        name: "release-a-pin-moved-only-by-a-dropped-version",
+        arts: &[
+            art(Skill, "ghcr.io/acme/c:2.3.0", "c 2.3.0", &[]).released("2.3.0"),
+            art(Skill, "ghcr.io/acme/c:2.9.0", "c 2.9.0", &[]).released("2.9.0"),
+            art(Skill, "ghcr.io/acme/c:stable", "c 2.3.0", &[]).released("2.3.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/p:1.2.0",
+                "p 1.2.0",
+                &[(Skill, "c", "ghcr.io/acme/c:2.5")],
+            )
+            .released("1.2.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/p:1.5.0",
+                "p 1.5.0",
+                &[(Skill, "c", "ghcr.io/acme/c:2")],
+            )
+            .released("1.5.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/p:1",
+                "p 1.2.0",
+                &[(Skill, "c", "ghcr.io/acme/c:2.5")],
+            )
+            .released("1.2.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/p:latest",
+                "p 1.2.0",
+                &[(Skill, "c", "ghcr.io/acme/c:2.5")],
+            )
+            .released("1.2.0"),
+            art(Skill, "ghcr.io/acme/y:1.0.0", "y 1.0.0", &[]).released("1.0.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/y:1.1.0",
+                "y 1.1.0",
+                &[(Skill, "p", "ghcr.io/acme/p:1.4")],
+            )
+            .released("1.1.0"),
+            art(Skill, "ghcr.io/acme/y:stable", "y 1.0.0", &[]).released("1.0.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/a:v1",
+                "a",
+                &[
+                    (Skill, "c", "ghcr.io/acme/c:stable"),
+                    (Skill, "y", "ghcr.io/acme/y:stable"),
+                ],
+            ),
+            art(
+                Skill,
+                "ghcr.io/acme/a:v2",
+                "a2",
+                &[(Skill, "p", "ghcr.io/acme/p:1"), (Skill, "y", "ghcr.io/acme/y:1.1")],
+            ),
+            art(Skill, "ghcr.io/acme/q:v1", "q", &[(Skill, "c", "ghcr.io/acme/c:2")]),
+            BYSTANDER,
+        ],
+        declare: &[
+            (Skill, "a", "ghcr.io/acme/a:v1"),
+            (Skill, "q", "ghcr.io/acme/q:v1"),
+            DECLARE_B,
+        ],
+        repoint: Some(("a", "ghcr.io/acme/a:v2")),
+        key: (Skill, "c"),
+        tags: &["ghcr.io/acme/c:stable", "ghcr.io/acme/c:2"],
+        ..BASE
+    },
+    // The shape above with `latest` left on `p` 1.5.0 and `y` 1.1.0, and `a` asking
+    // `y:1`, whose own tag names 1.0.0: the passes read `p` 1.2.0 in another order,
+    // and the held `c` must still refuse to move for it alone.
+    Spec {
+        name: "release-a-pin-moved-only-by-a-dropped-version-latest-ahead",
+        arts: &[
+            art(Skill, "ghcr.io/acme/c:2.3.0", "c 2.3.0", &[]).released("2.3.0"),
+            art(Skill, "ghcr.io/acme/c:2.9.0", "c 2.9.0", &[]).released("2.9.0"),
+            art(Skill, "ghcr.io/acme/c:stable", "c 2.3.0", &[]).released("2.3.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/p:1.2.0",
+                "p 1.2.0",
+                &[(Skill, "c", "ghcr.io/acme/c:2.5")],
+            )
+            .released("1.2.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/p:1.5.0",
+                "p 1.5.0",
+                &[(Skill, "c", "ghcr.io/acme/c:2")],
+            )
+            .released("1.5.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/p:1",
+                "p 1.2.0",
+                &[(Skill, "c", "ghcr.io/acme/c:2.5")],
+            )
+            .released("1.2.0"),
+            art(Skill, "ghcr.io/acme/y:1.0.0", "y 1.0.0", &[]).released("1.0.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/y:1.1.0",
+                "y 1.1.0",
+                &[(Skill, "p", "ghcr.io/acme/p:1.4")],
+            )
+            .released("1.1.0"),
+            art(Skill, "ghcr.io/acme/y:1", "y 1.0.0", &[]).released("1.0.0"),
+            art(
+                Skill,
+                "ghcr.io/acme/a:v1",
+                "a",
+                &[(Skill, "c", "ghcr.io/acme/c:stable"), (Skill, "y", "ghcr.io/acme/y:1")],
+            ),
+            art(
+                Skill,
+                "ghcr.io/acme/a:v2",
+                "a2",
+                &[(Skill, "p", "ghcr.io/acme/p:1"), (Skill, "y", "ghcr.io/acme/y:1.1")],
+            ),
+            art(Skill, "ghcr.io/acme/q:v1", "q", &[(Skill, "c", "ghcr.io/acme/c:2")]),
+            BYSTANDER,
+        ],
+        declare: &[
+            (Skill, "a", "ghcr.io/acme/a:v1"),
+            (Skill, "q", "ghcr.io/acme/q:v1"),
+            DECLARE_B,
+        ],
+        repoint: Some(("a", "ghcr.io/acme/a:v2")),
+        key: (Skill, "c"),
+        tags: &["ghcr.io/acme/c:stable", "ghcr.io/acme/c:2"],
+        ..BASE
+    },
+    // `p` retyped to a version that claims a major no release of `x` is in.
+    Spec {
+        name: "release-a-parent-claims-a-major-nobody-released",
+        arts: &[
+            art(Skill, "ghcr.io/acme/x:1.0.0", "x 1.0.0", &[]).released("1.0.0"),
+            art(Skill, "ghcr.io/acme/p:v1", "p", &[(Skill, "x", "ghcr.io/acme/x:1")]),
+            art(Skill, "ghcr.io/acme/p:v2", "p2", &[(Skill, "x", "ghcr.io/acme/x:2")]),
+            BYSTANDER,
+        ],
+        declare: &[(Skill, "p", "ghcr.io/acme/p:v1"), DECLARE_B],
+        repoint: Some(("p", "ghcr.io/acme/p:v2")),
+        tags: &["ghcr.io/acme/x:1", "ghcr.io/acme/x:1.0"],
+        ..BASE
+    },
 ];
 
 /// One edit of a declaration.
@@ -1456,6 +1740,12 @@ enum Move {
     AllApart,
     /// The pin's tag, to the digest the other tag serves.
     PinTagJoinsOther,
+    /// A release one minor above the newest of the held pin's major, which its
+    /// cascade floats and `latest` follow as `grim release` moves them.
+    NewRelease,
+    /// A release at patch 9 of the minor below the newest of the held pin's major:
+    /// the floats a newer release holds stay, as `grim release` leaves them.
+    Backport,
 }
 
 const MOVES: [Move; 6] = [
@@ -1467,11 +1757,25 @@ const MOVES: [Move; 6] = [
     Move::PinTagJoinsOther,
 ];
 
+/// [`MOVES`] and the two releases, for shapes whose key's repository holds releases.
+/// Apart from [`MOVES`], so the seeds a fuzz already replays draw what they drew.
+const RELEASE_MOVES: [Move; 8] = [
+    Move::None,
+    Move::PinTag,
+    Move::OtherTag,
+    Move::AllToOne,
+    Move::AllApart,
+    Move::PinTagJoinsOther,
+    Move::NewRelease,
+    Move::Backport,
+];
+
 fn options() -> ResolveOptions {
     ResolveOptions {
         per_artifact_timeout: std::time::Duration::from_secs(30),
         max_retries: 0,
         base_backoff: std::time::Duration::from_millis(1),
+        downgrade: Downgrade::Refuse,
     }
 }
 
@@ -1580,6 +1884,25 @@ fn answers(pin: &PinnedIdentifier, key: &NodeKey, proof: Option<&DesiredSet>, ma
     names(pin, id) || (holds && stamped) || (holds && indirect && (made == Made::Recorded || listed))
 }
 
+/// [`answers`] as graph carry reads an edge: one whose tag claims a version line in
+/// the pin's repository is answered by what the pin shows of its version alone. A
+/// bundle's list claims no line, so on a key one lists the edge rules answer as before.
+fn carries(pin: &PinnedIdentifier, key: &NodeKey, owed: &Owed<'_>, made: Made, id: &Identifier) -> bool {
+    let ranged = !owed.members.contains(key) && pin.registry_repository() == id.registry_repository();
+    match claim_of(id, EdgeOrigin::Requires) {
+        Claim::Range(req) if ranged => satisfies(&owed.shows(key, pin), &Line::of([req])),
+        _ => answers(pin, key, owed.proof, made, id),
+    }
+}
+
+/// The keys a bundle lists, in `lock`'s rows or on `walk`.
+fn bundle_listed(lock: &GrimoireLock, walk: &Walk) -> BTreeSet<NodeKey> {
+    let recorded = requests_from(lock, |key| key.0 == Bundle).into_keys();
+    recorded
+        .chain(walk.members.iter().map(|(key, _)| key.clone()))
+        .collect()
+}
+
 /// The declaration among `sets` that `lock`'s hash proves.
 fn proof_of<'s>(lock: &GrimoireLock, sets: &[&'s DesiredSet]) -> Option<&'s DesiredSet> {
     sets.iter()
@@ -1674,21 +1997,76 @@ struct Owed<'a> {
     /// The requests parents read as the proof shows them list, which the lock may
     /// not record.
     listed: Requests,
+    /// The keys a bundle lists.
+    members: BTreeSet<NodeKey>,
+    /// The version each manifest the store published carries, by its digest.
+    versions: &'a BTreeMap<Digest, semver::Version>,
+}
+
+/// What `pin` shows of its version: the annotation at its digest, else its tag, else
+/// what `recorded`, the lock's edges onto `key`, show as a writer takes them: every
+/// edge under a proof that does not declare the key, on a stale hash only once the
+/// pin names one. Of the edges in its repository at its digest the narrowest shows,
+/// and shapes that do not nest show nothing.
+fn shown(
+    pin: &PinnedIdentifier,
+    key: &NodeKey,
+    proof: Option<&DesiredSet>,
+    recorded: &Requests,
+    versions: &BTreeMap<Digest, semver::Version>,
+) -> Evidence {
+    let own = evidence(versions.get(&pin.digest()), pin.as_identifier());
+    let edges: Vec<&Identifier> = recorded.get(key).into_iter().flatten().collect();
+    let taken = match proof {
+        _ if own != Evidence::Unknown => return own,
+        Some(proof) if proof.table(key.0).contains_key(&key.1) => return Evidence::Unknown,
+        Some(_) => edges,
+        None if edges.iter().any(|id| names(pin, id)) => edges,
+        None => return Evidence::Unknown,
+    };
+    let at_pin = |id: &&Identifier| {
+        id.registry_repository() == pin.registry_repository() && id.digest().is_none_or(|d| d == pin.digest())
+    };
+    let shapes: Vec<Evidence> = taken
+        .into_iter()
+        .filter(at_pin)
+        .map(|id| evidence(None, id))
+        .filter(|shape| *shape != Evidence::Unknown)
+        .collect();
+    let nest = |a: &Evidence, b: &Evidence| within(a, b) || within(b, a);
+    if shapes.iter().any(|a| shapes.iter().any(|b| !nest(a, b))) {
+        return Evidence::Unknown;
+    }
+    let narrowest = shapes.iter().find(|a| shapes.iter().all(|b| within(a, b)));
+    narrowest.cloned().unwrap_or(Evidence::Unknown)
+}
+
+/// Whether every version `inner` allows, `outer` allows too.
+fn within(inner: &Evidence, outer: &Evidence) -> bool {
+    match (inner, outer) {
+        (Evidence::Exact(a), Evidence::Exact(b)) => a == b,
+        (Evidence::Exact(version), Evidence::Span { lo, hi }) => lo <= version && version < hi,
+        (Evidence::Span { lo, hi }, Evidence::Span { lo: l, hi: h }) => l <= lo && hi <= h,
+        _ => false,
+    }
 }
 
 impl Owed<'_> {
+    /// What `pin` shows of its version on `key`, as [`shown`] reads it.
+    fn shows(&self, key: &NodeKey, pin: &PinnedIdentifier) -> Evidence {
+        shown(pin, key, self.proof, &self.recorded, self.versions)
+    }
+
     /// Whether `pin` answers a request that stands on `key`.
     fn answered(&self, key: &NodeKey, pin: &PinnedIdentifier) -> bool {
         let declared = self.set.table(key.0).get(&key.1).and_then(DeclaredSource::identifier);
         let listed = || {
             let edges = self.listed.get(key).into_iter().flatten();
-            edges
-                .into_iter()
-                .any(|id| answers(pin, key, self.proof, Made::Listed, id))
+            edges.into_iter().any(|id| carries(pin, key, self, Made::Listed, id))
         };
         match (declared, surviving_edges(key, &self.recorded, &self.asked)) {
             (Some(id), _) => answers(pin, key, self.proof, Made::Unrecorded, id),
-            (None, Some(edges)) => edges.iter().any(|id| answers(pin, key, self.proof, Made::Recorded, id)) || listed(),
+            (None, Some(edges)) => edges.iter().any(|id| carries(pin, key, self, Made::Recorded, id)) || listed(),
             (None, None) => listed(),
         }
     }
@@ -1696,7 +2074,8 @@ impl Owed<'_> {
     /// Whether `pin` must stay: it answers, a digest named outright is the request and
     /// nothing keeps a pin against it, and a new edge releases it. An edge a parent
     /// read as the proof shows it lists is none: the walk behind the hash met it. A
-    /// declared key gains none, since no writer resolves an edge onto a direct key.
+    /// declared key gains none, since no writer resolves an edge onto a direct key. A
+    /// pin that satisfies every version line asked of a key no declaration holds stays.
     fn holds(&self, key: &NodeKey, pin: &PinnedIdentifier) -> bool {
         let mut vouched = self.recorded.clone();
         for (child, ids) in &self.listed {
@@ -1708,7 +2087,25 @@ impl Owed<'_> {
                 .any(|id| id.digest().is_some_and(|digest| digest != pin.digest()))
         });
         let declared = self.set.table(key.0).contains_key(&key.1);
-        self.answered(key, pin) && !elsewhere && (declared || !gained_an_edge(key, &vouched, &self.asked))
+        let answered = self.answered(key, pin) && !elsewhere;
+        (answered && (declared || !gained_an_edge(key, &vouched, &self.asked)))
+            || (!declared && self.lines_hold(key, pin))
+    }
+
+    /// Whether every request on `key` claims a version line in `pin`'s repository that
+    /// what `pin` shows satisfies. A held pin answers such a claim by its version alone,
+    /// whichever row recorded it, so no row the edit dropped is needed to keep it.
+    fn lines_hold(&self, key: &NodeKey, pin: &PinnedIdentifier) -> bool {
+        let here = |id: &Identifier| id.registry_repository() == pin.registry_repository();
+        let line = |id: &Identifier| match claim_of(id, EdgeOrigin::Requires) {
+            Claim::Range(req) => here(id) && satisfies(&self.shows(key, pin), &Line::of([req])),
+            _ => false,
+        };
+        let asked = self
+            .asked
+            .get(key)
+            .filter(|ids| !ids.is_empty() && !self.members.contains(key));
+        asked.is_some_and(|ids| ids.iter().all(line))
     }
 }
 
@@ -1732,6 +2129,10 @@ struct World {
     published: BTreeMap<String, (ArtifactKind, Vec<BundleMember>)>,
     /// The edges each published manifest carries, by its digest.
     edges_at: BTreeMap<Digest, Vec<BundleMember>>,
+    /// The version each published manifest carries, by its digest.
+    versions_at: BTreeMap<Digest, semver::Version>,
+    /// Whether `grim lock`, `grim update` and `grim add` run with `--allow-downgrade`.
+    downgrade: Downgrade,
     /// `marketplace.lock` of the one plugin [`PLUGIN`], once a part was written.
     market: Option<MarketplaceLock>,
     /// The bundles the last write of the part read, by pin: a stored part keeps none.
@@ -1741,6 +2142,10 @@ struct World {
     next_content: usize,
     /// A tag moved at some point.
     moved: bool,
+    /// The repository and version of the highest [`Move::NewRelease`] published.
+    new_release: Option<(String, semver::Version)>,
+    /// The digests every [`Move::Backport`] published.
+    backports: BTreeSet<Digest>,
     /// Keys that left the declaration by hand with no relock since.
     hand: BTreeSet<NodeKey>,
     /// Keys that ever did. A relock that carried one proved the lock, so every
@@ -1793,11 +2198,15 @@ impl World {
             spec,
             published: BTreeMap::new(),
             edges_at: BTreeMap::new(),
+            versions_at: BTreeMap::new(),
+            downgrade: Downgrade::Refuse,
             market: None,
             part_bundles: Vec::new(),
             no_part: false,
             next_content: 0,
             moved: false,
+            new_release: None,
+            backports: BTreeSet::new(),
             hand: BTreeSet::new(),
             carried_by_hand: BTreeSet::new(),
             repointed: None,
@@ -1824,7 +2233,7 @@ impl World {
                     id: world.expand(id).await,
                 });
             }
-            world.publish(art.kind, art.id, art.content, &edges).await;
+            world.release(art, &edges).await;
         }
         if let Some((name, value)) = spec.repoint {
             let kind = spec.declare.iter().find(|declared| declared.1 == name).unwrap().0;
@@ -1878,7 +2287,7 @@ impl World {
                 .find(|art| art.id == id)
                 .expect("an unwalked artifact");
             assert_ne!(art.kind, Bundle, "a bundle's list is always walked");
-            let (kind, mut edges) = self.published[id].clone();
+            let (_, mut edges) = self.published[id].clone();
             for (_, (edge_kind, name, to)) in self.spec.unwalked.iter().filter(|(at, _)| *at == id) {
                 let id = self.expand(to).await;
                 edges.push(BundleMember {
@@ -1888,9 +2297,11 @@ impl World {
                 });
             }
             let old = self.digest_of(id).await;
-            self.publish(kind, id, art.content, &edges).await;
+            let tags = self.release(art, &edges).await;
             let new = self.digest_of(id).await;
-            self.store.served.lock().unwrap().remove(&(id.to_string(), old.clone()));
+            for tag in tags {
+                self.store.served.lock().unwrap().remove(&(tag, old.clone()));
+            }
             let parts = self.market.iter_mut().flat_map(|market| market.plugins.values_mut());
             let rows = std::iter::once(&mut *lock)
                 .chain(parts)
@@ -1982,7 +2393,55 @@ impl World {
             .unwrap()
     }
 
-    async fn publish(&mut self, kind: ArtifactKind, id: &str, content: &str, edges: &[BundleMember]) {
+    /// Publish `art` with `edges` at its own tag and, for a release, at every tag its
+    /// version cascades to but a float a higher release in that float's span holds.
+    /// Every tag it put.
+    async fn release(&mut self, art: &Art, edges: &[BundleMember]) -> Vec<String> {
+        self.release_at(art.kind, art.id, art.content, edges, art.version())
+            .await
+    }
+
+    /// [`Self::release`] of one manifest at `id`.
+    async fn release_at(
+        &mut self,
+        kind: ArtifactKind,
+        id: &str,
+        content: &str,
+        edges: &[BundleMember],
+        version: Option<semver::Version>,
+    ) -> Vec<String> {
+        let digest = self.publish(kind, id, content, edges, version.as_ref()).await;
+        let mut put = vec![id.to_string()];
+        let Some(version) = version else {
+            return put;
+        };
+        let repository = parse(id);
+        for tag in publish_tags(&version.to_string(), None).unwrap() {
+            let at = repository.clone_with_tag(&tag);
+            if let Some(current) = self.store.serving(&at.to_string()) {
+                let shown = evidence(self.versions_at.get(&current), &at);
+                if let FloatVerdict::Keep(_) = float_verdict(&tag, &shown, &version) {
+                    continue;
+                }
+            }
+            self.store.put_tag(&repository, &tag, &digest).await.unwrap();
+            self.published.insert(at.to_string(), (kind, edges.to_vec()));
+            if !put.contains(&at.to_string()) {
+                put.push(at.to_string());
+            }
+        }
+        put
+    }
+
+    /// Publish one manifest at `id`, carrying `version` when it is a release: its digest.
+    async fn publish(
+        &mut self,
+        kind: ArtifactKind,
+        id: &str,
+        content: &str,
+        edges: &[BundleMember],
+        version: Option<&semver::Version>,
+    ) -> Digest {
         self.published.insert(id.to_string(), (kind, edges.to_vec()));
         let id = parse(id);
         let mut layers = Vec::new();
@@ -2003,10 +2462,13 @@ impl World {
                 annotations: None,
             });
         }
-        let annotations = BTreeMap::from([
+        let mut annotations = BTreeMap::from([
             ("content".to_string(), content.to_string()),
             (KIND_ANNOTATION.to_string(), kind.to_string()),
         ]);
+        if let Some(version) = version {
+            annotations.insert(VERSION_ANNOTATION.to_string(), version.to_string());
+        }
         let manifest = OciManifest {
             media_type: None,
             artifact_type: None,
@@ -2016,7 +2478,11 @@ impl World {
         };
         let digest = self.store.push_manifest(&id, &manifest).await.unwrap();
         self.edges_at.insert(digest.clone(), edges.to_vec());
+        if let Some(version) = version {
+            self.versions_at.insert(digest.clone(), version.clone());
+        }
         self.store.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
+        digest
     }
 
     fn lock(&self) -> GrimoireLock {
@@ -2043,6 +2509,14 @@ impl World {
         target.map(|t| t.lock)
     }
 
+    /// The options `grim lock`, `grim update` and `grim add` run with here.
+    fn writer_options(&self) -> ResolveOptions {
+        ResolveOptions {
+            downgrade: self.downgrade,
+            ..options()
+        }
+    }
+
     /// `grim lock`: the tags it resolved, the lock saved.
     async fn relock(&mut self) -> Result<Vec<String>, ResolveError> {
         let previous = self.lock();
@@ -2053,7 +2527,7 @@ impl World {
             Some(&prior),
             &Refresh::Nothing,
             &self.access,
-            &options(),
+            &self.writer_options(),
             self.dir.path(),
             LockRun::project(false),
         )
@@ -2081,7 +2555,7 @@ impl World {
             Some(&prior),
             &Refresh::Nothing,
             &self.access,
-            &options(),
+            &self.writer_options(),
             self.dir.path(),
             LockRun::project(false),
         )
@@ -2100,7 +2574,7 @@ impl World {
             Some(&prior),
             &Refresh::from_names(names),
             &self.access,
-            &options(),
+            &self.writer_options(),
             self.dir.path(),
             LockRun::project(false),
         )
@@ -2127,7 +2601,7 @@ impl World {
             Some(&prior),
             &Refresh::Nothing,
             &self.access,
-            &options(),
+            &self.writer_options(),
             self.dir.path(),
             LockRun::project(false),
         )
@@ -2167,7 +2641,7 @@ impl World {
             Some(&prior),
             &Refresh::from_names(&[name.to_string()]),
             &self.access,
-            &options(),
+            &self.writer_options(),
             self.dir.path(),
             LockRun::project(false),
         )
@@ -2438,8 +2912,56 @@ impl World {
                     self.store.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
                 }
             }
+            Move::NewRelease | Move::Backport => {
+                if !self.publish_version(mv, &key).await {
+                    return;
+                }
+            }
         }
         self.moved = true;
+    }
+
+    /// Publish the release `mv` names in the repository of the shape's tags, its edges
+    /// those of the newest release of `key`'s major there: false where that repository
+    /// holds no release, or the backport would fall below that major's first minor or
+    /// in major 0, where a caret line holds one minor and so may want it.
+    async fn publish_version(&mut self, mv: Move, key: &NodeKey) -> bool {
+        let repository = parse(self.spec.tags[0]).registry_repository();
+        let held = pins(&self.lock())
+            .get(key)
+            .and_then(|pin| self.versions_at.get(&pin.digest()))
+            .map(|version| version.major);
+        let serving = self.store.serving.lock().unwrap().clone();
+        let releases: Vec<(semver::Version, Digest)> = serving
+            .into_iter()
+            .filter(|(reference, _)| parse(reference).registry_repository() == repository)
+            .filter_map(|(_, digest)| Some((self.versions_at.get(&digest)?.clone(), digest)))
+            .collect();
+        let Some(major) = held.or_else(|| releases.iter().map(|(version, _)| version.major).max()) else {
+            return false;
+        };
+        let newest = releases.iter().filter(|(version, _)| version.major == major).max();
+        let Some((newest, digest)) = newest.cloned() else {
+            return false;
+        };
+        let version = match mv {
+            Move::NewRelease => semver::Version::new(major, newest.minor + 1, 0),
+            _ if major > 0 && newest.minor > 0 => semver::Version::new(major, newest.minor - 1, 9),
+            _ => return false,
+        };
+        let id = format!("{repository}:{version}");
+        let edges = self.edges_at[&digest].clone();
+        let content = format!("{} {version}", key.1);
+        self.release_at(key.0, &id, &content, &edges, Some(version.clone()))
+            .await;
+        match mv {
+            Move::NewRelease => self.new_release = self.new_release.take().max(Some((repository, version))),
+            _ => {
+                let digest = self.digest_of(&id).await;
+                self.backports.insert(digest);
+            }
+        }
+        true
     }
 
     /// Point every one of `tags` at one newly published digest.
@@ -2448,8 +2970,8 @@ impl World {
         self.next_content += 1;
         let content = format!("moved {}", self.next_content);
         let (kind, edges) = self.published[first].clone();
-        self.publish(kind, first, &content, &edges).await;
-        let digest = self.digest_of(first).await;
+        let version = self.versions_at.get(&self.digest_of(first).await).cloned();
+        let digest = self.publish(kind, first, &content, &edges, version.as_ref()).await;
         for tag in &tags[1..] {
             let id = parse(tag);
             self.store.put_tag(&id, id.tag_or_latest(), &digest).await.unwrap();
@@ -2467,7 +2989,8 @@ impl World {
             name: gained.1.to_string(),
             id: self.expand(gained.2).await,
         });
-        self.publish(kind, tag, &content, &edges).await;
+        let version = self.versions_at.get(&self.digest_of(tag).await).cloned();
+        self.publish(kind, tag, &content, &edges, version.as_ref()).await;
         self.moved = true;
     }
 
@@ -2811,6 +3334,7 @@ impl World {
             &self.access,
             IncludeOrigin::Declared,
             false,
+            Downgrade::Refuse,
         )
         .await;
         let logs = capture.text();
@@ -3143,32 +3667,15 @@ async fn check_relock(world: &mut World, row: &str, failures: &mut Vec<String>) 
 
     let resolves = match outcome {
         Err(error) => {
-            match (conflict_key(&error), &refused_fresh) {
-                (None, _) => fail("relock-error", error.to_string()),
-                // A pin that names an edge reads the record, not the tag, so a tag
-                // moved into agreement with a digest edge does not settle it: only
-                // `grim update` follows a tag.
-                (Some(key), None) if world.moved && named_any(&before_pins, &onto, &key) => {}
-                // A line typed back brought an edge the lock never recorded. It
-                // resolves, as a request the pin does not name does, so a 78 a fresh
-                // resolve gives too is no carry the hand rule owes.
-                (Some(key), Some(_)) if typed && gained_an_edge(&key, &onto, &asked) => {}
-                (Some(key), None) => fail(
-                    "exit-agrees",
-                    format!("relock refused {}/{} where a fresh resolve accepts", key.0, key.1),
-                ),
-                // A hand-deleted line leaves a stale hash and nothing else, so a
-                // once-direct key reads as an honest diamond: `grim lock` carries it
-                // where a fresh resolve exits 78. Decided in the design record,
-                // § The pin rule, "Hand edits, decided". A digest edge at another
-                // digest stays out: no pin can answer one.
-                (Some(key), Some(_)) if by_hand.contains(&key) && carries_by_hand(&before_pins, &onto, &key) => {
-                    fail(
-                        "exit-agrees",
-                        format!("a hand edit must carry {}/{}, got 78", key.0, key.1),
-                    );
-                }
-                (Some(_), Some(_)) => {}
+            let seen = Refused {
+                before: &before,
+                fresh: &fresh,
+                by_hand: &by_hand,
+                typed,
+                asked: &asked,
+            };
+            if let Some((clause, why)) = refused(world, &error, &seen) {
+                fail(clause, why);
             }
             assert_eq!(world.bytes(), before_bytes, "a refused relock writes nothing");
             return;
@@ -3200,7 +3707,10 @@ async fn check_relock(world: &mut World, row: &str, failures: &mut Vec<String>) 
             .copied()
             .filter(|name| !before.bundles.iter().any(|row| row.name == *name))
             .collect();
-        let reads_the_unlocked = |id: &String| unlocked.iter().any(|name| id.ends_with(&format!("/{name}:1")));
+        let reads_the_unlocked = |id: &String| {
+            let at = |name: &&str, tag: &str| id.ends_with(&format!("/{name}:{tag}"));
+            unlocked.iter().any(|name| at(name, "1") || at(name, "v1"))
+        };
         // A row an edit dropped beside such a bundle, or beside a row that records no
         // edge, has no pin to carry either.
         let afresh = |id: &String| {
@@ -3269,6 +3779,78 @@ async fn check_relock(world: &mut World, row: &str, failures: &mut Vec<String>) 
         Ok(_) => {}
     }
     check_proof(world, row, failures);
+}
+
+/// What [`check_relock`] saw before a relock that refused.
+struct Refused<'a> {
+    /// The lock the relock read.
+    before: &'a GrimoireLock,
+    /// What a fresh resolve of the same declaration said.
+    fresh: &'a Result<GrimoireLock, ResolveError>,
+    /// Keys that left the declaration by hand with no relock since.
+    by_hand: &'a BTreeSet<NodeKey>,
+    /// A hand typed a line back or pinned one.
+    typed: bool,
+    /// What the declaration asks over the old pins.
+    asked: &'a Requests,
+}
+
+/// The clause a relock's refusal `error` fails, with why, or `None` where the
+/// refusal is owed.
+fn refused(world: &World, error: &ResolveError, seen: &Refused<'_>) -> Option<(&'static str, String)> {
+    let (before_pins, onto) = (pins(seen.before), requests(seen.before));
+    let fresh = seen.fresh.as_ref();
+    let refused_fresh = fresh.err().and_then(conflict_key);
+    let exit = |why: String| Some(("exit-agrees", why));
+    let exception = Exception::of(error);
+    let node = |e: &ResolveError| (e.reference.kind, e.reference.name.clone());
+    match (conflict_key(error), &refused_fresh) {
+        (None, _) => match admitted(error) {
+            Some(label)
+                if fresh
+                    .err()
+                    .is_some_and(|f| admitted(f) == Some(label) && node(f) == node(error)) =>
+            {
+                None
+            }
+            Some(label) => exit(format!(
+                "relock refused with {label} where a fresh resolve does not on that node: {error}"
+            )),
+            None => Some(("relock-error", error.to_string())),
+        },
+        // A rule only a held pin triggers, judged whatever a fresh resolve says: a 78
+        // it gives elsewhere vouches for no move down a major. Judged before the
+        // moved-tag rule below, which answers a conflict between requests.
+        (Some(_), _) if exception.is_some() => exception.and_then(|e| {
+            e.judge("exit-agrees", world, error, seen.before, fresh.ok())
+                .and_then(exit)
+        }),
+        // A pin that names an edge reads the record, not the tag, so a tag
+        // moved into agreement with a digest edge does not settle it: only
+        // `grim update` follows a tag.
+        (Some(key), None) if world.moved && named_any(&before_pins, &onto, &key) => None,
+        // A line typed back brought an edge the lock never recorded. It
+        // resolves, as a request the pin does not name does, so a 78 a fresh
+        // resolve gives too is no carry the hand rule owes.
+        (Some(key), Some(_)) if seen.typed && gained_an_edge(&key, &onto, seen.asked) => None,
+        (Some(key), None) => exit(format!(
+            "relock refused {}/{} where a fresh resolve accepts",
+            key.0, key.1
+        )),
+        // A hand-deleted line leaves a stale hash and nothing else, so a
+        // once-direct key reads as an honest diamond: `grim lock` carries it
+        // where a fresh resolve exits 78. Decided in the design record,
+        // § The pin rule, "Hand edits, decided". A digest edge at another
+        // digest stays out: no pin can answer one.
+        (Some(key), Some(_)) if seen.by_hand.contains(&key) && carries_by_hand(&before_pins, &onto, &key) => {
+            exit(format!("a hand edit must carry {}/{}, got 78", key.0, key.1))
+        }
+        (Some(key), Some(other)) if key != *other => exit(format!(
+            "relock refused {}/{} where a fresh resolve refuses {}/{}",
+            key.0, key.1, other.0, other.1
+        )),
+        (Some(_), Some(_)) => None,
+    }
 }
 
 /// What a `grim lock` that wrote the lock on disk over `before` owes, whoever ran
@@ -3447,12 +4029,15 @@ fn check_others_hold(
     // A row the declaration no longer reaches, as a line deleted by hand leaves, is a
     // ghost: no relock claims its edge, so counted here it holds a pin the writer frees.
     let reached = world.walk_over(before).below;
+    let walk_after = world.walk_over(&after);
     let owed = Owed {
         set: &world.set,
         proof,
         recorded: requests_from(before, |key| reached.contains_key(key)),
-        asked: world.walk_over(&after).requests,
+        members: bundle_listed(&after, &walk_after),
+        asked: walk_after.requests,
         listed: world.listed_requests(before, &after_pins, proof),
+        versions: &world.versions_at,
     };
     for (key, pin) in &pins(before) {
         let Some(now) = after_pins.get(key).filter(|_| Some(key) != exempt) else {
@@ -3501,10 +4086,11 @@ fn check_recorded(world: &World, row: &str, failures: &mut Vec<String>) {
     }
 }
 
-/// A refused `grim add` or `grim update` names the conflict it met: the store
-/// keeps every manifest, so no other refusal has a cause here.
+/// A refused `grim add` or `grim update` names the 78 it met, a claim no release
+/// answers or a budget it passed: the store keeps every manifest, so no other
+/// refusal has a cause here.
 fn check_refusal(error: &ResolveError, row: &str, failures: &mut Vec<String>) {
-    if conflict_key(error).is_none() {
+    if conflict_key(error).is_none() && admitted(error).is_none() {
         failures.push(format!("refusal: {row}: {error}"));
     }
 }
@@ -3544,10 +4130,51 @@ fn check_update_all(
                 ));
             }
             check_proof(world, row, failures);
+            check_released(world, row, failures);
         }
         (Err(error), Err(_)) => check_refusal(&error, row, failures),
         (Ok(()), Err(fresh)) => failures.push(format!("update-agrees: {row}: a fresh resolve refuses: {fresh}")),
-        (Err(error), Ok(_)) => failures.push(format!("update-agrees: {row}: a fresh resolve succeeds: {error}")),
+        // A refused update writes nothing, so the lock still holds the pins it read.
+        (Err(error), Ok(fresh)) => match Exception::of(&error) {
+            Some(exception) => {
+                let judged = exception.judge("update-agrees", world, &error, &world.lock(), Some(&fresh));
+                failures.extend(judged.map(|why| format!("update-agrees: {row}: {why}")));
+            }
+            None => failures.push(format!("update-agrees: {row}: a fresh resolve succeeds: {error}")),
+        },
+    }
+}
+
+/// What a bare update that wrote the lock on disk owes the releases published since
+/// the lock was built. No pin sits on a backport: in a major of 1 or more, a caret line
+/// that admits it admits the newer release of its major too. And the shape's key takes
+/// the newest [`Move::NewRelease`] or a newer one when it is not declared, no bundle
+/// lists it, and every request onto it is a caret line in its repository admitting it.
+fn check_released(world: &World, row: &str, failures: &mut Vec<String>) {
+    let lock = world.lock();
+    let held = pins(&lock);
+    for (key, pin) in held.iter().filter(|(_, pin)| world.backports.contains(&pin.digest())) {
+        failures.push(format!("no-backport: {row}: {}/{} took {pin}", key.0, key.1));
+    }
+    let key = key_of(world.spec.key.0, world.spec.key.1);
+    let Some(((repository, new), pin)) = world.new_release.as_ref().zip(held.get(&key)) else {
+        return;
+    };
+    let onto = requests(&lock).remove(&key).unwrap_or_default();
+    let admits = |id: &Identifier| {
+        id.registry_repository() == *repository
+            && matches!(claim_of(id, EdgeOrigin::Requires), Claim::Range(req) if req.matches(new))
+    };
+    let listed = requests_from(&lock, |parent| parent.0 == Bundle).contains_key(&key);
+    let declared = world.set.table(key.0).contains_key(&key.1);
+    if declared || listed || onto.is_empty() || !onto.iter().all(admits) {
+        return;
+    }
+    if world.versions_at.get(&pin.digest()).is_none_or(|version| version < new) {
+        failures.push(format!(
+            "takes-release: {row}: {}/{} stayed on {pin} below {repository}:{new}",
+            key.0, key.1
+        ));
     }
 }
 
@@ -3568,10 +4195,259 @@ fn carries_by_hand(pins: &BTreeMap<NodeKey, PinnedIdentifier>, onto: &Requests, 
         }
 }
 
+/// The key a 78 refuses on: requests that conflict, a pin that would move only
+/// for a dropped version's claim, a line a dropped claim emptied, or a move down
+/// a major.
 fn conflict_key(error: &ResolveError) -> Option<NodeKey> {
+    match &error.kind {
+        ResolveErrorKind::UnchosenRequirement { .. } | ResolveErrorKind::MajorDowngrade { .. } => {
+            Some((error.reference.kind, error.reference.name.clone()))
+        }
+        _ => requests_conflict_key(error),
+    }
+}
+
+/// [`conflict_key`] of requests that conflict alone: the one 78 a TUI Install
+/// answers by declaring the row, and that a typed line's relock gives on a key it
+/// released.
+fn requests_conflict_key(error: &ResolveError) -> Option<NodeKey> {
     match &error.kind {
         ResolveErrorKind::BundleConflict { kind, name, .. } => Some((*kind, name.clone())),
         _ => None,
+    }
+}
+
+/// The refusals beside 78 a writer may give on the store as it stands: a claim
+/// no release answers, and the run's work and listing budgets.
+fn admitted(error: &ResolveError) -> Option<&'static str> {
+    match &error.kind {
+        ResolveErrorKind::NoMatchingVersion { .. } => Some("79 no matching version"),
+        ResolveErrorKind::GraphTooLarge {
+            limit: GraphLimit::Work { .. },
+            ..
+        } => Some("65 work budget"),
+        ResolveErrorKind::GraphTooLarge {
+            limit: GraphLimit::ListingBytes,
+            ..
+        } => Some("65 listing budget"),
+        _ => None,
+    }
+}
+
+/// A 78 a clause excuses where a fresh resolve, holding no pin, takes the move: a
+/// rule of `adr_dependency_version_claims.md` that only a held pin triggers. `test`
+/// checks the refusal against the store and the fresh lock, and a failure it finds
+/// names the exception under the clause it excuses.
+struct Exception {
+    name: &'static str,
+    excuses: &'static [&'static str],
+    test: ExceptionTest,
+}
+
+/// An [`Exception`]'s check: the world, the clause it judges under, the refusal, the
+/// lock the writer read, the refused key, and the fresh lock.
+type ExceptionTest = fn(&World, &str, &ResolveError, &GrimoireLock, &NodeKey, &GrimoireLock) -> Result<(), String>;
+
+/// § Errors and § Checks at the fixpoint: a move down a major refuses without
+/// `--allow-downgrade`, on a relock and on a bare update alike.
+static MAJOR_DOWNGRADE: Exception = Exception {
+    name: "major-downgrade",
+    excuses: &["exit-agrees", "update-agrees"],
+    test: takes_a_pin_down_a_major,
+};
+
+/// § Checks at the fixpoint, the pin form: a held pin that answers every claim
+/// left refuses to move for a claim of a version the graph dropped. Only a carried
+/// pin triggers it, so a bare update never does.
+static UNCHOSEN_PIN_FORM: Exception = Exception {
+    name: "unchosen-pin-form",
+    excuses: &["exit-agrees"],
+    test: moves_only_for_a_dropped_claim,
+};
+
+impl Exception {
+    fn of(error: &ResolveError) -> Option<&'static Exception> {
+        match &error.kind {
+            ResolveErrorKind::MajorDowngrade { .. } => Some(&MAJOR_DOWNGRADE),
+            ResolveErrorKind::UnchosenRequirement {
+                shape: Unchosen::Move { .. },
+                ..
+            } => Some(&UNCHOSEN_PIN_FORM),
+            _ => None,
+        }
+    }
+
+    /// Why `clause` still fails `error` over `before` where a fresh resolve wrote
+    /// `fresh`, or `None` where this exception excuses it.
+    fn judge(
+        &self,
+        clause: &str,
+        world: &World,
+        error: &ResolveError,
+        before: &GrimoireLock,
+        fresh: Option<&GrimoireLock>,
+    ) -> Option<String> {
+        let key = conflict_key(error)?;
+        let verdict = match fresh {
+            _ if !self.excuses.contains(&clause) => Err(format!("excuses no {clause}")),
+            Some(fresh) => (self.test)(world, clause, error, before, &key, fresh),
+            None => Err("a fresh resolve refuses too".to_string()),
+        };
+        verdict.err().map(|why| format!("{}: {why}: {error}", self.name))
+    }
+}
+
+/// The pin `before` holds on `key`, with what it shows of its version as the relock
+/// reads it.
+fn held_and_shown(world: &World, before: &GrimoireLock, key: &NodeKey) -> Result<(PinnedIdentifier, Evidence), String> {
+    let held = pins(before)
+        .remove(key)
+        .ok_or_else(|| "the lock holds no pin".to_string())?;
+    let proof = proof_of(before, &[&world.set]);
+    let shows = shown(&held, key, proof, &requests(before), &world.versions_at);
+    Ok((held, shows))
+}
+
+/// The version lines `lock`'s edges onto `key` in `repository` claim.
+fn claims_onto(lock: &GrimoireLock, key: &NodeKey, repository: &str) -> Vec<semver::VersionReq> {
+    let edges = requests(lock).remove(key).unwrap_or_default();
+    edges
+        .iter()
+        .filter(|id| id.registry_repository() == repository)
+        .filter_map(|id| match claim_of(id, EdgeOrigin::Requires) {
+            Claim::Range(req) => Some(req),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A fresh resolve takes `key` to a lower caret group than the held pin shows,
+/// which some claim it keeps the held pin fails, and the run refuses a downgrade.
+fn takes_a_pin_down_a_major(
+    world: &World,
+    clause: &str,
+    _: &ResolveError,
+    before: &GrimoireLock,
+    key: &NodeKey,
+    fresh: &GrimoireLock,
+) -> Result<(), String> {
+    if world.downgrade == Downgrade::Allow {
+        return Err("the run allows a downgrade".to_string());
+    }
+    let (held, shows) = held_and_shown(world, before, key)?;
+    let now = pins(fresh)
+        .remove(key)
+        .ok_or_else(|| "a fresh resolve holds no pin".to_string())?;
+    let to = match evidence(world.versions_at.get(&now.digest()), now.as_identifier()) {
+        Evidence::Exact(version) | Evidence::Span { lo: version, .. } => version,
+        _ => return Err(format!("the fresh pin {now} shows no version")),
+    };
+    if !shows.in_higher_group_than(&to) {
+        return Err(format!("{held} lies in no higher major than {to}"));
+    }
+    let repository = held.registry_repository();
+    let failing: Vec<semver::VersionReq> = claims_onto(fresh, key, &repository)
+        .into_iter()
+        .filter(|req| !satisfies(&shows, &Line::of([req.clone()])))
+        .collect();
+    if failing.is_empty() {
+        return Err(format!("{held} answers every claim the fresh resolve keeps"));
+    }
+    // A bare update reads every parent anew, a relock only those the edit changed: a
+    // claim from a parent it carries would be one it read through a carry defect.
+    if clause != "exit-agrees" {
+        return Ok(());
+    }
+    let edited = edited_keys(world, before, fresh);
+    let asked = requests_from(fresh, |parent| edited.contains(parent));
+    let from_an_edit = asked.get(key).into_iter().flatten().any(|id| {
+        let claim = claim_of(id, EdgeOrigin::Requires);
+        id.registry_repository() == repository && matches!(claim, Claim::Range(req) if failing.contains(&req))
+    });
+    match from_an_edit {
+        true => Ok(()),
+        false => Err(format!("only parents a relock carries claim past {held}")),
+    }
+}
+
+/// The keys whose pin a relock over `before` reads anew for the edit: a declared key
+/// with no pin there or one its declaration does not leave standing, and each key one
+/// of those asks for in `fresh` by an edge `before` does not record.
+fn edited_keys(world: &World, before: &GrimoireLock, fresh: &GrimoireLock) -> BTreeSet<NodeKey> {
+    let (held, recorded) = (pins(before), requests(before));
+    let typed = |(key, source): &(NodeKey, DeclaredSource)| {
+        let id = source.identifier();
+        id.is_some_and(|id| held.get(key).is_none_or(|pin| !may_stand(pin, id)))
+    };
+    let mut edited: BTreeSet<NodeKey> = world.roots().into_iter().filter(typed).map(|(key, _)| key).collect();
+    loop {
+        let asked = requests_from(fresh, |parent| edited.contains(parent));
+        let grown: Vec<NodeKey> = asked
+            .keys()
+            .filter(|child| !edited.contains(*child) && gained_an_edge(child, &recorded, &asked))
+            .cloned()
+            .collect();
+        if grown.is_empty() {
+            return edited;
+        }
+        edited.extend(grown);
+    }
+}
+
+/// A fresh resolve moves `key` off a held pin that answers every claim it keeps,
+/// and a release the store published at the dropped version the refusal names
+/// claims past the held pin through an edge onto `key`.
+fn moves_only_for_a_dropped_claim(
+    world: &World,
+    _: &str,
+    error: &ResolveError,
+    before: &GrimoireLock,
+    key: &NodeKey,
+    fresh: &GrimoireLock,
+) -> Result<(), String> {
+    let ResolveErrorKind::UnchosenRequirement {
+        parent, dropped, claim, ..
+    } = &error.kind
+    else {
+        return Err("not the pin form".to_string());
+    };
+    let (held, shows) = held_and_shown(world, before, key)?;
+    let repository = held.registry_repository();
+    let fresh_pins = pins(fresh);
+    match fresh_pins.get(key) {
+        Some(now) if now.digest() != held.digest() && now.registry_repository() == repository => {}
+        now => return Err(format!("a fresh resolve holds {now:?}")),
+    }
+    let claims = claims_onto(fresh, key, &repository);
+    if !claims.into_iter().all(|req| satisfies(&shows, &Line::of([req]))) {
+        return Err(format!("{held} fails a claim the fresh resolve keeps"));
+    }
+    let Claim::Range(req) = claim_of(&parse(&format!("{repository}:{claim}")), EdgeOrigin::Requires) else {
+        return Err(format!("{claim} claims no version line"));
+    };
+    if satisfies(&shows, &Line::of([req])) {
+        return Err(format!("{held} answers the dropped claim {claim}"));
+    }
+    let parent_at = fresh_pins
+        .iter()
+        .find(|(at, _)| format!("{}/{}", at.0, at.1) == *parent)
+        .map(|(_, pin)| pin.digest());
+    let claims_it = |digest: &Digest| {
+        let edges = world.edges_at.get(digest).into_iter().flatten();
+        edges.into_iter().any(|edge| {
+            let id = parse(&edge.id);
+            (edge.kind, edge.name.as_str()) == (key.0, key.1.as_str())
+                && id.registry_repository() == repository
+                && id.tag() == Some(claim.as_str())
+        })
+    };
+    let published = world
+        .versions_at
+        .iter()
+        .filter(|(digest, version)| version.to_string() == *dropped && parent_at.as_ref() != Some(*digest));
+    match published.map(|(digest, _)| digest).any(claims_it) {
+        true => Ok(()),
+        false => Err(format!("no dropped {parent} {dropped} claims {claim}")),
     }
 }
 
@@ -4154,7 +5030,7 @@ async fn every_writer_holds_the_pin_rule() {
     let mut failures = Vec::new();
     let mut scenarios = 0;
     let shapes = SPECS.iter().chain(LATER_SPECS).chain(TABLE_SPECS);
-    for spec in shapes.chain(STORE_SPECS).chain(UNWALKED_SPECS) {
+    for spec in shapes.chain(STORE_SPECS).chain(UNWALKED_SPECS).chain(CLAIM_SPECS) {
         for edits in edits_of(spec) {
             for mv in MOVES {
                 let name = row_name(spec, &edits, mv);
@@ -4168,7 +5044,383 @@ async fn every_writer_holds_the_pin_rule() {
             }
         }
     }
+    for spec in RELEASE_SPECS {
+        for edits in edits_of(spec) {
+            for mv in RELEASE_MOVES {
+                for downgrade in [Downgrade::Refuse, Downgrade::Allow] {
+                    let name = format!("{}/{downgrade:?}", row_name(spec, &edits, mv));
+                    let mut world = World::build(spec).await;
+                    world.downgrade = downgrade;
+                    for (edit, key) in &edits {
+                        edit_and_check(&mut world, *edit, key, &name, &mut failures).await;
+                    }
+                    world.move_tags(mv).await;
+                    check_relock(&mut world, &name, &mut failures).await;
+                    scenarios += 1;
+                }
+                // A bare update re-resolves every request, so it agrees with a fresh resolve
+                // but where the guard refuses a move down a major that a fresh resolve takes.
+                for (downgrade, flag) in [(Downgrade::Refuse, ""), (Downgrade::Allow, " --allow-downgrade")] {
+                    let name = format!("{}/update{flag}", row_name(spec, &edits, mv));
+                    let mut world = World::build(spec).await;
+                    world.downgrade = downgrade;
+                    for (edit, key) in &edits {
+                        edit_and_check(&mut world, *edit, key, &name, &mut failures).await;
+                    }
+                    world.move_tags(mv).await;
+                    let fresh = world.fresh().await;
+                    let outcome = world.update(&[]).await;
+                    check_update_all(&world, outcome, fresh, &name, &mut failures);
+                    scenarios += 1;
+                }
+            }
+        }
+    }
     report(&failures, scenarios);
+}
+
+fn release_spec(name: &str) -> &'static Spec {
+    RELEASE_SPECS.iter().find(|spec| spec.name == name).unwrap()
+}
+
+/// A release annotates its manifest with its version and points each tag of its
+/// cascade at it, and the store lists every tag its repository holds.
+#[tokio::test]
+async fn a_release_publishes_its_version_and_its_cascade() {
+    let world = World::build(release_spec("release-line")).await;
+    let y = parse("ghcr.io/acme/y:1.2.0");
+    let tags = world.access.list_tags(&y).await.unwrap().unwrap();
+    assert_eq!(tags, ["1", "1.0", "1.0.0", "1.2", "1.2.0", "latest"]);
+    let release = world.digest_of("ghcr.io/acme/y:1.2.0").await;
+    for float in ["1", "1.2", "latest"] {
+        let at = format!("ghcr.io/acme/y:{float}");
+        assert_eq!(world.digest_of(&at).await, release, "{at}");
+    }
+    assert_ne!(world.digest_of("ghcr.io/acme/y:1.0").await, release);
+    let pin = PinnedIdentifier::try_from(y.clone_with_digest(release.clone())).unwrap();
+    let manifest = world.access.fetch_manifest(&pin).await.unwrap().unwrap();
+    let annotated = crate::oci::version_evidence::annotated_version(&manifest.annotations);
+    assert_eq!(annotated, Some(semver::Version::new(1, 2, 0)));
+    assert_eq!(world.versions_at.get(&release), annotated.as_ref());
+}
+
+/// A release below the one a float names leaves that float where it is.
+#[tokio::test]
+async fn a_lower_release_leaves_a_float_a_higher_one_holds() {
+    let world = World::build(release_spec("release-a-parent-takes-down-a-major")).await;
+    let (two, one) = (
+        world.digest_of("ghcr.io/acme/x:2.0.0").await,
+        world.digest_of("ghcr.io/acme/x:1.0.0").await,
+    );
+    assert_eq!(world.digest_of("ghcr.io/acme/x:latest").await, two);
+    assert_eq!(world.digest_of("ghcr.io/acme/x:2").await, two);
+    assert_eq!(world.digest_of("ghcr.io/acme/x:1").await, one);
+    assert_eq!(world.digest_of("ghcr.io/acme/x:1.0").await, one);
+}
+
+/// A parent retyped to a release that claims the major below its dependency's pin:
+/// `grim lock` and `grim update` refuse the move with 78, and each takes it under
+/// `--allow-downgrade`.
+#[tokio::test]
+async fn the_downgrade_writers_take_a_pin_down_a_major() {
+    let spec = release_spec("release-a-parent-takes-down-a-major");
+    let (p, x) = (key_of(Skill, "p"), key_of(Skill, "x"));
+    for writer in ["lock", "update"] {
+        let mut world = World::build(spec).await;
+        let two = world.digest_of("ghcr.io/acme/x:2.0.0").await;
+        assert_eq!(pins(&world.lock())[&x].digest(), two);
+        world.apply(Edit::Repoint, &p);
+        for downgrade in [Downgrade::Refuse, Downgrade::Allow] {
+            world.downgrade = downgrade;
+            let outcome = match writer {
+                "lock" => world.relock().await.map(|_| ()),
+                _ => world.update(&[]).await,
+            };
+            match (downgrade, outcome) {
+                (Downgrade::Refuse, Err(error)) => {
+                    assert!(
+                        matches!(error.kind, ResolveErrorKind::MajorDowngrade { .. }),
+                        "{writer}: {error}"
+                    );
+                    assert_eq!(
+                        pins(&world.lock())[&x].digest(),
+                        two,
+                        "{writer}: a refusal writes nothing"
+                    );
+                }
+                (Downgrade::Allow, Ok(())) => {
+                    let one = world.digest_of("ghcr.io/acme/x:1.0.0").await;
+                    assert_eq!(pins(&world.lock())[&x].digest(), one, "{writer} --allow-downgrade");
+                }
+                (downgrade, outcome) => panic!("{writer} under {downgrade:?}: {outcome:?}"),
+            }
+        }
+    }
+}
+
+/// `a` retyped onto a parent whose cascade release claims past `c`'s pin and is
+/// then dropped: `grim lock` refuses the move with 78, where a fresh resolve,
+/// holding no pin, takes it.
+#[tokio::test]
+async fn a_relock_refuses_a_pin_moved_only_by_a_dropped_version() {
+    let mut world = World::build(release_spec("release-a-pin-moved-only-by-a-dropped-version")).await;
+    let c = key_of(Skill, "c");
+    assert_eq!(
+        pins(&world.lock())[&c].digest(),
+        world.digest_of("ghcr.io/acme/c:2.3.0").await
+    );
+    world.apply(Edit::Repoint, &key_of(Skill, "a"));
+    let fresh = world.fresh().await.unwrap();
+    assert_eq!(pins(&fresh)[&c].digest(), world.digest_of("ghcr.io/acme/c:2.9.0").await);
+    let error = world.relock().await.unwrap_err();
+    assert!(
+        matches!(
+            error.kind,
+            ResolveErrorKind::UnchosenRequirement {
+                shape: Unchosen::Move { .. },
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+fn conflict_on(name: &str) -> ResolveError {
+    let kind = ResolveErrorKind::BundleConflict {
+        kind: Skill,
+        name: name.to_string(),
+        sources: String::new(),
+        others: String::new(),
+        locations: Vec::new(),
+        from_bundles: false,
+    };
+    ResolveError::unidentified(Skill, name, kind)
+}
+
+fn downgrade_of(name: &str) -> ResolveError {
+    let kind = ResolveErrorKind::MajorDowngrade {
+        from: "2.0.0".to_string(),
+        to: "1.0.0".to_string(),
+        requesters: "skill/p".to_string(),
+        claim: "1".to_string(),
+        declare: String::new(),
+        fix: String::new(),
+    };
+    ResolveError::unidentified(Skill, name, kind)
+}
+
+/// A relock's 78 on one key beside a fresh resolve's 78 on another is no agreement: a
+/// move down a major is judged on its own, and a conflict must name the key the fresh
+/// resolve refuses.
+#[tokio::test]
+async fn a_relock_refusal_beside_a_fresh_78_on_another_key_is_judged() {
+    let world = World::build(release_spec("release-a-parent-takes-down-a-major")).await;
+    let before = world.lock();
+    let asked = world.walk_over(&before).requests;
+    let by_hand = BTreeSet::new();
+    let judged = |error: &ResolveError, fresh_on: &str| {
+        let fresh = Err(conflict_on(fresh_on));
+        let seen = Refused {
+            before: &before,
+            fresh: &fresh,
+            by_hand: &by_hand,
+            typed: false,
+            asked: &asked,
+        };
+        refused(&world, error, &seen).map(|(clause, _)| clause)
+    };
+    assert_eq!(judged(&downgrade_of("x"), "b"), Some("exit-agrees"), "a downgrade");
+    assert_eq!(
+        judged(&conflict_on("x"), "b"),
+        Some("exit-agrees"),
+        "a conflict elsewhere"
+    );
+    assert_eq!(judged(&conflict_on("x"), "x"), None, "the same conflict");
+}
+
+/// A relock's 79 agrees with a fresh resolve's only on the same node: a held pin that
+/// leaves one node with no release is no refusal a fresh 79 elsewhere vouches for.
+#[tokio::test]
+async fn a_relock_79_agrees_only_with_a_fresh_79_on_its_node() {
+    let world = World::build(release_spec("release-a-parent-takes-down-a-major")).await;
+    let before = world.lock();
+    let asked = world.walk_over(&before).requests;
+    let by_hand = BTreeSet::new();
+    let no_release = |name: &str| {
+        let kind = ResolveErrorKind::NoMatchingVersion {
+            repository: format!("ghcr.io/acme/{name}"),
+            claims: "^3".to_string(),
+            newest: None,
+        };
+        ResolveError::unidentified(Skill, name, kind)
+    };
+    let judged = |on: &str, fresh_on: &str| {
+        let fresh = Err(no_release(fresh_on));
+        let seen = Refused {
+            before: &before,
+            fresh: &fresh,
+            by_hand: &by_hand,
+            typed: false,
+            asked: &asked,
+        };
+        refused(&world, &no_release(on), &seen).map(|(clause, _)| clause)
+    };
+    assert_eq!(judged("x", "p"), Some("exit-agrees"), "another node");
+    assert_eq!(judged("x", "x"), None, "the same node");
+}
+
+/// A held parent whose tag moved onto a release claiming the major below its child's
+/// pin: a relock carries the parent and reads no new claim, so a downgrade refusal
+/// through it is a carry defect `exit-agrees` must not excuse, where a bare update,
+/// which reads every parent anew, owes it. A parent the edit retyped still excuses it.
+#[tokio::test]
+async fn a_downgrade_only_a_carried_parent_claims_excuses_no_relock() {
+    let spec = release_spec("release-a-parent-takes-down-a-major");
+    let (x, error) = (key_of(Skill, "x"), downgrade_of("x"));
+    let mut world = World::build(spec).await;
+    let before = world.lock();
+    let moved = world.digest_of("ghcr.io/acme/p:v2").await;
+    world
+        .store
+        .put_tag(&parse("ghcr.io/acme/p:v1"), "v1", &moved)
+        .await
+        .unwrap();
+    world.moved = true;
+    let fresh = world.fresh().await.unwrap();
+    let one = world.digest_of("ghcr.io/acme/x:1.0.0").await;
+    assert_eq!(pins(&fresh)[&x].digest(), one, "a fresh resolve reads the moved tag");
+    let judge = |clause| MAJOR_DOWNGRADE.judge(clause, &world, &error, &before, Some(&fresh));
+    assert!(judge("exit-agrees").is_some(), "a relock carries p");
+    assert_eq!(judge("update-agrees"), None, "an update reads p anew");
+
+    let mut world = World::build(spec).await;
+    world.apply(Edit::Repoint, &key_of(Skill, "p"));
+    let (before, fresh) = (world.lock(), world.fresh().await.unwrap());
+    let judged = MAJOR_DOWNGRADE.judge("exit-agrees", &world, &error, &before, Some(&fresh));
+    assert_eq!(judged, None, "the edit retyped p");
+}
+
+/// A new release moves its major's cascade and `latest`, and a backport only the
+/// floats no newer release holds. The update oracle fails a pin on a backport, and a
+/// key below the new release that every caret claim onto it admits.
+#[tokio::test]
+async fn the_release_oracle_fails_a_backport_pin_and_a_release_left_behind() {
+    let mut world = World::build(release_spec("release-line")).await;
+    world.move_tags(Move::Backport).await;
+    world.move_tags(Move::NewRelease).await;
+    let (backport, release) = (
+        world.digest_of("ghcr.io/acme/y:1.1.9").await,
+        world.digest_of("ghcr.io/acme/y:1.3.0").await,
+    );
+    for (float, at) in [("1", &release), ("latest", &release), ("1.1", &backport)] {
+        assert_eq!(
+            &world.digest_of(&format!("ghcr.io/acme/y:{float}")).await,
+            at,
+            "{float}"
+        );
+    }
+    let two = world.digest_of("ghcr.io/acme/y:1.2.0").await;
+    assert_eq!(world.digest_of("ghcr.io/acme/y:1.2").await, two);
+
+    let mut lock = world.lock();
+    for row in lock.iter_artifacts_mut().filter(|row| row.name == "y") {
+        let pin = row.source.pinned().unwrap().clone_with_digest(backport.clone());
+        row.source = LockedSource::Registry(pin);
+    }
+    lock_io::save(&world.lock_path, &lock, None).unwrap();
+    let mut failures = Vec::new();
+    check_released(&world, "planted", &mut failures);
+    let clauses: Vec<&str> = failures.iter().filter_map(|f| f.split(':').next()).collect();
+    assert_eq!(clauses, ["no-backport", "takes-release"], "{failures:?}");
+
+    let fresh = world.fresh().await;
+    let outcome = world.update(&[]).await;
+    let mut failures = Vec::new();
+    check_update_all(&world, outcome, fresh, "update", &mut failures);
+    assert_eq!(failures, Vec::<String>::new());
+    assert_eq!(pins(&world.lock())[&key_of(Skill, "y")].digest(), release);
+}
+
+/// The oracle's pin rule reads a pin's version from the annotation the store
+/// published at its digest, else from its tag: a tagless pin with neither shows
+/// nothing, and a Range claim in its repository holds it only by what it shows.
+#[test]
+fn the_oracle_reads_a_pins_version_from_its_annotation() {
+    let set = DesiredSet::default();
+    let digest = Algorithm::Sha256.hash(b"y 1.2.0");
+    let pin = PinnedIdentifier::try_from(parse("ghcr.io/acme/y").clone_with_digest(digest.clone())).unwrap();
+    let key = key_of(Skill, "y");
+    let carried = |versions: &BTreeMap<Digest, semver::Version>, claim: &str| {
+        let owed = Owed {
+            set: &set,
+            proof: None,
+            recorded: Requests::new(),
+            asked: Requests::new(),
+            listed: Requests::new(),
+            members: BTreeSet::new(),
+            versions,
+        };
+        carries(&pin, &key, &owed, Made::Recorded, &parse(claim))
+    };
+    let annotated = BTreeMap::from([(digest.clone(), semver::Version::new(1, 2, 0))]);
+    assert!(carried(&annotated, "ghcr.io/acme/y:1"));
+    assert!(carried(&annotated, "ghcr.io/acme/y:1.2"));
+    assert!(!carried(&annotated, "ghcr.io/acme/y:1.3"));
+    assert!(!carried(&annotated, "ghcr.io/acme/y:2"));
+    assert!(!carried(&BTreeMap::new(), "ghcr.io/acme/y:1"));
+}
+
+/// A pin that shows no version of its own shows what the lock's edges onto it
+/// show, as a writer takes them: every edge under a proof that does not declare
+/// the key, on a stale hash only once the pin names one, and of edges in its
+/// repository at its digest the narrowest, or nothing where two do not nest.
+#[test]
+fn the_oracle_reads_a_tagless_pins_version_from_its_recorded_edges() {
+    let set = DesiredSet::default();
+    let digest = Algorithm::Sha256.hash(b"y");
+    let at = |id: &str| PinnedIdentifier::try_from(parse(id).clone_with_digest(digest.clone())).unwrap();
+    let (tagless, literal) = (at("ghcr.io/acme/y"), at("ghcr.io/acme/y:stable"));
+    let key = key_of(Skill, "y");
+    let versions = BTreeMap::new();
+    let carried = |pin: &PinnedIdentifier, proof: Option<&DesiredSet>, edges: &[&str], claim: &str| {
+        let owed = Owed {
+            set: &set,
+            proof,
+            recorded: Requests::from([(key.clone(), edges.iter().copied().map(parse).collect())]),
+            asked: Requests::new(),
+            listed: Requests::new(),
+            members: BTreeSet::new(),
+            versions: &versions,
+        };
+        carries(pin, &key, &owed, Made::Recorded, &parse(claim))
+    };
+    let proven = Some(&set);
+    assert!(carried(&tagless, proven, &["ghcr.io/acme/y:1"], "ghcr.io/acme/y:1"));
+    assert!(!carried(&tagless, proven, &["ghcr.io/acme/y:1"], "ghcr.io/acme/y:2"));
+    let nested = ["ghcr.io/acme/y:1", "ghcr.io/acme/y:1.2"];
+    assert!(carried(&tagless, proven, &nested, "ghcr.io/acme/y:1.2"));
+    assert!(!carried(&tagless, proven, &nested, "ghcr.io/acme/y:1.3"));
+    let apart = ["ghcr.io/acme/y:1.2", "ghcr.io/acme/y:1.3"];
+    assert!(!carried(&tagless, proven, &apart, "ghcr.io/acme/y:1"));
+    let elsewhere = [
+        "ghcr.io/zz/y:1",
+        "ghcr.io/acme/y@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    ];
+    assert!(!carried(&tagless, proven, &elsewhere, "ghcr.io/acme/y:1"));
+    assert!(!carried(&tagless, None, &["ghcr.io/acme/y:1"], "ghcr.io/acme/y:1"));
+    let direct = DesiredSet::from_parts(
+        BTreeMap::from([("y".to_string(), source_of("ghcr.io/acme/y"))]),
+        BTreeMap::new(),
+    );
+    assert!(!carried(
+        &tagless,
+        Some(&direct),
+        &["ghcr.io/acme/y:1"],
+        "ghcr.io/acme/y:1"
+    ));
+    let named = ["ghcr.io/acme/y:stable", "ghcr.io/acme/y:1"];
+    assert!(carried(&literal, None, &named, "ghcr.io/acme/y:1"));
+    assert!(!carried(&literal, None, &["ghcr.io/acme/y:1"], "ghcr.io/acme/y:1"));
 }
 
 /// `x`'s tag moved to bytes with the same edges, and `b` leaves: the edit keeps `x`
@@ -4436,7 +5688,7 @@ async fn a_hand_undo_counts_a_row_an_edit_changed() {
     let mut failures = Vec::new();
     edit_and_check(&mut world, Edit::Hand, &p, "hand p", &mut failures).await;
     edit_and_check(&mut world, Edit::Remove, &pack, "remove pack", &mut failures).await;
-    world.redeclare(&pack, source_of("ghcr.io/acme/pack:2"));
+    world.redeclare(&pack, source_of("ghcr.io/acme/pack:v2"));
     world.redeclare(&p, source_of(DECLARE_P.2));
     assert!(
         !world.proven(&world.lock()),
@@ -4456,18 +5708,18 @@ async fn a_pin_named_only_in_a_later_pass_stays() {
         arts: &[
             X1_SAME,
             X2_SAME,
-            art(Skill, "ghcr.io/acme/w:1", "w", &[]),
-            art(Skill, "ghcr.io/acme/w:2", "w", &[]),
-            art(Skill, "ghcr.io/acme/c:1", "c", &[(Skill, "w", "ghcr.io/acme/w:1")]),
-            art(Skill, "ghcr.io/acme/d:1", "d", &[(Skill, "w", "ghcr.io/acme/w:2")]),
-            art(Skill, "ghcr.io/acme/a:1", "a1", &[(Skill, "x", X1)]),
-            art(Skill, "ghcr.io/acme/a:9", "a9", &[(Skill, "x", X1)]),
-            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "a", "ghcr.io/acme/a:1")]),
+            art(Skill, "ghcr.io/acme/w:v1", "w", &[]),
+            art(Skill, "ghcr.io/acme/w:v2", "w", &[]),
+            art(Skill, "ghcr.io/acme/c:1", "c", &[(Skill, "w", "ghcr.io/acme/w:v1")]),
+            art(Skill, "ghcr.io/acme/d:1", "d", &[(Skill, "w", "ghcr.io/acme/w:v2")]),
+            art(Skill, "ghcr.io/acme/a:v1", "a1", &[(Skill, "x", X1)]),
+            art(Skill, "ghcr.io/acme/a:v9", "a9", &[(Skill, "x", X1)]),
+            art(Skill, "ghcr.io/acme/p:1", "p", &[(Skill, "a", "ghcr.io/acme/a:v1")]),
             art(Skill, "ghcr.io/acme/b:1", "b", &[(Skill, "x", X2)]),
-            art(Skill, "ghcr.io/acme/z:1", "z", &[(Skill, "a", "ghcr.io/acme/a:9")]),
+            art(Skill, "ghcr.io/acme/z:1", "z", &[(Skill, "a", "ghcr.io/acme/a:v9")]),
         ],
         declare: &[
-            (Skill, "w", "ghcr.io/acme/w:1"),
+            (Skill, "w", "ghcr.io/acme/w:v1"),
             (Skill, "c", "ghcr.io/acme/c:1"),
             (Skill, "d", "ghcr.io/acme/d:1"),
             DECLARE_P,
@@ -4479,15 +5731,15 @@ async fn a_pin_named_only_in_a_later_pass_stays() {
     let held = pins(&world.lock())[&key_of(Skill, "x")].digest();
     world.apply(Edit::Remove, &key_of(Skill, "w"));
     assert!(!world.proven(&world.lock()), "the fixture");
-    // Both of `x`'s tags move to one digest, and `a:1` joins `a:9`.
+    // Both of `x`'s tags move to one digest, and `a:v1` joins `a:v9`.
     world.move_tags(Move::AllToOne).await;
-    let digest = world.digest_of("ghcr.io/acme/a:9").await;
+    let digest = world.digest_of("ghcr.io/acme/a:v9").await;
     world
         .store
-        .put_tag(&parse("ghcr.io/acme/a:1"), "1", &digest)
+        .put_tag(&parse("ghcr.io/acme/a:v1"), "v1", &digest)
         .await
         .unwrap();
-    // A hand declares `z`, which claims `a:9` in the same wave as `p`'s `a:1`.
+    // A hand declares `z`, which claims `a:v9` in the same wave as `p`'s `a:v1`.
     declare(&mut world.set, &key_of(Skill, "z"), source_of("ghcr.io/acme/z:1"));
 
     world.relock().await.expect("the edges agree");
@@ -4717,8 +5969,8 @@ async fn a_direct_key_holds_no_row_through_its_lock_row() {
     report(&failures, 1);
 }
 
-/// `pack`'s line pinned by hand to the digest `pack:2` serves, which lists `n` where
-/// `pack:1` lists `m`. A relock reads `pack` at that digest, so nothing holds `m`'s
+/// `pack`'s line pinned by hand to the digest `pack:v2` serves, which lists `n` where
+/// `pack:v1` lists `m`. A relock reads `pack` at that digest, so nothing holds `m`'s
 /// member row and its Install at a tag nobody published refuses. Fuzz seed 1003
 /// before the shapes grew.
 #[tokio::test]
@@ -4803,6 +6055,25 @@ async fn type_and_take_out(
     world.typed = typed;
 }
 
+/// `a` leaves by hand, so only `q`'s `c:2` reaches `c`, pinned at `stable` on 2.3.0.
+/// A line typed onto `c` and taken out again by `grim remove` or `grim uninstall`
+/// owes `c` its row: `grim lock` keeps that pin, whose version `^2` admits, and a
+/// dropped row resolves afresh onto 2.9.0. Red while the edit settles a key whose
+/// declaration left by what its pin's tag names alone.
+#[tokio::test]
+async fn an_edit_keeps_a_once_typed_pin_a_version_claim_holds() {
+    let spec = release_spec("release-a-pin-moved-only-by-a-dropped-version-latest-ahead");
+    let (a, c) = (key_of(Skill, "a"), key_of(Skill, "c"));
+    let mut failures = Vec::new();
+    for edit in [Edit::Remove, Edit::Undeclare] {
+        let mut world = World::build(spec).await;
+        let row = format!("{}/[Hand(a)]/round-trip({edit:?},c:2)", spec.name);
+        edit_and_check(&mut world, Edit::Hand, &a, &row, &mut failures).await;
+        type_and_take_out(&mut world, edit, &c, parse("ghcr.io/acme/c:2"), &row, &mut failures).await;
+    }
+    report(&failures, 2);
+}
+
 /// Every reached key of every shape at each tag, and a line nothing reached: the
 /// fuzz meets these only by chance.
 #[tokio::test]
@@ -4823,7 +6094,8 @@ async fn a_typed_line_costs_no_true_proof() {
             for (key, pin) in pins(&before) {
                 if !probe.set.table(key.0).contains_key(&key.1) {
                     let repository = Identifier::new_registry(pin.repository(), pin.registry());
-                    lines.extend(["1", "2"].map(|tag| (key.clone(), repository.clone_with_tag(tag))));
+                    let [one, two, _] = tag_names(&probe, &pin.registry_repository());
+                    lines.extend([one, two].map(|tag| (key.clone(), repository.clone_with_tag(tag))));
                 }
             }
             for (key, id) in lines {
@@ -4841,6 +6113,15 @@ async fn a_typed_line_costs_no_true_proof() {
         }
     }
     report(&failures, scenarios);
+}
+
+/// The tags a shape publishes `repository` at, then one it never publishes: `v1`,
+/// `v2` and `v9` where it spells them as tags that claim no version.
+fn tag_names(world: &World, repository: &str) -> [&'static str; 3] {
+    match world.published.contains_key(&format!("{repository}:v1")) {
+        true => ["v1", "v2", "v9"],
+        false => ["1", "2", "9"],
+    }
 }
 
 /// A small xorshift, so a failing seed replays with no dependency.
@@ -4904,10 +6185,11 @@ fn unset_seeds_run_the_default_range() {
     assert_eq!(seeds_between(Some("5".into()), Some("9".into())), 5..=9);
 }
 
-/// One random step of a sequence.
+/// One random step of a sequence, its tag moves drawn from `moves`.
 async fn fuzz_step(
     world: &mut World,
     rng: &mut Rng,
+    moves: &[Move],
     row: impl Fn(&str) -> String,
     failures: &mut Vec<String>,
 ) -> String {
@@ -4938,7 +6220,7 @@ async fn fuzz_step(
             step
         }
         3 => {
-            let mv = MOVES[rng.below(MOVES.len())];
+            let mv = moves[rng.below(moves.len())];
             world.move_tags(mv).await;
             // A part follows a bundle's tag, so only a moved tag gives its clauses work.
             if rng.below(2) == 0 {
@@ -5029,11 +6311,13 @@ async fn fuzz_step(
                 return "tui(nothing)".to_string();
             }
             let (op, picked) = ROW_ACTIONS[rng.below(ROW_ACTIONS.len())];
+            let offered = rows[rng.below(rows.len())].clone();
+            let tag = tag_names(world, &offered.location)[rng.below(3)].to_string();
             let step = RowStep {
-                row: rows[rng.below(rows.len())].clone(),
+                row: offered,
                 op,
                 picked,
-                tag: ["1", "2", "9"][rng.below(3)].to_string(),
+                tag,
             };
             let name = format!("tui({step:?})");
             row_and_check(world, &step, &row(&name), failures).await;
@@ -5064,7 +6348,8 @@ async fn round_trip_step(
         (key_of(Skill, "zz"), parse("ghcr.io/acme/zz:1"))
     } else {
         let (key, pin) = reached[rng.below(reached.len())].clone();
-        let tag = ["1", "2"][rng.below(2)];
+        let [one, two, _] = tag_names(world, &pin.registry_repository());
+        let tag = [one, two][rng.below(2)];
         (
             key,
             Identifier::new_registry(pin.repository(), pin.registry()).clone_with_tag(tag),
@@ -5149,7 +6434,7 @@ fn check_held_pin(
         // A typed line ends the proof the add relocks under, so `grim lock`
         // may release another key's pin that names no recorded edge: only a
         // refusal on the target compares the two writers.
-        Err(error) if conflict_key(&error).is_none_or(|refused| refused == *key) => {
+        Err(error) if requests_conflict_key(&error).is_none_or(|refused| refused == *key) => {
             failures.push(format!(
                 "held-pin: {row}: the add took {}/{}, `grim lock` over the typed line refuses: {error}",
                 key.0, key.1
@@ -5289,7 +6574,7 @@ async fn declare_owed(
     }
     let own = (row.kind, row.name.clone());
     let refused = world.relock_of(previous, &world.set).await.err();
-    if refused.as_ref().and_then(conflict_key) != Some(own.clone()) {
+    if refused.as_ref().and_then(requests_conflict_key) != Some(own.clone()) {
         return None;
     }
     let here = asked
@@ -5321,11 +6606,13 @@ fn typed_requests(world: &World, previous: &GrimoireLock, step: &RowStep, holder
 /// refuses a name, a row nothing holds refuses an Update, a guessed name bound
 /// elsewhere refuses before any relock, and so does one reached elsewhere. A held
 /// Install resolves no tag, unless it owes the row's line, which names the row's tag.
+/// A 79, or a 78 only a held pin triggers, is owed where `grim lock` gives it,
+/// `lock_refuses`.
 fn check_row_refusal(
     world: &World,
     step: &RowStep,
     error: &anyhow::Error,
-    (holder, replaces, previous, asked): (&RowHolder, &Replacing, &GrimoireLock, &Requests),
+    (holder, replaces, previous, asked, lock_refuses): (&RowHolder, &Replacing, &GrimoireLock, &Requests, bool),
     row: &str,
     failures: &mut Vec<String>,
 ) {
@@ -5350,6 +6637,11 @@ fn check_row_refusal(
                 fail(format!("Install exits 78 on its own key {kind}/{name}"));
             }
         }
+        Some(
+            ResolveErrorKind::MajorDowngrade { .. }
+            | ResolveErrorKind::UnchosenRequirement { .. }
+            | ResolveErrorKind::NoMatchingVersion { .. },
+        ) if lock_refuses => {}
         Some(ResolveErrorKind::StaleLock { .. }) if step.op == BatchOp::Update && !world.proven(previous) => {}
         Some(ResolveErrorKind::NotDeclared) if holder.sure.is_none() && step.op == BatchOp::Update => {}
         Some(ResolveErrorKind::TagNotFound) if !(repair && holder.sure.is_some()) || owed_line => {}
@@ -5405,6 +6697,53 @@ fn check_row_binding(
     }
 }
 
+/// Whether `refusal`, a 79 or a 78 only a held pin triggers, is what `grim lock` gives
+/// on the same node over the declaration as it stands, or with the row's line typed
+/// under a binding the action may declare: the relock the action reads before it
+/// writes. The TUI runs without `--allow-downgrade`, so its peer does too.
+async fn lock_refuses_alike(
+    world: &mut World,
+    previous: &GrimoireLock,
+    step: &RowStep,
+    holder: &RowHolder,
+    refusal: &ResolveError,
+) -> bool {
+    let claimed = matches!(refusal.kind, ResolveErrorKind::NoMatchingVersion { .. });
+    if !claimed && Exception::of(refusal).is_none() {
+        return false;
+    }
+    let id = parse(&format!("{}:{}", step.row.location, step.tag));
+    let mut sets = vec![world.set.clone()];
+    for binding in [Some(&step.row.name), holder.sure.as_ref(), holder.maybe.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let mut typed = world.set.clone();
+        declare(
+            &mut typed,
+            &(step.row.kind, binding.clone()),
+            DeclaredSource::Registry(id.clone()),
+        );
+        sets.push(typed);
+    }
+    let alike = |lock: &ResolveError| {
+        let node = |e: &ResolveError| (e.reference.kind, e.reference.name.clone());
+        node(lock) == node(refusal) && std::mem::discriminant(&lock.kind) == std::mem::discriminant(&refusal.kind)
+    };
+    let downgrade = std::mem::replace(&mut world.downgrade, Downgrade::Refuse);
+    let mut found = false;
+    for set in &sets {
+        if let Err(lock) = world.relock_of(previous, set).await
+            && alike(&lock)
+        {
+            found = true;
+            break;
+        }
+    }
+    world.downgrade = downgrade;
+    found
+}
+
 /// `step` on its row, held to the rule stated from the lock, the declaration and the
 /// store: never to the relock `plan_row` reads, which is the writer under test. What
 /// it wrote owes every pin it did not aim at what a relock owes, an Update moves its
@@ -5415,12 +6754,15 @@ async fn row_and_check(world: &mut World, step: &RowStep, row: &str, failures: &
     let set_before = world.set.clone();
     let proof = proof_of(&previous, &[&set_before]);
     let walk = world.walk_over(&previous);
+    let versions = world.versions_at.clone();
     let owed = Owed {
         set: &set_before,
         proof,
         recorded: requests(&previous),
         asked: walk.requests.clone(),
         listed: world.listed_requests(&previous, &pins(&previous), proof),
+        members: bundle_listed(&previous, &walk),
+        versions: &versions,
     };
     let holder = row_holder(world, &previous, step, &walk, &owed);
     let own_key = (step.row.kind, step.row.name.clone());
@@ -5443,7 +6785,11 @@ async fn row_and_check(world: &mut World, step: &RowStep, row: &str, failures: &
             if world.bytes() != bytes || world.roots() != roots_before {
                 failures.push(format!("tui-held: {row}: a refused action wrote"));
             }
-            let read = (&holder, &replaces, &previous, &asked);
+            let lock_refuses = match resolve_error(&error) {
+                Some(refusal) => lock_refuses_alike(world, &previous, step, &holder, refusal).await,
+                None => false,
+            };
+            let read = (&holder, &replaces, &previous, &asked, lock_refuses);
             check_row_refusal(world, step, &error, read, row, failures);
             return None;
         }
@@ -5519,7 +6865,8 @@ async fn every_action_on_every_row_takes_the_binding_that_holds_it() {
             let probe = prepared(spec).await;
             for offered in probe.offered(&probe.lock()) {
                 for (op, picked) in ROW_ACTIONS {
-                    for tag in ["1", "2"] {
+                    let [one, two, _] = tag_names(&probe, &offered.location);
+                    for tag in [one, two] {
                         let step = RowStep {
                             row: offered.clone(),
                             op,
@@ -5551,7 +6898,8 @@ async fn an_add_keeps_the_pin_grim_lock_keeps_over_the_same_line() {
         for (key, pin) in pins(&probe.lock()) {
             if !probe.set.table(key.0).contains_key(&key.1) {
                 let repository = Identifier::new_registry(pin.repository(), pin.registry());
-                let tags = ["1", "2"].map(|tag| repository.clone_with_tag(tag));
+                let [one, two, _] = tag_names(&probe, &pin.registry_repository());
+                let tags = [one, two].map(|tag| repository.clone_with_tag(tag));
                 let published = tags
                     .into_iter()
                     .filter(|id| probe.published.contains_key(&id.to_string()));
@@ -5593,7 +6941,8 @@ async fn a_tag_that_gains_an_edge_moves_no_pin_grim_lock_keeps() {
         for (key, pin) in pins(&probe.lock()) {
             if !probe.set.table(key.0).contains_key(&key.1) {
                 let repository = Identifier::new_registry(pin.repository(), pin.registry());
-                let tags = ["1", "2"].map(|tag| repository.clone_with_tag(tag));
+                let [one, two, _] = tag_names(&probe, &pin.registry_repository());
+                let tags = [one, two].map(|tag| repository.clone_with_tag(tag));
                 let published = tags
                     .into_iter()
                     .filter(|id| probe.published.contains_key(&id.to_string()));
@@ -6082,14 +7431,23 @@ async fn every_part_relock_holds_the_pin_rule() {
 #[tokio::test]
 async fn any_sequence_of_edits_holds_the_pin_rule() {
     let shapes: Vec<&'static Spec> = SPECS.iter().chain(FUZZ_SPECS).collect();
-    fuzz_over(&shapes).await;
+    fuzz_over(&shapes, &MOVES, &[Downgrade::Refuse]).await;
 }
 
 /// The same sequences over the shapes the first fuzz's draw leaves out.
 #[tokio::test]
 async fn any_sequence_over_later_shapes_holds_the_pin_rule() {
     let shapes: Vec<&'static Spec> = LATER_SPECS.iter().collect();
-    fuzz_over(&shapes).await;
+    fuzz_over(&shapes, &MOVES, &[Downgrade::Refuse]).await;
+}
+
+/// The same sequences over the shapes whose requests claim version lines, with a new
+/// release and a backport among the tag moves, each run with or without
+/// `--allow-downgrade`.
+#[tokio::test]
+async fn any_sequence_over_claim_shapes_holds_the_pin_rule() {
+    let shapes: Vec<&'static Spec> = CLAIM_SPECS.iter().chain(RELEASE_SPECS).collect();
+    fuzz_over(&shapes, &RELEASE_MOVES, &[Downgrade::Refuse, Downgrade::Allow]).await;
 }
 
 /// Seeds past the default range whose sequences end in an edit no table row makes.
@@ -6104,22 +7462,30 @@ async fn any_sequence_over_later_shapes_holds_the_pin_rule() {
 #[tokio::test]
 async fn sequences_past_the_default_seeds_hold_the_pin_rule() {
     let shapes: Vec<&'static Spec> = SPECS.iter().chain(FUZZ_SPECS).collect();
-    replay(&shapes, [1337, 4426, 8575, 143682, 1327528]).await;
+    let refuse = &[Downgrade::Refuse];
+    replay(&shapes, &MOVES, refuse, [1337, 4426, 8575, 143682, 1327528]).await;
     let later: Vec<&'static Spec> = LATER_SPECS.iter().collect();
-    replay(&later, [120]).await;
+    replay(&later, &MOVES, refuse, [120]).await;
 }
 
-async fn fuzz_over(shapes: &[&'static Spec]) {
+async fn fuzz_over(shapes: &[&'static Spec], moves: &[Move], downgrades: &[Downgrade]) {
     let seeds = fuzz_seeds();
     assert!(
         !seeds.is_empty(),
         "no seeds in {seeds:?}: an inverted range tests nothing"
     );
-    replay(shapes, seeds).await;
+    replay(shapes, moves, downgrades, seeds).await;
 }
 
-/// Each of `seeds`' sequence over `shapes`, then a relock.
-async fn replay(shapes: &[&'static Spec], seeds: impl IntoIterator<Item = u64>) {
+/// Each of `seeds`' sequence over `shapes`, then a relock. A seed picks its run's
+/// answer to a downgrade from `downgrades` by itself, so the draws stay those every
+/// seed made before a fuzz had a choice.
+async fn replay(
+    shapes: &[&'static Spec],
+    moves: &[Move],
+    downgrades: &[Downgrade],
+    seeds: impl IntoIterator<Item = u64>,
+) {
     let mut failures = Vec::new();
     let mut scenarios = 0;
     for seed in seeds {
@@ -6127,24 +7493,26 @@ async fn replay(shapes: &[&'static Spec], seeds: impl IntoIterator<Item = u64>) 
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let spec = shapes[rng.below(shapes.len())];
         let mut world = World::build(spec).await;
+        world.downgrade = downgrades[(seed % downgrades.len() as u64) as usize];
         let mut trail: Vec<String> = Vec::new();
         for _ in 0..=rng.below(8) {
             let so_far = trail.clone();
-            let row = |step: &str| format!("seed {seed} {}/{so_far:?}/{step}", spec.name);
+            let downgrade = world.downgrade;
+            let row = |step: &str| format!("seed {seed} {}/{downgrade:?}/{so_far:?}/{step}", spec.name);
             let step = if rng.below(3) == 0 {
                 round_trip_step(&mut world, &mut rng, row, &mut failures).await
             } else {
-                fuzz_step(&mut world, &mut rng, row, &mut failures).await
+                fuzz_step(&mut world, &mut rng, moves, row, &mut failures).await
             };
             trail.push(step);
         }
-        let name = format!("seed {seed} {}/{trail:?}", spec.name);
+        let name = format!("seed {seed} {}/{:?}/{trail:?}", spec.name, world.downgrade);
         check_relock(&mut world, &name, &mut failures).await;
     }
     report(&failures, scenarios);
 }
 
-const Y1: &str = "ghcr.io/acme/y:1";
+const Y1: &str = "ghcr.io/acme/y:v1";
 
 /// grim 0.15.1's lock of `p`, which requires `x`, and `q`, which requires `y`, each
 /// beside its requirement's own line: no row records an edge.
@@ -6274,8 +7642,8 @@ async fn an_edit_after_an_offline_relock_over_a_mixed_store_holds_the_pin_rule()
     report(&failures, scenarios);
 }
 
-/// grim 0.15.1's lock of `pack`, whose list names `held:1`, beside `x:1`, which
-/// requires `held:2` at the same bytes: an edge that lock never walked, which agrees
+/// grim 0.15.1's lock of `pack`, whose list names `held:v1`, beside `x:v1`, which
+/// requires `held:v2` at the same bytes: an edge that lock never walked, which agrees
 /// with the member's tagless pin until a tag moves.
 static UNWALKED_AGREEING_SPEC: Spec = Spec {
     name: "a-0.15.1-dependent-asks-another-tag-at-a-members-pin",
@@ -6296,8 +7664,8 @@ static UNWALKED_AGREEING_SPEC: Spec = Spec {
 
 /// **held-pin** beside an unwalked edge onto a member's pin: after every tag move,
 /// `grim lock`, then `grim add` of each tag of `held`, which writes the pin `grim lock`
-/// keeps before the line is typed. Found by review: with `held:1` moved, the add read
-/// only its line and moved the pin, where `grim lock` resolved `held:2` onto it.
+/// keeps before the line is typed. Found by review: with `held:v1` moved, the add read
+/// only its line and moved the pin, where `grim lock` resolved `held:v2` onto it.
 #[tokio::test]
 async fn an_add_beside_an_unwalked_edge_onto_its_pin_keeps_what_grim_lock_keeps() {
     let mut failures = Vec::new();

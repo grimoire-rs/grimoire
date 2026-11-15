@@ -35,6 +35,7 @@ use crate::lock::{ConfigFileLock, LockedArtifact, lock_io};
 use crate::oci::access::OciAccess;
 use crate::oci::mcp::McpDescriptor;
 use crate::oci::{ArtifactKind, PinnedIdentifier};
+use crate::resolve::resolve_options::Downgrade;
 
 const VERSION_ANNOTATION: &str = "org.opencontainers.image.version";
 const DESCRIPTION_ANNOTATION: &str = "org.opencontainers.image.description";
@@ -261,6 +262,7 @@ pub(crate) async fn run(
                 access,
                 IncludeOrigin::AdHoc,
                 offline,
+                Downgrade::Refuse,
             )
             .await?;
             let members = part_members(&res, &key);
@@ -445,6 +447,7 @@ pub(crate) async fn resolve_declared(
         access,
         IncludeOrigin::Declared,
         offline,
+        Downgrade::Refuse,
     )
     .await?;
     let mut inputs = Vec::with_capacity(all_selected.len());

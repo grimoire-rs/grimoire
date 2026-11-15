@@ -3,9 +3,9 @@
 
 //! Rolling-release publish-tag computation.
 //!
-//! A normal release of semver `X.Y.Z` is published once and then the
-//! floating tags `X.Y.Z`, `X.Y`, `X`, and `latest` are all pointed at it
-//! (most-specific first for crash safety — see `command/release.rs`). A
+//! A normal release of semver `X.Y.Z` is published once and then the tags
+//! `X.Y.Z`, `X.Y`, `X`, `latest` move to it, most-specific first for crash
+//! safety (see `command/release.rs`), a float never to a lower version. A
 //! **prerelease** (`X.Y.Z-rc.1`) is intentionally NOT part of the
 //! cascade: only its own exact tag is published — no `X.Y`, `X`, or
 //! `latest` move, so a release candidate never silently becomes the
@@ -34,6 +34,8 @@
 //!   suppressing the `X.Y`/`X`/`latest` floats even for a full semver.
 
 use super::Identifier;
+use super::version_claim::decimal_parts;
+use super::version_evidence::Evidence;
 
 /// A release-tier failure.
 ///
@@ -185,10 +187,22 @@ pub fn publish_tags(tag: &str, cascade: Option<bool>) -> Result<Vec<String>, Rel
 /// `major.minor.patch` (build metadata dropped); a prerelease to
 /// `major.minor.patch-pre`; a non-semver value is the literal string.
 fn exact_tag(tag: &str, parsed: Option<&semver::Version>) -> String {
-    match parsed {
-        Some(v) if v.pre.is_empty() => format!("{}.{}.{}", v.major, v.minor, v.patch),
-        Some(v) => format!("{}.{}.{}-{}", v.major, v.minor, v.patch, v.pre),
-        None => tag.to_string(),
+    parsed.map_or_else(|| tag.to_string(), version_tag)
+}
+
+/// The exact tag a release of `version` carries: build metadata dropped.
+pub fn version_tag(version: &semver::Version) -> String {
+    let semver::Version {
+        major,
+        minor,
+        patch,
+        pre,
+        ..
+    } = version;
+    if pre.is_empty() {
+        format!("{major}.{minor}.{patch}")
+    } else {
+        format!("{major}.{minor}.{patch}-{pre}")
     }
 }
 
@@ -201,6 +215,36 @@ fn cascade_set(v: &semver::Version) -> Vec<String> {
         v.major.to_string(),
         "latest".to_string(),
     ]
+}
+
+/// Whether a release moves a cascade float or leaves it where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FloatVerdict {
+    /// Point the float at this release.
+    Move,
+    /// Leave the float on the newer release it names, at this version.
+    Keep(semver::Version),
+}
+
+/// Whether `release` moves `float`, whose manifest's evidence is `current`.
+/// Only an exact version, a prerelease included, inside the float's own span
+/// and above the release by semver precedence keeps it; build metadata is ignored.
+pub fn float_verdict(float: &str, current: &Evidence, release: &semver::Version) -> FloatVerdict {
+    let Evidence::Exact(current) = current else {
+        return FloatVerdict::Move;
+    };
+    // Field compare, not `VersionReq`: its prerelease filter would move a float down from `2.5.0-rc.1`.
+    let in_span = float == "latest"
+        || match decimal_parts(float).as_deref() {
+            Some(&[major]) => current.major == major,
+            Some(&[major, minor]) => (current.major, current.minor) == (major, minor),
+            _ => false,
+        };
+    if in_span && release.cmp_precedence(current).is_lt() {
+        FloatVerdict::Keep(current.clone())
+    } else {
+        FloatVerdict::Move
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +358,126 @@ mod tests {
     fn missing_tag_error_displays_guidance() {
         let err = publish_tags("", None).expect_err("reject");
         assert!(err.to_string().contains("no tag"));
+    }
+
+    // ── float verdict ─────────────────────────────────────────────────────
+
+    fn v(text: &str) -> semver::Version {
+        semver::Version::parse(text).unwrap()
+    }
+
+    fn exact(text: &str) -> Evidence {
+        Evidence::Exact(v(text))
+    }
+
+    #[test]
+    fn evidence_that_is_not_exact_moves() {
+        let span = Evidence::Span {
+            lo: v("2.0.0"),
+            hi: v("3.0.0"),
+        };
+        for (float, current) in [("2", span), ("latest", Evidence::Unknown), ("2.4", Evidence::Vouched)] {
+            assert_eq!(
+                float_verdict(float, &current, &v("2.4.1")),
+                FloatVerdict::Move,
+                "{current:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_current_version_outside_the_floats_own_span_moves() {
+        for (float, current) in [
+            ("2", "3.1.0"),
+            ("2", "1.9.0"),
+            ("2.4", "2.5.0"),
+            ("0", "1.0.0"),
+            ("0.4", "0.5.1"),
+        ] {
+            let release = if float.starts_with('0') { "0.4.1" } else { "2.4.1" };
+            assert_eq!(
+                float_verdict(float, &exact(current), &v(release)),
+                FloatVerdict::Move,
+                "{float} on {current}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_at_or_above_the_current_version_moves() {
+        for (float, current) in [("2", "2.4.0"), ("2", "2.4.1"), ("2.4", "2.4.0"), ("latest", "1.0.0")] {
+            assert_eq!(
+                float_verdict(float, &exact(current), &v("2.4.1")),
+                FloatVerdict::Move,
+                "{float} on {current}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_metadata_never_decides_a_verdict() {
+        assert_eq!(
+            float_verdict("2", &exact("2.4.1+build.5"), &v("2.4.1")),
+            FloatVerdict::Move
+        );
+        assert_eq!(
+            float_verdict("2", &exact("2.4.1"), &v("2.4.1+build.9")),
+            FloatVerdict::Move
+        );
+        assert_eq!(
+            float_verdict("2", &exact("2.9.0+build.1"), &v("2.4.1")),
+            FloatVerdict::Keep(v("2.9.0+build.1"))
+        );
+    }
+
+    #[test]
+    fn a_prerelease_current_is_compared_by_precedence() {
+        for (float, current, release) in [
+            ("latest", "3.0.0-rc.1", "2.4.1"),
+            ("2", "2.5.0-rc.1", "2.4.1"),
+            ("2.5", "2.5.1-rc.1", "2.5.0"),
+            ("0", "0.5.0-beta", "0.4.1"),
+        ] {
+            assert_eq!(
+                float_verdict(float, &exact(current), &v(release)),
+                FloatVerdict::Keep(v(current)),
+                "{float} on {current} against {release}"
+            );
+        }
+        // Its own final, or any higher release, replaces it; another major's prerelease is outside the span.
+        for (float, current, release) in [
+            ("latest", "3.0.0-rc.1", "3.0.0"),
+            ("2", "2.5.0-rc.1", "2.5.0"),
+            ("2.4", "2.4.1-rc.1", "2.4.1"),
+            ("2", "3.0.0-rc.1", "2.4.1"),
+            ("0", "1.0.0-rc.1", "0.4.1"),
+        ] {
+            assert_eq!(
+                float_verdict(float, &exact(current), &v(release)),
+                FloatVerdict::Move,
+                "{float} on {current} against {release}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exact_current_inside_the_span_and_above_the_release_keeps() {
+        for (float, current) in [
+            ("2", "2.9.0"),
+            ("2.4", "2.4.3"),
+            ("latest", "3.0.0"),
+            ("latest", "2.9.0"),
+        ] {
+            assert_eq!(
+                float_verdict(float, &exact(current), &v("2.4.1")),
+                FloatVerdict::Keep(v(current)),
+                "{float} on {current}"
+            );
+        }
+        assert_eq!(
+            float_verdict("0.4", &exact("0.4.3"), &v("0.4.1")),
+            FloatVerdict::Keep(v("0.4.3"))
+        );
     }
 
     #[test]

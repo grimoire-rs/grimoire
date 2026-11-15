@@ -71,7 +71,8 @@ use crate::lock::refresh::Refresh;
 use crate::oci::ArtifactKind;
 use crate::oci::access::OciAccess;
 use crate::oci::text::{escape_controls, registry_text};
-use crate::resolve::resolve_options::ResolveOptions;
+use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
+use crate::resolve::resolve_options::{Downgrade, ResolveOptions};
 use crate::resolve::resolver::{LockRun, TargetLock, target_lock};
 
 use super::scope_resolution;
@@ -107,6 +108,11 @@ pub struct UpdateArgs {
     /// same question the workspace consent record answers durably.
     #[command(flatten)]
     pub hook_trust: crate::cli::options::HookTrustOpts,
+
+    /// `--allow-downgrade`: whether the resolve may move a pin to a lower major
+    /// version, with --marketplace too.
+    #[command(flatten)]
+    pub downgrade: crate::cli::options::DowngradeOpts,
 }
 
 /// Run `grim update`.
@@ -120,7 +126,7 @@ pub struct UpdateArgs {
 /// applies — and names the refusal on stderr.
 pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateReport, ExitCode)> {
     if let Some(m) = &args.marketplace {
-        return run_marketplace(ctx, m, &args.names).await;
+        return run_marketplace(ctx, m, &args.names, args.downgrade.downgrade()).await;
     }
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
 
@@ -143,11 +149,20 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
             prior.as_ref(),
             &refresh,
             &access,
-            &ResolveOptions::default(),
+            &ResolveOptions {
+                downgrade: args.downgrade.downgrade(),
+                ..ResolveOptions::default()
+            },
             scope.config_dir(),
             LockRun::in_scope(ctx.offline(), &scope.invocation),
         )
-        .await,
+        .await
+        .map_err(|e| {
+            let command = RemedyCommand::Update {
+                names: args.names.clone(),
+            };
+            with_remedy(e.naming(&scope.invocation), &command)
+        }),
     )?;
     let TargetLock {
         lock: new_lock,
@@ -1112,7 +1127,12 @@ fn record_changed(
 /// `--global`/`--config` or a malformed selector (64), manifest failures
 /// (65), lock contention (75), unknown selector (79), and every resolver,
 /// access or lock failure with its existing classification.
-async fn run_marketplace(ctx: &Context, manifest: &Path, names: &[String]) -> anyhow::Result<(UpdateReport, ExitCode)> {
+async fn run_marketplace(
+    ctx: &Context,
+    manifest: &Path,
+    names: &[String],
+    downgrade: Downgrade,
+) -> anyhow::Result<(UpdateReport, ExitCode)> {
     // Global flags live outside `UpdateArgs`, so clap cannot conflict them;
     // refuse before M is read so a missing M never masks the usage error.
     if ctx.global() || ctx.config().is_some() {
@@ -1156,6 +1176,7 @@ async fn run_marketplace(ctx: &Context, manifest: &Path, names: &[String]) -> an
         &access,
         IncludeOrigin::Declared,
         ctx.offline(),
+        downgrade,
     )
     .await?;
     super::grim(lock_io::save_marketplace(&lock_path, &result.lock, previous.as_ref()))?;
@@ -2469,6 +2490,7 @@ mod tests {
                 trust_workspace: false,
                 no_trust_workspace: false,
             },
+            downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: false },
         }
     }
 
@@ -2846,6 +2868,170 @@ mod tests {
         assert_eq!(logs.matches(&line).count(), 1, "{logs}");
     }
 
+    /// A project that locked `a` 1.0.0, `b` and a bare direct `x` at 3.1.0, after
+    /// which `a` 1.1.0 ships claiming `x:2`.
+    async fn a_now_claims_a_lower_major_of_x() -> (tempfile::TempDir, Context, std::path::PathBuf, Digest, Digest) {
+        use super::super::lock::test_registry::{REGISTRY, release_skill, two_majors_of_x};
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let (x26, x31) = two_majors_of_x(&reg).await;
+        release_skill(&reg, "a", "1.0.0", &[]).await;
+        release_skill(&reg, "b", "1.0.0", &[]).await;
+        let config = tmp.path().join("grimoire.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[options]\nclients = [\"claude\"]\n\n[skills]\na = \"{REGISTRY}/acme/a:1\"\n\
+                 b = \"{REGISTRY}/acme/b:1\"\nx = \"{REGISTRY}/acme/x\"\n"
+            ),
+        )
+        .unwrap();
+        let ctx = Context::with_access(tmp.path().join("home"), reg.clone()).with_config(config.clone());
+        run(&ctx, &update_all()).await.expect("the first update installs");
+        release_skill(&reg, "a", "1.1.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+        (tmp, ctx, config, x26, x31)
+    }
+
+    fn update_a_and_b() -> UpdateArgs {
+        UpdateArgs {
+            names: vec!["a".to_string(), "b".to_string()],
+            ..update_all()
+        }
+    }
+
+    /// Asserts `err` is the 78 `major-downgrade` refusal whose fix is `fix`.
+    fn assert_downgrade_refusal(err: &anyhow::Error, fix: &str) {
+        let classified = crate::error::classify(err);
+        assert_eq!(classified.exit, ExitCode::ConfigError, "{err:#}");
+        assert_eq!(classified.reason, Some(crate::error::ErrorReason::MajorDowngrade));
+        assert_eq!(
+            super::super::lock::test_registry::downgrade_fix(err),
+            Some(fix),
+            "{err:#}"
+        );
+        let printed = crate::error::printed_chain(err);
+        assert!(printed.ends_with(&format!("; {fix}")), "{printed}");
+    }
+
+    /// The selected parent moves to a release that claims a lower major of the
+    /// unselected `x`, so the fix names `x` beside the names the run typed.
+    #[tokio::test]
+    async fn a_named_update_refusing_a_major_downgrade_names_the_node_too() {
+        use super::super::lock::test_registry::REGISTRY;
+        let (_tmp, ctx, config, _, x31) = a_now_claims_a_lower_major_of_x().await;
+
+        let err = run(&ctx, &update_a_and_b())
+            .await
+            .expect_err("a major downgrade refuses");
+
+        let grim = Invocation::config(&config);
+        assert_downgrade_refusal(
+            &err,
+            &format!(
+                "declare skill x as `{REGISTRY}/acme/x@{x31}` in grimoire.toml, or run `{grim} update \
+                 --allow-downgrade -- a b x`"
+            ),
+        );
+    }
+
+    /// A bare update already resolved every pin, so its fix is the declaration or
+    /// the flag alone.
+    #[tokio::test]
+    async fn a_bare_update_refusing_a_major_downgrade_names_the_flag() {
+        use super::super::lock::test_registry::REGISTRY;
+        let (_tmp, ctx, config, _, x31) = a_now_claims_a_lower_major_of_x().await;
+
+        let err = run(&ctx, &update_all()).await.expect_err("a major downgrade refuses");
+
+        let grim = Invocation::config(&config);
+        assert_downgrade_refusal(
+            &err,
+            &format!(
+                "declare skill x as `{REGISTRY}/acme/x@{x31}` in grimoire.toml, or rerun `{grim} update \
+                 --allow-downgrade` to take 2.6.0"
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_downgrade_lets_a_named_update_move_the_pin_down() {
+        use super::super::lock::test_registry::REGISTRY;
+        let (tmp, ctx, _, x26, x31) = a_now_claims_a_lower_major_of_x().await;
+        let args = UpdateArgs {
+            downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: true },
+            ..update_a_and_b()
+        };
+
+        let (report, exit) = run(&ctx, &args).await.expect("the flag takes the move");
+
+        assert_eq!(exit, ExitCode::Success);
+        let x = report
+            .into_items()
+            .into_iter()
+            .find(|row| row.name == "x")
+            .expect("x has a row");
+        assert_eq!(
+            (x.action, x.old, x.new),
+            (UpdateAction::Updated, Some(x31), Some(x26.clone()))
+        );
+        let lock = lock_io::load(&tmp.path().join("grimoire.lock")).unwrap();
+        let pinned = lock.iter_artifacts().find(|a| a.name == "x").unwrap().source.pinned();
+        assert_eq!(
+            pinned.map(ToString::to_string),
+            Some(format!("{REGISTRY}/acme/x:2@{x26}"))
+        );
+    }
+
+    /// A marketplace plugin whose include moves to a release claiming a lower
+    /// major of `x`: the update refuses naming itself with the flag, and the flag
+    /// takes 2.6.0 into the plugin's part.
+    #[tokio::test]
+    async fn a_marketplace_update_refusing_a_major_downgrade_names_the_flag() {
+        use super::super::lock::test_registry::{REGISTRY, release_skill, two_majors_of_x};
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let (x26, x31) = two_majors_of_x(&reg).await;
+        release_skill(&reg, "a", "1.0.0", &[]).await;
+        let manifest = tmp.path().join("marketplace.toml");
+        std::fs::write(
+            &manifest,
+            format!("[plugins.p]\ninclude = [\"{REGISTRY}/acme/a:1\", \"{REGISTRY}/acme/x\"]\n"),
+        )
+        .unwrap();
+        let ctx = Context::with_access(tmp.path().join("home"), reg.clone());
+        let args = UpdateArgs {
+            marketplace: Some(manifest.clone()),
+            ..update_all()
+        };
+        run(&ctx, &args).await.expect("the first update locks x at 3.1.0");
+        release_skill(&reg, "a", "1.1.0", &[("x", &format!("{REGISTRY}/acme/x:2"))]).await;
+
+        let err = run(&ctx, &args).await.expect_err("a major downgrade refuses");
+
+        assert_downgrade_refusal(
+            &err,
+            &format!(
+                "include skill x as `{REGISTRY}/acme/x@{x31}` in plugin 'p' of {path}, or run `grim update \
+                 --marketplace {path} p --allow-downgrade`, which moves every pin of the plugin whose tag moved",
+                path = manifest.display()
+            ),
+        );
+        let allow = UpdateArgs {
+            downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: true },
+            ..args
+        };
+        let (_, exit) = run(&ctx, &allow).await.expect("the flag takes the move");
+        assert_eq!(exit, ExitCode::Success);
+        let lock = crate::export::resolve::load_lock(&crate::export::resolve::lock_path(&manifest))
+            .unwrap()
+            .unwrap();
+        let x = lock.plugins["p"].iter_artifacts().find(|a| a.name == "x").unwrap();
+        assert_eq!(
+            x.source.pinned().map(ToString::to_string),
+            Some(format!("{REGISTRY}/acme/x:2@{x26}"))
+        );
+    }
+
     /// The lock moved on before this run, as after a crash past its write: the old
     /// closure no longer holds the record, so no named run can prune it.
     #[tokio::test]
@@ -2856,9 +3042,14 @@ mod tests {
         std::fs::write(scope.workspace.join("gone.md"), "# gone\n").unwrap();
         run(&ctx, &update_all()).await.expect("the first update installs");
         std::fs::write(&scope.config_path, local_rule_config(r#""claude""#)).unwrap();
-        super::super::lock::run(&ctx, &super::super::lock::LockArgs {})
-            .await
-            .expect("the lock drops the rule and leaves its record");
+        super::super::lock::run(
+            &ctx,
+            &super::super::lock::LockArgs {
+                downgrade: crate::cli::options::DowngradeOpts { allow_downgrade: false },
+            },
+        )
+        .await
+        .expect("the lock drops the rule and leaves its record");
         let orphan = scope.workspace.join(".claude/rules/gone.md");
 
         let (out, logs) = update_logged(&ctx, &update_named("local")).await;

@@ -102,6 +102,7 @@ tasks:
         tests/test_old_grim_remove_unread.py
         tests/test_old_grim_settings.py
         tests/test_old_grim_unwalked_requires.py
+        tests/test_old_grim_version_claims.py
         tests/test_marketplace_stale_remedy.py
         tests/test_catalog_kindless_upgrade.py::test_grim_0_15_1_lists_the_rows_this_grim_cached
       REPORT: results/old-grim/junit.xml

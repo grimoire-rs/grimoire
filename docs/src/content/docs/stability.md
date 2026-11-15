@@ -30,7 +30,7 @@ surface, the experimental [settings][settings] surface, and the
 
 | Area | Guarantee |
 |------|-----------|
-| CLI surface | Subcommand names, arguments, flags, and the [documented exit codes][exit-codes] |
+| CLI surface | Subcommand names, arguments, flags (`--allow-downgrade` on `add`, `update` and `lock` joined additively), and the [documented exit codes][exit-codes] (no code was added for dependency version claims) |
 | `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration], and the rule that [`grim lock`][lock] keeps existing pins. See [Additive fields](#frozen-additive-fields) |
 | `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field, the `[[plugin]]` table and the [`[marketplace]` table][marketplace-table] and the [plugin metadata keys][plugin-metadata] — under the same additive and pin rules as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |
@@ -40,7 +40,7 @@ surface, the experimental [settings][settings] surface, and the
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
-| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release], the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, the `com.grimoire.uncompressed.digest` layer annotation, the [two-layer layout](./artifacts.md#requires-layer) of an artifact that declares dependencies (a grim convention: one content layer and one `application/vnd.grimoire.bundle.v1+json` requires layer, told apart by media type and written content first), and the `com.grimoire.requires-features` annotation grim reads to refuse a feature it does not know |
+| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release] (a cascading release never moves a float to a lower version), the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, the `com.grimoire.uncompressed.digest` layer annotation, the [two-layer layout](./artifacts.md#requires-layer) of an artifact that declares dependencies (a grim convention: one content layer and one `application/vnd.grimoire.bundle.v1+json` requires layer, told apart by media type and written content first), and the `com.grimoire.requires-features` annotation grim reads to refuse a feature it does not know |
 | [Package index][package-index] transport | The locators a published index serves. The client contract is [the root][index-root] at `<base>/c/root.json` and [the gzip blobs][index-blobs] it names at `<base>/c/f/sha256/<hex>.json.gz`, whose digest and size cover the inflated JSON. Both are permanent once an index emits them, and under `schema: 1` they grow only by additive fields. Their *presence* is not promised: a `404` is a normal answer that sends grim to `all.json`. Everything else under `c/` is private to the index pipeline. Also served: HTTP `<base>/all.json` and the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], both while the index's `legacy` setting is true (the default), and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised either (most indexes publish none, and a `404` is a normal, non-error answer). Its **path and document shape** are promised, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
@@ -147,14 +147,34 @@ identical to one written before apart from the tag in `pinned`, and
 [`grim why`][why] command and its report are covered by the CLI and reports
 rows above from the release that introduced them.
 
+[Dependency version claims](./artifacts.md#what-the-tag-claims) added one flag,
+one reason and one field, all additive. `--allow-downgrade` joined
+[`grim add`][add], `grim update` and [`grim lock`][lock]. The error document
+gained the reason `major-downgrade`, paired with `config` / 78 and neither
+forceable nor retryable. The `release` report and every `publish` entry gained
+`floats_kept`, always present and `[]` when no float was kept. `tags` keeps its
+meaning, and no exit code, schema, `lock_version` or `grimoire.toml` key changed.
+One manifest reached through two majors counts as two majors of one artifact and
+exits `78`. That covers tags `2` and `3` that name one manifest, and an export
+pick of `req:2` beside `req:1` on one digest. The feature is new in 0.16.0, so no
+release merged them. The literal `req:v2` shape still merges.
+
 Pin stability kept the lock format and changed what a lock write does.
-[`grim lock`][lock] keeps every pin whose request is unchanged, and so do
+[`grim lock`][lock] keeps every pin that still answers its request, and so do
 [`grim add`][add], [TUI][tui] Install and the export stage.
 [`grim update`][update] is the command that moves a pin whose request held. The
 [few cases][lock-pins] where another command resolves one are listed with
 `grim lock`. To compare a request with a pin, the lock records the reference that resolved it, so `pinned` reads
 `registry/repo:tag@sha256:…` on every artifact entry of `grimoire.lock` and
 `marketplace.lock`.
+
+A pin answers its request when its version satisfies every
+[version claim](./artifacts.md#what-the-tag-claims) the request carries, even
+when its tag differs from the claim's tag. A pin with no tag and no version
+annotation takes its version from the edges the previous lock recorded onto it.
+A direct declaration without a tag is answered by any tagged pin of its
+repository, so an edit from `x:2` to `x` keeps the pin until `grim update`.
+A new claim that a held pin fails moves that pin and reports it as `moved`.
 
 No field was added, `lock_version` stays `1`, and the published schema always
 allowed that tag. A reference requested by digest alone stays tagless, and
@@ -210,7 +230,12 @@ present and `[]` when empty.
 `--check` ran, and `update_available` keeps its per-row meaning. A dependency
 row answers `true` or `false` too, once the local store confirms the edges onto
 it, and `null` before. Unreleased builds of the dependency feature left it
-`null`.
+`null`. A dependency row whose recorded edges are all range claims of one
+repository answers by resolving the line's cascade tag once and comparing the
+digest with the pin, so it no longer reads as a split. A direct row declared
+with no tag and no digest answers the same way when those claims are on its own
+repository. The row reads `null` where the line's cascade tag is gone or names a
+release outside the line, because `grim update` then reads the tag listing.
 
 A failed re-resolve always read `null`. So does a row past the 30 s deadline,
 the run's cap of 2,048 re-resolves or its 300 s deadline. A tag outside the OCI
@@ -223,7 +248,7 @@ list an undeclared member at different references.
 unchanged pin. No report's `pinned` value changed, because the tag stays in the
 lock file.
 
-Eleven changes are not additive. Each fixes a shipped path, and each is named here
+Thirteen changes are not additive. Each fixes a shipped path, and each is named here
 for anyone upgrading:
 
 - `grim lock`, `grim add` and `grim update` exit `78` on a lock they cannot
@@ -304,16 +329,25 @@ for anyone upgrading:
     moves to.
 
   A pick that leaves the dependent beside the same version exits `0` as before.
+  A dependent's version-range requirement such as `x:2.1` accepts any version
+  inside its range, so a pick that keeps `x` inside it refuses nothing.
   So does one that reaches several bundles of the held repository. The refusal
   text says that the whole-plugin update it offers moves every pin of the plugin
   whose tag moved.
+- `grim release` and `grim publish` with the cascade on never move `X.Y`, `X` or
+  `latest` to a lower version, where they moved every float. They read each
+  float's manifest first and name a kept float in `floats_kept`. A real
+  cascading release fails closed with `69`, `80` or `81` before any tag moves. A
+  dry run keeps its exit code: it warns once and plans every float moving when
+  it cannot read one. Floats already published are not corrected.
 
 Some exits went the other way, and a job that read the failure as a signal loses
 it:
 
 - `grim lock` and `grim add` exit `0` with the pin kept on a diamond whose edges
   parted after a tag moved, where they exited `78`. Bare `grim update` still exits
-  `78`, so run that to find the split.
+  `78`, so run that to find the split. `B:2` beside `B:2.1` is not a diamond of
+  this kind: both claim one major, so the pair resolves.
 - `grim add` of a bundle member beside a dependent whose entry records no edges,
   with the install, exits `0` and keeps the pin. That holds where the member's
   moved tag names a manifest whose dependencies conflict or form a cycle back at
@@ -357,8 +391,10 @@ it:
   plugin that records that bundle's digest, while the registry still serves that
   digest. A run on the whole plugin still exits `79`.
 - `grim lock` exits `0` after `grim remove` of a direct declaration that held a
-  version conflict off, and keeps that key's pin, where it exited `78`.
-  `grim update` still exits `78` on that conflict.
+  version conflict off, and keeps that key's pin, where it exited `78`. That
+  holds for literal tags only. With numeric tags the two claims are two majors,
+  and the run exits `78` whatever was removed. `grim update` still exits `78` on
+  that conflict.
 - A declared artifact's tag, or a bundle member's, can be withdrawn while the
   registry still serves its digest. `grim lock` then keeps the pin at exit `0`,
   where it exited `79`. `grim add` of the same reference keeps it too, where it

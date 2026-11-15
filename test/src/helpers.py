@@ -4,21 +4,31 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import sys
 import tarfile
-from collections.abc import Iterator
+import tempfile
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
 
 from src.registry import (
     GRIMOIRE_GZIP_LAYER_MEDIA_TYPE,
     LAYER_MEDIA_TYPE,
+    REGISTRY_HOST,
     PublishedArtifact,
+    list_tags,
     push_artifact,
     push_gzip_artifact,
     push_manifest,
+    retag,
+    tag_digest,
 )
+
+if TYPE_CHECKING:
+    from src.runner import GrimRunner
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -184,15 +194,173 @@ def make_dependent(
     grim's own shape: empty config, no ``artifactType``, kind via the
     ``com.grimoire.kind`` annotation, no layer annotations.
     """
-    blob = content if isinstance(content, bytes) else tar_of(content)
-    content_type = _MCP_LAYER_MEDIA_TYPE if kind == "mcp" else LAYER_MEDIA_TYPE
     digest = push_manifest(
         repo,
         tag,
-        [(content_type, blob), (_REQUIRES_LAYER_MEDIA_TYPE, members_layer(requires))],
+        [_content_layer(kind, content), (_REQUIRES_LAYER_MEDIA_TYPE, members_layer(requires))],
         {"com.grimoire.kind": kind, **(annotations or {})},
     )
     return PublishedArtifact(repo=repo, tag=tag, digest=digest, kind=kind)
+
+
+def _content_layer(kind: str, content: dict[str, str | bytes] | bytes) -> tuple[str, bytes]:
+    """The kind's content layer: raw bytes for an MCP descriptor, else a tar of the file tree."""
+    blob = content if isinstance(content, bytes) else tar_of(content)
+    return (_MCP_LAYER_MEDIA_TYPE if kind == "mcp" else LAYER_MEDIA_TYPE, blob)
+
+
+# ---------------------------------------------------------------------------
+# Version-claim fixtures: annotated releases, cascades, backports, lies
+# ---------------------------------------------------------------------------
+
+VERSION_ANNOTATION = "org.opencontainers.image.version"
+
+# The semver 2.0.0 grammar (semver.org), which `semver::Version::parse` accepts.
+_SEMVER = re.compile(
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?"
+)
+
+
+def cascade_tags(version: str) -> list[str]:
+    """The tags ``grim release`` pushes for ``version`` by default, exact tag first.
+
+    Mirrors ``publish_tags(version, None)`` and ``cascade_set`` in
+    ``src/oci/release.rs``: a full release gives ``[X.Y.Z, X.Y, X, latest]``,
+    a prerelease only ``X.Y.Z-pre``, and build metadata reaches no tag.
+    Raises ``ValueError`` when ``version`` is not full semver.
+    """
+    match = _SEMVER.fullmatch(version)
+    if match is None:
+        raise ValueError(f"not a full semver version: {version!r}")
+    major, minor, patch, pre = match.group(1, 2, 3, 4)
+    if pre is not None:
+        return [f"{major}.{minor}.{patch}-{pre}"]
+    return [f"{major}.{minor}.{patch}", f"{major}.{minor}", major, "latest"]
+
+
+def _push_annotated(
+    repo: str,
+    tag: str,
+    version: str,
+    files: dict[str, str | bytes] | bytes,
+    requires: list[tuple[str, str, str]] | None,
+    kind: str,
+) -> PublishedArtifact:
+    """Push ``files`` at ``tag`` in grim's own manifest shape, annotated with ``version``."""
+    annotations = {VERSION_ANNOTATION: version}
+    if requires is not None:
+        return make_dependent(repo, tag, kind, files, requires, annotations=annotations)
+    digest = push_manifest(
+        repo, tag, [_content_layer(kind, files)], {"com.grimoire.kind": kind, **annotations}
+    )
+    return PublishedArtifact(repo=repo, tag=tag, digest=digest, kind=kind)
+
+
+def _move_tags(repo: str, tags: Sequence[str], digest: str) -> None:
+    """Point each of ``tags`` at ``digest``, keeping every digest it moves off fetchable.
+
+    zot drops a manifest once its last tag moves, so a digest that only the
+    moved tag holds first gets a ``keep-<12 hex>`` tag.
+    """
+    held = {tag: tag_digest(repo, tag) for tag in list_tags(repo)}
+    for tag in tags:
+        old = held.get(tag)
+        if old is not None and old != digest and list(held.values()).count(old) == 1:
+            keep = f"keep-{old.removeprefix('sha256:')[:12]}"
+            retag(repo, keep, old)
+            held[keep] = old
+        retag(repo, tag, digest)
+        held[tag] = digest
+
+
+def publish_release(
+    repo: str,
+    version: str,
+    files: dict[str, str | bytes] | bytes,
+    requires: list[tuple[str, str, str]] | None = None,
+    cascade: bool = True,
+    kind: str = "skill",
+) -> PublishedArtifact:
+    """Publish ``version`` of ``repo`` at the tags :func:`cascade_tags` names, without grim.
+
+    One manifest at the exact tag: ``kind``'s content layer (``files`` as
+    :func:`make_dependent` takes them), a requires layer when ``requires`` is
+    not None, and ``org.opencontainers.image.version`` = ``version``, so each
+    version gets its own digest even with identical files. The rest of
+    :func:`cascade_tags` (``X.Y``, ``X``, ``latest``) then points at it unless
+    ``cascade`` is false; a digest a float leaves untagged keeps a ``keep-`` tag.
+    Every float moves, even down to a lower version, which ``grim release``
+    never does: only versions published in ascending order leave the tags
+    ``grim release`` writes. Returns the artifact at its exact tag.
+    """
+    tags = cascade_tags(version)
+    release = _push_annotated(repo, tags[0], version, files, requires, kind)
+    if cascade:
+        _move_tags(repo, tags[1:], release.digest)
+    return release
+
+
+def backport(repo: str, older: str) -> list[str]:
+    """Point ``X`` and ``latest`` at the release ``older``, as a tool other than grim may.
+
+    ``older`` is a full version already published at its exact tag. ``X.Y``
+    and every other tag stay where they are. A digest left with no tag gets
+    ``keep-<12 hex>``, since zot drops an untagged manifest; a newer release
+    from :func:`publish_release` still holds its exact tag and needs none.
+    Returns the tags moved, ``[X, "latest"]``.
+    """
+    tags = cascade_tags(older)
+    if len(tags) == 1:
+        raise ValueError(f"a prerelease has no major or latest tag: {older!r}")
+    moved = [tags[2], "latest"]
+    _move_tags(repo, moved, tag_digest(repo, tags[0]))
+    return moved
+
+
+def publish_lie(
+    repo: str, tag: str, annotated: str, files: dict[str, str | bytes]
+) -> PublishedArtifact:
+    """Push a skill at ``tag`` only, whose ``org.opencontainers.image.version`` is ``annotated``.
+
+    The caller picks a contradiction (tag ``2`` annotated ``3.1.0``); nothing
+    checks it, and no other tag moves. Returns the artifact at ``tag``.
+    """
+    return _push_annotated(repo, tag, annotated, files, None, "skill")
+
+
+def release_with_grim(
+    runner: GrimRunner,
+    repo: str,
+    version: str,
+    files: dict[str, str | bytes],
+    kind: str = "skill",
+    flags: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Run the real ``grim release`` of ``files`` as ``repo:version``; return its JSON report.
+
+    ``files`` is the tree :func:`make_artifact` takes, under one root (a skill's
+    ``<name>/``, a rule's ``<name>.md``), written to a fresh dir in the test's
+    tmp dir and released with ``--kind kind`` plus ``flags`` (``["--dry-run"]``).
+    ``repo`` has no registry host. Pass ``grim_at(project_dir)``, as
+    ``test_release.py`` does, so no ``grimoire.toml`` above the suite is read.
+    A non-zero exit raises ``AssertionError``.
+    """
+    roots = {PurePosixPath(path).parts[0] for path in files}
+    if len(roots) != 1:
+        raise ValueError(f"files must sit under one artifact root, got {sorted(roots)}")
+    source = Path(tempfile.mkdtemp(prefix="release-", dir=runner.grim_home.parent))
+    for path, content in files.items():
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="utf-8", newline="\n")
+    reference = f"{REGISTRY_HOST}/{repo}:{version}"
+    return runner.json("release", str(source / roots.pop()), reference, "--kind", kind, *flags)
 
 
 def make_hook(

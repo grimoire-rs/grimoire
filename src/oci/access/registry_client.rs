@@ -30,7 +30,7 @@ use crate::oci::identifier::is_valid_oci_tag;
 use crate::oci::manifest::OciManifest;
 use crate::oci::{Digest, Identifier, PinnedIdentifier};
 
-use super::super::access::{CatalogListing, OciAccess, Operation};
+use super::super::access::{CatalogListing, OciAccess, Operation, TAG_PAGE_COST, TagListing, tag_cost};
 
 use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig, ClientProtocol};
@@ -44,9 +44,14 @@ use crate::oci::manifest::{Descriptor, OCI_EMPTY_CONFIG_MEDIA_TYPE};
 /// The media type of an OCI image manifest.
 const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
+/// Most one `tags/list` page may take, request and body.
+const TAGS_PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Real OCI registry access backed by `oci-client`.
 pub struct RegistryClient {
     client: Client,
+    /// Deadline for one `tags/list` page.
+    page_timeout: std::time::Duration,
 }
 
 impl RegistryClient {
@@ -70,6 +75,7 @@ impl RegistryClient {
     pub fn with_plain_http_hosts(hosts: Vec<String>) -> Self {
         Self {
             client: Client::new(registry_config(hosts)),
+            page_timeout: TAGS_PAGE_TIMEOUT,
         }
     }
 
@@ -502,7 +508,13 @@ impl OciAccess for RegistryClient {
     }
 
     async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
-        self.walk_tags(id, super::CATALOG_LISTING_BYTE_LIMIT).await
+        let listing = self.walk_tags(id, super::CATALOG_LISTING_BYTE_LIMIT).await?;
+        Ok(listing.map(|listing| listing.tags))
+    }
+
+    async fn list_tags_within(&self, id: &Identifier, max_bytes: usize) -> Result<Option<TagListing>, AccessError> {
+        self.walk_tags(id, max_bytes.min(super::CATALOG_LISTING_BYTE_LIMIT))
+            .await
     }
 
     async fn list_catalog(&self, registry: &str) -> Result<CatalogListing, AccessError> {
@@ -654,20 +666,20 @@ impl RegistryClient {
     fn with_plain_http(registry: &str) -> Self {
         Self {
             client: Client::new(registry_config(vec![registry.to_string()])),
+            page_timeout: TAGS_PAGE_TIMEOUT,
         }
     }
 }
 
 impl RegistryClient {
     /// Walk a repository's `tags/list` through every `rel="next"` `Link`; a
-    /// page without one is the last. A failure after the first page is an
-    /// error, since a short tag list resolves the wrong version. A repeated
-    /// cursor, an empty page that points on, or more than `byte_limit` bytes
-    /// of tags ends the walk with what it has.
-    async fn walk_tags(&self, id: &Identifier, byte_limit: usize) -> Result<Option<Vec<String>>, AccessError> {
-        /// Fixed memory charged per page against the byte limit.
-        const PAGE_COST: usize = 256;
-
+    /// page without one is the last, and only reaching it makes the listing
+    /// complete. A failure after the first page, or a page past its deadline,
+    /// is an error, since a short tag list resolves the wrong version. A
+    /// repeated cursor, an empty page that points on, a `next` link grim cannot
+    /// follow, or a charge past `byte_limit` ends the walk with what it has,
+    /// marked incomplete.
+    async fn walk_tags(&self, id: &Identifier, byte_limit: usize) -> Result<Option<TagListing>, AccessError> {
         let reference = reference_for(id);
         let auth = Self::auth_for(id.registry());
         let endpoint = format!("/v2/{}/tags/list", reference.repository());
@@ -676,44 +688,63 @@ impl RegistryClient {
         let mut seen = HashSet::new();
         let mut tags: Vec<String> = Vec::new();
         let mut bytes = 0usize;
+        let listing = |tags: Vec<String>, bytes: usize, complete: bool| Some(TagListing { tags, bytes, complete });
         // Sending a cursor twice would replay the same pages forever.
         while seen.insert(query.clone()) {
-            let page = match self.client.tags_page(&reference, &auth, &query).await {
-                Ok(page) => page,
-                Err(e) if seen.len() > 1 => return Err(AccessError::with_identifier(id.clone(), registry_or_auth(e))),
-                Err(e) => match lookup_failure(e) {
+            // A deadline per page, not per walk: the byte limit bounds how many
+            // pages a walk reads, and a whole-walk deadline cuts a long listing short.
+            let read = tokio::time::timeout(self.page_timeout, self.client.tags_page(&reference, &auth, &query));
+            let page = match read.await {
+                Err(elapsed) => {
+                    let kind = AccessErrorKind::Registry(Box::new(elapsed));
+                    return Err(AccessError::with_identifier(id.clone(), kind));
+                }
+                Ok(Ok(page)) => page,
+                Ok(Err(e)) if seen.len() > 1 => {
+                    return Err(AccessError::with_identifier(id.clone(), registry_or_auth(e)));
+                }
+                Ok(Err(e)) => match lookup_failure(e) {
                     None => return Ok(None),
                     Some(kind) => return Err(AccessError::with_identifier(id.clone(), kind)),
                 },
             };
+            let next = page.next.as_deref().filter(|link| next_relation(link).is_some());
             // An empty page that still points on never grows `bytes`, so it must end here.
-            if page.tags.is_empty() && page.next.is_some() {
+            if page.tags.is_empty() && next.is_some() {
                 tracing::warn!(
                     "registry sent an empty tags/list page with a next link for '{id}'; its tags stop there"
                 );
-                return Ok(Some(tags));
+                return Ok(listing(tags, bytes, false));
             }
-            bytes += page.tags.iter().map(|t| t.len() + size_of::<String>()).sum::<usize>()
+            bytes += page.tags.iter().map(|tag| tag_cost(tag)).sum::<usize>()
                 + query.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
-                + PAGE_COST;
+                + TAG_PAGE_COST;
             tags.extend(page.tags);
             if bytes > byte_limit {
                 tracing::warn!(
                     "registry listed more than {} MiB of tags for '{id}'; its tags stop there",
                     byte_limit >> 20
                 );
-                return Ok(Some(tags));
+                return Ok(listing(tags, bytes, false));
             }
-            match page.next.as_deref().and_then(|link| next_page_query(link, &endpoint)) {
+            let Some(link) = next else {
+                return Ok(listing(tags, bytes, true));
+            };
+            match next_page_query(link, &endpoint) {
                 Some(next) => query = next,
-                None => return Ok(Some(tags)),
+                None => {
+                    tracing::warn!(
+                        "registry sent a tags/list next link grim cannot follow for '{id}'; its tags stop there"
+                    );
+                    return Ok(listing(tags, bytes, false));
+                }
             }
         }
         tracing::warn!(
             "registry repeated a tags/list page cursor for '{id}'; its tags stop after {}",
             tags.len()
         );
-        Ok(Some(tags))
+        Ok(listing(tags, bytes, false))
     }
 
     /// Walk the registry's `_catalog` to the end of its own pagination: the
@@ -819,6 +850,15 @@ impl RegistryClient {
     }
 }
 
+/// The `rel="next"` part of a `Link` header, if it has one.
+fn next_relation(link: &str) -> Option<&str> {
+    // ponytail: splitting on ',' breaks only on a raw comma inside the link URI; add a real RFC 8288 parser if a registry sends one.
+    link.split(',').find(|part| {
+        let part = part.to_ascii_lowercase();
+        part.contains("rel=\"next\"") || part.contains("rel=next")
+    })
+}
+
 /// The query of the `rel="next"` target in a `Link` header, when it names
 /// `endpoint` (an absolute path such as `/v2/_catalog`).
 ///
@@ -826,12 +866,7 @@ impl RegistryClient {
 /// endpoint, so a Link naming another host can neither redirect the walk nor
 /// leak a token.
 fn next_page_query(link: &str, endpoint: &str) -> Option<Vec<(String, String)>> {
-    // ponytail: splitting on ',' breaks only on a raw comma inside the link URI; add a real RFC 8288 parser if a registry sends one.
-    let part = link.split(',').find(|part| {
-        let part = part.to_ascii_lowercase();
-        part.contains("rel=\"next\"") || part.contains("rel=next")
-    })?;
-    let uri = part.split_once('<')?.1.split_once('>')?.0.trim();
+    let uri = next_relation(link)?.split_once('<')?.1.split_once('>')?.0.trim();
     let url = reqwest::Url::parse("http://registry.invalid")
         .ok()?
         .join(endpoint)
@@ -1121,7 +1156,7 @@ mod tests {
     }
 
     /// How a fake `_catalog` / `tags/list` server paginates.
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum Paging {
         /// Honours the spec `last` cursor and sends no `Link`.
         Last,
@@ -1134,8 +1169,16 @@ mod tests {
         /// Endless empty pages, each with a fresh `Link` cursor.
         EmptyLinks,
         /// `Link`-only paging where `rel="prev"` and `rel="next"` arrive as
-        /// two separate headers, `prev` first.
+        /// two separate headers, `prev` first; the last page sends `prev` alone.
         SplitLinks,
+        /// `Link` paging whose second page is empty but still links on.
+        EmptyMid,
+        /// `Link` paging whose `next` names another repository's path.
+        ForeignLink,
+        /// `Link` paging that never answers once this many pages were served.
+        StallAfter(usize),
+        /// `Link` paging that waits this many milliseconds before each page.
+        Slow(u64),
     }
 
     /// A token-gated registry holding `total` repositories `repo-00000`…,
@@ -1169,9 +1212,17 @@ mod tests {
                 let has_bearer = req.contains("authorization: bearer ");
                 let tags = first.contains("/tags/list");
                 let endpoint = if tags { "/v2/acme/x/tags/list" } else { "/v2/_catalog" };
+                let next_path = if matches!(mode, Paging::ForeignLink) {
+                    "/v2/acme/other/tags/list"
+                } else {
+                    endpoint
+                };
                 let ok_json = |body: &str, link: Option<usize>| {
-                    let next = |k: usize| format!("link: <{endpoint}?n=1000&next_page={k}>; rel=\"next\"\r\n");
+                    let next = |k: usize| format!("link: <{next_path}?n=1000&next_page={k}>; rel=\"next\"\r\n");
                     let link = match (link, mode) {
+                        (None, Paging::SplitLinks) => {
+                            format!("link: <{endpoint}?n=1000&next_page=0>; rel=\"prev\"\r\n")
+                        }
                         (None, _) => String::new(),
                         (Some(k), Paging::SplitLinks) => {
                             format!("link: <{endpoint}?n=1000&next_page=0>; rel=\"prev\"\r\n{}", next(k))
@@ -1193,23 +1244,42 @@ mod tests {
                 let response = if first.contains("/token") {
                     ok_json(r#"{"token":"test-token"}"#, None)
                 } else if (first.contains("/v2/_catalog") || tags) && has_bearer {
+                    if matches!(mode, Paging::StallAfter(n) if pages_served >= n) {
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    }
+                    if let Paging::Slow(ms) = mode {
+                        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    }
                     if matches!(mode, Paging::FailAfter(n) if pages_served >= n) {
                         "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
                     } else {
                         pages_served += 1;
                         let start = match mode {
                             Paging::Last | Paging::FailAfter(_) => number_after("last=repo-").map_or(0, |n| n + 1),
-                            Paging::Link | Paging::SplitLinks => number_after("next_page=").unwrap_or(0),
+                            Paging::Link
+                            | Paging::SplitLinks
+                            | Paging::EmptyMid
+                            | Paging::ForeignLink
+                            | Paging::StallAfter(_)
+                            | Paging::Slow(_) => number_after("next_page=").unwrap_or(0),
                             Paging::Repeat | Paging::EmptyLinks => 0,
                         };
-                        let end = if matches!(mode, Paging::EmptyLinks) {
+                        let end = if matches!(mode, Paging::EmptyLinks)
+                            || (matches!(mode, Paging::EmptyMid) && start == 1000)
+                        {
                             start
                         } else {
                             total.min(start + 1000)
                         };
                         let page: Vec<String> = (start..end).map(|i| format!("\"repo-{i:05}\"")).collect();
                         let link = match mode {
-                            Paging::Link | Paging::SplitLinks | Paging::FailAfter(_) => (end < total).then_some(end),
+                            Paging::Link
+                            | Paging::SplitLinks
+                            | Paging::FailAfter(_)
+                            | Paging::ForeignLink
+                            | Paging::StallAfter(_)
+                            | Paging::Slow(_) => (end < total).then_some(end),
+                            Paging::EmptyMid => (start + 1000 < total).then_some(start + 1000),
                             Paging::Repeat => Some(1000),
                             Paging::EmptyLinks => Some(pages_served),
                             Paging::Last => None,
@@ -1399,7 +1469,94 @@ mod tests {
             .await
             .expect("tag listing")
             .expect("repository exists");
-        assert!(tags.len() < 20_000);
+        assert!(tags.tags.len() < 20_000);
+        handle.abort();
+    }
+
+    /// A resolve's listing stops at its own budget, far below the per-repository
+    /// cap, and says it stopped; a listing under the budget reads every tag.
+    #[tokio::test]
+    async fn list_tags_within_stops_at_the_byte_limit() {
+        let (host, handle) = spawn_paged_registry(usize::MAX / 2, Paging::Link).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = client
+            .list_tags_within(&paged_repo(&host), 64 * 1024)
+            .await
+            .expect("tag listing")
+            .expect("repository exists");
+        assert!(!listing.complete);
+        assert!(listing.tags.len() < 20_000);
+        // The run's budget is debited what the walk charged, so a cut walk reports past its limit.
+        assert!(listing.bytes > 64 * 1024, "{}", listing.bytes);
+        handle.abort();
+
+        let (host, handle) = spawn_paged_registry(2500, Paging::Link).await;
+        let client = RegistryClient::with_plain_http(&host);
+        let listing = client
+            .list_tags_within(&paged_repo(&host), 64 * 1024 * 1024)
+            .await
+            .expect("tag listing")
+            .expect("repository exists");
+        assert!(listing.complete);
+        assert_eq!(listing.tags.len(), 2500);
+        let held: usize = listing.tags.iter().map(|t| t.len() + size_of::<String>()).sum();
+        assert!(listing.bytes >= held, "{} < {held}", listing.bytes);
+        handle.abort();
+    }
+
+    /// A walk cut short is incomplete, so a resolve refuses it rather than pick an
+    /// older release from it; a `prev`-only `Link` is the true end.
+    #[tokio::test]
+    async fn list_tags_within_flags_every_early_stop_incomplete() {
+        for (mode, complete) in [
+            (Paging::Repeat, false),
+            (Paging::EmptyMid, false),
+            (Paging::ForeignLink, false),
+            (Paging::SplitLinks, true),
+        ] {
+            let (host, handle) = spawn_paged_registry(2500, mode).await;
+            let client = RegistryClient::with_plain_http(&host);
+            let listing = client
+                .list_tags_within(&paged_repo(&host), 64 * 1024 * 1024)
+                .await
+                .expect("tag listing")
+                .expect("repository exists");
+            assert_eq!(listing.complete, complete, "{mode:?}");
+            handle.abort();
+        }
+    }
+
+    /// A page that never answers ends the walk with an error instead of hanging it.
+    #[tokio::test]
+    async fn walk_tags_fails_a_page_that_never_answers() {
+        let (host, handle) = spawn_paged_registry(2500, Paging::StallAfter(1)).await;
+        let mut client = RegistryClient::with_plain_http(&host);
+        client.page_timeout = std::time::Duration::from_millis(300);
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.list_tags_within(&paged_repo(&host), 64 * 1024 * 1024),
+        )
+        .await
+        .expect("a stalled page must end the walk")
+        .expect_err("a stalled page");
+        assert!(matches!(err.kind, AccessErrorKind::Registry(_)), "{err:?}");
+        handle.abort();
+    }
+
+    /// The deadline is per page: a listing slower in total than one page's
+    /// deadline still reads whole.
+    #[tokio::test]
+    async fn walk_tags_gives_each_page_its_own_deadline() {
+        let (host, handle) = spawn_paged_registry(5000, Paging::Slow(300)).await;
+        let mut client = RegistryClient::with_plain_http(&host);
+        client.page_timeout = std::time::Duration::from_secs(1);
+        let listing = client
+            .list_tags_within(&paged_repo(&host), 64 * 1024 * 1024)
+            .await
+            .expect("tag listing")
+            .expect("repository exists");
+        assert!(listing.complete);
+        assert_eq!(listing.tags.len(), 5000);
         handle.abort();
     }
 
@@ -1414,7 +1571,7 @@ mod tests {
         .await
         .expect("an endless run of empty pages must end the walk")
         .expect("tag listing");
-        assert_eq!(tags, Some(Vec::new()));
+        assert_eq!(tags.map(|listing| listing.tags), Some(Vec::new()));
         handle.abort();
     }
 

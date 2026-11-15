@@ -1750,3 +1750,79 @@ def test_publish_dry_run_reports_pushed_to(
     assert row["pushed_to"] is None, (
         f"pushed_to must be explicit null when the knob is unset, got {row['pushed_to']!r}"
     )
+
+
+def test_publish_backport_entry_keeps_newer_floats(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A backport entry leaves `X` and `latest` on the newer release, reports
+    them in `floats_kept`, and in plain output names its reference in one
+    stderr line per kept float."""
+    prefix = unique_repo.split("/")[-1]
+    skill_name = f"{prefix}-skill"
+    repo_path = f"skills/{skill_name}"
+    kept = [{"tag": "2", "version": "2.9.0"}, {"tag": "latest", "version": "2.9.0"}]
+    runner = grim_at(project_dir)
+
+    def manifest(version: str) -> str:
+        return str(_write_publish_manifest(project_dir, registry, prefix, skill_version=version))
+
+    newer = runner.json("publish", "--manifest", manifest("2.9.0"))["items"][0]
+
+    plain = runner.run("publish", "--manifest", manifest("2.3.7"))
+    reference = f"{registry}/{repo_path}:2.3.7"
+    assert [line for line in plain.stderr.splitlines() if "above this release" in line] == [
+        f"{reference}: kept '2' on 2.9.0, above this release 2.3.7",
+        f"{reference}: kept 'latest' on 2.9.0, above this release 2.3.7",
+    ], plain.stderr
+
+    row = runner.json("publish", "--manifest", manifest("2.3.8"))["items"][0]
+    assert row["status"] == "pushed"
+    assert row["tags"] == ["2.3.8", "2.3"], "kept floats are not in `tags`"
+    assert row["floats_kept"] == kept
+    assert tag_digest(repo_path, "2.3") == row["digest"]
+    for tag in ("2", "latest"):
+        assert tag_digest(repo_path, tag) == newer["digest"], tag
+
+    rerun = runner.json("publish", "--manifest", manifest("2.3.8"))["items"][0]
+    assert rerun["status"] == "skipped"
+    assert rerun["floats_kept"] == [], "a skipped entry judges no float"
+
+
+def test_publish_dry_run_backport_plans_kept_floats_and_moves_nothing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A `--dry-run` backport, with and without `--force`, plans `X` and
+    `latest` as kept and moves no tag. Offline it cannot read the floats, so
+    it keeps exit 0, plans every float moving and warns once."""
+    prefix = unique_repo.split("/")[-1]
+    repo_path = f"skills/{prefix}-skill"
+    kept = [{"tag": "2", "version": "2.9.0"}, {"tag": "latest", "version": "2.9.0"}]
+    runner = grim_at(project_dir)
+
+    def manifest(version: str) -> str:
+        return str(_write_publish_manifest(project_dir, registry, prefix, skill_version=version))
+
+    newer = runner.json("publish", "--manifest", manifest("2.9.0"))["items"][0]
+
+    for flags in ([], ["--force"]):
+        row = runner.json("publish", "--manifest", manifest("2.3.7"), "--dry-run", *flags)["items"][0]
+        assert row["status"] == "dry-run", flags
+        assert row["tags"] == ["2.3.7", "2.3"], flags
+        assert row["floats_kept"] == kept, flags
+
+        offline = runner.run(
+            "--offline", "publish", "--manifest", manifest("2.3.7"), "--dry-run", *flags, format="json"
+        )
+        row = json.loads(offline.stdout)["items"][0]
+        assert row["status"] == "dry-run", flags
+        assert row["tags"] == ["2.3.7", "2.3", "2", "latest"], flags
+        assert row["floats_kept"] == [], flags
+        warnings = [line for line in offline.stderr.splitlines() if "could not check the floats" in line]
+        assert len(warnings) == 1, offline.stderr
+
+    for tag in ("2.9.0", "2", "latest"):
+        assert tag_digest(repo_path, tag) == newer["digest"], tag
+    for tag in ("2.3.7", "2.3"):
+        with pytest.raises(urllib.error.HTTPError):
+            tag_digest(repo_path, tag)

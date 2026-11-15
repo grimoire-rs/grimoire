@@ -46,7 +46,8 @@ reaches a registry:
    an exec bit, so the direct form is refused at build (65). Full rule:
    [hook-spec.md](hook-spec.md#payload-not-executable).
 6. **`grim release … --dry-run`** — prints the exact push plan: every
-   tag and the digest each will point at, without touching the registry.
+   tag and the digest each will point at, and never writes to the registry (a
+   cascading dry run reads the floats it would move).
 
 ### Metadata Defaults {#metadata-defaults}
 
@@ -113,8 +114,14 @@ for everyone already on them. Full rules: [Batch publishing][batch-publish].
 - **Cascade tags.** Releasing `1.2.3` also moves the floating tags
   `1`, `1.2`, and `latest` to the new digest — that is how consumers
   tracking `:1` pick up your patch on `grim update`. Implication: a
+  cascade never moves a floating tag to a lower version: a `2.3.7` backport
+  released after `2.9.0` moves `2.3` and leaves `2` and `latest` on `2.9.0`
+  (reported in `floats_kept`). A
   release is immediately visible to every floating consumer; do not
-  release a breaking change under the same major.
+  release a breaking change under the same major. Run releases into one
+  repository one at a time, for example in a CI concurrency group. Tags
+  have no compare-and-set, so two concurrent releases can leave a float on
+  the lower version.
 - **Immutability gate.** An exact-version tag that already exists and
   points at different bytes refuses to move. `--force` overrides —
   use it only to deliberately rewrite history. Re-releasing *identical*
@@ -195,7 +202,7 @@ always exist first. A requires cycle exits 65 before any push. Semantics to know
   misconfiguration exits 64 ([announcing][announcing]).
 - Confirm flags with `grim publish --help`; `--dry-run` prints the full
   plan (including planned description companions) with zero registry
-  writes.
+  writes; a cascading run reads the floats.
 
 ## Description Companion
 

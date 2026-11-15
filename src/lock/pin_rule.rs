@@ -11,6 +11,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use semver::Version;
+
 use crate::config::declaration::DesiredSet;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
@@ -18,6 +20,8 @@ use crate::lock::locked_source::LockedSource;
 use crate::lock::merge_policy::winning_request;
 use crate::oci::bundle::BundleMember;
 use crate::oci::identifier::is_valid_oci_tag;
+use crate::oci::version_claim::{Claim, EdgeOrigin, Line, claim_of};
+use crate::oci::version_evidence::{Evidence, evidence, satisfies};
 use crate::oci::{ArtifactKind, Digest, Identifier, NodeKey, PinnedIdentifier};
 
 /// A pin and the lock row that records it.
@@ -37,6 +41,12 @@ pub enum Answered<'r> {
     All,
     /// At least one, and not this one: the smallest request left over.
     Some {
+        unanswered: &'r Identifier,
+    },
+    /// None, but every request is a version claim the pin's tag cannot rule out,
+    /// the smallest being `unanswered`: only a relock reads the version. Only
+    /// [`PinRecord::classify_undeclared`] answers it.
+    MayHold {
         unanswered: &'r Identifier,
     },
     /// None, which is also what an empty set of requests gets.
@@ -61,14 +71,37 @@ impl PinRecord<'_> {
 
     /// [`Self::classify`] for a key whose declaration just left. `declared` is
     /// the identifier the lock's proof held it at, which is the request a tagless
-    /// pin resolved, so the same request from an edge is answered.
+    /// pin resolved, so the same request from an edge is answered. `ranges` are the
+    /// requests that claim a version ([`reached_ranges`]), which a bundle's list
+    /// never does: see [`Answered::MayHold`].
     pub fn classify_undeclared<'r>(
         &self,
         declared: Option<&Identifier>,
         requests: &'r BTreeSet<Identifier>,
+        ranges: &BTreeSet<Identifier>,
     ) -> Answered<'r> {
         let stamped = |id: &Identifier| self.pin.tag().is_none() && declared == Some(id);
-        classify_by(requests, |id| self.names(id) || stamped(id))
+        match classify_by(requests, |id| self.names(id) || stamped(id)) {
+            Answered::None if requests.iter().all(|id| ranges.contains(id) && self.may_hold(id)) => requests
+                .first()
+                .map_or(Answered::None, |unanswered| Answered::MayHold { unanswered }),
+            answered => answered,
+        }
+    }
+
+    /// Whether `id` claims a range in the pin's repository that the pin's tag does
+    /// not rule out. A tagless pin answers only what the stamp rule above names.
+    fn may_hold(&self, id: &Identifier) -> bool {
+        let Claim::Range(req) = claim_of(id, EdgeOrigin::Requires) else {
+            return false;
+        };
+        let line = Line::of([req]);
+        let open = match evidence(None, self.pin.as_identifier()) {
+            Evidence::Exact(version) => line.matches(&version),
+            Evidence::Span { lo, hi } => line.bounds().is_some_and(|(l, h)| l < hi && lo < h),
+            Evidence::Unknown | Evidence::Vouched => true,
+        };
+        self.pin.tag().is_some() && same_repository(self.pin, id) && open
     }
 
     /// Whether a bundle row disagrees with its own pin about the repository. No
@@ -128,6 +161,10 @@ pub struct EdgeEvidence {
     /// bundle's list read at the recorded digest answers: see [`answers_stamped_edge`].
     /// Under a proof, or for a pin with a tag.
     pub takes_stamped_edges: bool,
+    /// The recorded `requires` edges no bundle list names, which settled through
+    /// their line and show its caret range: see [`recorded_evidence`]. Empty, every
+    /// recorded edge shows its tag's shape.
+    pub ranges: BTreeSet<Identifier>,
 }
 
 /// Keys `lock` lists more than once, as a keep-both merge leaves them. Nothing
@@ -156,15 +193,42 @@ pub fn reached_requests(
     lock: &GrimoireLock,
     reached: Option<&BTreeSet<NodeKey>>,
 ) -> BTreeMap<NodeKey, BTreeSet<Identifier>> {
-    let artifacts = lock
-        .iter_artifacts()
-        .map(|a| ((a.kind, a.name.clone()), a.source.pinned(), &a.requires));
-    let bundles = lock
-        .bundles
+    edges_of(artifact_rows(lock).chain(bundle_rows(lock)), reached)
+}
+
+/// The edges of [`reached_requests`] an artifact's `requires` records and no bundle
+/// row lists, which [`EdgeEvidence::ranges`] reads as claims.
+pub fn reached_ranges(
+    lock: &GrimoireLock,
+    reached: Option<&BTreeSet<NodeKey>>,
+) -> BTreeMap<NodeKey, BTreeSet<Identifier>> {
+    let listed = edges_of(bundle_rows(lock), reached);
+    let mut ranges = edges_of(artifact_rows(lock), reached);
+    for (key, ids) in &mut ranges {
+        ids.retain(|id| !listed.get(key).is_some_and(|listed| listed.contains(id)));
+    }
+    ranges
+}
+
+type EdgeRow<'l> = (NodeKey, Option<&'l PinnedIdentifier>, &'l [BundleMember]);
+
+fn artifact_rows(lock: &GrimoireLock) -> impl Iterator<Item = EdgeRow<'_>> {
+    lock.iter_artifacts()
+        .map(|a| ((a.kind, a.name.clone()), a.source.pinned(), a.requires.as_slice()))
+}
+
+fn bundle_rows(lock: &GrimoireLock) -> impl Iterator<Item = EdgeRow<'_>> {
+    lock.bundles
         .iter()
-        .map(|b| ((ArtifactKind::Bundle, b.name.clone()), b.pinned(), &b.members));
+        .map(|b| ((ArtifactKind::Bundle, b.name.clone()), b.pinned(), b.members.as_slice()))
+}
+
+fn edges_of<'l>(
+    rows: impl Iterator<Item = EdgeRow<'l>>,
+    reached: Option<&BTreeSet<NodeKey>>,
+) -> BTreeMap<NodeKey, BTreeSet<Identifier>> {
     let mut edges: BTreeMap<NodeKey, BTreeSet<Identifier>> = BTreeMap::new();
-    for (parent, pin, members) in artifacts.chain(bundles) {
+    for (parent, pin, members) in rows {
         if reached.is_some_and(|reached| !reached.contains(&parent)) {
             continue;
         }
@@ -240,17 +304,17 @@ pub fn stamp_request<'c>(
 /// Stamp the tagless pins of `lock`, as a relock under `proof` would, for an edit
 /// of `previous` that ends its proof: past it nothing shows what they answered, and
 /// the next relock would resolve them all. A key direct in `proof` takes its
-/// declaration, any other an edge from a row in `reached`, which the proof vouched
-/// for: one `lock` still records, which the next relock reads, else one `previous`
-/// recorded from a parent the edit took. A key listed twice is no pin. Writes no
-/// digest.
+/// declaration, any other the edge [`stamp_among`] picks from a row in `reached`,
+/// which the proof vouched for: one `lock` still records, which the next relock
+/// reads, else one `previous` recorded from a parent the edit took. A key listed
+/// twice is no pin. Writes no digest.
 pub fn stamp_kept_pins(
     lock: &mut GrimoireLock,
     previous: &GrimoireLock,
     proof: &DesiredSet,
     reached: Option<&BTreeSet<NodeKey>>,
 ) {
-    let recorded = [reached_requests(lock, reached), reached_requests(previous, reached)];
+    let recorded = [lock, previous].map(|from| (reached_requests(from, reached), reached_ranges(from, reached)));
     let twice = listed_twice(lock);
     for entry in lock.iter_artifacts_mut() {
         let Some(pin) = entry.source.pinned().filter(|pin| pin.tag().is_none()) else {
@@ -264,11 +328,41 @@ pub fn stamp_kept_pins(
             Some(declared) => declared.identifier(),
             None => recorded
                 .iter()
-                .find_map(|edges| edges.get(&key).and_then(|edges| stamp_request(pin, edges))),
+                .find_map(|(edges, ranges)| stamp_among(pin, &key.1, edges.get(&key)?, ranges.get(&key))),
         };
         if let Some(stamped) = request.and_then(|id| with_tag_of(pin, id)) {
             entry.source = LockedSource::Registry(stamped);
         }
+    }
+}
+
+/// The edge a relock under the proof stamps on the tagless `pin` among `edges`, with
+/// `ranges` the range edges among them: [`stamp_request`]'s, unless an edge shows the
+/// pin's version as [`recorded_evidence`] reads it, which names what the pin answers.
+/// A digest request onto the pin keeps it tagless, as a fresh resolve records it.
+fn stamp_among<'e>(
+    pin: &PinnedIdentifier,
+    binding: &str,
+    edges: &'e BTreeSet<Identifier>,
+    ranges: Option<&BTreeSet<Identifier>>,
+) -> Option<&'e Identifier> {
+    let stamp = stamp_request(pin, edges);
+    if stamp.is_some_and(|id| id.tag().is_none() && id.digest() == Some(pin.digest())) {
+        return stamp;
+    }
+    let evidence = EdgeEvidence {
+        requests: edges.clone(),
+        ranges: ranges.cloned().unwrap_or_default(),
+        ..EdgeEvidence::default()
+    };
+    let record = PinRecord {
+        pin,
+        row: None,
+        binding,
+    };
+    match recorded_evidence(record, &evidence) {
+        (_, Some(shows)) => edges.get(shows),
+        _ => stamp,
     }
 }
 
@@ -310,6 +404,7 @@ pub fn stamped_edge_evidence(
                 takes_listed_edges: tagless,
                 takes_stamped_edges: true,
                 requests: recorded,
+                ..EdgeEvidence::default()
             }
         }
         // A tagged row took its tag from a claim the part recorded, which a stamp then
@@ -401,6 +496,79 @@ pub fn answers_direct(record: PinRecord<'_>, declared: Option<&Identifier>, id: 
 /// a pin is never carried into a new one.
 pub fn answers_edge(record: PinRecord<'_>, evidence: &EdgeEvidence, id: &Identifier) -> bool {
     evidence.requests.contains(id) || record.names(id)
+}
+
+/// Whether the pin answers a `requires` claim `id` whose tag claims the versions of
+/// `line`: its version evidence lies inside the line, read from `annotated`, the
+/// stored manifest's version where known, else from the tag the pin was recorded
+/// under, else from [`recorded_evidence`] over `edges`. A recorded edge never stands
+/// in for evidence the pin shows itself, and the pin answers only in its own repository.
+pub fn answers_range(
+    record: PinRecord<'_>,
+    annotated: Option<&Version>,
+    edges: &EdgeEvidence,
+    id: &Identifier,
+    line: &Line,
+) -> bool {
+    let shown = match evidence(annotated, record.pin.as_identifier()) {
+        Evidence::Unknown => recorded_evidence(record, edges).0,
+        own => own,
+    };
+    same_repository(record.pin, id) && satisfies(&shown, line)
+}
+
+/// The version the previous lock's edges onto the pin show, and the edge that shows it.
+/// Each read the pin's digest when the lock was written: a listed edge's tag shape is a
+/// fact about that digest, a range edge in [`EdgeEvidence::ranges`] proves only its caret
+/// range. Only edges in the pin's repository at no other digest count. Nested shapes give
+/// the narrowest, ties the smallest edge; shapes that do not nest give
+/// [`Evidence::Unknown`], as no edge does.
+pub fn recorded_evidence<'e>(record: PinRecord<'_>, edges: &'e EdgeEvidence) -> (Evidence, Option<&'e Identifier>) {
+    let at_pin = |id: &&Identifier| same_repository(record.pin, id) && holds_digest(record.pin, id);
+    let shown: Vec<(Evidence, &Identifier)> = edges
+        .requests
+        .iter()
+        .filter(at_pin)
+        .map(|id| (edge_shows(edges, id), id))
+        .filter(|(shown, _)| *shown != Evidence::Unknown)
+        .collect();
+    let nest = |a: &Evidence, b: &Evidence| within(a, b) || within(b, a);
+    if shown.iter().any(|(a, _)| shown.iter().any(|(b, _)| !nest(a, b))) {
+        return (Evidence::Unknown, None);
+    }
+    // The requests are ordered, so of equal shapes the smallest edge comes first.
+    match shown.iter().find(|(a, _)| shown.iter().all(|(b, _)| within(a, b))) {
+        Some((narrowest, id)) => (narrowest.clone(), Some(*id)),
+        None => (Evidence::Unknown, None),
+    }
+}
+
+/// What one recorded edge shows: a range edge its caret range, any other its tag's shape.
+fn edge_shows(edges: &EdgeEvidence, id: &Identifier) -> Evidence {
+    match claim_of(id, EdgeOrigin::Requires) {
+        Claim::Range(req) if edges.ranges.contains(id) => match Line::of([req]).bounds() {
+            Some((lo, hi)) if lo < hi => Evidence::Span { lo, hi },
+            _ => Evidence::Unknown,
+        },
+        _ => evidence(None, id),
+    }
+}
+
+/// Whether every version `inner` allows, `outer` allows too.
+fn within(inner: &Evidence, outer: &Evidence) -> bool {
+    match (inner, outer) {
+        (Evidence::Exact(a), Evidence::Exact(b)) => a == b,
+        (Evidence::Exact(version), Evidence::Span { lo, hi }) => lo <= version && version < hi,
+        (Evidence::Span { lo, hi }, Evidence::Span { lo: l, hi: h }) => l <= lo && hi <= h,
+        _ => false,
+    }
+}
+
+/// Whether the pin answers a direct line `id` with no tag, which claims any version:
+/// any tagged pin of its repository does, so dropping a line's tag keeps its pin
+/// until `grim update`. A tagless pin answers only as [`answers_direct`] says.
+pub fn answers_any_line(record: PinRecord<'_>, id: &Identifier) -> bool {
+    same_repository(record.pin, id) && record.pin.tag().is_some()
 }
 
 /// Whether the pin answers an edge a parent lists where the lock's proof shows that
@@ -550,6 +718,190 @@ mod tests {
     }
 
     #[test]
+    fn a_range_claim_is_answered_by_evidence_in_the_pins_repository_only() {
+        let line = Line::of([semver::VersionReq::parse("^2").unwrap()]);
+        let claim = id("ghcr.io/acme/x:2");
+        let held = pin("ghcr.io/acme/x:2.1.0", "x");
+        let tagless = pin("ghcr.io/acme/x", "x");
+        let none = EdgeEvidence::default();
+
+        assert!(answers_range(record(&held), None, &none, &claim, &line));
+        assert!(
+            !answers_range(record(&held), None, &none, &id("quay.io/acme/x:2"), &line),
+            "another registry"
+        );
+        let annotated = Version::new(3, 0, 0);
+        assert!(
+            !answers_range(record(&held), Some(&annotated), &none, &claim, &line),
+            "annotated 3.0.0"
+        );
+        assert!(
+            !answers_range(record(&tagless), None, &none, &claim, &line),
+            "no evidence"
+        );
+    }
+
+    fn recorded(ids: &[Identifier]) -> EdgeEvidence {
+        EdgeEvidence {
+            requests: set(ids),
+            ..EdgeEvidence::default()
+        }
+    }
+
+    fn span(lo: (u64, u64), hi: (u64, u64)) -> Evidence {
+        Evidence::Span {
+            lo: Version::new(lo.0, lo.1, 0),
+            hi: Version::new(hi.0, hi.1, 0),
+        }
+    }
+
+    #[test]
+    fn a_recorded_edge_shows_the_version_its_tag_names() {
+        let tagless = pin("ghcr.io/acme/x", "x");
+        let two = id("ghcr.io/acme/x:2");
+
+        let edges = recorded(std::slice::from_ref(&two));
+        assert_eq!(
+            recorded_evidence(record(&tagless), &edges),
+            (span((2, 0), (3, 0)), Some(&two))
+        );
+    }
+
+    #[test]
+    fn nested_recorded_edges_show_the_narrowest_and_disjoint_ones_nothing() {
+        let tagless = pin("ghcr.io/acme/x", "x");
+        let (one, two, minor) = (id("ghcr.io/acme/x:1"), id("ghcr.io/acme/x:2"), id("ghcr.io/acme/x:2.1"));
+
+        let nested = recorded(&[two.clone(), minor.clone()]);
+        assert_eq!(
+            recorded_evidence(record(&tagless), &nested),
+            (span((2, 1), (2, 2)), Some(&minor))
+        );
+        let disjoint = recorded(&[one, two]);
+        assert_eq!(
+            recorded_evidence(record(&tagless), &disjoint),
+            (Evidence::Unknown, None)
+        );
+    }
+
+    /// A recorded `requires` edge settled through its line, so `x:2.1` shows `^2.1`,
+    /// [2.1, 3.0); two such edges nest where their tags' shapes would not. An edge a
+    /// bundle lists read its own tag, which still shows that tag's shape.
+    #[test]
+    fn a_recorded_range_edge_shows_its_caret_range_and_a_listed_edge_its_tag() {
+        let tagless = pin("ghcr.io/acme/x", "x");
+        let (low, high, listed) = (
+            id("ghcr.io/acme/x:2.1"),
+            id("ghcr.io/acme/x:2.3"),
+            id("ghcr.io/acme/x:2.4"),
+        );
+        let edges = |all: &[Identifier], ranges: &[Identifier]| EdgeEvidence {
+            ranges: set(ranges),
+            ..recorded(all)
+        };
+
+        let one = edges(std::slice::from_ref(&low), std::slice::from_ref(&low));
+        assert_eq!(
+            recorded_evidence(record(&tagless), &one),
+            (span((2, 1), (3, 0)), Some(&low))
+        );
+        let two = edges(&[low.clone(), high.clone()], &[low.clone(), high.clone()]);
+        assert_eq!(
+            recorded_evidence(record(&tagless), &two),
+            (span((2, 3), (3, 0)), Some(&high))
+        );
+        let mixed = edges(&[high.clone(), listed.clone()], std::slice::from_ref(&high));
+        assert_eq!(
+            recorded_evidence(record(&tagless), &mixed),
+            (span((2, 4), (2, 5)), Some(&listed))
+        );
+    }
+
+    /// Only a `requires` edge no bundle row lists counts as a range: a bundle names
+    /// the tag it read.
+    #[test]
+    fn only_a_requires_edge_no_bundle_lists_counts_as_a_range() {
+        let rows = [
+            skill_row(
+                "p",
+                &format!("ghcr.io/acme/p:1@{}", sha('a')),
+                &["ghcr.io/acme/x:2.1", "ghcr.io/acme/x:2.3"],
+            ),
+            skill_row("x", &format!("ghcr.io/acme/x@{}", sha('b')), &[]),
+        ];
+        let mut lock = proven(&declared(&[("p", "ghcr.io/acme/p:1")]), &rows.concat());
+        let mut bundle = row("ghcr.io/acme/b", "1", &pin("ghcr.io/acme/b:1", "b"));
+        bundle.members.push(BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "x".to_string(),
+            id: "ghcr.io/acme/x:2.3".to_string(),
+        });
+        lock.bundles.push(bundle);
+
+        let x = (ArtifactKind::Skill, "x".to_string());
+        let (low, high) = (id("ghcr.io/acme/x:2.1"), id("ghcr.io/acme/x:2.3"));
+        assert_eq!(reached_requests(&lock, None)[&x], set(&[low.clone(), high]));
+        assert_eq!(reached_ranges(&lock, None)[&x], set(&[low]));
+    }
+
+    #[test]
+    fn a_recorded_edge_elsewhere_or_at_another_digest_shows_nothing() {
+        let tagless = pin("ghcr.io/acme/x", "x");
+
+        let elsewhere = recorded(&[id("ghcr.io/acme/mirror/x:2"), id("quay.io/acme/x:2")]);
+        assert_eq!(
+            recorded_evidence(record(&tagless), &elsewhere),
+            (Evidence::Unknown, None)
+        );
+        let other = recorded(&[at("ghcr.io/acme/x:2", "y")]);
+        assert_eq!(recorded_evidence(record(&tagless), &other), (Evidence::Unknown, None));
+        let same = at("ghcr.io/acme/x:2", "x");
+        let here = recorded(std::slice::from_ref(&same));
+        assert_eq!(
+            recorded_evidence(record(&tagless), &here),
+            (span((2, 0), (3, 0)), Some(&same))
+        );
+    }
+
+    #[test]
+    fn a_range_claim_reads_recorded_edges_only_where_the_pin_shows_nothing() {
+        let line = Line::of([semver::VersionReq::parse("^2").unwrap()]);
+        let claim = id("ghcr.io/acme/x:2");
+        let edges = recorded(std::slice::from_ref(&claim));
+
+        assert!(answers_range(
+            record(&pin("ghcr.io/acme/x", "x")),
+            None,
+            &edges,
+            &claim,
+            &line
+        ));
+        let held = pin("ghcr.io/acme/x:1.0.0", "x");
+        assert!(
+            !answers_range(record(&held), None, &edges, &claim, &line),
+            "own tag 1.0.0"
+        );
+        let annotated = Version::new(3, 0, 0);
+        let tagless = pin("ghcr.io/acme/x", "x");
+        assert!(
+            !answers_range(record(&tagless), Some(&annotated), &edges, &claim, &line),
+            "annotated 3.0.0"
+        );
+    }
+
+    #[test]
+    fn a_bare_line_is_answered_by_any_tagged_pin_of_its_repository() {
+        let line = id("ghcr.io/acme/x");
+
+        assert!(answers_any_line(record(&pin("ghcr.io/acme/x:2", "x")), &line));
+        assert!(!answers_any_line(record(&pin("ghcr.io/acme/x", "x")), &line), "tagless");
+        assert!(
+            !answers_any_line(record(&pin("ghcr.io/acme/y:2", "x")), &line),
+            "another repository"
+        );
+    }
+
+    #[test]
     fn provenance_tag_uses_digest_when_bundle_is_digest_pinned() {
         let tagged = Identifier::parse("ghcr.io/acme/stack:1.0").unwrap();
         assert_eq!(bundle_provenance_tag(&tagged), "1.0");
@@ -636,6 +988,60 @@ mod tests {
         assert_eq!(record(&pinned).classify(&both), Answered::Some { unanswered: &two });
         assert_eq!(record(&pinned).classify(&set(&[two])), Answered::None);
         assert_eq!(record(&pinned).classify(&BTreeSet::new()), Answered::None);
+    }
+
+    /// A version claim the pin's tag cannot rule out keeps the row unproven, since only
+    /// the next relock reads the version. A bundle's list claims no range, so a tag it
+    /// lists keeps nothing, and one request outside the claims keeps nothing either.
+    #[test]
+    fn a_left_declaration_keeps_a_pin_its_tag_cannot_rule_out_of_a_version_claim() {
+        let left = |pinned: &str, requests: &[&str], claims: &[&str]| {
+            let pinned = pin(pinned, "d");
+            let requests = set(&requests.iter().map(|r| id(r)).collect::<Vec<_>>());
+            let ranges = set(&claims.iter().map(|r| id(r)).collect::<Vec<_>>());
+            let answered = record(&pinned).classify_undeclared(None, &requests, &ranges);
+            (answered != Answered::None, answered != Answered::All)
+        };
+        let c2 = "ghcr.io/acme/c:2";
+        assert_eq!(
+            left("ghcr.io/acme/c:stable", &[c2], &[c2]),
+            (true, true),
+            "kept, unproven"
+        );
+        let y12 = "ghcr.io/acme/y:1.2";
+        assert_eq!(left("ghcr.io/acme/y:1", &[y12], &[y12]), (true, true), "spans overlap");
+        assert_eq!(left("ghcr.io/acme/c:2", &[c2], &[c2]), (true, false), "named");
+        assert_eq!(
+            left("ghcr.io/acme/c:1.0.0", &[c2], &[c2]),
+            (false, true),
+            "tag rules it out"
+        );
+        let y21 = "ghcr.io/acme/y:2.1";
+        assert_eq!(left("ghcr.io/acme/y:1", &[y21], &[y21]), (false, true), "spans apart");
+        let beta = "ghcr.io/acme/c:beta";
+        assert_eq!(
+            left("ghcr.io/acme/c:stable", &[beta], &[beta]),
+            (false, true),
+            "no version claim"
+        );
+        let other = "ghcr.io/other/c:2";
+        assert_eq!(
+            left("ghcr.io/acme/c:stable", &[other], &[other]),
+            (false, true),
+            "another repository"
+        );
+        assert_eq!(left("ghcr.io/acme/c", &[c2], &[c2]), (false, true), "tagless");
+        assert_eq!(
+            left("ghcr.io/acme/c:stable", &[c2], &[]),
+            (false, true),
+            "a bundle lists it"
+        );
+        let both = [c2, beta];
+        assert_eq!(
+            left("ghcr.io/acme/c:stable", &both, &[c2]),
+            (false, true),
+            "a listed tag beside it"
+        );
     }
 
     #[test]
@@ -963,6 +1369,30 @@ mod tests {
 
         assert_eq!(stamped(&["q"]).as_deref(), Some("2"), "the edge that survives");
         assert_eq!(stamped(&["p", "q"]).as_deref(), Some("1"), "the smallest the proof saw");
+    }
+
+    /// The relock under the proof stamps the range edge whose caret range shows the
+    /// pin's version, `x:2.3`. A stamp of the smaller `x:2.1` reads as `>=2.1 <2.2` on
+    /// an unannotated manifest, which fails `x:2.3`, so the next relock would move it.
+    #[test]
+    fn a_stamp_takes_the_range_edge_that_shows_the_pins_version() {
+        let proof = declared(&[("p", "ghcr.io/acme/p:1"), ("q", "ghcr.io/acme/q:1")]);
+        let rows = [
+            skill_row("p", &format!("ghcr.io/acme/p:1@{}", sha('a')), &["ghcr.io/acme/x:2.1"]),
+            skill_row("q", &format!("ghcr.io/acme/q:1@{}", sha('a')), &["ghcr.io/acme/x:2.3"]),
+            skill_row("x", &format!("ghcr.io/acme/x@{}", sha('b')), &[]),
+        ];
+        let previous = proven(&proof, &rows.concat());
+        let reached = reached_rows(&proof, &previous, Some(&proof));
+        let stamped = |taken: &[&str]| {
+            let mut lock = previous.clone();
+            lock.skills.retain(|row| !taken.contains(&row.name.as_str()));
+            stamp_kept_pins(&mut lock, &previous, &proof, reached.as_ref());
+            pins_of(&lock, "x")[0].tag().map(str::to_string)
+        };
+
+        assert_eq!(stamped(&[]).as_deref(), Some("2.3"), "edges the lock keeps");
+        assert_eq!(stamped(&["p", "q"]).as_deref(), Some("2.3"), "edges the edit took");
     }
 
     /// Nothing says which of two rows for one key is current, so neither is a pin

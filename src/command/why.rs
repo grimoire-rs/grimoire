@@ -23,7 +23,9 @@ use crate::lock::effective_set::{
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::oci::text::registry_text;
+use crate::oci::version_claim::{Claim, claim_of};
 use crate::oci::{ArtifactKind, Identifier};
+use crate::resolve::graph::edge_origin;
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
 use super::command_error::CommandError;
@@ -143,6 +145,20 @@ impl<'a> Provenance<'a> {
         requested.tag_or_latest() == declared.tag_or_latest()
     }
 
+    /// Whether a bare declaration of `key` yields to what `parent` asked: a range
+    /// claim of the declaration's own repository chooses the pin, so it neither
+    /// overrides the declaration nor asks for what the declaration pins.
+    fn yields_to(&self, parent: &NodeKey, requested: &Identifier, key: &NodeKey) -> bool {
+        let Some(Origin::Direct(DeclaredSource::Registry(declared))) = self.graph().and_then(|g| g.nodes.get(key))
+        else {
+            return false;
+        };
+        declared.digest().is_none()
+            && declared.tag_or_latest() == "latest"
+            && declared.registry_repository() == requested.registry_repository()
+            && matches!(claim_of(requested, edge_origin(parent)), Claim::Range(_))
+    }
+
     /// Non-bundle parents of a direct `key`, split into those asking for what
     /// the declaration already pins and those it overrode.
     fn direct_edges(&self, key: &NodeKey) -> (Vec<NodeKey>, Vec<WhyOverride>) {
@@ -158,6 +174,9 @@ impl<'a> Provenance<'a> {
             let Some(id) = self.requested_id(parent, key) else {
                 continue;
             };
+            if self.yields_to(parent, &id, key) {
+                continue;
+            }
             if !self.same_as_direct(&id, key) {
                 overrides.push(WhyOverride {
                     kind: parent.0,
@@ -304,4 +323,76 @@ pub fn run(ctx: &Context, args: &WhyArgs) -> anyhow::Result<(WhyReport, ExitCode
         grim: scope.invocation.clone(),
     };
     Ok((report, ExitCode::Success))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The overrides and removal note of `x`, declared `declared`, when `q`
+    /// requires `edge` of it, or with `bundled` when a declared bundle lists it.
+    fn answers(declared: &str, edge: &str, bundled: bool) -> (Vec<WhyOverride>, Option<String>) {
+        let pin = "d".repeat(64);
+        let parent = if bundled {
+            format!(
+                "[[bundle]]\nname = \"pack\"\nrepo = \"ghcr.io/acme/pack\"\ntag = \"1\"\n\
+                 pinned = \"ghcr.io/acme/pack@sha256:{pin}\"\n\n\
+                 [[bundle.member]]\nkind = \"skill\"\nname = \"x\"\nid = \"{edge}\"\n"
+            )
+        } else {
+            format!(
+                "[[skill]]\nname = \"q\"\npinned = \"ghcr.io/acme/q@sha256:{pin}\"\n\n\
+                 [[skill.requires]]\nkind = \"skill\"\nname = \"x\"\nid = \"{edge}\"\n"
+            )
+        };
+        let lock = GrimoireLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{pin}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n\
+             [[skill]]\nname = \"x\"\npinned = \"ghcr.io/acme/x:1@sha256:{pin}\"\n\n{parent}"
+        ))
+        .unwrap();
+        let registry = |id: &str| DeclaredSource::Registry(Identifier::parse(id).unwrap());
+        let mut set = DesiredSet::default();
+        set.skills.insert("x".to_string(), registry(declared));
+        if bundled {
+            set.bundles.insert("pack".to_string(), registry("ghcr.io/acme/pack:1"));
+        } else {
+            set.skills.insert("q".to_string(), registry("ghcr.io/acme/q:1"));
+        }
+        let prov = Provenance::new(&set, Some(&lock));
+        let key = (ArtifactKind::Skill, "x".to_string());
+        (prov.overrides(&key), prov.redundant_note(&key))
+    }
+
+    /// A bare declaration yields to a range claim of its own repository and its
+    /// pin follows the claim, so the claim overrides nothing and is no reason to
+    /// call the declaration removable.
+    #[test]
+    fn a_range_claim_a_bare_declaration_yields_to_is_no_override() {
+        for declared in ["ghcr.io/acme/x", "ghcr.io/acme/x:latest"] {
+            let (overrides, note) = answers(declared, "ghcr.io/acme/x:1.2", false);
+
+            assert!(overrides.is_empty(), "{declared}: {overrides:?}");
+            assert_eq!(note, None, "{declared}");
+        }
+    }
+
+    /// A literal tag, a claim on another repository, a bundle member and a
+    /// tagged declaration each still read as an override.
+    #[test]
+    fn an_edge_a_bare_declaration_does_not_yield_to_still_overrides() {
+        for (declared, edge, bundled) in [
+            ("ghcr.io/acme/x", "ghcr.io/acme/x:stable", false),
+            ("ghcr.io/acme/x", "ghcr.io/other/x:1.2", false),
+            ("ghcr.io/acme/x", "ghcr.io/acme/x:1", true),
+            ("ghcr.io/acme/x:2", "ghcr.io/acme/x:1.2", false),
+        ] {
+            let (overrides, note) = answers(declared, edge, bundled);
+
+            let ids: Vec<&str> = overrides.iter().map(|o| o.id.as_str()).collect();
+            assert_eq!(ids, [edge], "{declared} {edge} {bundled}");
+            assert_eq!(note, None, "{declared} {edge} {bundled}");
+        }
+    }
 }

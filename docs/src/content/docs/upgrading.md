@@ -499,6 +499,35 @@ store now succeed offline, where they exited `81` before. The reason
 `unsupported-artifact-feature` is new, and a bundle manifest that does not have
 exactly one layer now carries it instead of a reason-less `65`.
 
+**How claims behave in 0.16.0.** A tag in a `requires` value is a
+[version claim](./artifacts.md#what-the-tag-claims), not a literal tag. Eight
+things differ from what you may expect:
+
+- A `requires` diamond within one major resolves. `B:2` beside `B:2.1` gives the
+  release the tag `2` names, the highest in major 2, where released builds
+  refused it.
+- A direct declaration without a tag yields to the major a dependency claims. A
+  declaration with a tag still wins. grim says so on stderr and names the
+  requesters.
+- A moved pin may record a cascade tag, such as `x:2@sha256:…`, where a
+  requester wrote `2.1`. Only `grimoire.lock` carries it.
+- An edit from `x:2` to `x` keeps the pin until `grim update`.
+- `grim add`, `grim update` and `grim lock` take `--allow-downgrade`. Without
+  it, a claim that would move a pin to a lower major refuses with exit `78` and
+  reason `major-downgrade`.
+- `grim add` of a bare reference keeps any tagged pin of the same repository,
+  where 0.15.1 re-pinned to `latest`. The report still says `added`. Run
+  `grim update <name>` to move the pin.
+- Two majors of one artifact exit `78`, in every arrival order, and so does a
+  claim from a version the resolve dropped. The error names a tag that exists to
+  declare in `grimoire.toml`, and asks you to declare the artifact with a tag to
+  choose one. A claim no release satisfies exits `79`, unless a claim in another
+  major arrives later in the walk, which exits `78`. A missing tag or manifest
+  below a dependency exits `79` only when the resolve keeps the release that
+  requires it.
+- A pin with no tag and no version annotation keeps the version its recorded
+  edges show.
+
 **Hooks are consented per target.** `grim add <bundle>` used to consent every
 hook member of the bundle, including one that was already present and had never
 been consented. It now consents only the target and the hooks it newly pulls
@@ -697,7 +726,12 @@ it, so a later run can compare it with the request.
   table has no such column, so stderr names each row with an update.
 - A dependency row answers for the tag its pin records while an edge names it,
   and otherwise for the smallest edge the lock holds. It cannot predict a moved
-  parent that switches or drops the edge.
+  parent that switches or drops the edge. When every edge is a range
+  [claim](./artifacts.md#what-the-tag-claims) of one repository, the row
+  compares the line's cascade tag with the pin instead.
+- A pin that still lies within every claim stays, even when its tag differs from
+  the claim's tag. A moved tag that stays inside the claimed major changes
+  nothing until `grim update`.
 - `grim lock` no longer re-checks an existing pin, so a hand-edited digest under
   the same repository and tag survives it. For a checkout you do not trust, run
   `grim update` or delete the lock. `grim status --check` reports a pin that
@@ -808,6 +842,8 @@ it, so a later run can compare it with the request.
     moves to.
 
   A pick that leaves the dependent beside the same version exits `0` as before.
+  A dependent's version-range requirement such as `x:2.1` accepts any version
+  inside its range, so a pick that keeps `x` inside it refuses nothing.
   So does one that reaches several bundles of the held repository. The refusal
   text says that the whole-plugin update it offers moves every pin of the plugin
   whose tag moved.
@@ -860,8 +896,10 @@ it.
   a plugin that records that bundle's digest, while the registry still serves
   that digest. A run on the whole plugin still exits `79`.
 - `grim lock` exits `0` after `grim remove` of a direct declaration that held a
-  version conflict off, and keeps that key's pin, where it exited `78`.
-  `grim update` still exits `78` on that conflict.
+  version conflict off, and keeps that key's pin, where it exited `78`. That
+  holds for literal tags only. With numeric tags the two claims are two majors,
+  and the run exits `78` whatever was removed. `grim update` still exits `78` on
+  that conflict.
 - A declared artifact's tag, or a bundle member's, can be withdrawn while the
   registry still serves its digest. `grim lock` then keeps the pin at exit `0`,
   where 0.15.1 exited `79`. `grim add` of the same reference keeps it too, where
@@ -947,7 +985,9 @@ it.
 - A key whose declaration left, with surviving edges its pin names only in part,
   keeps its row and leaves the lock stale. The next `grim lock` keeps that pin. If
   its pin names none of them, the row is dropped and the lock stays stale, so the
-  next `grim lock` resolves those edges.
+  next `grim lock` resolves those edges. If every surviving edge is a version
+  claim the pin's tag does not rule out, the row stays instead, and the next
+  `grim lock` keeps the pin when its version answers.
 - An edit that changes the rows of a lock it leaves stale writes a hash no
   declaration produces. Restoring `grimoire.toml` by hand then does not make it
   read fresh. See [`grim remove`][remove].
@@ -1151,6 +1191,22 @@ To keep the old result, set `[description] entry_readme = false`. Give an entry 
 that sets files but no `readme`, next to a root `README.md`, now warns that the
 README is not published. See [the lookup and its
 precedence](./publishing.md#description-entry-readme).
+
+## Releases stop moving a float to a lower version {#release-floats}
+
+From 0.16.0 `grim release` and `grim publish` with the cascade on leave `X.Y`,
+`X` and `latest` on a higher version. After 2.9.0, a release of 2.3.7 moves `2.3`
+and keeps `2` and `latest` on 2.9.0. grim names each kept float on stderr and in
+`floats_kept` in the JSON report. `tags` lists only the tags that point at
+the release.
+
+A real cascading release reads each float first and fails closed with `69`, `80`
+or `81` before any tag moves. A cascading `release --dry-run` and
+`publish --dry-run` read the floats too, but never fail on it. When a read fails,
+or offline, the dry run warns once on stderr and plans every float moving, as
+0.15.1 did, with `floats_kept` `[]`. `--no-cascade`, a prerelease and a non-semver tag read nothing. Floats a backport
+already moved down stay where they are. Publish a newer release to move them, or
+retag with another OCI tool.
 
 ## Smaller notes {#smaller-notes}
 

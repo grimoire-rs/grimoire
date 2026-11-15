@@ -69,7 +69,8 @@ bundle members, because no stage needs them to work.
 2. Write the six stage skills. Each one requires the templates with a
    `grim.requires` key, as a [relative reference][relative]. `./templates:1`
    means the `templates` repository beside this one, so the package survives a
-   mirror.
+   mirror. The tag is a [claim][claims]: `./templates:1` accepts any release from
+   1.0.0 up to, but not including, 2.0.0.
 
    <!-- doc: guide-dependencies -->
    ```bash-run
@@ -261,13 +262,22 @@ the skill.
 
 ## When the chain is not what you expected {#overrides}
 
-A direct declaration beats whatever an artifact asked for. If you declare
-`templates` yourself at another version, `grim why skill templates` also prints
+A direct declaration with a tag beats whatever an artifact asked for. If you
+declare `templates` yourself at another version, `grim why skill templates` also prints
 an `overrides:` line naming each parent and the reference it wanted, and your
 declaration wins. If the same digest is both declared and required, grim
 notes on stderr that your declaration is redundant. The
 [`grim why` reference][cmd-why] has the exit codes, including `65` for a lock
 whose graph cannot be followed. `grim lock` repairs that.
+
+A declaration without a tag does not beat a claim. It yields to the dependencies
+on its own repository.
+
+Say `skill/a` requires `ghcr.io/acme/x:2` and `skill/b`
+requires `ghcr.io/acme/x:2.1`, and you declare `x` bare. grim resolves `x` to the
+highest 2.x release that satisfies both. It prints one line on stderr naming
+`skill/a` and `skill/b`. Declare `x` with a tag to choose a version yourself. Two
+requesters that claim different majors of one artifact exit `78`.
 
 ## Next steps {#next-steps}
 
@@ -282,6 +292,7 @@ whose graph cannot be followed. `grim lock` repairs that.
 [bundles]: ../concepts.md#bundles
 [requires]: ../artifacts.md#requires
 [relative]: ../artifacts.md#bundle-relative-refs
+[claims]: ../artifacts.md#what-the-tag-claims
 [publishing]: ../publishing.md
 [publishing-bundles]: ../publishing.md#bundles
 [artifacts-requires]: ../artifacts.md#requires

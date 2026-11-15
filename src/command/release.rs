@@ -7,11 +7,11 @@
 //! `<ref>` is `registry/repo:version`. The artifact is validated+packed
 //! (reusing `build`), the cascade tag set is computed from the version,
 //! and then via the [`OciAccess`] seam: push the layer blob, push the
-//! manifest (with annotations), then move every cascade tag onto the
-//! manifest digest. The exact version tag is written FIRST so a crash
-//! never leaves a floating tag (`1.2`/`1`/`latest`) pointing at a
-//! manifest that has no specific tag. Re-releasing identical content is
-//! an idempotent no-op (same digest). `--dry-run` prints the plan;
+//! manifest (with annotations), then move the cascade tags onto the
+//! manifest digest, never a float to a lower version. The exact version
+//! tag goes FIRST so a crash never leaves a float (`1.2`/`1`/`latest`)
+//! on a manifest that has no specific tag. Re-releasing identical content
+//! is an idempotent no-op (same digest). `--dry-run` prints the plan;
 //! `--force` allows moving an existing exact-version tag that points
 //! elsewhere.
 
@@ -19,18 +19,22 @@ use std::sync::Arc;
 
 use clap::Args;
 
-use crate::api::release_report::ReleaseReport;
+use crate::api::release_report::{KeptFloat, ReleaseReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
-use crate::oci::access::{OciAccess, Operation};
+use crate::oci::access::error::{AccessError, AccessErrorKind};
+use crate::oci::access::{AccessMode, OciAccess, Operation};
 use crate::oci::annotations::{annotations_for_bundle, annotations_for_mcp, annotations_for_settings};
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
 use crate::oci::layer::{self, Compression};
 use crate::oci::manifest::{Descriptor, OciManifest};
 use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
 use crate::oci::reference::ArtifactRef;
-use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags, resolve_cascade};
+use crate::oci::release::{
+    FloatVerdict, ReleaseError, ReleaseErrorKind, float_verdict, publish_tags, resolve_cascade, version_tag,
+};
 use crate::oci::settings::SETTINGS_LAYER_MEDIA_TYPE;
+use crate::oci::version_evidence::{annotated_version, evidence};
 use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 use anyhow::Context as _;
@@ -80,14 +84,16 @@ pub struct ReleaseArgs {
     pub pin: bool,
 
     /// Assert the rolling cascade: move `X.Y`, `X`, and `latest` onto this
-    /// release. Requires a full semver tag — a non-semver tag with
-    /// `--cascade` is a data error (65). Default (neither flag): cascade
-    /// automatically for full semver, publish a single tag otherwise.
+    /// release, but never a float to a lower version. Requires a full semver
+    /// tag — a non-semver tag with `--cascade` is a data error (65). Default
+    /// (neither flag): cascade automatically for full semver, publish a
+    /// single tag otherwise.
     #[arg(long, overrides_with = "no_cascade")]
     pub cascade: bool,
 
     /// Publish only the exact tag; suppress the `X.Y`/`X`/`latest` cascade
-    /// even for a full semver version.
+    /// even for a full semver version (the cascade never moves a float to a
+    /// lower version).
     #[arg(long, overrides_with = "cascade")]
     pub no_cascade: bool,
 
@@ -330,10 +336,12 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
 
     if args.dry_run {
         // No push: report the plan with a deterministic preview digest.
-        let preview = preview_manifest_digest(&manifest)?;
-        let report = ReleaseReport::new(id.to_string(), preview, tags, false)
+        let preview: Digest = preview_manifest_digest(&manifest)?.parse()?;
+        let (tags, kept) = plan_floats(&access, ctx.access_mode(), &push_repo, &tags, &version, &preview).await;
+        let report = ReleaseReport::new(id.to_string(), preview.to_string(), tags, false)
             .with_pushed_to(pushed_to)
-            .with_compression(args.compression);
+            .with_compression(args.compression)
+            .with_floats_kept(&version, kept);
         return Ok((report, ExitCode::Success));
     }
 
@@ -358,7 +366,8 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
 
     // Move the exact version tag FIRST, then the wider floating tags last
     // (crash safety: `1.2.3` exists before `1.2`/`1`/`latest` move to it).
-    super::grim(move_tags(&access, &push_repo, &tags, &version, &target).await)?;
+    let (tags, kept) =
+        super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, &tags, &version, &target).await)?;
 
     // An adopted manifest has the same content under the other compression.
     let compression = match (target == manifest_digest, args.compression) {
@@ -368,7 +377,8 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     };
     let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
         .with_pushed_to(pushed_to)
-        .with_compression(compression);
+        .with_compression(compression)
+        .with_floats_kept(&version, kept);
     Ok((report, ExitCode::Success))
 }
 
@@ -456,8 +466,11 @@ async fn release_bundle(
     };
 
     if args.dry_run {
-        let preview = preview_manifest_digest(&oci_manifest)?;
-        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
+        let preview: Digest = preview_manifest_digest(&oci_manifest)?.parse()?;
+        let (tags, kept) = plan_floats(&access, ctx.access_mode(), &push_repo, tags, version, &preview).await;
+        let report = ReleaseReport::new(id.to_string(), preview.to_string(), tags, false)
+            .with_pushed_to(pushed_to)
+            .with_floats_kept(version, kept);
         return Ok((report, ExitCode::Success));
     }
 
@@ -469,9 +482,11 @@ async fn release_bundle(
     } else {
         super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
     };
-    super::grim(move_tags(&access, &push_repo, tags, version, &target).await)?;
+    let (tags, kept) = super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
 
-    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
+    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
+        .with_pushed_to(pushed_to)
+        .with_floats_kept(version, kept);
     Ok((report, ExitCode::Success))
 }
 
@@ -544,8 +559,11 @@ async fn release_mcp(
     };
 
     if args.dry_run {
-        let preview = preview_manifest_digest(&oci_manifest)?;
-        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
+        let preview: Digest = preview_manifest_digest(&oci_manifest)?.parse()?;
+        let (tags, kept) = plan_floats(&access, ctx.access_mode(), &push_repo, tags, version, &preview).await;
+        let report = ReleaseReport::new(id.to_string(), preview.to_string(), tags, false)
+            .with_pushed_to(pushed_to)
+            .with_floats_kept(version, kept);
         return Ok((report, ExitCode::Success));
     }
 
@@ -560,9 +578,11 @@ async fn release_mcp(
     } else {
         super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
     };
-    super::grim(move_tags(&access, &push_repo, tags, version, &target).await)?;
+    let (tags, kept) = super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
 
-    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
+    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
+        .with_pushed_to(pushed_to)
+        .with_floats_kept(version, kept);
     Ok((report, ExitCode::Success))
 }
 
@@ -630,8 +650,11 @@ async fn release_settings(
     };
 
     if args.dry_run {
-        let preview = preview_manifest_digest(&oci_manifest)?;
-        let report = ReleaseReport::new(id.to_string(), preview, tags.to_vec(), false).with_pushed_to(pushed_to);
+        let preview: Digest = preview_manifest_digest(&oci_manifest)?.parse()?;
+        let (tags, kept) = plan_floats(&access, ctx.access_mode(), &push_repo, tags, version, &preview).await;
+        let report = ReleaseReport::new(id.to_string(), preview.to_string(), tags, false)
+            .with_pushed_to(pushed_to)
+            .with_floats_kept(version, kept);
         return Ok((report, ExitCode::Success));
     }
 
@@ -646,9 +669,11 @@ async fn release_settings(
     } else {
         super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
     };
-    super::grim(move_tags(&access, &push_repo, tags, version, &target).await)?;
+    let (tags, kept) = super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
 
-    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags.to_vec(), true).with_pushed_to(pushed_to);
+    let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
+        .with_pushed_to(pushed_to)
+        .with_floats_kept(version, kept);
     Ok((report, ExitCode::Success))
 }
 
@@ -836,6 +861,120 @@ async fn move_tags(
     Ok(())
 }
 
+/// Judge the cascade floats, then move the exact tag and the floats that
+/// follow this release onto `digest`. Returns the tags moved and the floats kept.
+///
+/// # Errors
+///
+/// A failed or offline float read, before any tag moves; a failed tag write.
+async fn move_cascade(
+    access: &Arc<dyn OciAccess>,
+    mode: AccessMode,
+    repo: &Identifier,
+    tags: &[String],
+    version: &str,
+    digest: &Digest,
+) -> Result<(Vec<String>, Vec<KeptFloat>), crate::error::Error> {
+    let (moving, kept) = judge_floats(access, mode, repo, tags, version, digest).await?;
+    move_tags(access, repo, &moving, version, digest).await?;
+    Ok((moving, kept))
+}
+
+/// The floats a dry run onto `target` would move and keep. A float it cannot
+/// read, or any float offline, is planned as moving after one warning, as
+/// before floats were read: a dry run moves no tag, so it never fails here.
+async fn plan_floats(
+    access: &Arc<dyn OciAccess>,
+    mode: AccessMode,
+    repo: &Identifier,
+    tags: &[String],
+    version: &str,
+    target: &Digest,
+) -> (Vec<String>, Vec<KeptFloat>) {
+    match judge_floats(access, mode, repo, tags, version, target).await {
+        Ok(plan) => plan,
+        Err(e) => {
+            tracing::warn!("could not check the floats of {repo}: {e}; planning every float to move");
+            (tags.to_vec(), Vec::new())
+        }
+    }
+}
+
+/// Split the cascade `tags` into the tags a release onto `target` moves, in
+/// order, and the floats it leaves on a newer release. A float already on
+/// `target`, absent, on a manifest grim cannot parse, or whose version tag
+/// no longer names its manifest, moves.
+///
+/// # Errors
+///
+/// A failed tag or manifest read, with its own exit code (fail closed);
+/// `OfflineMiss` (81) offline, before any float is read.
+async fn judge_floats(
+    access: &Arc<dyn OciAccess>,
+    mode: AccessMode,
+    repo: &Identifier,
+    tags: &[String],
+    version: &str,
+    target: &Digest,
+) -> Result<(Vec<String>, Vec<KeptFloat>), crate::error::Error> {
+    // Only a full semver release cascades, so any other one has no float to judge.
+    let Ok(release) = semver::Version::parse(version) else {
+        return Ok((tags.to_vec(), Vec::new()));
+    };
+    let mut kept = Vec::new();
+    for float in tags.iter().filter(|tag| *tag != version) {
+        // Offline a tag-cache miss reads as absent: the plan would move a float the registry keeps.
+        if mode == AccessMode::Offline {
+            let float = repo.clone_with_tag(float.as_str());
+            return Err(AccessError::with_identifier(float, AccessErrorKind::OfflineMiss).into());
+        }
+        let on = match resolve_existing_version(access, repo, float).await? {
+            Some(on) if &on != target => on,
+            _ => continue,
+        };
+        let pinned = PinnedIdentifier::try_from(repo.clone_with_digest(on.clone()))?;
+        let annotated = match access.fetch_manifest(&pinned).await {
+            Ok(manifest) => manifest.and_then(|manifest| annotated_version(&manifest.annotations)),
+            // An image index, another tool's manifest or a body served under another digest is unknown evidence: the float moves.
+            Err(e)
+                if matches!(
+                    e.kind,
+                    AccessErrorKind::InvalidManifest(_) | AccessErrorKind::DigestMismatch { .. }
+                ) =>
+            {
+                None
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let current = evidence(annotated.as_ref(), &repo.clone_with_tag(float.as_str()));
+        let FloatVerdict::Keep(newer) = float_verdict(float, &current, &release) else {
+            continue;
+        };
+        // The annotation alone is the publisher's word; its own version tag must still name this manifest.
+        let shown = version_tag(&newer);
+        let named = resolve_existing_version(access, repo, &shown).await?;
+        if named.as_ref() != Some(&on) {
+            let why = if named.is_some() {
+                "names another manifest"
+            } else {
+                "is gone"
+            };
+            tracing::warn!("{repo}:{float} shows {newer}, but tag '{shown}' {why}; moving '{float}' to {version}");
+            continue;
+        }
+        kept.push(KeptFloat {
+            tag: float.clone(),
+            version: newer,
+        });
+    }
+    let moving = tags
+        .iter()
+        .filter(|tag| kept.iter().all(|float| &float.tag != *tag))
+        .cloned()
+        .collect();
+    Ok((moving, kept))
+}
+
 /// Resolve the digest an exact-version tag currently points at, if any.
 ///
 /// # Errors
@@ -927,6 +1066,7 @@ fn preview_manifest_digest(manifest: &OciManifest) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use crate::cli::options::{GlobalOptions, OutputFormat};
+    use crate::cli::printer::Printable;
 
     fn opts(registry: Option<&str>) -> GlobalOptions {
         GlobalOptions {
@@ -1148,6 +1288,574 @@ mod tests {
             .await
             .expect_err("a missing existing manifest must refuse");
         assert!(is_tag_exists(&err), "{err}");
+    }
+
+    // ── cascade floats never move to a lower version ─────────────────────
+
+    /// Point `repo:tag` at a fresh manifest annotated with `version` (none: unannotated).
+    async fn tag_annotated(
+        registry: &crate::oci::access::memory_registry::MemoryRegistry,
+        repo: &str,
+        tag: &str,
+        version: Option<&str>,
+    ) -> Digest {
+        let repo = Identifier::parse(repo).unwrap();
+        let mut manifest = manifest_of(format!("{tag} {version:?}").as_bytes());
+        if let Some(version) = version {
+            manifest.annotations.insert(
+                crate::oci::version_evidence::VERSION_ANNOTATION.to_string(),
+                version.to_string(),
+            );
+        }
+        let digest = registry.push_manifest(&repo, &manifest).await.unwrap();
+        registry.put_tag(&repo, tag, &digest).await.unwrap();
+        digest
+    }
+
+    fn kept(tag: &str, version: &str) -> KeptFloat {
+        KeptFloat {
+            tag: tag.to_string(),
+            version: semver::Version::parse(version).unwrap(),
+        }
+    }
+
+    fn write_mcp(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(format!("{name}.toml"));
+        std::fs::write(
+            &path,
+            "description = \"Demo.\"\n\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\nargs = [\"mcp\"]\n",
+        )
+        .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_backport_keeps_x_and_latest_on_the_newer_release_and_moves_x_y() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        for kind in ["skill", "mcp"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = match kind {
+                "skill" => write_skill(tmp.path(), "backport"),
+                _ => write_mcp(tmp.path(), "backport"),
+            };
+            let registry = MemoryRegistry::new();
+            let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+            let repo = "localhost:5000/acme/backport";
+            let release = |version: &str| {
+                let mut args = release_args(path.clone(), &format!("{repo}:{version}"), None);
+                args.kind = Some(kind.to_string());
+                args
+            };
+            let (old, _) = run(&ctx, &release("2.4.0")).await.expect("2.4.0");
+            let (newer, _) = run(&ctx, &release("2.9.0")).await.expect("2.9.0");
+            assert_eq!(
+                tag_digest(&registry, &format!("{repo}:2.4")).await.to_string(),
+                old.manifest_digest
+            );
+
+            let (backport, _) = run(&ctx, &release("2.4.1")).await.expect("2.4.1");
+            assert_eq!(backport.tags, ["2.4.1", "2.4"], "{kind}");
+            assert_eq!(
+                backport.floats_kept,
+                [kept("2", "2.9.0"), kept("latest", "2.9.0")],
+                "{kind}"
+            );
+            for (tag, at) in [
+                ("2.4.1", &backport),
+                ("2.4", &backport),
+                ("2", &newer),
+                ("latest", &newer),
+            ] {
+                let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+                assert_eq!(digest.to_string(), at.manifest_digest, "{kind} {tag}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_float_without_an_exact_version_moves_as_before() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "plain-float");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/plain-float";
+        tag_annotated(&registry, repo, "2", None).await;
+        tag_annotated(&registry, repo, "2.4", Some("canary")).await;
+        tag_annotated(&registry, repo, "latest", None).await;
+
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let (report, _) = run(&ctx, &release_args(skill, &format!("{repo}:2.4.1"), None))
+            .await
+            .expect("release");
+        assert_eq!(report.tags, ["2.4.1", "2.4", "2", "latest"]);
+        assert!(report.floats_kept.is_empty());
+        for tag in ["2.4.1", "2.4", "2", "latest"] {
+            let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+            assert_eq!(digest.to_string(), report.manifest_digest, "{tag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_float_outside_its_own_span_moves() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "span-float");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/span-float";
+        tag_annotated(&registry, repo, "2.4", Some("2.5.0")).await;
+        tag_annotated(&registry, repo, "2", Some("3.1.0")).await;
+        let three = tag_annotated(&registry, repo, "latest", Some("3.1.0")).await;
+        let repo_id = Identifier::parse(repo).unwrap();
+        registry.put_tag(&repo_id, "3.1.0", &three).await.unwrap();
+
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let (report, _) = run(&ctx, &release_args(skill, &format!("{repo}:2.4.1"), None))
+            .await
+            .expect("release");
+        assert_eq!(report.tags, ["2.4.1", "2.4", "2"]);
+        assert_eq!(
+            report.floats_kept,
+            [kept("latest", "3.1.0")],
+            "latest has no span of its own"
+        );
+        assert_eq!(tag_digest(&registry, &format!("{repo}:latest")).await, three);
+        for tag in ["2.4", "2"] {
+            let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+            assert_eq!(digest.to_string(), report.manifest_digest, "{tag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_float_is_created() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "fresh-float");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/fresh-float";
+        // A manifest read would fail, so creating the floats reads none.
+        let denied = ManifestDenied(
+            registry.clone(),
+            || crate::oci::access::error::AccessErrorKind::Registry(Box::new(std::io::Error::other("down"))),
+            false,
+        );
+        let ctx = Context::with_access(tmp.path().to_path_buf(), denied);
+        let (report, _) = run(&ctx, &release_args(skill, &format!("{repo}:2.4.1"), None))
+            .await
+            .expect("release");
+        assert_eq!(report.tags, ["2.4.1", "2.4", "2", "latest"]);
+        assert!(report.floats_kept.is_empty());
+        for tag in ["2.4.1", "2.4", "2", "latest"] {
+            let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+            assert_eq!(digest.to_string(), report.manifest_digest, "{tag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rerelease_of_the_same_version_moves_its_floats() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "again");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/again";
+        let reference = format!("{repo}:2.4.1");
+        let seed = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let (first, _) = run(&seed, &release_args(skill.clone(), &reference, None))
+            .await
+            .expect("first");
+
+        // Floats already on the release's digest move without a manifest read.
+        let denied = ManifestDenied(
+            registry.clone(),
+            || crate::oci::access::error::AccessErrorKind::Registry(Box::new(std::io::Error::other("down"))),
+            false,
+        );
+        let ctx = Context::with_access(tmp.path().to_path_buf(), denied);
+        let (same, _) = run(&ctx, &release_args(skill.clone(), &reference, None))
+            .await
+            .expect("identical re-release");
+        assert_eq!(same.manifest_digest, first.manifest_digest);
+        assert_eq!(same.tags, ["2.4.1", "2.4", "2", "latest"]);
+        assert!(same.floats_kept.is_empty());
+
+        // Changed content under the same version: the floats on 2.4.1 follow it.
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: again\ndescription: Changed.\n---\n# again\n",
+        )
+        .unwrap();
+        let mut args = release_args(skill, &reference, None);
+        args.force = true;
+        let (forced, _) = run(&seed, &args).await.expect("forced re-release");
+        assert_ne!(forced.manifest_digest, first.manifest_digest);
+        assert_eq!(forced.tags, ["2.4.1", "2.4", "2", "latest"]);
+        for tag in ["2.4.1", "2.4", "2", "latest"] {
+            let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+            assert_eq!(digest.to_string(), forced.manifest_digest, "{tag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn force_moves_the_exact_tag_but_never_lowers_a_float() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "forced");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/forced";
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        run(&ctx, &release_args(skill.clone(), &format!("{repo}:2.4.1"), None))
+            .await
+            .expect("2.4.1");
+        let (newer, _) = run(&ctx, &release_args(skill.clone(), &format!("{repo}:2.9.0"), None))
+            .await
+            .expect("2.9.0");
+
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: forced\ndescription: Patched.\n---\n# forced\n",
+        )
+        .unwrap();
+        let mut args = release_args(skill, &format!("{repo}:2.4.1"), None);
+        args.force = true;
+        let (forced, _) = run(&ctx, &args).await.expect("--force 2.4.1");
+        assert_eq!(forced.tags, ["2.4.1", "2.4"]);
+        assert_eq!(forced.floats_kept, [kept("2", "2.9.0"), kept("latest", "2.9.0")]);
+        for (tag, at) in [("2.4.1", &forced), ("2.4", &forced), ("2", &newer), ("latest", &newer)] {
+            let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+            assert_eq!(digest.to_string(), at.manifest_digest, "{tag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_reports_the_floats_it_would_keep() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "preview");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/preview";
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let (newer, _) = run(&ctx, &release_args(skill.clone(), &format!("{repo}:2.9.0"), None))
+            .await
+            .expect("2.9.0");
+
+        let mut args = release_args(skill, &format!("{repo}:2.4.1"), None);
+        args.dry_run = true;
+        let (plan, _) = run(&ctx, &args).await.expect("dry run");
+        assert!(!plan.pushed);
+        assert_eq!(plan.tags, ["2.4.1", "2.4"]);
+        assert_eq!(plan.floats_kept, [kept("2", "2.9.0"), kept("latest", "2.9.0")]);
+        let probe = Identifier::parse(&format!("{repo}:2.4.1")).unwrap();
+        assert!(
+            registry
+                .resolve_digest(&probe, Operation::Query)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            tag_digest(&registry, &format!("{repo}:latest")).await.to_string(),
+            newer.manifest_digest
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_float_read_moves_no_tag() {
+        use crate::oci::access::error::AccessErrorKind;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "unread");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/unread";
+        let seed = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let (newer, _) = run(&seed, &release_args(skill.clone(), &format!("{repo}:2.9.0"), None))
+            .await
+            .expect("2.9.0");
+
+        let cases: [(fn() -> AccessErrorKind, ExitCode); 2] = [
+            (
+                || AccessErrorKind::Registry(Box::new(std::io::Error::other("down"))),
+                ExitCode::Unavailable,
+            ),
+            (
+                || AccessErrorKind::Authentication(Box::new(std::io::Error::other("denied"))),
+                ExitCode::AuthError,
+            ),
+        ];
+        for (kind, exit) in cases {
+            // A failed manifest read after the guard, and a failed tag read.
+            for tag_read_fails in [false, true] {
+                let ctx = Context::with_access(
+                    tmp.path().to_path_buf(),
+                    ManifestDenied(registry.clone(), kind, tag_read_fails),
+                );
+                let args = release_args(skill.clone(), &format!("{repo}:2.4.1"), None);
+                let err = run(&ctx, &args).await.expect_err("a failed float read must abort");
+                assert_eq!(
+                    crate::error::classify_error(&err),
+                    exit,
+                    "tag_read_fails={tag_read_fails}"
+                );
+                for tag in ["2.4.1", "2.4"] {
+                    let probe = Identifier::parse(&format!("{repo}:{tag}")).unwrap();
+                    assert!(
+                        registry
+                            .resolve_digest(&probe, Operation::Query)
+                            .await
+                            .unwrap()
+                            .is_none(),
+                        "{tag}"
+                    );
+                }
+                for tag in ["2", "latest"] {
+                    let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+                    assert_eq!(digest.to_string(), newer.manifest_digest, "{tag}");
+                }
+            }
+        }
+    }
+
+    /// A dry run moves no tag, so an unreachable or refusing registry keeps
+    /// its exit 0: the plan moves every float, as before floats were read.
+    #[tokio::test]
+    async fn a_dry_run_that_cannot_read_a_float_plans_every_float_moving() {
+        use crate::oci::access::error::AccessErrorKind;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "unread-plan");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/unread-plan";
+        let seed = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let (newer, _) = run(&seed, &release_args(skill.clone(), &format!("{repo}:2.9.0"), None))
+            .await
+            .expect("2.9.0");
+
+        let kinds: [fn() -> AccessErrorKind; 2] = [
+            || AccessErrorKind::Registry(Box::new(std::io::Error::other("down"))),
+            || AccessErrorKind::Authentication(Box::new(std::io::Error::other("denied"))),
+        ];
+        for kind in kinds {
+            for tag_read_fails in [true, false] {
+                let ctx = Context::with_access(
+                    tmp.path().to_path_buf(),
+                    ManifestDenied(registry.clone(), kind, tag_read_fails),
+                );
+                let mut args = release_args(skill.clone(), &format!("{repo}:2.4.1"), None);
+                args.dry_run = true;
+                let (plan, exit) = run(&ctx, &args).await.expect("a dry run still plans");
+                assert_eq!(exit, ExitCode::Success);
+                assert_eq!(
+                    plan.tags,
+                    ["2.4.1", "2.4", "2", "latest"],
+                    "tag_read_fails={tag_read_fails}"
+                );
+                assert!(plan.floats_kept.is_empty(), "tag_read_fails={tag_read_fails}");
+                for tag in ["2", "latest"] {
+                    let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+                    assert_eq!(digest.to_string(), newer.manifest_digest, "{tag}");
+                }
+            }
+        }
+    }
+
+    /// The version a kept float shows must still be released under its own
+    /// tag at the float's manifest; a deleted or re-pointed version tag moves it.
+    #[tokio::test]
+    async fn a_float_whose_version_tag_is_gone_or_elsewhere_moves() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "stale-float");
+        for retag_elsewhere in [false, true] {
+            let registry = MemoryRegistry::new();
+            let repo = "localhost:5000/acme/stale-float";
+            let newer = tag_annotated(&registry, repo, "2", Some("2.9.0")).await;
+            let repo_id = Identifier::parse(repo).unwrap();
+            registry.put_tag(&repo_id, "latest", &newer).await.unwrap();
+            if retag_elsewhere {
+                let other = tag_annotated(&registry, repo, "2.9.0", Some("2.9.0")).await;
+                assert_ne!(other, newer);
+            }
+
+            let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+            for dry_run in [true, false] {
+                let mut args = release_args(skill.clone(), &format!("{repo}:2.4.1"), None);
+                args.dry_run = dry_run;
+                let (report, _) = run(&ctx, &args).await.expect("release");
+                let case = format!("retag_elsewhere={retag_elsewhere} dry_run={dry_run}");
+                assert_eq!(report.tags, ["2.4.1", "2.4", "2", "latest"], "{case}");
+                assert!(report.floats_kept.is_empty(), "{case}");
+            }
+            for tag in ["2", "latest"] {
+                assert_ne!(tag_digest(&registry, &format!("{repo}:{tag}")).await, newer, "{tag}");
+            }
+        }
+    }
+
+    /// Floats sit on a newer release and every manifest read fails, so a
+    /// release that reads a float would abort.
+    #[tokio::test]
+    async fn a_release_without_floats_reads_none() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "no-floats");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/no-floats";
+        let seed = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        run(&seed, &release_args(skill.clone(), &format!("{repo}:2.9.0"), None))
+            .await
+            .expect("2.9.0");
+        let denied = ManifestDenied(
+            registry,
+            || crate::oci::access::error::AccessErrorKind::Registry(Box::new(std::io::Error::other("down"))),
+            false,
+        );
+        let ctx = Context::with_access(tmp.path().to_path_buf(), denied);
+        for (version, no_cascade) in [("2.4.1", true), ("2.4.1-rc.1", false), ("canary", false)] {
+            let mut args = release_args(skill.clone(), &format!("{repo}:{version}"), None);
+            args.no_cascade = no_cascade;
+            let (plan, _) = run(&ctx, &args).await.expect("no float to read");
+            assert_eq!(plan.tags, [version]);
+            assert!(plan.floats_kept.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_float_leaves_tags_and_prints_one_line() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "one-line");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/one-line";
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        run(&ctx, &release_args(skill.clone(), &format!("{repo}:3.0.0"), None))
+            .await
+            .expect("3.0.0");
+
+        let (report, _) = run(&ctx, &release_args(skill, &format!("{repo}:2.4.1"), None))
+            .await
+            .expect("2.4.1");
+        assert_eq!(report.tags, ["2.4.1", "2.4", "2"]);
+        assert_eq!(report.floats_kept, [kept("latest", "3.0.0")]);
+        assert_eq!(
+            report.kept_lines(),
+            ["kept 'latest' on 3.0.0, above this release 2.4.1"]
+        );
+        let mut table = Vec::new();
+        report.print_plain(&mut table).unwrap();
+        assert!(!String::from_utf8(table).unwrap().contains("latest"));
+    }
+
+    /// Offline no float can be read: a dry run keeps its exit 0 and plans every
+    /// float moving, while a release refuses with 81 before any tag moves.
+    #[tokio::test]
+    async fn offline_a_cascade_dry_run_plans_every_float_moving_and_a_release_exits_81() {
+        use crate::oci::access::cached_access::CachedAccess;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        use crate::oci::tag_cache::TagCache;
+        use crate::store::{BlobStore, GrimPaths};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "offline");
+        let registry = MemoryRegistry::new();
+        let repo = "localhost:5000/acme/offline";
+        let seed = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let (newer, _) = run(&seed, &release_args(skill.clone(), &format!("{repo}:2.9.0"), None))
+            .await
+            .expect("2.9.0");
+
+        let cache = GrimPaths::new(tmp.path().join("cold"));
+        cache.ensure_layout().unwrap();
+        let cold = CachedAccess::new(
+            registry.clone(),
+            TagCache::new(cache.tags_dir()),
+            BlobStore::new(cache.blobs_dir()),
+            AccessMode::Offline,
+        );
+        let ctx = Context::with_access(tmp.path().to_path_buf(), cold).with_offline();
+        let mut args = release_args(skill.clone(), &format!("{repo}:2.4.1"), None);
+        args.dry_run = true;
+        let (plan, exit) = run(&ctx, &args).await.expect("an offline dry run still plans");
+        assert_eq!(exit, ExitCode::Success);
+        assert_eq!(plan.tags, ["2.4.1", "2.4", "2", "latest"]);
+        assert!(plan.floats_kept.is_empty());
+        args.dry_run = false;
+        let err = run(&ctx, &args).await.expect_err("an offline release must refuse");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::OfflineBlocked);
+        let exact = Identifier::parse(&format!("{repo}:2.4.1")).unwrap();
+        assert!(
+            registry
+                .resolve_digest(&exact, Operation::Query)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for tag in ["2", "latest"] {
+            let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+            assert_eq!(digest.to_string(), newer.manifest_digest, "{tag}");
+        }
+
+        // A release with no float to read stays unaffected offline.
+        for (version, no_cascade) in [("2.4.1", true), ("2.4.1-rc.1", false), ("canary", false)] {
+            let mut args = release_args(skill.clone(), &format!("{repo}:{version}"), None);
+            args.dry_run = true;
+            args.no_cascade = no_cascade;
+            let (plan, _) = run(&ctx, &args).await.expect("no float to read");
+            assert_eq!(plan.tags, [version]);
+        }
+    }
+
+    /// An image index, another tool's manifest, or a body the registry served
+    /// under another digest says nothing about the float's version, so the
+    /// float moves, `--force` included.
+    #[tokio::test]
+    async fn a_float_on_an_unparseable_manifest_moves() {
+        use crate::oci::access::error::AccessErrorKind;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let kinds: [fn() -> AccessErrorKind; 2] = [
+            || AccessErrorKind::InvalidManifest("an image index".to_string()),
+            || AccessErrorKind::DigestMismatch {
+                expected: Algorithm::Sha256.hash(b"expected"),
+                actual: Algorithm::Sha256.hash(b"actual"),
+            },
+        ];
+        for kind in kinds {
+            let tmp = tempfile::tempdir().unwrap();
+            let skill = write_skill(tmp.path(), "foreign");
+            let registry = MemoryRegistry::new();
+            let repo = "localhost:5000/acme/foreign";
+            let seed = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+            run(&seed, &release_args(skill.clone(), &format!("{repo}:2.9.0"), None))
+                .await
+                .expect("2.9.0");
+
+            let unparseable = ManifestDenied(registry.clone(), kind, false);
+            let ctx = Context::with_access(tmp.path().to_path_buf(), unparseable);
+            for (dry_run, force) in [(true, false), (false, true)] {
+                let mut args = release_args(skill.clone(), &format!("{repo}:2.4.1"), None);
+                args.dry_run = dry_run;
+                args.force = force;
+                let (report, _) = run(&ctx, &args).await.expect("an unreadable float moves");
+                assert_eq!(report.tags, ["2.4.1", "2.4", "2", "latest"], "dry_run={dry_run}");
+                assert!(report.floats_kept.is_empty(), "dry_run={dry_run}");
+                if !dry_run {
+                    for tag in ["2", "latest"] {
+                        let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+                        assert_eq!(digest.to_string(), report.manifest_digest, "{tag}");
+                    }
+                }
+            }
+        }
     }
 
     /// A registry double whose manifest fetch fails with the given kind; everything else is a `MemoryRegistry`.
@@ -1768,6 +2476,45 @@ mod tests {
         assert!(!report.pushed, "an existing push-side tag must skip the release");
         assert_eq!(report.reference, "pull.example/acme/skip-skill:1.0.0");
         assert_eq!(report.pushed_to.as_deref(), Some("push.example/acme/skip-skill:1.0.0"));
+    }
+
+    /// The float reads consult the PUSH repository: a newer release there
+    /// keeps its floats, while the pull-named repository holds none.
+    #[tokio::test]
+    async fn run_push_registry_float_reads_consult_push_repo() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "float-skill");
+        let registry = MemoryRegistry::new();
+        let push = "push.example/acme/float-skill";
+        let newer = tag_annotated(&registry, push, "2.9.0", Some("2.9.0")).await;
+        let push_repo = Identifier::parse(push).unwrap();
+        for float in ["2", "latest"] {
+            registry.put_tag(&push_repo, float, &newer).await.unwrap();
+        }
+        let (major, latest) = (newer.clone(), newer);
+
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let mut outcomes = Vec::new();
+        for dry_run in [true, false] {
+            let mut args = release_args(
+                skill.clone(),
+                "pull.example/acme/float-skill:2.4.1",
+                Some("push.example"),
+            );
+            args.dry_run = dry_run;
+            let (report, _) = run(&ctx, &args).await.expect("release");
+            outcomes.push((dry_run, report.tags, report.floats_kept));
+        }
+        let kept_floats = vec![kept("2", "2.9.0"), kept("latest", "2.9.0")];
+        let tags = vec!["2.4.1".to_string(), "2.4".to_string()];
+        assert_eq!(
+            outcomes,
+            [(true, tags.clone(), kept_floats.clone()), (false, tags, kept_floats)]
+        );
+        assert_eq!(tag_digest(&registry, &format!("{push}:2")).await, major);
+        assert_eq!(tag_digest(&registry, &format!("{push}:latest")).await, latest);
     }
 
     /// The overwrite guard consults the PUSH repository: a different digest

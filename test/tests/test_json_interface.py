@@ -17,7 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_artifact, make_description, write_config
+from src.helpers import (
+    make_artifact,
+    make_dependent,
+    make_description,
+    publish_release,
+    write_config,
+)
 from src.registry import REGISTRY_HOST
 from src.stdio_drivers import drive_until_answered, initialize
 
@@ -212,6 +218,42 @@ def test_error_reason_marks_no_lock(grim_at, project_dir: Path) -> None:
     assert "retryable" not in doc["error"], (
         f"no-lock is not a retryable reason: {doc}"
     )
+
+
+def test_error_reason_marks_major_downgrade(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """A lock that would move a held pin into a lower major exits 78 with
+    reason ``major-downgrade``, so a consumer can offer
+    ``--allow-downgrade`` without scraping ``message``. No ``forceable``:
+    ``--force`` is not the answer to it."""
+    x = f"{unique_repo}/x"
+    skill = {"x/SKILL.md": "---\nname: x\ndescription: d\n---\n# x\n"}
+    publish_release(x, "2.6.0", skill)
+    publish_release(x, "3.1.0", skill)
+    write_config(project_dir, skills={"x": f"{REGISTRY_HOST}/{x}"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    dependent = make_dependent(
+        f"{unique_repo}/a",
+        "1",
+        "skill",
+        {"a/SKILL.md": "---\nname: a\ndescription: d\n---\n# a\n"},
+        [("skill", "x", f"{REGISTRY_HOST}/{x}:2")],
+    )
+    write_config(project_dir, skills={"x": f"{REGISTRY_HOST}/{x}", "a": dependent.fq})
+
+    result = runner.run("--format", "json", "lock", check=False)
+    assert result.returncode == 78, result.stderr
+    doc = json.loads(result.stdout)
+    assert doc["error"]["code"] == "config"
+    assert doc["error"]["exit"] == 78
+    assert doc["error"]["reason"] == "major-downgrade"
+    assert "forceable" not in doc["error"], (
+        f"a major downgrade is answered by --allow-downgrade: {doc}"
+    )
+    assert "--allow-downgrade" in doc["error"]["message"]
+    assert f"`{REGISTRY_HOST}/{x}@sha256:" in doc["error"]["message"]
 
 
 @pytest.mark.skipif(

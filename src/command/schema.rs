@@ -156,7 +156,7 @@ fn with_requires(mut value: serde_json::Value, owner: &str) -> anyhow::Result<sc
     properties.insert(
         "requires".to_string(),
         serde_json::json!({
-            "description": format!("Artifacts this {owner} requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`), each mapping a binding name to a member reference."),
+            "description": format!("Artifacts this {owner} requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`), each mapping a binding name to a member reference. A version-shaped tag is a version claim: `2.1` accepts 2.1.0 and later below 3.0.0, `0.2` accepts 0.2.x, and no tag or `latest` accepts any version; any other tag names one manifest."),
             "type": "object",
             "propertyNames": { "enum": ["skills", "rules", "agents", "mcp", "hooks", "bundles", "settings"] },
             "additionalProperties": {
