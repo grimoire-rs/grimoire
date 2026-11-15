@@ -339,6 +339,11 @@ for anyone upgrading:
   `79` and others) where 0.15.1 exited `0`, when the relock they run in the
   same run fails. They change nothing then, and `uninstall` deletes no file.
   `--no-relock` restores the in-place edit and its exit code.
+- `grim update --marketplace <manifest> <plugin>` and a declared
+  `grim export plugin --plugin` that saves `marketplace.lock` relock every other
+  plugin whose part is stale, keeping each pin its includes still answer. They
+  exit with the relock's code (`69`, `78`, `79`, `80`, `81`) where 0.15.1 copied
+  the stale part and exited `0`. They write nothing then.
 - `grim release` and `grim publish` with the cascade on never move `X.Y`, `X` or
   `latest` to a lower version, where they moved every float. A float on a
   prerelease is the exception and always moves. They read each

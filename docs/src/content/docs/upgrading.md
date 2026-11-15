@@ -834,6 +834,13 @@ it, so a later run can compare it with the request.
   refuses the nested bundle. The refusal needs proof, from the lock's records or
   from a manifest or tag read that succeeded. A failed read refuses nothing by
   itself. Select `<plugin>` to move both.
+- `grim update --marketplace <manifest> <plugin>` (or `<plugin>:<member>`) relocks
+  every other plugin whose part of `marketplace.lock` no longer matches its
+  declaration, and warns once on stderr naming it. Each pin still answering its
+  include stays, and nothing else refreshes. 0.15.1 copied that part stale and
+  exited `0`. A relock that fails exits with its own code, for example `69`,
+  `78`, `79`, `80` or `81`, and writes nothing. A `grim export plugin --plugin`
+  that saves `marketplace.lock` relocks stale parts the same way.
 - The same refusal also covers four more shapes of that pick, which exited `0`
   before. They arise on a part c5e3824 wrote, and the first two also on a part
   0.15.1 wrote. The last one also arises on a part this grim wrote, when the pick

@@ -392,7 +392,7 @@ impl DeclaredPlan {
 /// names into [`PluginInput`]s (C-010): `marketplace::load`,
 /// `ConfigFileLock::try_acquire`, `resolve::load_lock`, `select` (the
 /// caller's own emptiness and `--plugin` checks), then `resolve_marketplace`
-/// always — `Reconcile{stale}`, which with nothing stale only carries and
+/// always — `Reconcile{stale}`, which with no part stale only carries and
 /// drops, no network. `project` plugins take their pins from
 /// the project's own lock; the lock and the resolver only ever see the
 /// `include` plugins. `flags` are the `--version` / `--description`

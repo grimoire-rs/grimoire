@@ -226,6 +226,119 @@ def test_s021_update_one_plugin_leaves_the_other_part_identical(
     assert _part(second, "b") == _part(first, "b"), "b's part is carried verbatim"
 
 
+def test_a_plugin_pick_relocks_a_stale_part_it_left_out_and_keeps_its_pins(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The run saves the whole lock, so a part it did not pick whose declaration
+    changed is relocked in the same run: its held pin stays although its tag
+    moved, only the edit resolves, and a part in line stays byte for byte."""
+    a_repo, b_repo, c_repo, extra_repo = (f"{unique_repo}/{n}" for n in ("pa", "pb", "pc", "extra"))
+    _skill(a_repo, "pa", "v1")
+    b1 = _skill(b_repo, "pb", "v1")
+    _skill(c_repo, "pc", "v1")
+    extra = _skill(extra_repo, "extra", "v1")
+    m = project_dir / "marketplace.toml"
+    lock_path = project_dir / "marketplace.lock"
+    plugins = {
+        "a": [f"{registry}/{a_repo}:stable"],
+        "b": [f"{registry}/{b_repo}:stable"],
+        "c": [f"{registry}/{c_repo}:stable"],
+    }
+    _write_marketplace(m, plugins)
+    runner = grim_at(project_dir)
+    runner.run("update", "--marketplace", "marketplace.toml")
+    first = _lock(lock_path)
+
+    a2 = _skill(a_repo, "pa", "v2")
+    _skill(b_repo, "pb", "v2")
+    _skill(c_repo, "pc", "v2")
+    _write_marketplace(m, {**plugins, "b": [*plugins["b"], f"{registry}/{extra_repo}:stable"]})
+    result = runner.run(
+        "--format", "json", "update", "--marketplace", "marketplace.toml", "a", check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "plugin 'b' no longer matches its part" in result.stderr, result.stderr
+    rows = {(r["plugin"], r["name"]): r["action"] for r in json.loads(result.stdout)["items"]}
+    assert rows[("a", "pa")] == "updated", rows
+    assert rows[("b", "pb")] == "unchanged", rows
+    assert rows[("b", "extra")] != "unchanged", rows
+
+    second = _lock(lock_path)
+    assert _pins(second, "a") == {("skill", "pa"): f"{registry}/{a_repo}:stable@{a2.digest}"}
+    assert _pins(second, "b") == {
+        ("skill", "pb"): f"{registry}/{b_repo}:stable@{b1.digest}",
+        ("skill", "extra"): f"{registry}/{extra_repo}:stable@{extra.digest}",
+    }
+    assert _part(second, "c") == _part(first, "c"), "a part in line is carried verbatim"
+    assert _part(second, "b")[1]["declaration_hash"] != _part(first, "b")[1]["declaration_hash"]
+
+    # The relocked part is in line: a member pick of it is no stale refusal.
+    again = runner.run("update", "--marketplace", "marketplace.toml", "b:pb", check=False)
+    assert again.returncode == 0, again.stderr
+
+
+def test_a_stale_part_left_out_that_cannot_relock_fails_the_run_and_writes_nothing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    a_repo, b_repo = f"{unique_repo}/pa", f"{unique_repo}/pb"
+    _skill(a_repo, "pa", "v1")
+    _skill(b_repo, "pb", "v1")
+    m = project_dir / "marketplace.toml"
+    lock_path = project_dir / "marketplace.lock"
+    plugins = {"a": [f"{registry}/{a_repo}:stable"], "b": [f"{registry}/{b_repo}:stable"]}
+    _write_marketplace(m, plugins)
+    runner = grim_at(project_dir)
+    runner.run("update", "--marketplace", "marketplace.toml")
+
+    _skill(a_repo, "pa", "v2")
+    missing = f"{registry}/{unique_repo}/missing:stable"
+    _write_marketplace(m, {**plugins, "b": [*plugins["b"], missing]})
+    before = lock_path.read_bytes()
+    result = runner.run(
+        "--format", "json", "update", "--marketplace", "marketplace.toml", "a", check=False
+    )
+    assert result.returncode == 79, result.stderr
+    error = _error(result)
+    assert error["exit"] == 79, error
+    assert "plugin 'b'" in error["message"], error
+    assert lock_path.read_bytes() == before, "a failed relock writes nothing"
+
+
+def test_a_plugin_export_that_saves_the_lock_relocks_a_stale_part_it_left_out(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`export plugin --plugin` resolves through the same seam: when it saves the
+    lock for its own stale plugin, a stale part it did not select is relocked
+    too, its held pin kept."""
+    a_repo, b_repo, extra_repo = (f"{unique_repo}/{n}" for n in ("pa", "pb", "extra"))
+    _skill(a_repo, "pa", "v1")
+    b1 = _skill(b_repo, "pb", "v1")
+    extra = _skill(extra_repo, "extra", "v1")
+    m = project_dir / "marketplace.toml"
+    lock_path = project_dir / "marketplace.lock"
+    plugins = {"a": [f"{registry}/{a_repo}:stable"], "b": [f"{registry}/{b_repo}:stable"]}
+    _write_marketplace(m, plugins)
+    runner = grim_at(project_dir)
+    runner.run("update", "--marketplace", "marketplace.toml")
+
+    _skill(b_repo, "pb", "v2")
+    more = f"{registry}/{extra_repo}:stable"
+    _write_marketplace(m, {"a": [*plugins["a"], more], "b": [*plugins["b"], more]})
+    result = runner.run(
+        "export", "plugin", "--plugin", "a", "--client", "claude", "-o", str(project_dir / "out"),
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _pins(_lock(lock_path), "b") == {
+        ("skill", "pb"): f"{registry}/{b_repo}:stable@{b1.digest}",
+        ("skill", "extra"): f"{registry}/{extra_repo}:stable@{extra.digest}",
+    }
+    # Both parts in line: a member pick of either is no stale refusal.
+    for pick in ("a:pa", "b:pb"):
+        again = runner.run("update", "--marketplace", "marketplace.toml", pick, check=False)
+        assert again.returncode == 0, f"{pick}: {again.stderr}"
+
+
 def test_s021_plugin_dropped_from_m_yields_no_rows_and_leaves_l(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
