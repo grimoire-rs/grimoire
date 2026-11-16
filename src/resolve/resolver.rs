@@ -764,9 +764,13 @@ fn warn_relock(
         explained: &explained,
         part: run.part,
     };
-    let moved: BTreeSet<NodeKey> = moved_pins(&target.dispositions, previous, &target.lock)
-        .into_iter()
-        .collect();
+    let moved: BTreeSet<NodeKey> = if target.tagless_resolved.is_empty() {
+        BTreeSet::new()
+    } else {
+        moved_pins(&target.dispositions, previous, &target.lock)
+            .into_iter()
+            .collect()
+    };
     let warnings = [
         tagless_warning(&target.tagless_resolved, &moved, proven, run.part),
         unvouched_warning(target, refresh, carry, &unvouched),
