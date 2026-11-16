@@ -24,7 +24,7 @@ These apply to every subcommand:
 | `--registry <ref>` | Registry for short identifiers and the browse set. Repeatable / comma-separated (`--registry a,b`); the first value is the default. |
 | `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |
 | `--locked` | Refuse a command that would write a lock when the lock no longer matches its manifest; see [`--locked`](#locked). Also `GRIM_LOCKED`. |
-| `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install`, `export plugin` and `export marketplace`, silent elsewhere; the two exports count every member fetched, across all plugins). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
+| `--progress <auto\|json\|none>` | Progress rendering for long-running passes (default `auto` = tty-gated stderr bar on `install`, `status`, `export plugin` and `export marketplace`, silent elsewhere (`status` draws it for its adoption proofs); the two exports count every member fetched, across all plugins). `json` emits NDJSON events on **stderr** — `{"event":"start","total":N}`, `{"event":"advance","position":i,"total":N,"label":"…"}` (`label` is display-only), `{"event":"finish"}` — while stdout keeps the normal report. **Experimental pre-1.0**; see [Stability](./stability.md#unstable). |
 | `--log-level <level>` | Set the tracing log level: `off`, `error`, `warn`, `info`, `debug` or `trace` (case-insensitive). Wins over [`GRIM_LOG`](./configuration.md#environment-variables). An invalid value prints one line on stderr naming the accepted levels, and the run continues at the `GRIM_LOG` or `warn` level. |
 
 A downstream reader that closes the pipe early — `grim status --format
@@ -663,6 +663,7 @@ A bundle has no local-path form via `add`: `grim add --kind bundle
 | A reference naming another repository for an existing binding, an invalid binding name, or a local-path bundle | `64` |
 | A local modification or an untracked destination, or a dependency [cycle](./concepts.md#dependency-cycles) or [limit](./concepts.md#dependency-limits), including the node-admission and tag-listing limits | `65` |
 | With [`--locked`](#locked), a stale lock (reason `stale-lock`) | `65` |
+| An install state file that cannot be read, before the lock is saved | `74` |
 | Concurrent write on the config file's lock | `75` |
 | Sources claiming different versions of one artifact, claims in two majors, or no client that can host it | `78` |
 | A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`) | `78` |
@@ -706,6 +707,13 @@ With `--offline`, a dependency list missing from the local store is carried over
 from the previous lock with a warning. Where the lock records none, what only
 that artifact requires leaves the lock, as on 0.15.1. See
 [offline and the store](./concepts.md#dependency-offline).
+
+When `lock` drops a node, it reads install state and proves that node's
+outputs from the local store, with no request, before it saves the lock. It
+writes the records it proves to the state file, so a later `grim update` can
+prune those files. It never deletes a file. A state file it cannot read
+produces a warning and the lock still saves. [`grim add`](#add) does the same
+when its relock drops a pin, and so does Install in the [TUI](#tui).
 
 With the `settings` flag on and a [settings package][settings] in the lock,
 `lock` also checks the packages it would apply before it writes the lock. A
@@ -904,6 +912,19 @@ identical to what the install would write, it is **adopted** into the
 install record and reported `unchanged` — so deleting the state file while
 leaving rendered files intact repairs itself on the next install.
 
+The install record is a cache of what is on disk. After a `git pull` or a
+branch checkout, committed outputs and the lock move together while the record
+stays behind. Install renders the locked pin, from the local store or after a
+fetch, and compares the render with the files on disk. A match is recognised:
+install re-pins the record, writes no client byte, reports `unchanged` and
+exits `0`, where grim 0.15.1 refused with exit `65`. Files that differ from
+that render are a local edit and still refuse with `65`. One artifact present
+at two versions, such as Claude at v2 and Copilot at v1, reads `outdated`,
+and install rolls it forward and reports `updated`. Offline, a pin the store
+lacks leaves the refusal as it was. A symbolic link is never proven by this
+comparison. The gate above adopts a live link to identical bytes, and nothing
+else. See [Checkout models](./guides/shared-skills.md#checkout-models).
+
 A refused run exits `65` and names the first refused artifact in its error. One
 stderr warning then names every other refused file artifact, uncapped, so one
 rerun with `--force` covers them all. A refused settings package gets no second
@@ -1067,6 +1088,27 @@ an artifact whose on-disk bytes drifted from the recorded hash is **refused**
 with exit `65` until you pass `--force`. One flag therefore governs every way
 this command can destroy hand-edited work: the overwrite above, the prune
 below, and the client reap below that.
+
+Before `update` rewrites the lock, it proves each recorded output against the
+lock it is about to replace. It reads the local store, then the registry for a
+pin the store lacks. A named run proves only its own closure. This catches
+files that a pull or checkout brought without a record. A dropped artifact's
+files are deleted only where that proof holds. A file that stays unproven is
+never deleted, `--force` included, and a stderr line names it:
+`skill 'extra' left <paths> on disk: grim could not prove it wrote <it|them> (<reason>)`.
+A path named twice is listed once. The advice that follows is
+`delete <it|them> by hand if unwanted`. For a symbolic link it is `remove the link
+only`, and a file under a linked ancestor outside its root gets none. When one
+node mixes them, the advice is grouped as `for <p1>, <p2>: <advice>`. There is
+no retry advice. `proven, but its record could not be saved` is a reason too.
+`remove`, `lock` and `add` give it when they proved a node but could not save
+its record. An MCP server names the config files that hold its entry, and a
+linked config it did not read. It never names the config file as a whole to
+delete:
+`mcp 'github' left its entry in <path>: grim could not prove it wrote it (<reason>); remove the 'github' entry from it by hand if unwanted`.
+A node whose every reason is the unsaved record leads with `grim proved it wrote`.
+A state file that cannot be read, or a record write that fails,
+stops `update` with exit `74` before the lock is saved.
 
 > **Changed in 0.13.0.** `update` previously forced the overwrite
 > unconditionally, so a hand-edited artifact was replaced silently at exit `0`
@@ -1294,6 +1336,7 @@ nothing.
 | A locally modified artifact, refused with `refused: true` on its row; the report still prints and the pin has already moved | `65` |
 | A named run on a stale lock (`stale-lock`), or any run on a stale lock with [`--locked`](#locked) | `65` |
 | A dependency [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits) (including 32,768 node admissions and 32 MiB of tag listings), or `unsupported-artifact-feature` | `65` |
+| A state file that cannot be read, or a proven record that cannot be saved, before the lock is saved (the lock stays unchanged) | `74` |
 | Concurrent write on the config file's lock | `75` |
 | Sources claiming different versions of one artifact, which a moved tag [can cause](./concepts.md#bundle-conflicts), or claims in two majors | `78` |
 | A move to a lower major version without `--allow-downgrade` (reason `major-downgrade`) | `78` |
@@ -1480,6 +1523,70 @@ source](#add-path), `path: <path> (dev)` for a [dev-installed](#install-dev)
 record, or `dependency: <kind>/<name>, …` for an artifact that only another
 artifact's [dependencies](./concepts.md#dependencies) bring in. Pair with
 `--format json` to drive automation.
+
+### Records that follow the disk {#status-adoption}
+
+`status` is no longer read-only. A `git pull`, a branch checkout or a copied
+workspace can leave the install record behind files grim wrote itself. For a
+row that reads `modified`, or that has no record, `status` renders the lock's
+pin and compares the render with the files on disk. A match reads `installed`,
+and `status` writes that record to the machine-local state file under the
+state-file lock. At project scope, the proof never reads an MCP config that is a
+link or sits under a link leaving the workspace. Such a config is never proven.
+The proof does not read a config over 8 MiB either. An entry grim already
+recorded is still read in full. Outputs split between the record's pin and the lock's pin read
+`outdated`. A difference that no render explains stays `modified`. A stale lock
+proves nothing. A row that reads `missing` because an output is absent reads no
+content. Neither the report nor the exit code changes when a write cannot
+happen, and `--format json` gains no key.
+
+Online, a pin the local store lacks is fetched, within fixed bounds:
+
+| Bound | Limit |
+|---|---|
+| One call | 10 seconds |
+| One run | 30 seconds |
+| Manifest fetches | 64 |
+| Layer fetches | 64 |
+| One manifest | 4 MiB |
+| Decoded layer bytes | 512 MiB |
+
+The decoded-bytes bound is one budget for each `grim status` run, each TUI
+adoption task and each `grim_status` call, `--check` included. Every layer
+decode such a run performs, from the local store or the registry, is charged
+where it happens, a failed decode included. A layer whose decode failed is not
+decoded again in that run. A layer larger than what is left is not read, and
+its artifact stays unproven with the fetch-budget reason. `install` and the
+other commands have no such budget.
+A run that passes a bound leaves the rest unproven, and the next run takes
+them. A host that failed is skipped for 10 minutes, and a pin a registry
+answered `404` for is skipped for 24 hours. Both are remembered in
+`$GRIM_HOME/state/adoption-misses.json`, an internal file that may change in
+any minor release. `--offline` and `GRIM_OFFLINE` send no request. Under
+[`--check`](#status-check) the proof reads the local store only. The catalog
+and tag requests that `--check` makes still go out.
+
+Plain output names the outcome in one stderr line:
+
+```text
+adopted 3 artifacts into the install record; 0 left unproven
+offline: 2 artifacts were not proven; run `grim status` again online to prove them
+records not written: another grim holds the state-file lock
+```
+
+A single artifact reads `1 artifact` in both lines, and the offline line ends
+`to prove it`. The command in the offline line is the run's own invocation, such as
+`grim --global status`. The cause in the last line is one of four. Another grim holds the
+state-file lock, or the state file cannot be read or written. The state
+directory may be read-only, or the state path may be a link or lie outside its
+root.
+
+A row whose pin the store lacks can stay `modified` for that reason. It gets
+one more warning naming `grim install`. That command fetches the pin and checks
+the files against it. The global
+[`--progress`](#global-options) option names each proof: `auto` draws the stderr bar on a
+terminal, and `json` prints the NDJSON events. `--log-level off` hides the outcome line.
+The [TUI](#tui) and the [MCP server](#mcp) apply the same rule.
 
 Every row also carries `direct`, which says whether the artifact is declared in
 this scope's `grimoire.toml`, and `required_by`, which lists the parents that
@@ -1764,10 +1871,10 @@ this order and taking the first that matches: `stale`, `missing`,
 
 | State | Meaning | Remedy |
 |---|---|---|
-| `installed` | Locked, an install record exists, every present output matches its recorded hash, and the recorded source content equals the lock's. | — |
+| `installed` | Locked, an install record exists, every present output matches its recorded hash, and the recorded source content equals the lock's. A node whose files differ from its record, or that has no record, also reads `installed` when [adoption](#status-adoption) proves its files against a render of the lock's pin. | — |
 | `outdated` | Recorded, outputs intact, but the installed content differs from the lock pin. | [`grim install`](#install) |
-| `modified` | Recorded, outputs present, at least one drifted from its recorded hash — a hand edit. | Keep the edit, or [`grim install --force`](#install) to overwrite it |
-| `missing` | No lock entry, **or** no install record, **or** a recorded output absent from disk. | [`grim install`](#install) — preceded by [`grim lock`](#lock) when the lock has no entry for it |
+| `modified` | Recorded, outputs present, at least one drifted from its recorded hash — a hand edit. Also a node whose drift no render of the lock's pin explains, such as a pin the store lacks offline. | Keep the edit, or [`grim install --force`](#install) to overwrite it |
+| `missing` | No lock entry, **or** no install record that adoption could prove, **or** a recorded output absent from disk. | [`grim install`](#install) — preceded by [`grim lock`](#lock) when the lock has no entry for it |
 | `stale` | `grimoire.lock`'s `declaration_hash` no longer matches the live config. | [`grim lock`](#lock) |
 
 A file excluded by [`.grimignore`](./artifacts.md#grimignore) never
@@ -2007,6 +2114,12 @@ never moves a pin that still answers its claims, and writes the lock once.
 A row the rules below leave "until the next `grim lock`" is settled in the run.
 With every manifest in the local store, a plain `remove` works offline.
 
+`remove` also proves, from the local store and with no request, the outputs of
+every node the relock drops, before it saves the lock. It warns on stderr
+about files left on disk that it could not prove. It never deletes a file.
+A state file it cannot read produces a warning, and the edit and its exit code
+stand.
+
 If that relock fails, `remove` changes nothing and exits with the relock's own
 code, for example `78`, `69` or `79`. Registry unreachable, a manifest the store
 lacks, two majors of one artifact, a forced major downgrade, a settings conflict
@@ -2216,6 +2329,12 @@ nothing is removing nothing. A warning names the entry, and so does the
 report's `abandoned_entries`. `grim uninstall --force` removes it instead.
 Edit such an entry afterwards and it becomes ordinary drift, refused by the
 gate above.
+
+Before it deletes, `uninstall` proves each file's record against the lock, from
+the local store alone, and sends no request. A render that a pull or checkout
+left behind is recognised and deleted. A file it cannot prove is left in place
+and named on stderr. A state file that cannot be read or written stops the run
+with exit `74` before the lock or config changes.
 
 Uninstall writes no managed vendor config entry back. Removing one artifact
 leaves another rule's `claudeMdExcludes` element or OpenCode glob as you left
@@ -3739,6 +3858,18 @@ browser, `g` to switch scope, `h` to show/hide deprecated artifacts, and
 `space` to mark rows. A search that hides rows below the relevance cutoff
 says so in the status line, as `N weaker matches hidden`.
 
+After the first load, and after each scope switch, one background task proves
+the lock's recordless and lagging outputs, as [`grim status`](#status-adoption)
+does. The status line reads `adopting <n> artifacts in the background…` (`adopting 1 artifact in the background…` for one), then
+`adopted <n> · <m> unproven (tui.log)`. The event loop writes the records
+between your actions, so an action never contends with the task. A task fetches
+for at most 60 seconds and keeps what it proved by then. Only a task still
+running 10 seconds after that commits nothing. It fetches under the same
+bounds as the CLI. Online and offline behaviour match the CLI's, and the
+warnings go to `$GRIM_HOME/tui.log`. A scope switch drops the other
+scope's task. Install proves the nodes its relock drops, as `grim add` does,
+and Update proves what it may touch.
+
 The TUI opens in project scope when it finds a `grimoire.toml` by walking
 up from the working directory. When it finds none, it opens in global
 scope, which needs no config file, and the status line says so. Pressing
@@ -4540,7 +4671,11 @@ running shell commands.
 
 The server is **read-only by default**. The one mutating tool
 (`grim_render`) is gated behind `--allow-writes`: without the flag it is
-neither advertised nor callable.
+neither advertised nor callable. `--allow-writes` also lets `grim_status` write
+the install records it proves. Its proof reads the local store alone and never
+fetches. A call with `check: true` still reads the network the way
+`--check` does. The server keeps what it proved in memory for its lifetime. Without the
+flag it reports the same rows and writes nothing.
 
 The install **scope is chosen per tool call**, not at launch: every
 scope-sensitive tool takes optional `global` / `config` / `workspace`
@@ -4558,14 +4693,14 @@ down when the client closes stdin (EOF).
 
 | Flag | Effect |
 |------|--------|
-| `--allow-writes` | Register the write tool `grim_render`. Launch-pinned deliberately: enabling writes is a decision of whoever wires the server into a harness, never of the model calling the tools. |
+| `--allow-writes` | Register the write tool `grim_render`, and let `grim_status` write the install records it proves. Launch-pinned deliberately: enabling writes is a decision of whoever wires the server into a harness, never of the model calling the tools. |
 
 **Tools exposed:**
 
 | Tool | Description | Gate |
 |------|-------------|------|
 | `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `kind?` (an array of the `grim search --kind` kind names; with it, every word of `query` matches as text), `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. An unpaged call on a large index can return tens of megabytes, so pass `limit` and `offset`. `total`, `truncated` and `sources[].capped` report the cut. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
-| `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
+| `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Under `--allow-writes` it also records what it proves, as [`grim status`](#status-adoption) does. The proof reads the store alone, but `check: true` still reads the network. Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 32 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
 | `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
@@ -4590,7 +4725,7 @@ state.
 }
 ```
 
-Add `--allow-writes` to the `args` array to enable `grim_render`:
+Add `--allow-writes` to the `args` array to enable `grim_render` and the record writes of `grim_status`:
 
 ```json
 {

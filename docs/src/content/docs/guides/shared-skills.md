@@ -141,6 +141,21 @@ Project scope does not help here, because the artifact is not tied to one checko
 
 The result table prints one row and names one target, so step 3 is not optional. There is no single directory both agents read here. What there is instead is one lock entry rendering two byte-identical copies, and one [`grim update --global`](../commands.md#update) rolling both forward together.
 
+## Two checkout models {#checkout-models}
+
+A repository either commits the rendered files or ignores them. Both work. They differ in what a `git pull` leaves on disk, and so in what grim has to prove.
+
+The first model commits the outputs beside the lock. After a pull, the files and the lock moved together, but the install record in `.grimoire/` did not, because it is machine-local and ignored. [`grim install`](../commands.md#install) renders the locked pin and compares it with the files. A match re-pins the record, writes no client file and exits `0` with every row `unchanged`. [`grim status`](../commands.md#status-adoption) does the same and reads `installed`. Use this model when contributors should have the files without running grim, for example in a cloud session.
+
+The second model is the one this guide set up: the outputs are ignored, as in the section above. A pull changes only the lock. The next `grim install` renders the new pin over the old files and reports `updated`. Use this model when you want diffs of the declaration alone.
+
+Two limits apply to the first model:
+
+- A file with a different line ending is not a render of the pin. A Windows checkout that converts `\n` to `\r\n` reads as a local edit and is refused, as it was before. Mark the output directories `text eol=lf` in `.gitattributes`, for example `.claude/** text eol=lf`, so every checkout keeps the bytes grim wrote.
+- A link on a parent directory is never proven. A dotfiles tool such as stow or yadm that links `~/.claude/skills` into another tree leaves grim with no way to tell its own file from yours. An install reads the files as modified, and `update` keeps them and names them on stderr.
+
+A clone that holds a render of an older pin than the lock names is refused as an untracked destination. Run `grim install --force` there, or delete the stale files.
+
 ## An MCP server in the same list
 
 A server descriptor has the same problem and a different shape. Nothing lands under `skills/` or `rules/`: grim splices an entry into each client's own MCP config, in that client's own format.

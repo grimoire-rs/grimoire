@@ -84,6 +84,10 @@ You do not have to touch your root `.gitignore`. The first time grim creates
 `.grimoire/`, the directory that holds project install state, it writes
 `.grimoire/.gitignore` with a single `*` in it.
 
+If your repository also commits the rendered files, a pull leaves the local
+record behind them. `grim install` recognises the pulled render and exits `0`.
+See [Two checkout models](./shared-skills.md#checkout-models).
+
 ## Run the same install in CI
 
 The job needs three steps: check the repository out, put `grim` on the runner,

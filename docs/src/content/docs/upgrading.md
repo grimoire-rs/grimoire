@@ -189,9 +189,58 @@ A changed pin still re-materializes with no force at all. The gate compares
 against the **recorded** hash, so rolling a floating tag forward over an
 untouched file is unaffected — the rolling-release path is exactly as it was.
 
+A render that a `git pull` or checkout brought is not an edit. See
+[install records follow the files](#records-follow-disk).
+
 **What to do.** Re-run with `--force` to overwrite your edit, or answer the
 TUI's Overwrite dialog. To keep the edit instead, stop tracking the artifact:
 [`grim remove`][remove] undeclares it and leaves the file on disk.
+
+## Install records follow the files on disk {#records-follow-disk}
+
+The install record says what grim wrote. A `git pull` or branch checkout can
+change committed outputs and the lock while the record stays behind. grim 0.15.1
+read that as a local edit. It refused the install with exit `65` and read the row
+as `modified`. The record is now a cache of the disk, and grim proves it against
+a render of the locked pin.
+
+**What you will see.**
+
+- `grim install` over a pulled render exits `0` where it exited `65`. The row
+  reads `unchanged`, and no client file changes.
+- One artifact present at two versions reads `outdated` in
+  [`grim status`][status], and `install` rolls it forward as `updated`.
+- `grim update` and `grim uninstall` prove their files first. A state file they
+  cannot read now exits `74` before the lock or config is written. It used to
+  fail after.
+- `grim status` and the [TUI][tui] write records they prove, and online they
+  may fetch a missing pin within fixed bounds. See
+  [Records that follow the disk][status-adoption]. The `--format json` report
+  gains no key. Under `grim mcp`, `grim_status` writes only with `--allow-writes`.
+- A real local edit still refuses with `65`.
+- grim 0.15.1 reads the records new grim writes.
+
+**What to do.** Nothing. Scripts that treated the old `65` after a pull as a
+signal should stop doing so. For the two checkout models, see
+[One directory every agent reads][checkout-models].
+
+## A stored credential no longer reaches a host only a project file marks insecure {#credential-project-insecure}
+
+A project `grimoire.toml` can mark a registry `insecure = true`, which makes grim
+use plain HTTP for it. A repository you clone carries that file. grim no longer
+sends a stored credential to such a host. It sends the credential only to a host
+that `GRIM_INSECURE_REGISTRIES` or your global config also declares insecure.
+
+**What you will see.** A pull, a push (`release`, `publish`) or a catalog browse
+that lists repositories from that host runs anonymously. One stderr warning per
+host names the cause. A registry that needs a credential then answers with an
+authentication failure. A pull or a push then exits `80`. A catalog browse
+warns and lists that source with `ok: false`, and exits `0`.
+
+**What to do.** If you trust the host, opt in one of three ways. Set
+`GRIM_INSECURE_REGISTRIES`, set `insecure = true` on a global `[[registries]]`
+entry, or run `grim config registry set <alias> --insecure --global`. See
+[plain-HTTP registries][plain-http].
 
 ## A broken global config now fails more commands the same way {#global-config-strict}
 
@@ -1647,6 +1696,9 @@ one only when someone pushed the tag by hand.
 [search]: ./commands.md#search
 [settings]: ./settings.md
 [json-update]: ./json-interface.md#shapes-items
+[status-adoption]: ./commands.md#status-adoption
+[checkout-models]: ./guides/shared-skills.md#checkout-models
+[plain-http]: ./configuration.md#plain-http-registries
 
 <!-- internal -->
 [ref-rule-support-dir]: #rule-support-dir

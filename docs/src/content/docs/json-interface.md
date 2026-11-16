@@ -159,6 +159,19 @@ edges:
   field that does name a recorded client the configured set no longer
   wants, and only when `[options].clients` is explicitly set.
 
+`status` is not read-only. It may write install records it proves from the
+files on disk, and online it may fetch a pin the local store lacks. See
+[Records that follow the disk][commands-status-adoption]. None of this adds a
+key or a `state` literal. A row that a pull left reading `modified` reads
+`installed` once its render is proven. A proof that cannot happen leaves
+the report and the exit code as they were.
+
+After a `git pull`, `install` and `update` recognise a render of the lock's
+pin and report `unchanged` at exit `0`, where 0.15.1 exited `65`. A refusal
+for an edit keeps its `refused` row and exit `65`. A state file that
+`update` or `uninstall` cannot read exits `74` before the lock or config is
+written.
+
 #### The `lock` rows {#lock-rows}
 
 `grim lock` reports one row per artifact the lock holds, plus one per artifact
@@ -1098,7 +1111,7 @@ recognize. The reasons defined so far:
 |----------|-------------|---------|
 | `stale-lock` | `data` / 65 | The lock no longer matches what it was written from. Either a partial `grim update <name>` was refused because `grimoire.lock` no longer matches the current declaration (retry with `grim lock`, then the same update; if `grim lock` finds a pinned manifest gone, bare `grim update` moves every pin), or `grim install` found that a locked entry's dependencies differ from the pinned artifact's, or that a local path source changed since locking, or `grim why` could not follow the lock's dependency graph (run `grim lock`). It is also the reason under [`--locked`](./commands.md#locked) when a command that writes a lock finds it out of sync with its manifest; for a marketplace, when a declared plugin's part is stale or missing. |
 | `modified` | `data` / 65 | An install was refused because the installed artifact was modified locally (the same state `grim status` reports as `modified`). Retry the same `grim install` / `grim add` with `--force` to overwrite. A refused [settings value][settings-force] sets it when any refused piece changed after grim wrote it. |
-| `untracked-destination` | `data` / 65 | An install was refused because the destination already exists on disk with no install record — grim does not clobber files it did not create. Retry with `--force` to overwrite and record it. A refused settings value sets it when grim wrote none of the refused pieces. |
+| `untracked-destination` | `data` / 65 | An install was refused because the destination already exists on disk with no install record, and its bytes are not a render of the locked pin — grim does not clobber files it did not create. Retry with `--force` to overwrite and record it. A refused settings value sets it when grim wrote none of the refused pieces. |
 | `no-config` | `not-found` / 79 | A project-scope command found no `grimoire.toml` by walking up from the working directory. Distinct from an explicit `--config <path>` that does not exist, which also exits 79 but carries no `reason` — that is a wrong path, not "no config anywhere". |
 | `no-lock` | `not-found` / 79 | `grim install` (or `grim export` reading a project) found a `grimoire.toml` but no `grimoire.lock`. Run `grim lock`, then retry. Under [`--locked`](./commands.md#locked) any command that writes `grimoire.lock` gives it too. |
 | `locked` | `temp-fail` / 75 | A config-file write was refused because another `grim` process holds the `<file>.lock` advisory sidecar. Transient — retry the same command. Cline's own lock on its MCP settings file, held past grim's wait, carries the same reason. So does a settings file that changed during the run, which grim leaves untouched. |
@@ -1324,6 +1337,7 @@ probes the companion tag) — both interfaces call the same fetch core.
 `grim_describe` returns the same shape as `grim describe --format json`,
 including the `has_description` and `requires` fields. `grim_status` rows carry
 `direct` and `required_by` too.
+`grim_status` writes install records only when the server runs with `--allow-writes`. Its proof reads the store and never fetches. A call with `check: true` still reads the network the way `--check` does.
 
 ## No self-identifying reports {#no-discriminator}
 
@@ -1337,6 +1351,7 @@ can ship in a minor release.
 <!-- internal -->
 [commands-color]: ./commands.md#global-options
 [commands-status]: ./commands.md#status
+[commands-status-adoption]: ./commands.md#status-adoption
 [commands-search]: ./commands.md#search
 [commands-rate]: ./commands.md#rate
 [commands-rate-viewer]: ./commands.md#rate-viewer-state
