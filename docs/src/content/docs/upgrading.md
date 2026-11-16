@@ -13,8 +13,9 @@ Almost nothing here is a breaking change. Grimoire is [stabilizing toward
 about contracts, not about what you *see*, and every one of these is visible
 enough to look like a bug if you meet it cold. The one exception is
 [`GRIM_RATING_HOST`](#rating-host), removed before the 1.0 freeze takes
-effect and called out as breaking where it appears. Two more are what grim
-0.16.0 packs for a [rule][ref-rule-support-dir] and an [agent][ref-agent-companions].
+effect and called out as breaking where it appears. Three more are what grim
+0.16.0 packs for a [rule][ref-rule-support-dir] and an [agent][ref-agent-companions],
+and which [logo][ref-logo-svg] a package publishes.
 
 ## Adding a client changes what autodetect targets {#autodetect}
 
@@ -1337,9 +1338,11 @@ artifacts are skipped and each companion is re-pointed, so
 comes from the top level, and no artifact's digest changes. A repository
 without per-package files publishes as before.
 
-From 0.16.0 an SVG wins over a PNG at every level, including the top-level
-lookup. A repository with both `logo.png` and `logo.svg` in the same place
-publishes the SVG on its next run, where earlier releases published the PNG.
+**Breaking.** From 0.16.0 an SVG wins over a PNG at every level, including the
+top-level lookup. A repository with both `logo.png` and `logo.svg` in the same
+place publishes the SVG on its next run, where earlier releases published the
+PNG. To keep the PNG, delete the SVG or set `logo = "logo.png"` in
+`[description]`.
 
 To turn the README lookup off, set `[description] entry_readme = false`. The
 logo lookup has no toggle. Give an entry a `[<kind>.<name>.description]` table
@@ -1367,6 +1370,49 @@ A float whose current version is a prerelease is the exception: it always moves
 to the new release, whatever the precedence. `latest` on 2.0.0-rc.1 moves when
 you release 1.9.0. `grim release` never cascades a prerelease, so a float sits on
 one only when someone pushed the tag by hand.
+
+## A dev-install that meets a bundle member or dependency is refused {#dev-install-collision}
+
+A dev-install and an artifact the lock brings in share one install record and
+one destination. The lock brings one in through a bundle or a dependency. grim
+0.15.1 let either side replace the other's files. It exited `0` with no message.
+
+**What you will see.** Since 0.16.0 the run exits `64` and writes nothing.
+Three cases refuse:
+
+- A `grim install <path>` whose name the lock already installs.
+- A [`grim add`][add] whose bundle members or dependencies include a
+  dev-installed name. It leaves `grimoire.toml` as it was.
+- A [`grim install`][install] that would write a locked artifact over a dev
+  record.
+
+**What to do.** Rename the local skill, rule or agent, or
+[`grim uninstall`][uninstall] the other copy first. To replace a dev copy with
+the locked artifact, rerun `grim install --force`. See
+[Dev-install a local path][install-dev].
+
+## A non-regular file at one of grim's own paths exits 74 {#non-regular-file}
+
+A named pipe at a path grim derives itself used to block the open forever.
+Three cases show it:
+
+- A pipe at `$GRIM_HOME/grimoire.toml` hung every command that loads the global
+  config.
+- A pipe at the install state hung `grim status`.
+- A pipe at `$GRIM_HOME/hooks/dispatch.json` hung the `grim-hook` launcher on
+  every client tool call.
+
+**What you will see.** Since 0.16.0 grim refuses anything that is neither a
+regular file nor a directory. The message is `not a regular file` and the exit
+is `74`. It covers the global config, the locks and the install state. It also
+covers the hook, settings, catalog, tag and blob files under `$GRIM_HOME`, and
+the client files grim edits.
+
+A missing file is still absent, and a symlink is still followed. A path you name
+yourself, such as `--config`, `publish.toml` or `marketplace.toml`, still
+accepts a pipe. See [Non-regular files][json-error-document].
+
+**What to do.** Remove the pipe or device.
 
 ## Smaller notes {#smaller-notes}
 
@@ -1718,6 +1764,8 @@ one only when someone pushed the tag by hand.
 [lock]: ./commands.md#lock
 [lock-pins]: ./commands.md#lock-pins
 [add]: ./commands.md#add
+[install-dev]: ./commands.md#install-dev
+[json-error-document]: ./json-interface.md#error-non-regular
 [status-check]: ./commands.md#status-check
 [lock-held-back]: ./commands.md#lock-held-back
 [json-shapes-items]: ./json-interface.md#shapes-items
@@ -1739,4 +1787,5 @@ one only when someone pushed the tag by hand.
 
 <!-- internal -->
 [ref-rule-support-dir]: #rule-support-dir
+[ref-logo-svg]: #package-readme-companion
 [ref-agent-companions]: #agent-companions

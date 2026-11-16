@@ -1083,6 +1083,14 @@ grim-specific codes above 78; the same table governs plain-mode exit
 codes. Clap parse failures (the pre-contract boundary above) and `--help`
 never produce the document.
 
+### Non-regular files {#error-non-regular}
+
+Grim derives some paths itself: the global config, a lock, the install state
+and the client files it edits. Each must be a regular file or a directory. A
+named pipe or device there exits `74` with `not a regular file` instead of
+blocking the open. The `code` stays `io`. A path you name yourself,
+such as `--config`, `publish.toml` or `marketplace.toml`, still accepts a pipe.
+
 ### The optional `reason` field {#error-reason}
 
 Some failures carry a machine-readable `reason` alongside `code`/`exit` —
