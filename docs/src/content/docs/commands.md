@@ -3068,6 +3068,10 @@ one report. A multi-file bundle has no single payload to print, so plain
 mode requires `--out <dir>` to unpack the tree to disk instead; without
 `--out` (and no `--path`), plain mode is a usage error (exit 64).
 
+A repository with no companion exits 79 and prints `no description is
+published for <registry>/<repository>`. The message names neither a kind nor
+the reserved tag, and the same holds for `--digest-only` and `--path`.
+
 ### Cache probe (--digest-only) {#fetch-digest-only}
 
 `--digest-only` resolves the reference to a digest and reports `{ref,
