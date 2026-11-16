@@ -1,5 +1,7 @@
 # Research: spec-kit's Multi-Client Rendering Model (input for advanced grim rendering)
 
+**Expires:** 2027-01-19
+
 Analyzed 2026-07-19, `github/spec-kit` @ `main` (v0.13.0, commit `57cc518d`),
 via 4-agent research fan-out (overview / init CLI / templates / multi-client).
 Full facet transcripts: arcana session scratchpad. Written from the arcana

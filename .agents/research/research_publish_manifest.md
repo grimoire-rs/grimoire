@@ -1,6 +1,7 @@
 # Research: Batch Publish Manifest Prior Art
 
 **Date:** 2026-06-12
+**Expires:** n/a (historical — adr_grim_publish.md)
 **Researcher:** worker-researcher (persisted by orchestrator — worker had no Write tool)
 **Consumed by:** `adr_grim_publish.md`, `plan_grim_publish.md`
 **Scope:** Multi-package publish workflows, manifest file disambiguation patterns, idempotent re-publish semantics, OCI movable channel tags.

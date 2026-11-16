@@ -5,7 +5,7 @@
 - **Date**: 2026-08-14
 - **Domain**: Codex CLI (`openai/codex`) native hook system — third-party installer surface choice for grim's Codex hook dispatcher registration
 - **Triggered by**: hex-architect tier-high research fan-out, axis `codex-hook-surface`, blocking design decision D7a. Builds directly on `.agents/research/hooks_vendor_reports/codex.md` (same research date) — that file's §2/§3/§9/§10/§11 are treated as established and **not** re-derived here except where this pass found more precise or corrected detail.
-- **Expires**: Codex hooks are explicitly a fast-moving target (10+ merged hook PRs and a dozen+ open hook issues in the two weeks before this research date alone). Re-verify against `codex-rs/hooks/schema/generated/*.schema.json` and the specific source files cited below before shipping a hard dependency. Treat anything here as stale after **2026-09-14** (one month) or after the next Codex stable release past `rust-v0.147.0`, whichever comes first.
+- **Expires:** 2027-02-14. Original note: Codex hooks are explicitly a fast-moving target (10+ merged hook PRs and a dozen+ open hook issues in the two weeks before this research date alone). Re-verify against `codex-rs/hooks/schema/generated/*.schema.json` and the specific source files cited below before shipping a hard dependency. Treat anything here as stale after **2026-09-14** (one month) or after the next Codex stable release past `rust-v0.147.0`, whichever comes first.
 
 Repo state for this pass: shallow clone (`--depth 1`) of `openai/codex` `main`, HEAD `8630bb3c` (2026-08-14T09:27:41Z) — one commit later than the prior report's HEAD, same day.
 

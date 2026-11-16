@@ -1,6 +1,7 @@
 # Research: Upstream hook-system currency check for PR #98 (hooks artifact kind)
 
 **Date:** 2026-09-28
+**Expires:** 2027-03-28
 
 **Question:** PR [grimoire-rs/grimoire#98](https://github.com/grimoire-rs/grimoire/pull/98)
 (branch `origin/hex/hooks-artifact-kind`, created 2026-08-19) builds a `Hook`

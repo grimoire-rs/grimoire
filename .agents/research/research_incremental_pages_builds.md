@@ -2,6 +2,7 @@
 
 ## Metadata
 - Date: 2026-09-28 (all URLs accessed this date)
+- **Expires:** 2027-03-28
 - Lane: incremental Pages deploys (neutral; no design recommendation)
 - Question: can an Astro package-index site (~400 OCI artifacts, later + per-harness zips/trees) skip unchanged work between runs and deploy partially, and what does the current indexer/grim cost per artifact?
 - Sources: URLs inline; code refs are `file:line` in `/home/mherwig/dev/grimoire-indexer` (IDX) and `/home/mherwig/dev/grimoire-duo` (GRIM). Web fetches were summarised by a small model; numbers below are quoted from those summaries.

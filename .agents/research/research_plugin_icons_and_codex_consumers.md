@@ -3,6 +3,7 @@
 ## Metadata
 
 - **Date**: 2026-09-29
+- **Expires:** 2027-03-29
 - **Domain**: packaging
 - **Triggered by**: e2e marketplace shows no plugin icons; user claim "Codex merged into ChatGPT, same standard"
 - **Expires**: 2027-03-29

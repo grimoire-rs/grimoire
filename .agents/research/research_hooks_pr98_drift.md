@@ -1,6 +1,7 @@
 # Research: bringing PR #98 (hooks ArtifactKind) current with main
 
 Date: 2026-09-28
+**Expires:** n/a (historical — plan_hooks_pr98_revival.md)
 Question: what does it take to bring `origin/hex/hooks-artifact-kind` (PR
 [grimoire-rs/grimoire#98](https://github.com/grimoire-rs/grimoire/pull/98))
 current with `main`, and what has main changed since the merge base

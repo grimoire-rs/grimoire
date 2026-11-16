@@ -1,6 +1,7 @@
 # Research: screencast recording harness
 
 **Date:** 2026-09-06
+**Expires:** 2027-03-06
 **Run:** hex-plan xhigh, docs redesign (`.agents/plans/plan_docs_site_redesign.md`)
 **Phase:** Discover, explorer recordings
 **Consumers:** `.agents/specs/design_docs_site_redesign.md`, the plan.

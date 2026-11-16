@@ -3,6 +3,7 @@
 ## Metadata
 
 - Date: 2026-10-20
+- **Expires:** 2027-04-20
 - Lane: codebase recon (hex-discuss `index-structure`)
 - Repos read: `grimoire`, `grimoire-indexer`, `grimoire-vscode`, `grimoire-index`
 - Live sample: `https://index.grimoire.rs/all.json`, 19 records — every scale figure is an extrapolation

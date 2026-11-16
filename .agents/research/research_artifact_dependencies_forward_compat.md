@@ -3,6 +3,7 @@
 ## Metadata
 
 - **Date**: 2026-11-01
+- **Expires:** 2027-05-01
 - **Domain**: packaging
 - **Triggered by**: `.agents/adr/adr_artifact_dependencies.md` (in design)
 - **Expires**: 2027-05-01

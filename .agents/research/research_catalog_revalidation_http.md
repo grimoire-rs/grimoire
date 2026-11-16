@@ -1,5 +1,7 @@
 # Research: HTTP & OCI Revalidation Semantics for Catalog Cache Freshness
 
+**Expires:** n/a (historical — adr_catalog_freshness_revalidation.md)
+
 **Axis:** technology | **Run:** `/hex-plan high` — catalog revalidation
 **Scope:** is conditional-GET / HEAD-digest revalidation a safe, cheap replacement for
 Grimoire's current "unconditional GET + 1h wholesale-rebuild TTL" for the three

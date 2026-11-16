@@ -1,6 +1,7 @@
 # WP-B — live vendor verification of the hook launcher, guard, and matcher dialects
 
 **Date:** 2026-08-16 · **Author:** WP-B worker · **Plan:** `plan_hooks_artifact_kind.md` § WP-B
+**Expires:** 2027-02-16
 **Status:** complete for claude + codex + copilot **CLI** surfaces. Windows runtime and Copilot's
 cloud agent remain unverifiable here and are marked as such.
 

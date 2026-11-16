@@ -1,5 +1,7 @@
 # Research: Stale-While-Revalidate UX for the Browse Catalog
 
+**Expires:** n/a (historical — adr_catalog_freshness_revalidation.md)
+
 **Axis**: Design patterns / precedent
 **For**: `/hex-plan high` — browse catalog SWR (serve cached rows instantly past TTL, revalidate in background, priority-refresh the selected row)
 **Context in-tree** (not re-derived here): `src/catalog.rs:11` — browse catalog cache is "atomically written, with a 1 hour TTL". Two background-check machines already exist with bounded mpsc + semaphore + generation-stamped messages + RAII in-flight dedup: `src/tui/update_check.rs`, `src/tui/bundle_member_fetch.rs`.

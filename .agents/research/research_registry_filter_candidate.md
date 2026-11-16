@@ -1,5 +1,7 @@
 # Research — browse-filter match candidate and the `registry set` verb
 
+**Expires:** n/a (historical — adr_registry_filter_match_candidate.md)
+
 **Provenance.** Produced 2026-08-11 as the SOTA / known-pitfall axis of the
 high-tier `/hex-review` of `feat/registry-set-verb`, and persisted here as the
 technology and domain research artifacts for the follow-up `/hex-plan high`

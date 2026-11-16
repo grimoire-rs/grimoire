@@ -1,5 +1,7 @@
 # Research: Cursor + Kiro Surface Verification (wave-1 vendor expansion)
 
+**Expires:** 2027-01-19
+
 Live verification 2026-07-19 (worker-researcher, primary sources only) for
 [`adr_vendor_wave_expansion.md`](../adr/adr_vendor_wave_expansion.md) ⚠ items.
 Sibling artifacts: `research_vendor_verification_junie_gemini.md`,

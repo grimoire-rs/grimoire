@@ -1,6 +1,7 @@
 # Research: Qoder and Copilot CLI hook schema primary-source verification
 
 **Date:** 2026-09-28
+**Expires:** 2027-03-28
 
 **Question:** Fill four exact-schema gaps left by
 [`research_hooks_upstream_2026-09.md`](./research_hooks_upstream_2026-09.md)

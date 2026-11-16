@@ -1,5 +1,7 @@
 # Research: Qoder vendor verification
 
+**Expires:** 2027-03-24
+
 Verified 2026-09-24 against docs.qoder.com, for adding `qoder` as a grim
 client. Qoder is Alibaba's agentic IDE plus `qodercli`; its config surface is a
 near-clone of Claude Code's under `.qoder/`. Consumers:

@@ -1,6 +1,7 @@
 # Research: In-Repo Distillation Map for First-Party Catalog Packages
 
 - **Date:** 2026-06-12
+- **Expires:** n/a (historical — plan_catalog_packages.md)
 - **Scope:** classify in-repo source material for three publishable skills:
   `grim-usage`, `ai-config-authoring`, `grim-authoring`
 - **Method:** full read of `.claude/rules/meta-ai-config.md`, `.claude/rules.md`,

@@ -8,6 +8,7 @@ portability, C) schema migration & versioning.
 ## Axis A: anchored paths & traversal safety
 
 **Date:** 2026-06-13
+**Expires:** n/a (historical — adr_install_state_portability.md)
 **Context:** Grimoire stores install records as `(PathAnchor, relative: String)` pairs
 (forward-slash UTF-8) per ADR `adr_install_state_portability.md`. At resolve
 time the stored relative is re-joined under a trusted anchor root that may

@@ -1,6 +1,7 @@
 # Research: AI Coding Tool Lifecycle Hooks (cross-IDE)
 
 **Date:** 2026-06-03
+**Expires:** n/a (historical — adr_hooks_support.md)
 **Author:** worker-researcher (via /architect)
 **Status:** **Superseded for all vendor facts** by
 [`research_hooks_vendor_survey.md`](./research_hooks_vendor_survey.md)

@@ -1,6 +1,7 @@
 # Research: docs content survey, frontmatter drafts and check baseline
 
 **Date:** 2026-09-06
+**Expires:** n/a (historical — plan_docs_site_redesign.md)
 **Run:** hex-plan xhigh, docs redesign (`.agents/plans/plan_docs_site_redesign.md`)
 **Phase:** Discover, explorer content
 **Consumers:** `.agents/specs/design_docs_site_redesign.md`, the plan.

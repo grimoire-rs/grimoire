@@ -11,7 +11,7 @@
 > (`research_hooks_qoder_copilot_schemas.md` §4). Left below unchanged rather
 > than rewritten, per the plan's correction-note-not-rewrite instruction.
 **Triggered by:** maintainer feature request — support hooks as a distributable artifact kind
-**Expires:** 2026-11-14 (**short deliberately** — three clients shipped or reworked hooks
+**Expires:** n/a (historical — adr_hooks_support.md) — was 2026-11-14 (**short deliberately** — three clients shipped or reworked hooks
 within 90 days of this survey; two more have open reliability bugs against the surface)
 **Method:** one Sonnet 5 researcher per client, primary sources only (vendor docs, vendor
 changelogs, vendor source, official issue trackers), every claim URL-anchored and fetch-dated.
