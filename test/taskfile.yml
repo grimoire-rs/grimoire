@@ -107,6 +107,7 @@ tasks:
         tests/test_old_grim_auto_status.py
         tests/test_marketplace_stale_remedy.py
         tests/test_catalog_kindless_upgrade.py::test_grim_0_15_1_lists_the_rows_this_grim_cached
+        tests/test_goose_kilo_agents.py::test_global_kilo_agent_with_a_token_installed_by_0_15_1_stays_installed
         tests/test_global.py::test_global_kiro_home_naming_the_home_dir_migrates_from_0_15_1
         tests/test_global.py::test_global_kiro_home_naming_the_home_dir_autodetects_and_migrates_from_0_15_1
       REPORT: results/old-grim/junit.xml

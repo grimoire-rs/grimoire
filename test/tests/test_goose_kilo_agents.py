@@ -16,7 +16,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_artifact, write_config
+from src.old_grim import OLD_BIN, checked_old_grim
 from src.registry import PublishedArtifact
 from src.runner import GrimRunner
 
@@ -177,3 +180,125 @@ def test_global_kilo_agent_follows_xdg_config_home_not_the_kilo_skills_root(
     out = runner.json("uninstall", "--global", "agent", "rev")
     assert out["status"] in ("uninstalled", "removed"), out
     assert not (xdg / "kilo/agents/rev.md").exists()
+
+
+@pytest.mark.skipif(not OLD_BIN, reason="GRIM_OLD_BIN names no grim 0.15.1 binary")
+def test_global_kilo_agent_with_a_token_installed_by_0_15_1_stays_installed(
+    tmp_path_factory: pytest.TempPathFactory,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+) -> None:
+    """0.15.1 wrote a global Kilo agent whose body holds ``{env:}``. The decline
+    covers new writes only: at the same pin this grim leaves that file and its
+    record as they are, so the artifact stays ``installed``."""
+    old_bin = checked_old_grim(tmp_path_factory.mktemp("old-grim-kilo-token"))
+    doc = "---\nname: rev\ndescription: Reviews code.\n---\n# rev\nSecret: {env:HOME}\n"
+    ag = make_artifact(f"{unique_repo}/rev", "agent", {"rev.md": doc}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(
+        f'[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n"
+    )
+
+    old = GrimRunner(old_bin, grim_home)
+    old.json("lock", "--global")
+    old_rows = old.json("install", "--global", "--client", "kilo")["items"]
+    assert old_rows[0]["status"] == "installed", old_rows
+    agent_path = old.home / ".config/kilo/agents/rev.md"
+    assert agent_path.is_file(), "0.15.1 wrote the file this grim would now decline"
+    written = agent_path.read_text(encoding="utf-8")
+    assert "{env:HOME}" in written
+
+    new = GrimRunner(grim_binary, grim_home)
+    first = new.run("install", "--global", "--client", "kilo", format="json", check=False)
+    first_rows = json.loads(first.stdout)["items"] if first.stdout else []
+    status_rows = new.json("status", "--global")["items"]
+    second = new.run("install", "--global", "--client", "kilo", format="json", check=False)
+    second_rows = json.loads(second.stdout)["items"] if second.stdout else []
+
+    for run, rows in ((first, first_rows), (second, second_rows)):
+        assert run.returncode == 0, run.stderr
+        assert rows[0]["status"] == "unchanged", rows
+    assert status_rows[0]["state"] == "installed", status_rows
+    assert agent_path.read_text(encoding="utf-8") == written, "the file 0.15.1 wrote must stay byte-identical"
+
+
+def test_global_kilo_agent_with_an_expansion_token_is_declined(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """Kilo substitutes ``{env:}``/``{file:}`` in a GLOBAL agent's body
+    (trusted scan upstream), never a project one — grim declines to write
+    such an agent at global scope rather than let a published agent pull an
+    environment variable into its prompt with no permission prompt."""
+    doc = "---\nname: rev\ndescription: Reviews code.\n---\n# rev\nSecret: {env:SECRET_TOKEN}\n"
+    ag = make_artifact(f"{unique_repo}/rev", "agent", {"rev.md": doc}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(
+        f'[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n"
+    )
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    result = runner.run("install", "--global", "--client", "kilo", format="json")
+    assert result.returncode == 0, result.stderr
+    rows = json.loads(result.stdout)["items"]
+    assert rows[0]["status"] == "skipped", rows
+    assert "{env:" in result.stderr and "kilo" in result.stderr.lower(), result.stderr
+
+    assert not (runner.home / ".config/kilo/agents/rev.md").exists(), (
+        "a global Kilo agent carrying {env:} must not be written"
+    )
+    status_row = runner.json("status", "--global")["items"][0]
+    assert status_row["outputs"] == [], (
+        f"a declined global agent must record zero outputs: {status_row}"
+    )
+
+
+def test_project_kilo_agent_with_an_expansion_token_installs_verbatim(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A project agent is untrusted upstream (no ``{env:}``, ``{file:}``
+    confined to ``fileScope.root``), so Kilo never substitutes its body —
+    grim writes it exactly as published, unlike the same body at global
+    scope."""
+    doc = "---\nname: rev\ndescription: Reviews code.\n---\n# rev\nSecret: {env:SECRET_TOKEN}\n"
+    ag = make_artifact(f"{unique_repo}/rev", "agent", {"rev.md": doc}, tag="v1")
+    write_config(project_dir, agents={"rev": ag.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    rows, _ = _install(runner, "--client", "kilo")
+    assert rows[0]["status"] == "installed", rows
+
+    text = (project_dir / ".kilo/agents/rev.md").read_text(encoding="utf-8")
+    assert "{env:SECRET_TOKEN}" in text, text
+
+
+def test_global_kilo_agent_update_to_a_pin_with_a_token_is_stable(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A plain global Kilo agent whose tag moves to a body holding ``{env:}``:
+    ``grim update`` declines the new body, and a second ``update`` changes nothing."""
+    plain = "---\nname: rev\ndescription: Reviews code.\n---\n# rev\nbody\n"
+    ag = make_artifact(f"{unique_repo}/rev", "agent", {"rev.md": plain}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(f'[agents]\nrev = "{ag.fq}"\n', encoding="utf-8", newline="\n")
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+    runner.json("install", "--global", "--client", "kilo")
+    agent_path = runner.home / ".config/kilo/agents/rev.md"
+    assert agent_path.is_file()
+
+    tokened = "---\nname: rev\ndescription: Reviews code.\n---\n# rev\nSecret: {env:HOME}\n"
+    make_artifact(f"{unique_repo}/rev", "agent", {"rev.md": tokened}, tag="v1")
+
+    runs = [runner.run("update", "--global", "--client", "kilo", format="json", check=False) for _ in range(2)]
+    status = runner.json("status", "--global")["items"][0]
+    first, second = runs
+    assert first.returncode == 0 and second.returncode == 0, (first.stderr, second.stderr)
+    assert json.loads(first.stdout)["items"][0]["action"] == "updated"
+    assert json.loads(second.stdout)["items"][0]["action"] == "unchanged"
+    for r in runs:
+        assert "{env:" in r.stderr and "kilo" in r.stderr.lower(), r.stderr
+    assert not agent_path.exists(), "the unedited v1 output is reaped, not carried"
+    assert status["state"] == "missing", status
+    assert status["outputs"] == [], status
+    assert [p["client"] for p in status["outputs_pending"]] == ["kilo"], status

@@ -1099,6 +1099,15 @@ async fn install_one<M: ArtifactMaterializer>(
         tracing::warn!("{}", support_dir_deprecation(&artifact.name, &publisher));
     }
 
+    // Read once, for the Kilo global-agent expansion-token decline below: an
+    // agent body a `.ok()` best-effort parse cannot read is left to fail
+    // properly inside `materialize_agent` instead.
+    let agent_body = (kind == ArtifactKind::Agent)
+        .then(|| std::fs::read_to_string(&canonical).ok())
+        .flatten()
+        .and_then(|doc| crate::skill::agent_frontmatter::AgentFrontmatter::parse_doc(&doc, &canonical).ok())
+        .map(|parsed| parsed.body);
+
     // Effective materialize set: the explicit `--client` targets PLUS — only
     // when the pin changed — every still-active recorded client. Version is an
     // artifact-level property: all clients in a record move to the new pin
@@ -1168,6 +1177,17 @@ async fn install_one<M: ArtifactMaterializer>(
         let fits = name_fits(*client, kind, &artifact.name);
         if !fits && let Some(grammar) = client.vendor().agent_name_grammar() {
             warn_name_rejected(kind, &artifact.name, *client, grammar);
+        }
+        if fits
+            && let Some(body) = &agent_body
+            && let Some(token) = kilo_global_agent_token(*client, kind, target.scope(), body)
+        {
+            tracing::warn!(
+                "agent '{}' skipped for {client}: its body contains a `{token}` expansion token, \
+                 which Kilo substitutes in a global agent",
+                artifact.name
+            );
+            return false;
         }
         fits
     });
@@ -1819,6 +1839,23 @@ fn name_rejecting_clients(
                 .map(|g| (*c, g))
         })
         .collect()
+}
+
+/// The expansion token a Kilo global agent install must decline for, if
+/// `client`/`kind`/`scope` is that case at all: Kilo substitutes `{env:`/
+/// `{file:` in a global agent's body (trusted scan upstream), never a
+/// project one. `None` for every other client, kind, or scope.
+fn kilo_global_agent_token(
+    client: crate::install::client_target::ClientTarget,
+    kind: ArtifactKind,
+    scope: ConfigScope,
+    body: &str,
+) -> Option<&'static str> {
+    (client == crate::install::client_target::ClientTarget::Kilo
+        && kind == ArtifactKind::Agent
+        && scope == ConfigScope::Global)
+        .then(|| super::vendor_kilo::global_agent_expansion_token(body))
+        .flatten()
 }
 
 /// The one user-facing line for a name-grammar skip.
@@ -3811,6 +3848,41 @@ mod tests {
     }
 
     use super::super::materializer::DefaultMaterializer;
+
+    // ── kilo_global_agent_token ───────────────────────────────────
+
+    #[test]
+    fn kilo_global_agent_token_fires_only_for_kilo_agent_global_with_a_token() {
+        let body = "hi {env:HOME}";
+        assert_eq!(
+            kilo_global_agent_token(ClientTarget::Kilo, ArtifactKind::Agent, ConfigScope::Global, body),
+            Some("{env:")
+        );
+        assert_eq!(
+            kilo_global_agent_token(ClientTarget::Kilo, ArtifactKind::Agent, ConfigScope::Project, body),
+            None,
+            "project scope is untrusted upstream and never declined"
+        );
+        assert_eq!(
+            kilo_global_agent_token(ClientTarget::Claude, ArtifactKind::Agent, ConfigScope::Global, body),
+            None,
+            "only Kilo expands this token"
+        );
+        assert_eq!(
+            kilo_global_agent_token(ClientTarget::Kilo, ArtifactKind::Rule, ConfigScope::Global, body),
+            None,
+            "only agents carry a substituted body"
+        );
+        assert_eq!(
+            kilo_global_agent_token(
+                ClientTarget::Kilo,
+                ArtifactKind::Agent,
+                ConfigScope::Global,
+                "plain body"
+            ),
+            None
+        );
+    }
 
     // ── persist_progress ───────────────────────────────────────────
 
