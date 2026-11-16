@@ -265,7 +265,7 @@ grim uninstall agent code-reviewer         # removes files + declaration
 [stability-unstable]: ./stability.md#unstable
 
 [cline-docs]: https://cline.bot
-[droid-docs]: https://docs.factory.ai/cli/configuration/custom-droids
+[droid-docs]: https://docs.factory.com/harness/subagents
 [goose-agents-docs]: https://goose-docs.ai/docs/guides/context-engineering/custom-agents
 [warp-docs]: https://warp.dev
 [openclaw-docs]: https://github.com/openclaw/openclaw

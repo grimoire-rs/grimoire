@@ -572,8 +572,8 @@ The full tool table lives at [`grim mcp`](./commands.md#mcp).
 [antigravity-docs]: https://antigravity.google/docs/mcp
 [qoder-mcp-docs]: https://docs.qoder.com/cli/mcp-reference
 [warp-mcp-docs]: https://docs.warp.dev/agents/capabilities/mcp/
-[cline-mcp-docs]: https://docs.cline.bot/mcp/configuring-mcp-servers
-[droid-mcp-docs]: https://docs.factory.ai/cli/configuration/mcp
+[cline-mcp-docs]: https://docs.cline.bot/mcp/mcp-overview
+[droid-mcp-docs]: https://docs.factory.com/harness/mcp
 [ansible-blockinfile]: https://docs.ansible.com/ansible/latest/collections/ansible/builtin/blockinfile_module.html
 [catalog-mcp-grim]: https://github.com/grimoire-rs/grimoire/blob/main/catalog/mcp/grim.toml
 [toml-edit-crate]: https://docs.rs/toml_edit/latest/toml_edit/
