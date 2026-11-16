@@ -3,7 +3,7 @@
 
 //! Kilo's vendor strategy: own-directory skills, pool-eligible; markdown agents; rules and MCP declined.
 //!
-//! Kilo Code (`Kilo-Org/kilocode`), verified 2026-07-27, re-verified 2026-09-27, against the project's
+//! Kilo Code (`Kilo-Org/kilocode`), verified 2026-07-27, re-verified 2026-09-27 and 2026-11-16 (v7.8.28), against the project's
 //! own source — `globalDirs()` and `skillDirectories()` — rather than prose.
 //!
 //! **The client name is `kilo`, not `kilocode`.** The product has rebranded to
@@ -14,8 +14,9 @@
 //!
 //! - **Skills**: `.kilo/skills/<name>/` (project), `~/.kilo/skills/<name>/`
 //!   (global) — both source-confirmed.
-//! - **`.kilocode` is NEVER written.** It is a read-only fallback, every doc
-//!   that mentions it calls it deprecated, and that codebase reaches EOL
+//! - **`.kilocode` is NEVER written.** It is a read-only fallback, the docs
+//!   call it legacy ("Canonical `.kilo/` skills take precedence over legacy
+//!   `.kilocode/` skills"), and that codebase reaches EOL
 //!   2026-07-31. grim writes `.kilo` exclusively — a second write path would
 //!   be a second thing to reap, and adding one "for safety" is how a
 //!   deprecated directory outlives its deprecation.

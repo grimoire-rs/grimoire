@@ -36,7 +36,9 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- `${amp:id-token}` finding: refuted, NOT REAL; the token passes through as Amp intends (driver verification 2026-11-16). No code landed for Amp.
 
 ## Routing
 
@@ -52,6 +54,7 @@ none required — no code landed in this run.
 - #24 Skill SKILL.md frontmatter keys name/description; dir name must match name → (a) ledger or doc text fix
 - (c) security — docs/src/content/docs/mcp-servers.md:227 · expansion
 - (c) security — docs/src/content/docs/mcp-servers.md:227 · trust-gate key (not a row)
+- `${amp:id-token}` in MCP values → dropped: not real, passes through as Amp intends
 
 ## Issue drafts
 

@@ -24,14 +24,17 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #9 `GOOSE_PATH_ROOT` wording: refuted, NOT REAL; grim's text is right (driver verification 2026-11-16).
+- #12 plugin skills: not implemented, deferred (on the plan's deferred list).
 
 ## Routing
 
 - #8 Rule kind declined; .goosehints/AGENTS.md monolithic, no per-file scoping key → (a) ledger or doc text fix
-- #9 $GOOSE_PATH_ROOT does not move agent/skill dirs (grim: "not honored",... → (a) ledger or doc text fix
+- #9 $GOOSE_PATH_ROOT does not move agent/skill dirs (grim: "not honored",... → dropped: not real, grim's wording is correct
 - #11 Hook kind declined (Goose owns own hooks file) → (c) issue draft
-- #12 Plugins surface: skills from ~/.agents/plugins/<plugin-name>/ (not covered by... → (b) additive renderer or metadata support — reported, not implemented in this run
+- #12 Plugins surface: skills from ~/.agents/plugins/<plugin-name>/ (not covered by... → deferred: not implemented in this run
 
 ## Issue drafts
 

@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_upstream_adoption_20261116
-- **Active phase:** 1 — WP1 export fixes
+- **Active phase:** 6 — docs and records
 - **Step:** /hex-execute → Implement
-- **Last update:** 2026-11-16 (after 129929ec: chore(skills): teach upstream-refresh the subagent cap and moved feeds)
+- **Last update:** 2026-11-16 (after 6c6d3b9f: fix(kilo): decline a global agent whose body holds an expansion token)
 
 
 ## Context
@@ -30,8 +30,8 @@ issuer field with a warning; `product-context.md` facts and re-rank.
 | Goose `GOOSE_PATH_ROOT` wording | not real: grim's text is right | dropped |
 | OpenCode V2 ignores `OPENCODE_CONFIG` | refuted: `server-process.ts:132` reads it | sweep records corrected |
 | OpenCode V2 settings keys | all still accepted, only deprecated | watchlist note, no code |
-| Cursor `${PLUGIN_ROOT}` | only `grim export plugin` (`src/export/family.rs:405-412`) | narrow fix |
-| Kilo agent-body expansion | global scope only; OpenCode does not expand | narrow fix |
+| Cursor `${PLUGIN_ROOT}` | not real: `family::agent_plugins_mcp_entry` has one caller, `stage::mcp_value`, so `${CURSOR_PLUGIN_ROOT}` already applies on both export paths | dropped |
+| Kilo agent-body expansion | global scope only; OpenCode does not expand | narrow fix, landed in `6c6d3b9f` |
 | Copilot sandbox-path expansion | version is 1.0.109; grim has no such row | note only |
 | Qoder env expansion in settings | real, but upstream states no syntax | deferred, needs a CLI probe |
 
@@ -54,16 +54,16 @@ files changed, tests added, deviations.
 Copy this plan to `.agents/plans/plan_upstream_adoption_20261116.md` with the
 `## Status` block.
 
-**WP1 — export fixes.**
+**WP1 — export fixes.** Landed in `e36551e8`; the Cursor item below was dropped (not real).
 - `src/export/marketplace_export.rs:890-894` (`EntryDoc`): stop writing
-  `documentationUrl` / `supportUrl` on marketplace entries for Claude and
-  Qoder; they stay in `plugin.json`. Update the test at `:1803-1820` and the
+  `documentationUrl` / `supportUrl` on marketplace entries for Claude
+  only (Qoder entries are unchanged: nothing upstream says Qoder rejects them);
+  the Claude `plugin.json` now carries them (`family.rs`, `stage.rs`). Update the test at `:1803-1820` and the
   e2e assertions at `:2752-2782`.
-- `src/export/family.rs:405-412`: for `ClientTarget::Cursor`, emit
-  `${CURSOR_PLUGIN_ROOT}`, the same branch `src/export/stage.rs:1517-1534`
-  already has. Test mirrors the `stage.rs` Cursor cases.
+- ~~`src/export/family.rs:405-412` Cursor `${CURSOR_PLUGIN_ROOT}`~~ dropped:
+  `stage::mcp_value` is the only caller and already emits it.
 
-**WP2 — settings rows.** Pattern: `SettingsField` rows in
+**WP2 — settings rows.** Landed in `58754de8` (318 rows). Pattern: `SettingsField` rows in
 `src/install/vendor_<harness>.rs`; each change also edits the vendor unit
 test, the value cell in `docs/src/content/docs/settings.md`, and the golden
 schema `src/command/testdata/settings.schema.json` (regenerate with
@@ -87,7 +87,7 @@ schema `src/command/testdata/settings.schema.json` (regenerate with
   316 → 318 in three places in `src/install/vendor.rs` (`:1869`, `:2317`,
   `:2318`, `:2363`).
 
-**WP3 — MCP fields.** Rules: `subsystem-install-layout-agents-mcp.md`,
+**WP3 — MCP fields.** Landed in `c1b453f2`. Rules: `subsystem-install-layout-agents-mcp.md`,
 `adr_mcp_oauth_projection.md` (lossless-or-skip).
 - Droid: add optional `authorization_server_issuer` to `McpOAuth`
   (`src/oci/mcp.rs`), write `oauth.authorizationServerIssuer`
@@ -101,7 +101,10 @@ schema `src/command/testdata/settings.schema.json` (regenerate with
 - One self-heal test each for Copilot and Junie, shape copied from
   `test/tests/test_mcp_artifact.py` / `test_fix_followups.py`.
 
-**WP4 — vendor-metadata keys.** Registry + parity-test pattern:
+**WP4 — vendor-metadata keys.** Landed in `4eafa219` for the Copilot agent keys
+and Claude `autoCompactWindow`; the Copilot skill keys were NOT implemented (a
+vendor with `skill_fields` leaves the shared skills pool, and Copilot is in
+`POOL_CAPABLE_VENDORS`: breaking; owner decision, issue draft). Registry + parity-test pattern:
 `vendor_copilot.rs:42-74`, `vendor_claude.rs:109-190`, doc parity as in
 `vendor_kilo.rs:477-489`; each key gets its row in
 `docs/src/content/docs/vendor-metadata.md`.
@@ -114,7 +117,10 @@ schema `src/command/testdata/settings.schema.json` (regenerate with
 - The worker fetches each key's type from the vendor page first; a key the
   existing field spec cannot express is deferred with the reason.
 
-**WP5a — Kiro root and Kilo hardening.**
+**WP5a — Kiro root and Kilo hardening.** Kiro landed in `10dd77ae` for `/`, `$HOME`
+and ancestors only: a relative `KIRO_HOME` is still followed, because `settings.md`
+and `json-interface.md` document `KIRO_HOME=kiro-rel` as the `settings-root-relative`
+example (owner decision, issue draft). Kilo landed in `6c6d3b9f`.
 - `kiro_root` (`vendor_kiro.rs:315-317`): a relative value, `/`, `$HOME` or
   an ancestor of `$HOME` falls back to `~/.kiro` (upstream rule for V3;
   precedent `vendor_openclaw.rs:181-190`). Extend the test at `:364`.
@@ -123,7 +129,12 @@ schema `src/command/testdata/settings.schema.json` (regenerate with
   per-artifact decline path. Project scope is untouched (Kilo does not
   expand there). Token matching reuses `token()` in `src/oci/settings.rs:624`.
 
-**WP5b — OpenCode config file.** Gate first: confirm from V1 source
+**WP5b — OpenCode config file.** STOPPED at its gate; not landed. Implemented, tested
+and reverted: `reap_relocated_roots` keys only on `PathAnchor::VendorRoot` and
+`ClaudeUserDir`, OpenCode MCP and agent outputs anchor at the fixed `OpenCodeRoot`
+(skipped), and the reaper excludes `ArtifactKind::Settings` by design, so neither old
+XDG entry kind is reaped. Owner decision needed; issue draft in
+`research_upstream_opencode_20261116.md`. Gate first: confirm from V1 source
 (`anomalyco/opencode` at `v1.19.5`) that V1 reads
 `$OPENCODE_CONFIG_DIR/opencode.json[c]`. If it does not, stop and report.
 - `src/install/opencode_config.rs:70-80`, `:124-133`: order becomes
@@ -178,17 +189,20 @@ this host has no `/mnt/c`.
 
 ## Resulting history (after the 4 sweep commits)
 
-1. `chore: add the upstream adoption plan`
-2. `fix(export): keep doc and support links out of marketplace entries`
-3. `fix(export): keep CURSOR_PLUGIN_ROOT in grim export plugin`
-4. `feat(settings): accept the values upstream added and add two rows`
-5. `feat(mcp): write the Droid issuer, Copilot scopes and Junie timeout`
-6. `feat(vendor): lift the new Copilot and Claude frontmatter keys`
-7. `fix(kiro): fall back to ~/.kiro for an unusable KIRO_HOME`
-8. `fix(kilo): decline a global agent whose body holds an expansion token`
-9. `fix(opencode): edit the config file under OPENCODE_CONFIG_DIR`
-10. `docs: describe the adopted upstream changes`
-11. `chore: update the rules, ledgers and positioning records`
+As `git log --oneline origin/main..HEAD`, oldest first, plus the pending records:
+
+1. `4f302b0f` `chore: add the upstream adoption plan`
+2. `e36551e8` `fix(export): move Claude doc and support links into plugin.json`
+3. `58754de8` `feat(settings): accept the values upstream added and add two rows`
+4. `c1b453f2` `feat(mcp): write the Droid issuer, Copilot scopes and Junie timeout`
+5. `4eafa219` `feat(vendor): lift the new Copilot and Claude agent frontmatter keys`
+6. `10dd77ae` `fix(kiro): fall back to ~/.kiro for an unusable KIRO_HOME`
+7. `6c6d3b9f` `fix(kilo): decline a global agent whose body holds an expansion token`
+8. pending: `docs: describe the adopted upstream changes`
+9. pending: `chore: update the rules, ledgers and positioning records`
+
+Dropped from the earlier list: the Cursor export commit (not real) and the OpenCode
+config-file commit (WP5b stopped at its gate).
 
 ## Not in this PR
 
@@ -199,7 +213,9 @@ this host has no `/mnt/c`.
 - Amp rules via `globs`, Droid `enabledTools` and folder scope, Goose plugin
   skills, Antigravity agent `model` validation, Junie `effort` alias.
 - Deep passes for `claude`, `opencode`, `copilot`, `codex`.
-- The 15 issue drafts stay in the research artifacts; none is filed.
+- Decided not to implement, each an issue draft with a watchlist row: OpenCode
+  config-file move (reaper), Copilot skill keys (leave the pool), relative `KIRO_HOME`.
+- The issue drafts stay in the research artifacts; none is filed.
 
 ## Verification
 
@@ -209,9 +225,9 @@ this host has no `/mnt/c`.
   literals and rows; the MCP descriptor schema shows the issuer field.
 - Stability: each self-heal test installs with the old layout or key set,
   re-materializes, and asserts `grim status` reports `installed`; the
-  OpenCode upgrade fixture also asserts the old XDG file lost grim's entries.
-- Export: the marketplace e2e test shows no entry-level link keys for Claude
-  and Qoder; the `grim export plugin` Cursor test shows `${CURSOR_PLUGIN_ROOT}`.
+  OpenCode upgrade fixture (dropped with WP5b) would have asserted the old XDG file lost grim's entries.
+- Export: the marketplace e2e test shows no entry-level link keys for Claude,
+  and the Claude `plugin.json` carries them.
 - Final: `task verify`, `task docs:check`, `task catalog:verify`,
   `task git:dco`, `python3 .claude/skills/upstream-refresh/scripts/upstream_stale.py report`,
   then green PR CI including the Windows jobs.

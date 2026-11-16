@@ -13,7 +13,9 @@
 //! Skill, agent, rule and MCP surfaces verified 2026-09-27 against
 //! OpenCode 1.18.32 (docs and source at tag `v1.18.32`); live-verified the
 //! same day with `opencode agent list`, `opencode debug skill`,
-//! `opencode debug config` and `opencode mcp list` in a sandbox.
+//! `opencode debug config` and `opencode mcp list` in a sandbox. grim writes
+//! the V1 shapes (npm `latest` 1.19.5); V2 (GitHub v2.x) still reads them and
+//! reads `OPENCODE_CONFIG`, re-checked 2026-11-16.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -157,7 +159,8 @@ impl Vendor for OpenCodeVendor {
     }
 
     /// OpenCode skips the `.claude` and `.agents` skill dirs when
-    /// `OPENCODE_DISABLE_EXTERNAL_SKILLS` is set (v1.18.32 `skill/index.ts`).
+    /// `OPENCODE_DISABLE_EXTERNAL_SKILLS` is set (v1.18.32 `skill/index.ts`; V1
+    /// docs only, V2 documents no such variable).
     fn reads_pool(&self, _scope: ConfigScope) -> bool {
         reads_pool_from(super::vendor::env_disable_flag("OPENCODE_DISABLE_EXTERNAL_SKILLS"))
     }
@@ -434,7 +437,8 @@ impl Vendor for OpenCodeVendor {
 }
 
 /// OpenCode's user-level skills dir. `$OPENCODE_CONFIG_DIR` is OpenCode's
-/// **additive** extra scan directory (opencode.ai/docs/config — searched
+/// **additive** extra scan directory (V1; V1 also reads an `opencode.json[c]`
+/// there, which grim never writes; opencode.ai/docs/config — searched
 /// with the `{skill,skills}/**/SKILL.md` pattern alongside the always-
 /// scanned global config dir): when the user set it, grim installs there
 /// to respect the explicit override; else the default

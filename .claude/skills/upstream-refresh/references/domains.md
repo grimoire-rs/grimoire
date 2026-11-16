@@ -86,8 +86,10 @@ off a harness's workspace or folder trust gate, or pre-trusts a folder, is
 never a candidate, whatever its type: threat model T3, decided for the
 Gemini row in the settings follow-ups plan (PD-41). Known so far: gemini
 `/security/folderTrust/enabled`, antigravity `/trustedWorkspaces`, kiro
-`chat.disableTrustAllConfirmation`, copilot `trustedFolders`
-(`adr_settings_artifact_kind.md`, Appendix A › Rows added under #270). A
+`chat.disableTrustAllConfirmation`, copilot `trustedFolders`, qoder
+`security.folderTrust.enabled` and `permissions.trustDirectories`, amp
+`amp.mcpTrustedServers` (`adr_settings_artifact_kind.md`, Appendix A › Rows
+added under #270). A
 new one is a finding.
 
 | Harness | File grim edits | Upstream key reference | Named limits |

@@ -5,7 +5,7 @@
 //!
 //! Goose is Block's open-source agent (<https://goose-docs.ai>, repo
 //! `aaif-goose/goose`, formerly `block/goose`), verified 2026-07-27, re-verified 2026-09-27
-//! against v1.52.0, both times against its own raw documentation.
+//! against v1.52.0 and 2026-11-16 against v1.59.2, each time against its own raw documentation.
 //!
 //! - **Skills**: the cross-vendor `.agents/skills` pool at BOTH scopes —
 //!   `<ws>/.agents/skills` (project), `$HOME/.agents/skills` (global).

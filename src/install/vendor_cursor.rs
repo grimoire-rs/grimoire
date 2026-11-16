@@ -4,7 +4,7 @@
 //! Cursor's vendor strategy: universal skills, `.mdc` rules, native agents.
 //!
 //! Cursor (v2.4+) is the only wave-1 vendor native for all four kinds
-//! (`adr_vendor_wave_expansion.md` mapping table; live-verified 2026-07-19, re-verified 2026-09-27,
+//! (`adr_vendor_wave_expansion.md` mapping table; live-verified 2026-07-19, re-verified 2026-09-27 and 2026-11-16,
 //! `research_vendor_verification_cursor_kiro.md`):
 //!
 //! - **Skills**: `.cursor/skills/<name>/` (project), `~/.cursor/skills/`

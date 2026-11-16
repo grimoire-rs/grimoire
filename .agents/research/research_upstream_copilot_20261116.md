@@ -38,25 +38,31 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #2 `/effortLevel` `none`, `minimal`, `max`: confirmed; landed in `58754de8`.
+- #16 agent keys: confirmed, spelling narrowed (`reasoningEffort`, not `reasoning-effort`; also `models`, `modelPolicy`); landed in `4eafa219`.
+- #20 MCP `oauthScopes`: confirmed (requires `oauthClientId`); landed in `c1b453f2`, CLI files only.
+- #11 skill keys `argument-hint`, `user-invocable`, `disable-model-invocation`: confirmed upstream; NOT implemented, a vendor declaring `skill_fields` leaves the shared skills pool and Copilot is in `POOL_CAPABLE_VENDORS` (`src/install/vendor.rs` `pool_capable_from`; test `pool_vendors_declare_no_skill_fields`): breaking, issue draft below.
+- Sandbox-path expansion: narrowed, changelog 1.0.109 only, and grim has no row for it (driver verification 2026-11-16).
 
 ## Routing
 
 - #1 Settings rows: every settings_fields() key exists with the type and merge class... → (a) ledger or doc text fix
-- #2 /effortLevel enum → (b) additive renderer or metadata support — reported, not implemented in this run
+- #2 /effortLevel enum → (b) landed in `58754de8`
 - #3 Settings key list (Appendix B): 42 rows, 7 enum / 33 bool / 2 string-list;... → (a) ledger or doc text fix
 - #4 Trust-gate claim: no key that switches off a trust gate or pre-trusts a folder... → (a) ledger or doc text fix
 - #6 Shared Claude subset read by Copilot → (a) ledger or doc text fix
 - #8 XDG_CONFIG_HOME no longer read → (a) ledger or doc text fix
 - #9 Pool gap: with COPILOT_HOME set, ~/.agents/skills not scanned → (a) ledger or doc text fix
 - #10 VS Code portable Skills dialog ignores COPILOT_HOME (microsoft/vscode#331073) → (a) ledger or doc text fix
-- #11 Skill frontmatter: no Copilot-only keys, empty registry → (b) additive renderer or metadata support — reported, not implemented in this run
+- #11 Skill frontmatter: no Copilot-only keys, empty registry → (c) issue draft: lifting the keys removes Copilot from the shared skills pool (breaking); not implemented
 - #12 Skill locations (project .github/skills, .agents/skills; personal... → (a) ledger or doc text fix
 - #13 .agent.md extension; grim emits .md → (a) ledger or doc text fix
 - #15 Agent keys disable-model-invocation / user-invocable / target; infer retired → (a) ledger or doc text fix
-- #16 Agent keys reasoning-effort / include-custom-instructions stay out as... → (b) additive renderer or metadata support — reported, not implemented in this run
+- #16 Agent keys reasoning-effort / include-custom-instructions stay out as... → (b) landed in `4eafa219`
 - #18 Global MCP env/headers substitution (${VAR} written verbatim) → (a) ledger or doc text fix
-- #20 MCP oauth projection: shipped fields oauthClientId, oauthPublicClient,... → (b) additive renderer or metadata support — reported, not implemented in this run
+- #20 MCP oauth projection: shipped fields oauthClientId, oauthPublicClient,... → (b) landed in `c1b453f2`
 - #21 auth.redirectPort is changelog-only, callback_port stays unmapped → (a) ledger or doc text fix
 - #22 Project MCP file: reads .mcp.json and .github/mcp.json, .mcp.json wins in a... → (a) ledger or doc text fix
 - #23 Private clone credential-helper regression (copilot-cli#4103) → (a) ledger or doc text fix
@@ -67,7 +73,11 @@ none required — no code landed in this run.
 
 ## Issue drafts
 
-none
+### Copilot skill keys: lifting them removes Copilot from the shared skills pool
+
+The Copilot CLI skills reference lists `argument-hint`, `user-invocable` and `disable-model-invocation` beyond the open Agent Skills standard (https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference#skills-reference, CLI 1.0.112). grim lifts none. A vendor that declares `skill_fields` is excluded from the shared skills pool (`pool_capable_from` in `src/install/vendor.rs`, test `pool_vendors_declare_no_skill_fields` in `src/install/render.rs`), and Copilot is in `POOL_CAPABLE_VENDORS`, so lifting the keys moves Copilot out of the pool and changes where its skills install: a breaking change after the 1.0 freeze. Needs an owner decision on whether a pool vendor may declare skill fields (for example lifting them as metadata without leaving the pool).
+
+Labels: enhancement
 
 ## Friction
 

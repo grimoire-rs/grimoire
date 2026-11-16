@@ -3,7 +3,7 @@
 
 //! Zed's vendor strategy: shared-pool skills + MCP; rules and agents declined.
 //!
-//! Zed mapping (`adr_vendor_wave_expansion.md`; live-verified 2026-07-19, re-verified 2026-09-27 against v1.21.0,
+//! Zed mapping (`adr_vendor_wave_expansion.md`; live-verified 2026-07-19, re-verified 2026-09-27 against v1.21.0 and 2026-11-16 against v1.28.1,
 //! `research_vendor_verification_zed_amp.md`):
 //!
 //! - **Skills**: the shared `.agents/skills` pool (project

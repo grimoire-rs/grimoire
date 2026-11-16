@@ -4,7 +4,7 @@
 //! OpenClaw's vendor strategy: GLOBAL-scope skills only; everything else declined.
 //!
 //! OpenClaw (formerly ClawdBot) is an open-source agent daemon, verified
-//! 2026-07-27, re-verified 2026-09-27, against the project's own repository and documentation. The
+//! 2026-07-27, re-verified 2026-09-27 and 2026-11-16, against the project's own repository and documentation. The
 //! rename is first-party proven, not aggregator hearsay: OpenClaw's own
 //! backward-compatibility code still carries `metadata.clawdbot` /
 //! `metadata.clawdis` legacy aliases. **The client ships under the current

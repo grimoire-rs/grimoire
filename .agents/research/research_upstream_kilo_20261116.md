@@ -39,7 +39,10 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #20 `/memory_model` (string): confirmed against the live schema; landed in `58754de8` as a row.
+- #25 global agent body expands `{env:` and `{file:` (project agents do not): confirmed, `ConfigVariable.substitute` in `agent.ts` at v7.8.28; landed in `6c6d3b9f` as a decline with a warning at global scope. Narrowed: global scope only, and an agent already installed stays installed.
 
 ## Routing
 
@@ -47,10 +50,11 @@ none required — no code landed in this run.
 - #6 Agent frontmatter registry:... → (a) ledger or doc text fix
 - #8 .kilocode legacy dir read-only fallback, .kilo/ wins → (a) ledger or doc text fix
 - #10 opencode lineage: separate client, Kilo adopts OpenCode releases → (a) ledger or doc text fix
-- #20 Settings key list = 9 rows; re-check trigger: runtime reads update or... → (b) additive renderer or metadata support — reported, not implemented in this run
+- #20 Settings key list = 9 rows; re-check trigger: runtime reads update or... → (b) `/memory_model` landed in `58754de8`
 - #24 Trust gates: no key that disables a trust gate is proposed as a row → (a) ledger or doc text fix
 - #26 Hook kind: Kilo takes a JS/TS plugin module, no config-level hook surface → (a) ledger or doc text fix
 - (c) security — src/install/vendor_kilo.rs:36 · expansion
+- #25 agent body expansion (new row) → (b) landed in `6c6d3b9f`: a global agent whose body holds `{env:` or `{file:` is skipped with a warning
 
 ## Issue drafts
 

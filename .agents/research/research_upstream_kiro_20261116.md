@@ -65,16 +65,20 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #29 `/chat.showThinking` string form: confirmed; landed in `58754de8` (a boolean or `expanded`/`collapsed`/`off`; a boolean renders as before).
+- #39 `KIRO_HOME` fallback: confirmed, "A filesystem root, your home directory, one of its ancestors, or a relative path falls back to `~/.kiro`"; the root, `$HOME` and ancestor cases landed in `10dd77ae`. The relative case is NOT implemented: grim still follows a relative value because `settings.md` and `json-interface.md` document `KIRO_HOME=kiro-rel` as the `settings-root-relative` example; issue draft below.
+- #1 `/acp.agentEngine` `v1`: refuted, NOT REAL as a defect. `v1` is excluded on purpose, retired upstream.
 
 ## Routing
 
-- #1 settings key /acp.agentEngine → (b) additive renderer or metadata support — reported, not implemented in this run
-- #29 settings key /chat.showThinking → (c) issue draft
+- #1 settings key /acp.agentEngine → dropped: `v1` excluded on purpose (retired upstream)
+- #29 settings key /chat.showThinking → (b) landed in `58754de8` (was an issue draft)
 - #35 Settings key list: 34 rows, flat dotted, settings/cli.json → (a) ledger or doc text fix
 - #37 No value validation (invalid keybindings fall back) → (a) ledger or doc text fix
 - #38 /knowledge.default*Patterns workspace override replaces list whole (on-limited) → (a) ledger or doc text fix
-- #39 KIRO_HOME replaces ~/.kiro outright; honored by CLI → (c) issue draft
+- #39 KIRO_HOME replaces ~/.kiro outright; honored by CLI → (b) root, `$HOME` and ancestor fall back, landed in `10dd77ae`; relative value stays followed, issue draft
 - #40 New env var KIRO_DEFAULT_SETTINGS (root-owned defaults file, lowest settings... → (c) issue draft
 - #41 New env var KIRO_AGENT_CONFIG_DIR (agent dir for V2->V3 auto-upgrade scan) → (c) issue draft
 - #43 MCP disabledTools / remote oauth not emitted → (a) ledger or doc text fix
@@ -89,12 +93,6 @@ none required — no code landed in this run.
 
 ## Issue drafts
 
-### Kiro settings: /chat.showThinking is now a string
-
-Kiro's settings reference types `chat.showThinking` as a string (`expanded`, `collapsed`, `off`); `true`/`false` still map to `collapsed`/`off`. Source: https://kiro.dev/docs/reference/settings.md. grim's row is boolean (`src/install/vendor_kiro.rs` KIRO_SETTINGS_FIELDS; `docs/src/content/docs/settings.md:~801-838`), so a retype is a layout question, not a quiet edit.
-
-Labels: enhancement
-
 ### Kiro rules: CLI V3 supports all four inclusion modes
 
 Kiro's steering page says CLI V3 supports all four inclusion modes while V1/V2 load only `always`; the IDE half (kiro-cli issue 9176) was not re-tested. Source: https://kiro.dev/docs/steering.md. grim warns that inclusion modes are unsupported on the CLI, tracked as gap-kiro-rules (`.agents/upstream-watchlist.md:66`, `docs/src/content/docs/clients.md:337-355`); that warning depends on this fact.
@@ -103,7 +101,13 @@ Labels: enhancement
 
 ### Kiro env variables: KIRO_DEFAULT_SETTINGS, KIRO_AGENT_CONFIG_DIR and a KIRO_HOME fallback rule
 
-Kiro documents `KIRO_DEFAULT_SETTINGS` (root-owned defaults file, CLI 3.1.0+, macOS/Linux) and `KIRO_AGENT_CONFIG_DIR` (V2 to V3 agent upgrade scan, CLI 2.37.0 changelog), and rewords `KIRO_HOME`: a filesystem root, home directory, ancestor or relative path falls back to `~/.kiro`. Sources: https://kiro.dev/docs/reference/settings.md and https://kiro.dev/changelog/cli/2-37/. grim reads `KIRO_HOME` through `env_dir("KIRO_HOME")` in `src/install/vendor_kiro.rs` (watchlist :67, :170) and knows neither new variable.
+Kiro documents `KIRO_DEFAULT_SETTINGS` (root-owned defaults file, CLI 3.1.0+, macOS/Linux) and `KIRO_AGENT_CONFIG_DIR` (V2 to V3 agent upgrade scan, CLI 2.37.0 changelog), and rewords `KIRO_HOME`: a filesystem root, home directory, ancestor or relative path falls back to `~/.kiro` (the first three landed in `10dd77ae`). Sources: https://kiro.dev/docs/reference/settings.md and https://kiro.dev/changelog/cli/2-37/. grim reads `KIRO_HOME` through `env_dir("KIRO_HOME")` in `src/install/vendor_kiro.rs` (watchlist :67, :170) and knows neither new variable.
+
+Labels: enhancement
+
+### Kiro: a relative KIRO_HOME falls back to ~/.kiro, grim still follows it
+
+Kiro ignores a relative `KIRO_HOME` and reads `~/.kiro` (https://kiro.dev/docs/reference/settings.md, CLI 3.2.1). grim follows the value, because `docs/src/content/docs/settings.md` and `json-interface.md` document `KIRO_HOME=kiro-rel` as the `settings-root-relative` example and say other kinds follow a relative root. A relative root also makes skills, steering rules and MCP entries land where Kiro never looks. Changing it rewrites a documented contract and needs an owner decision: either fall back like Kiro (and re-document the example) or keep following and document the divergence.
 
 Labels: enhancement
 

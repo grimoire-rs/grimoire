@@ -59,11 +59,15 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #9 project `/permissions/defaultMode` `dontAsk`, `manual`: confirmed against the settings reference; landed in `58754de8`. That they take effect from a project file rests on the vendor docs: `claude doctor` 2.1.325 only accepts them and rejects a bogus value.
+- #40 `documentationUrl`/`supportUrl` on a marketplace entry: confirmed; landed in `e36551e8` (the Claude entry drops them, `plugin.json` carries them; Qoder entries unchanged, nothing upstream says Qoder rejects them).
+- #47 agent `autoCompactWindow` (2.1.296): confirmed; landed in `4eafa219` as `claude.auto-compact-window`.
 
 ## Routing
 
-- #9 /permissions/defaultMode enum, project values default/acceptEdits/plan → (b) additive renderer or metadata support — reported, not implemented in this run
+- #9 /permissions/defaultMode enum, project values default/acceptEdits/plan → (b) landed in `58754de8`
 - #11 /extraKnownMarketplaces/<name> atomic map with source → (a) ledger or doc text fix
 - #16 /sandbox/filesystem/allowWrite, /denyWrite, /denyRead, /allowRead string lists,... → (a) ledger or doc text fix
 - #17 Settings key list (Appendix B): 10 rows added, all present on reference with... → (a) ledger or doc text fix
@@ -79,17 +83,13 @@ none required — no code landed in this run.
 - #36 Plugin icon/logo field: none exists; "never invent an icon key: Claude strips... → (b) additive renderer or metadata support — reported, not implemented in this run
 - #37 Marketplace-level logo/icon: Claude top level is name, owner, plugins,... → (a) ledger or doc text fix
 - #38 Marketplace entry metadata author, homepage, repository, license, keywords,... → (a) ledger or doc text fix
-- #40 Marketplace entry documentationUrl, supportUrl, owner.url defined by the Claude... → (c) issue draft
+- #40 Marketplace entry documentationUrl, supportUrl, owner.url defined by the Claude... → (b) landed in `e36551e8` (was an issue draft)
 - #46 Skill frontmatter registry (14 claude.* skill keys incl. when_to_use, shell,... → (a) ledger or doc text fix
-- #47 Agent frontmatter registry (13 keys) matches sub-agents page → (a) ledger or doc text fix
+- #47 Agent frontmatter registry (13 keys) matches sub-agents page → (b) `autoCompactWindow` landed in `4eafa219`; the other 13 keys unchanged
 
 ## Issue drafts
 
-### Claude marketplace entries: documentationUrl and supportUrl fail `claude plugin validate`
-
-Claude now documents `documentationUrl` and `supportUrl` as plugin.json-only directory fields and says `claude plugin validate` reports each as an unknown field in a marketplace entry; `owner.url` stays defined. Source: https://code.claude.com/docs/en/plugins-reference#directory-listing-fields and https://code.claude.com/docs/en/plugins/marketplace-reference. grim's marketplace export writes both keys for Claude and Qoder at `src/export/marketplace_export.rs:890-892` (ledger `.agents/upstream-watchlist.md:62`).
-
-Labels: bug
+none (the one draft landed in `e36551e8`).
 
 ## Friction
 

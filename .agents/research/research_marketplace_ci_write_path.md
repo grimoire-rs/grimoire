@@ -1,7 +1,7 @@
 # Research: scheduled regenerate-and-PR bots for a generated git repo (GitHub + GitLab)
 
 ## Metadata
-Date: 2026-09-28 · Expires: 2027-03-28 · Axis: operability & security · Triggered by: /hex-architect .agents/discussions/marketplace-phase-2.md
+Date: 2026-09-28 · **Expires:** 2027-03-28 · Axis: operability & security · Triggered by: /hex-architect .agents/discussions/marketplace-phase-2.md
 
 Access date for every URL: 2026-09-28. WebFetch returns a small-model summary of the page, not the page: quoted strings are the summary's quotes of the docs; "not stated" = absent from the summary, not proven absent upstream. Bash `curl`/live tests were not run. Local files cited as path:line.
 

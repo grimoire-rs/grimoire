@@ -15,8 +15,9 @@ refuted so they are not re-derived.
 **Domain:** positioning / packaging / ci-cd / security
 **Triggered by:** Pre-1.0 decision — "is the project underselling itself, and
 where should it be posted?"
-**Expires:** 2027-01-26 (competitive landscape moves fast; re-verify star
-counts, funding, and channel rules before citing them)
+**Expires:** 2027-05-16 (competitive landscape moves fast; re-verify star
+counts, funding, and channel rules before citing them; landscape re-checked
+2026-11-16, see `research_upstream_landscape_20261116.md`)
 **Method:** 6 parallel research lanes → 10 adversarial refutation agents
 (8 of 10 claims refuted or corrected) → synthesis. Load-bearing claims then
 re-verified by hand against the local checkout and live APIs.
@@ -68,9 +69,9 @@ first-run path before touching framing. Do **not** rename the project, do
 
 | Holder | What it is | What it blocks |
 |---|---|---|
-| [jeffreytse/grimoire](https://github.com/jeffreytse/grimoire) | Go; "package manager for best practices — 1000+ skills across 26 domains"; targets Claude Code, Copilot, Gemini CLI, Cursor, OpenCode. 21★ | GitHub search + the pitch phrase + **colliding config filenames** |
+| [jeffreytse/grimoire](https://github.com/jeffreytse/grimoire) | Go; "package manager for best practices — 1000+ skills across 26 domains"; targets Claude Code, Copilot, Gemini CLI, Cursor, OpenCode. 39★ (2026-11-16) | GitHub search + the pitch phrase + **colliding config filenames** |
 | emersion `grim` | Wayland screenshot utility | Debian/Ubuntu `apt`, Arch official repos |
-| [Vaishnav-Sabari-Girish/grimoire](https://github.com/Vaishnav-Sabari-Girish/grimoire) | Rust task runner, "define sigils, cast workflows"; v0.4.0 published 2026-07-02, **active**; ships binaries named `grim` *and* `grimoire` | crates.io **`grim`** |
+| [Vaishnav-Sabari-Girish/grimoire](https://github.com/Vaishnav-Sabari-Girish/grimoire) | Rust task runner, "define sigils, cast workflows"; v0.4.0 published 2026-07-02, no push since (re-checked 2026-11-16); ships binaries named `grim` *and* `grimoire` | crates.io **`grim`** |
 | jshrake/grimoire (archived 2020-02-15) | GLSL live-coding tool, v0.2.1, 5.2k downloads | crates.io **`grimoire`** |
 
 **Decision: keep the name.** A rename breaks `ghcr.io/grimoire-rs/*` catalog
@@ -95,12 +96,14 @@ The "npm for AI skills" niche is **crowded**, not blue ocean.
 
 | Project | Signal | What it does *not* do |
 |---|---|---|
-| Vercel skills.sh | 27.2k★ | Documents having **no** dependency resolution, cross-vendor rendering, hosted registry, or lockfile |
-| Tessl | Founded by Guy Podjarny (Snyk founder); $125M raised; Snyk security score on every public skill | Not OCI; hosted registry |
-| ClawHub | 3,000+ skills, semantic search, serves the OpenClaw ecosystem | Hosted; no lockfile/digest model |
-| skillctl | Sigstore/cosign signing | Narrower scope |
-| jeffreytse/grimoire | 21★ | git-backed, no OCI, no lockfile |
-| openskills / Paks / Askill / FastSkill / skill-get / Skilz | Show HN launches | assorted |
+| Vercel skills.sh | 39.7k★ (39,673, `vercel-labs/skills`, 2026-11-16), v1.9.0; "OpenCode, Claude Code, Codex, Cursor, and 75 more" agents; hosted directory with a 1,450,205-entry leaderboard; packs bundle public and private skills | **Now documents a lockfile**: `skills-lock.json` v2 with `computedHash`, `install --frozen-lockfile`, Git sources pinned by `commit` (the 2026-07 "no lockfile" row is false). Installs skills only; its README states no rules or agents rendering |
+| Tessl | Hosted registry with quality, impact and security scores ("Snyk-powered security scores", install policies); homepage now "Software factory". Founder and "$125M raised" **not re-sourced 2026-11-16** | Not OCI; hosted registry |
+| ClawHub | `clawhub.ai`, now Skills **and** Plugins; `openclaw/clawhub` 9,554★. "3,000+ skills" **not re-verified** (no total on the page) | Hosted; no lockfile/digest model |
+| skillctl (`vrothberg/skillctl`) | Created 2026-10-19, pushed 2026-11-14, Apache-2.0, 2★. **OCI-registry skill manager**: signed versioned artifacts (Sigstore/cosign), project dependencies in `skillctl.yaml`, Renovate updates. Identity inferred from the Sigstore/cosign match, no URL in the earlier row | Skills only (plugins possible). Directly overlaps grim's OCI claim |
+| jeffreytse/grimoire | 39★, v0.2.0 (2026-07-19), last push 2026-07-24 | git-backed, no OCI, no lockfile |
+| openskills | 10,832★, v1.5.0 (2026-01-17), last push 2026-01-18 | assorted |
+| Paks / Askill / FastSkill / skill-get / Skilz | Show HN launches; no primary repo found 2026-11-16, **unverified** | assorted |
+| OCI skills spec implementations | Vitale spec still Draft 0.1.0, Discussion #292 open (28 comments); `arconia-io/arconia-cli` 31★ (early-access), `salaboy/skills-oci` 16★ (v0.0.12, 2026-06-12) | newer and thinner than grim |
 
 **Anthropic's Agent Skills format became a cross-vendor open standard in
 Dec 2025** (Microsoft, OpenAI, Atlassian, Figma, Cursor, GitHub). Consequence:
@@ -110,13 +113,24 @@ cross-vendor claim on **rules and agents** — `CLAUDE.md` / `AGENTS.md` /
 
 ### Differentiator ranking (10-second stranger appeal)
 
+Re-ranked 2026-11-16 from `research_upstream_landscape_20261116.md`; the
+changes are marked, the reasoning is one line each.
+
 1. **One artifact → 10 clients, with build-time-enforced honest declines.**
-   Unique across everything surveyed. Backed by `docs/src/clients.md:29-40`
-   and the parity test in `src/install/client_target.rs` that fails the build
-   if the table drifts. Sell on rules + agents.
-2. **Lockfile + digest pinning + `grim update`.**
-3. **No service to run** (OCI reuse) — sentence two, never the headline. As a
-   lead it is a barrier; as a follow-up it is reassurance.
+   Still unique: skills.sh covers 79 agents but installs skills only (its
+   README states no rules or agents rendering), and skillctl is skills only.
+   Backed by `docs/src/clients.md:29-40` and the parity test in
+   `src/install/client_target.rs` that fails the build if the table drifts.
+   Sell on rules + agents.
+2. **No service to run (OCI reuse)** — moved up from 3. skills.sh is a hosted
+   directory and Tessl and ClawHub are hosted registries, so this is the
+   structural contrast that remains. No longer unique: skillctl is also an OCI
+   registry manager, so state it as a property, never as "the only OCI one".
+   Sentence two, never the headline.
+3. **Lockfile + digest pinning + `grim update`** — moved down from 2. skills.sh
+   now documents `skills-lock.json` v2 with `computedHash` and
+   `--frozen-lockfile`, and skillctl has `skillctl.yaml`: table stakes, so
+   name it, do not lead with it.
 4. MCP-server-as-artifact · 5. publish + self-hostable index + GitHub/GitLab
    parity · 6. bundles · 7. frozen stability contract + JSON interface.
    *(4–7 are the credibility payload for the announcement post, not the front
@@ -379,7 +393,7 @@ contributors — and no ecosystem forms around a 12-package index in launch
 week.
 
 **Realistic 6-month best case** is not "the package manager for AI-agent
-config" (Vercel has 27.2k stars; Tessl has $125M). It is: *the reference OCI
+config" (Vercel's skills.sh has 39.7k stars; Tessl reported $125M, not re-sourced 2026-11-16). It is: *the reference OCI
 implementation people cite when the Agent Skills OCI spec discussion comes
 up, used by people who run 3+ coding agents and got tired of copy-pasting
 rules.*
@@ -408,5 +422,5 @@ Vitale spec gaining traction with grim cited as prior art.
 | github.com/Vaishnav-Sabari-Girish/grimoire | Repo | 2026-07-26 | crates.io `grim` holder |
 | `agentskills/agentskills` Discussion #292 | Discussion | 2026-07-26 | OCI Agent Skills spec draft |
 | rust-unofficial/awesome-rust CONTRIBUTING.md | Repo | 2026-07-26 | 50★/2000-download gate |
-| hesreallyhim/awesome-claude-code | Repo | 2026-07-26 | 50,947★, issue-form submission |
+| hesreallyhim/awesome-claude-code | Repo | 2026-11-16 | 58,149★ (50,947★ on 2026-07-26), issue-form submission |
 | ChatGPT 5.6 SOL handover, 2026-07-19 | Doc | 2026-07-19 | Prior analysis; several claims refuted above |

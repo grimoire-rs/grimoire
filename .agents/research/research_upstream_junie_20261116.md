@@ -30,14 +30,17 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #10 MCP per-server `timeout` (ms, 1000 to 3600000): confirmed on the MCP page; landed in `c1b453f2` (an out-of-range value is not written and warns).
+- #3 `reasoningLevel`: not implemented, deferred (the Junie `effort` alias stays on the plan's deferred list).
 
 ## Routing
 
-- #3 reasoningLevel values low/medium/high, model-dependent → (b) additive renderer or metadata support — reported, not implemented in this run
+- #3 reasoningLevel values low/medium/high, model-dependent → deferred: not implemented in this run
 - #6 Extension/plugin discovery of agents/ inside a Claude-format plugin (marked... → (a) ledger or doc text fix
 - #8 Guidelines discovery order. Wording changed: .junie/AGENTS.md is exclusive when... → (a) ledger or doc text fix
-- #10 MCP env interpolation undocumented; only literal env → (b) additive renderer or metadata support — reported, not implemented in this run
+- #10 MCP env interpolation undocumented; only literal env → (b) `timeout` landed in `c1b453f2`; env interpolation still undocumented
 - #12 JUNIE_*_LOCATIONS additive, *_DEFAULT_LOCATIONS default true; AGENT/MCP/SKILL... → (a) ledger or doc text fix
 - #16 Settings re-check trigger: Junie documents config.json vs settings.json... → (c) issue draft
 - #17 Hook kind declined for Junie: "splices shell-command hooks into a shared config... → (c) issue draft

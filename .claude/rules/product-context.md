@@ -129,8 +129,9 @@ Global flags: `--offline`, `--locked`, `--global`, `--config <path>`,
 
 Verified landscape, with signal counts and gaps, lives in
 `.agents/research/research_promotion_positioning.md` › "Competitive
-landscape" (re-verify after 2027-01-26). Nearest comparables: Vercel
-`skills.sh`, Tessl, ClawHub, `skillctl`, `jeffreytse/grimoire`. Structural
+landscape" (re-verify after 2027-05-16). Nearest comparables: Vercel
+`skills.sh`, Tessl, ClawHub, `skillctl` (an OCI-registry skill manager with
+Sigstore signing), `jeffreytse/grimoire`. Structural
 prior art rather than competitors: ORAS (OCI artifact transport), Helm's
 OCI chart distribution, npm/cargo lockfile UX, Claude Code plugin
 marketplaces. The differentiator ranking lives in that same artifact —

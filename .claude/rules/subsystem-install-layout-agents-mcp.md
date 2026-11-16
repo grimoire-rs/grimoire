@@ -35,23 +35,23 @@ config files:
 |--------|---------|--------|
 | **Claude** | `<workspace>/.mcp.json` (`mcpServers`) | `~/.claude.json` — `$CLAUDE_CONFIG_DIR/.claude.json` when set (`mcpServers`) |
 | **OpenCode** | `<workspace>/opencode.json`/`.jsonc` (`mcp`) | `$OPENCODE_CONFIG` else XDG `opencode.json` (`mcp`) |
-| **Copilot** | **two files, two outputs**: `<workspace>/.vscode/mcp.json` (`servers`, `${env:VAR}`) for VS Code's Copilot Chat, then `<workspace>/.github/mcp.json` (`mcpServers`, the global shape, `${VAR}` verbatim) for the Copilot **CLI**, which never reads the VS Code file — `Vendor::mcp_config_paths` + `mcp_entry_for`; a workspace `.mcp.json` (Claude's) hides `.github/mcp.json` from the CLI entirely (live-verified 1.0.88). oauth: `client_id` only → `oauth.clientId` / `oauthClientId` | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` (`mcpServers`); `${VAR}` written verbatim — Copilot CLI expands it (skipped before 2026-09-27) |
+| **Copilot** | **two files, two outputs**: `<workspace>/.vscode/mcp.json` (`servers`, `${env:VAR}`) for VS Code's Copilot Chat, then `<workspace>/.github/mcp.json` (`mcpServers`, the global shape, `${VAR}` verbatim) for the Copilot **CLI**, which never reads the VS Code file — `Vendor::mcp_config_paths` + `mcp_entry_for`; a workspace `.mcp.json` (Claude's) hides `.github/mcp.json` from the CLI entirely (live-verified 1.0.88). oauth: `client_id` → `oauth.clientId` / `oauthClientId`, plus `scopes` → `oauthScopes` in the two CLI files (beside a client id only) | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` (`mcpServers`); `${VAR}` written verbatim — Copilot CLI expands it (skipped before 2026-09-27) |
 | **Codex** | `<workspace>/.codex/config.toml` (`mcp_servers`); only honored by Codex for **trusted** projects — grim writes it regardless, an untrusted project simply won't have it read | `$CODEX_HOME`\|`~/.codex`/`config.toml` (`mcp_servers`); HTTP/SSE headers map to `http_headers`/`env_http_headers`/`bearer_token_env_var`; a header embedding an env ref in text is unrepresentable → descriptor skipped; `timeout` (ms) → `startup_timeout_ms` |
 | **Cursor** | `<workspace>/.cursor/mcp.json` (`mcpServers`); stdio needs `type: "stdio"`, env refs `${env:VAR}` | `~/.cursor/mcp.json` (`mcpServers`) |
 | **Kiro** | `<workspace>/.kiro/settings/mcp.json` (`mcpServers`); `${VAR}` env refs native | `~/.kiro/settings/mcp.json` (`mcpServers`) |
-| **Junie** | `<workspace>/.junie/mcp/mcp.json` (`mcpServers`); env-ref descriptors skipped (interpolation undocumented) | `$JUNIE_HOME`\|`~/.junie`/`mcp/mcp.json` (`mcpServers`) |
+| **Junie** | `<workspace>/.junie/mcp/mcp.json` (`mcpServers`); env-ref descriptors skipped (interpolation undocumented); `timeout` ms written, a value outside 1000 to 3600000 not written and warned | `$JUNIE_HOME`\|`~/.junie`/`mcp/mcp.json` (`mcpServers`) |
 | **Gemini** | `<workspace>/.gemini/settings.json` (`mcpServers`); sse → `url`, http → `httpUrl`, `${VAR}` native; `timeout` dropped + warned (Gemini bounds every tool call with it; projected before 2026-09-27) | `~/.gemini/settings.json` (`mcpServers`) |
 | **Zed** | `<workspace>/.zed/settings.json` (`context_servers`, flat shape); env-ref descriptors skipped (no upstream support) | `$XDG_CONFIG_HOME`\|`~/.config/zed` (unix) or `%APPDATA%\Zed` (Windows) `/settings.json` (`context_servers`, JSONC) |
 | **Amp** | `<workspace>/.amp/settings.json` (`amp.mcpServers`, literal dotted key); `${VAR}` refs | `$XDG_CONFIG_HOME`\|`~/.config/amp`/`settings.json` (`amp.mcpServers`) |
 | **Warp** | `<workspace>/.warp/.mcp.json` (`mcpServers`); stdio `command`/`args`/`env`/`working_directory` (from `cwd`), http + sse `url`/`headers`; descriptors with an env ref or any oauth field skipped (expansion undocumented, no oauth keys). Warp also reads Claude's `.mcp.json`/`~/.claude.json` and `.agents/.mcp.json` — double registration when both clients are selected | `~/.warp/.mcp.json` (`mcpServers`) |
-| **Droid** | `<workspace>/.factory/mcp.json` (`mcpServers`); `type` always written; `disabled`/`disabledTools` vendor-owned (unhashed, carried over); `${VAR}` verbatim in `env`/`headers`/`oauth.clientId` (Droid expands only there) — a ref in `command`/`args`/`url` skips; oauth `client_id` only, else skip | `~/.factory/mcp.json` (`mcpServers`); Droid's UI copies a toggled project server here, so a same-named global install meets the untracked gate (65) |
+| **Droid** | `<workspace>/.factory/mcp.json` (`mcpServers`); `type` always written; `disabled`/`disabledTools` vendor-owned (unhashed, carried over); `${VAR}` verbatim in `env`/`headers`/`oauth.clientId` (Droid expands only there) — a ref in `command`/`args`/`url` skips; oauth `client_id` → `oauth.clientId` and `authorization_server_issuer` → `oauth.authorizationServerIssuer` (https only; a client id without an issuer still installs, with a warning), else skip | `~/.factory/mcp.json` (`mcpServers`); Droid's UI copies a toggled project server here, so a same-named global install meets the untracked gate (65) |
 | **Qoder** | `<workspace>/.qoder/settings.json` (`mcpServers`) — **not** the shared `.mcp.json` Qoder also reads (Claude's grim-managed file; one member, two vendors, two state outputs); Claude shape + `cwd`, `timeout` ms; env-ref descriptors skipped (expansion undocumented) | `$QODER_CONFIG_DIR`\|`~/.qoder`/`settings.json` (`mcpServers`) |
 | **Cline** | — none upstream; `mcp_config_path` is `None`, so a project install warns + skips | `$CLINE_MCP_SETTINGS_PATH`, else `$CLINE_DATA_DIR/settings/`, else `$CLINE_DIR`\|`~/.cline` + `/data/settings/`, file `cline_mcp_settings.json` (`mcpServers`, flat, `${env:VAR}`) — shared by Cline CLI and extension; every splice (install and removal) holds Cline's own `<file>.lock` directory lock (`cline_lock.rs`) and re-reads under it; a held lock past 12 s → exit 75; anchors at `cline-root`, so a file relocated outside `~/.cline` is unanchorable → skipped |
 
 Every non-Claude client declines the `ws` transport (skip + warn). The
 structured `oauth` block is lossless-or-skip (`McpOAuth::unmapped`,
 `adr_mcp_oauth_projection.md`): OpenCode, Zed, Copilot and Droid write it when they
-carry every field it sets (Copilot and Droid: `client_id` only), every other client
+carry every field it sets (Copilot: `client_id`, plus `scopes` in the CLI files; Droid: `client_id` and `authorization_server_issuer`; `authorization_server_issuer` is lossless-or-skip for any client that cannot express it), every other client
 skips it (Qoder documents both, in shapes grim cannot carry) — see
 `docs/src/content/docs/clients.md` "Known gaps".
 
@@ -73,11 +73,11 @@ YAML sequence (upstream types it `string[]`) and nothing lifted — the
 only (`tools` dropped + warning, empty `goose.*` registry) into its own
 `.goose/agents/`, never the `.agents/agents/` Antigravity owns. **Kilo** takes
 OpenCode's shape — filename is the identity, `name` and `tools` dropped,
-`kilo.*` lifted — and the same install-time `color`/`steps` drop as OpenCode
+`kilo.*` lifted. At global scope a body holding `{env:` or `{file:` is skipped for Kilo with a warning (Kilo substitutes them in a global body, never a project one; an agent already installed stays) — and the same install-time `color`/`steps` drop as OpenCode
 (`drop_invalid_opencode_values`; Kilo skips just the invalid agent, OpenCode its
 whole config). **Junie** is Markdown with `tools` as a
 YAML sequence and `junie.*` lifted to camelCase keys; an agent name outside
-Junie's `[a-z][a-z0-9_-]*` is skipped for Junie only. **Droid** writes a
+Junie's `[a-z][a-z0-9_-]*` is skipped for Junie only. **Copilot** lifts `copilot.include-custom-instructions`, `reasoning-effort`, `models` and `model-policy` beside its older keys, and **Claude** lifts `claude.auto-compact-window` (an integer, Claude Code 2.1.296 and later); an agent declaring none renders as before. **Droid** writes a
 custom droid at `.factory/droids/<name>.md`: `tools` as a YAML list, `model`
 verbatim (`inherit` included), `droid.reasoning-effort` → `reasoningEffort`;
 a name outside Droid's `[a-z0-9_-]+` (a `.`) is skipped for Droid only. Both
