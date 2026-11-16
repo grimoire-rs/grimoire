@@ -1045,6 +1045,10 @@ class TestAiConfigOverhaulPhase2:
         # Edits one docs page, never commits — left model-invocable so an AI
         # performing a release reaches it without a human in the loop.
         "changelog": False,
+        # Bumps the version and commits drift fixes; the name carries an
+        # action verb, so `test_action_skills_disable_model_invocation` holds
+        # it to manual invocation.
+        "prepare-release": True,
         # Pure analysis / advisory — auto-invocation safe
         "bugfix": False,
         "builder": False,

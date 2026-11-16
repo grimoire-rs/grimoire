@@ -98,6 +98,11 @@ The final push is always the human's call; `release:prepare` only prints
 it. After the tag is pushed, CI takes over: build → test → GitHub Release,
 then the post-announce jobs.
 
+`/prepare-release <major|minor|patch>` covers the first two lines plus what
+precedes them: an inventory of every change since the last tag, a drift review
+of the shipped `catalog/` packages and of the docs pages, then the bump and the
+changelog page. It stops before the release commit.
+
 ### Catalog Publish
 
 `dist-workspace.toml` `post-announce-jobs` runs
