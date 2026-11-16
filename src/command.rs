@@ -650,8 +650,7 @@ where
 /// rolling release re-resolves the floating tag instead of serving a
 /// cached pin — no separate "remote" routing mode is needed.
 pub fn access_seam(ctx: &crate::context::Context) -> anyhow::Result<std::sync::Arc<dyn crate::oci::access::OciAccess>> {
-    let plain_http = plain_http_hosts(ctx);
-    map_access_io(ctx, ctx.access(plain_http))
+    map_access_io(ctx, ctx.access(transport_hosts(ctx)))
 }
 
 /// [`access_seam`] for a caller that resolved its own scope rather than
@@ -673,10 +672,7 @@ pub fn access_seam_scoped(
     config: Option<&std::path::Path>,
     workspace: Option<&std::path::Path>,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::oci::access::OciAccess>> {
-    let plain_http = crate::oci::access::registry_client::plain_http_hosts_with(&declared_insecure_hosts(
-        ctx, global, config, workspace,
-    ));
-    map_access_io(ctx, ctx.access(plain_http))
+    map_access_io(ctx, ctx.access(declared_insecure_hosts(ctx, global, config, workspace)))
 }
 
 /// The complete plain-HTTP exception list for this invocation: the implicit
@@ -702,15 +698,14 @@ pub fn access_seam_scoped(
 /// nothing and leaves the env-var and loopback halves intact, which is
 /// exactly the behaviour that shipped before the config field existed.
 pub fn plain_http_hosts(ctx: &crate::context::Context) -> Vec<String> {
+    transport_hosts(ctx).hosts().to_vec()
+}
+
+/// [`plain_http_hosts`] with the hosts only a project file declared, which
+/// the OCI client reaches without a stored credential.
+fn transport_hosts(ctx: &crate::context::Context) -> crate::oci::access::registry_client::PlainHttpHosts {
     ctx.plain_http_memo()
-        .get_or_init(|| {
-            crate::oci::access::registry_client::plain_http_hosts_with(&declared_insecure_hosts(
-                ctx,
-                ctx.global(),
-                ctx.config(),
-                None,
-            ))
-        })
+        .get_or_init(|| declared_insecure_hosts(ctx, ctx.global(), ctx.config(), None))
         .clone()
 }
 
@@ -741,23 +736,32 @@ fn declared_insecure_hosts(
     global: bool,
     config: Option<&std::path::Path>,
     workspace: Option<&std::path::Path>,
-) -> Vec<String> {
+) -> crate::oci::access::registry_client::PlainHttpHosts {
+    use crate::config::scope::ConfigScope;
     let scope = scope_resolution::resolve_untracked(ctx, global, config, workspace).ok();
-    let project = scope.as_ref().map(|s| s.registries.as_slice()).unwrap_or_default();
-    let scope_kind = scope
-        .as_ref()
-        .map_or(crate::config::scope::ConfigScope::Project, |s| s.scope);
+    let declared = scope.as_ref().map(|s| s.registries.as_slice()).unwrap_or_default();
+    let scope_kind = scope.as_ref().map_or(ConfigScope::Project, |s| s.scope);
     let global_entries = global_config_tiers(ctx, scope_kind)
         .map(|(registries, _)| registries)
         .unwrap_or_default();
+    // A project file, which a cloned repository delivers, may make a host plain
+    // HTTP but never send it a stored credential; a global-scope run's own
+    // declaration is the user's global config.
+    let (user, project) = match scope_kind {
+        ConfigScope::Global => (declared, &[][..]),
+        ConfigScope::Project => (global_entries.as_slice(), declared),
+    };
+    crate::oci::access::registry_client::PlainHttpHosts::new(&insecure_hosts(user), &insecure_hosts(project))
+}
 
-    project
+/// The locator host of each entry that set `insecure = true`: without its
+/// namespace, and *with* its port, since `HttpsExcept` matches the exact
+/// `host[:port]` a request carries.
+fn insecure_hosts(entries: &[crate::config::declaration::RegistryConfig]) -> Vec<String> {
+    entries
         .iter()
-        .chain(global_entries.iter())
         .filter(|rc| rc.insecure)
         .filter_map(|rc| rc.oci.as_deref())
-        // The locator host without its namespace, and *with* its port —
-        // `HttpsExcept` matches the exact `host[:port]` a request carries.
         .map(|locator| crate::oci::access::registry_client::registry_host(locator).to_string())
         .collect()
 }
@@ -1570,9 +1574,39 @@ mod tests {
         let seen = ctx.plain_http_seen();
         assert_eq!(seen.len(), 1, "exactly one client build; got {seen:?}");
         assert!(
-            seen[0].contains(&"registry.internal:5050".to_string()),
+            seen[0].hosts().contains(&"registry.internal:5050".to_string()),
             "the declared host must reach the OCI client, not just the builder; got: {seen:?}"
         );
+        assert!(
+            !seen[0].allows_credential("registry.internal:5050"),
+            "a host only the project file declares must reach the client without a credential; got: {seen:?}"
+        );
+    }
+
+    /// Only a project file's `insecure = true` withholds the credential; the
+    /// user's global config keeps it, whichever scope the run resolves.
+    #[test]
+    fn a_global_config_host_keeps_its_credential_and_a_project_host_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_project_config(
+            &tmp,
+            "[skills]\n\n[rules]\n\n[[registries]]\nalias = \"local\"\n\
+             oci = \"registry.internal:5050/grimoire\"\ninsecure = true\n",
+        );
+        std::fs::write(
+            tmp.path().join("grim-home").join("grimoire.toml"),
+            "[[registries]]\nalias = \"mine\"\noci = \"global.internal:5051/team\"\ninsecure = true\n",
+        )
+        .unwrap();
+        let project_scope = transport_hosts(&ctx);
+        assert!(project_scope.hosts().contains(&"global.internal:5051".to_string()));
+        assert!(project_scope.allows_credential("global.internal:5051"));
+        assert!(!project_scope.allows_credential("registry.internal:5050"));
+
+        let global = Context::hermetic_scoped(tmp.path().join("grim-home"), true, None);
+        let global_scope = transport_hosts(&global);
+        assert!(global_scope.hosts().contains(&"global.internal:5051".to_string()));
+        assert!(global_scope.allows_credential("global.internal:5051"));
     }
 
     /// The MCP tools resolve their scope per tool call, so their transport
@@ -1605,7 +1639,7 @@ mod tests {
         let scoped = declared_insecure_hosts(&ctx, false, Some(&other.join("grimoire.toml")), None);
         assert_eq!(
             scoped,
-            vec!["other.internal:5051".to_string()],
+            crate::oci::access::registry_client::PlainHttpHosts::new(&[], &["other.internal:5051".to_string()]),
             "a per-call scope must not inherit the launch scope's opt-in, nor lose its own"
         );
     }
