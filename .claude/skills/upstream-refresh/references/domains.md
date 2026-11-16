@@ -53,7 +53,7 @@ upstream variable grim does not follow, tracked in `.agents/upstream-watchlist.m
 | `codex` | 1 | [docs/config.md](https://github.com/openai/codex/blob/main/docs/config.md) | GH `openai/codex` releases — stable `rust-v*` only, skip prereleases (`-alpha`); also [dev changelog](https://developers.openai.com/codex/changelog) | `CODEX_HOME` (honored) | `codex mcp list`; settings: `codex debug prompt-input`, `codex execpolicy check` |
 | `opencode` | 1 | [opencode.ai/docs](https://opencode.ai/docs/config/) | GH `anomalyco/opencode` releases (`v*`; `sst/opencode` redirects here); also [opencode.ai/changelog](https://opencode.ai/changelog) | `OPENCODE_CONFIG_DIR` (honored), `OPENCODE_CONFIG` (honored, file) | `opencode agent list`, `opencode debug skill`, `opencode debug config`, `opencode mcp list` |
 | `copilot` | 1 | [Copilot CLI docs](https://docs.github.com/en/copilot/how-tos/copilot-cli) | GH `github/copilot-cli` releases — skip prereleases (`-N` suffix); also [github.blog changelog](https://github.blog/changelog/label/copilot/) | `COPILOT_HOME` (honored) | `copilot skill list`, `copilot instruction list`, `copilot mcp list`, `copilot -p x --agent no-such-agent` (agents); settings: `copilot config <key> <value>` |
-| `cursor` | 2 | [cursor.com/docs](https://cursor.com/docs) | page [cursor.com/changelog](https://cursor.com/changelog) | `CURSOR_CONFIG_DIR` (honored for the settings kind's `cli-config.json` only; not for skills, rules, agents, `mcp.json`) | — |
+| `cursor` | 2 | [cursor.com/docs](https://cursor.com/docs) | page [cursor.com/changelog](https://cursor.com/changelog) — page 1 holds only the newest few headings, older ones continue on [cursor.com/changelog/page/2](https://cursor.com/changelog/page/2) | `CURSOR_CONFIG_DIR` (honored for the settings kind's `cli-config.json` only; not for skills, rules, agents, `mcp.json`) | — |
 | `kiro` | 2 | [Kiro configuration](https://kiro.dev/docs/configuration/) | page [kiro.dev/changelog](https://kiro.dev/changelog/) | `KIRO_HOME` (honored) | — |
 | `junie` | 2 | [Junie docs](https://junie.jetbrains.com/docs/guidelines-and-memory.html) | GH `JetBrains/junie` releases (newest tags are nightlies with empty bodies — read headings on [whats-new](https://junie.jetbrains.com/whats-new)) | `JUNIE_HOME` (not honored; replaces `~/.junie`); `JUNIE_*_LOCATIONS` only add search paths | — |
 | `gemini` | 2 | [configuration.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md) | GH `google-gemini/gemini-cli` releases — stable `v*` only, skip `-nightly`/`-preview`; also [docs/changelogs](https://github.com/google-gemini/gemini-cli/blob/main/docs/changelogs/index.md) | `GEMINI_CLI_HOME` (honored; replaces home, `.gemini` appended) | — |
@@ -61,12 +61,12 @@ upstream variable grim does not follow, tracked in `.agents/upstream-watchlist.m
 | `amp` | 2 | [ampcode.com/docs](https://ampcode.com/docs/markdown/customize/skills) (was `/manual`) | page [ampcode.com/chronicle](https://ampcode.com/chronicle) | `AMP_SETTINGS_FILE` (not honored; in the binary's help, not the docs) | — |
 | `antigravity` | 2 | [antigravity.google/docs](https://antigravity.google/docs/rules) | page [antigravity.google/changelog](https://antigravity.google/changelog/) | none documented | — |
 | `cline` | 2 | [docs.cline.bot](https://docs.cline.bot) | GH `cline/cline` releases — extension `v*` and `cli-v*` streams only, skip `desktop-v*`, `sdk/*` | `CLINE_DATA_DIR` (not honored) | — |
-| `droid` | 2 | [docs.factory.ai](https://docs.factory.ai) | page [release notes](https://docs.factory.ai/changelog/release-notes) | none documented | — |
+| `droid` | 2 | [docs.factory.com](https://docs.factory.com) (`docs.factory.ai` redirects here; paths under `/harness/`) | page [release notes](https://docs.factory.com/changelog/release-notes.md) | none documented | — |
 | `goose` | 2 | [goose docs](https://goose-docs.ai) | GH `aaif-goose/goose` releases (`block/goose` redirects here) | `GOOSE_PATH_ROOT` (not honored) | — |
 | `warp` | 2 | [docs.warp.dev](https://docs.warp.dev) | page [docs.warp.dev/changelog](https://docs.warp.dev/changelog) (one sub-page per year) | none documented | — |
-| `openclaw` | 2 | [docs.openclaw.ai](https://docs.openclaw.ai) | GH `openclaw/openclaw` releases — newest mainline version, not newest date (older `v2026.7.x` patches still ship); per-release `CHANGELOG/<version>.md` in the repo | `OPENCLAW_HOME` (not honored; documented, replaces home) | — |
+| `openclaw` | 2 | [docs.openclaw.ai](https://docs.openclaw.ai) | GH `openclaw/openclaw` releases — newest mainline version, not newest date (older `v2026.7.x` patches still ship); per-release `CHANGELOG/<version>.md` in the repo | `OPENCLAW_HOME` (honored — `OPENCLAW_STATE_DIR` first, then `OPENCLAW_HOME` + `.openclaw`, verified 2026-11-16) | — |
 | `kilo` | 2 | [Kilo-Org/docs](https://github.com/Kilo-Org/docs) | GH `Kilo-Org/kilocode` releases (`v*`) | none documented | — |
-| `qoder` | 2 | [docs.qoder.com](https://docs.qoder.com/cli/memory) | page [CLI release notes](https://docs.qoder.com/release-notes/qoder-cli) (`qoder.com/changelog` is a JS app WebFetch cannot read) | `QODER_CONFIG_DIR` (honored) | — |
+| `qoder` | 2 | [docs.qoder.com](https://docs.qoder.com/cli/memory) | page [CLI release notes](https://docs.qoder.com/release-notes/qoder-cli) — redirects to [changelog.qoder.com/cli](https://changelog.qoder.com/cli), which WebFetch reads (`qoder.com/changelog` is a separate JS app WebFetch cannot read) | `QODER_CONFIG_DIR` (honored) | — |
 
 ### Settings keys per harness
 
@@ -176,8 +176,10 @@ Add a seed here when a finding needs the next pass on a target.
 - **Code and docs:** `src/catalog/rating_provider.rs`,
   `docs/src/content/docs/ratings.md`.
 - **Feed:** [GHES release notes](https://docs.github.com/en/enterprise-server@latest/admin/release-notes)
-  (cursor = GHES version), [GitLab releases](https://about.gitlab.com/releases/categories/releases/)
-  (cursor = GitLab version), and the
+  (cursor = GHES version); GitLab version from the
+  [releases RSS feed](https://docs.gitlab.com/releases/releases.xml) — the
+  `about.gitlab.com/releases/categories/releases/` URL now redirects to a
+  docs index with no per-version list — and the
   [GraphQL removed-items log](https://docs.gitlab.com/api/graphql/removed_items/)
   for `awardEmojiToggle`.
 - **Stale:** a row past threshold, or a removal/deprecation of an API the
