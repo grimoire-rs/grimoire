@@ -354,6 +354,19 @@ pub(crate) fn kilo_config_roots(xdg_config: Option<PathBuf>, home: Option<PathBu
     roots
 }
 
+/// The Kilo/OpenCode expansion token `body` carries, if any — a global
+/// agent's body is substituted by Kilo (`config/agent.ts`: `trusted` is
+/// true only for the global scan), so it would read an environment variable
+/// or a local file into the agent's prompt with no tool permission prompt.
+/// Reuses the settings validator's own predicate; the extra `contains` call
+/// only picks which token name the warning shows.
+pub(crate) fn global_agent_expansion_token(body: &str) -> Option<&'static str> {
+    if !crate::oci::settings::has_expansion_token(body) {
+        return None;
+    }
+    Some(if body.contains("{env:") { "{env:" } else { "{file:" })
+}
+
 #[cfg(test)]
 mod tests {
     //! Specification tests for Kilo — own-directory skills and agents.
@@ -392,6 +405,13 @@ mod tests {
 
     fn agent(doc: &str) -> ParsedAgent {
         crate::skill::agent_frontmatter::AgentFrontmatter::parse_doc(doc, Path::new("rev.md")).expect("valid agent")
+    }
+
+    #[test]
+    fn global_agent_expansion_token_names_the_token_it_finds() {
+        assert_eq!(global_agent_expansion_token("hi {env:HOME} there"), Some("{env:"));
+        assert_eq!(global_agent_expansion_token("read {file:~/secret}"), Some("{file:"));
+        assert_eq!(global_agent_expansion_token("plain body, no tokens"), None);
     }
 
     #[test]

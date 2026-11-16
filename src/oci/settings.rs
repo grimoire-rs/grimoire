@@ -44,6 +44,14 @@ const EXPANDING_VENDORS: &[&str] = &[ClientTarget::OpenCode.as_str(), ClientTarg
 /// every string of its settings file.
 const DOLLAR_EXPANDING_VENDOR: &str = ClientTarget::Gemini.as_str();
 
+/// Whether `text` holds a Kilo/OpenCode config-variable expansion token
+/// (`{env:` or `{file:`). Shared with the Kilo agent renderer, which declines
+/// a global agent body carrying one (Kilo substitutes only trusted, i.e.
+/// global, agent bodies).
+pub(crate) fn has_expansion_token(text: &str) -> bool {
+    text.contains("{env:") || text.contains("{file:")
+}
+
 /// Whether `text` holds a `$` the Gemini resolver reads as a reference: one
 /// followed by a word character or a brace.
 fn holds_dollar_reference(text: &str) -> bool {
@@ -622,7 +630,7 @@ impl VendorCheck<'_> {
     }
 
     fn token(&self, text: &str, pointer: &str) -> Result<(), SettingsError> {
-        if EXPANDING_VENDORS.contains(&self.vendor) && (text.contains("{env:") || text.contains("{file:")) {
+        if EXPANDING_VENDORS.contains(&self.vendor) && has_expansion_token(text) {
             return Err(SettingsError::ExpansionToken {
                 pointer: self.absolute(pointer),
             });
