@@ -1,6 +1,7 @@
 # Research: Short-Reference Resolution (W1-B / D2)
 
 - **Date:** 2026-07-26
+- **Expires:** n/a (historical — meta-plan_promotion_1_0.md)
 - **Gate:** meta-plan_promotion_1_0 → W1-B research gate
 - **Question:** *Does fixing short-ref expansion change resolution for any
   already-published reference?*

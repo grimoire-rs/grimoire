@@ -1,6 +1,7 @@
 # Research: Harness Plugin/Extension Schemes — Feasibility of Grim-Owned Plugin Containers
 
 **Date:** 2026-07-10
+**Expires:** 2027-01-10
 **Method:** Deep-research fan-out (105 agents: 5 search angles → 23 sources
 fetched → 95 claims extracted → top 25 adversarially verified with 3-vote
 panels, ≥2/3 refutations kill a claim → 17 confirmed → 8 synthesized

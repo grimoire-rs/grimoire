@@ -1,6 +1,7 @@
 # Research: Glob Semantics for Registry Browse Filters
 
 - **Date:** 2026-08-09
+- **Expires:** n/a (historical — adr_registry_browse_filters.md)
 - **Question:** For per-registry `include`/`exclude` glob lists (browse-view
   filtering of package/repo name strings) in `[[registries]]` config — is
   `globset` the right crate, what exactly are its match semantics, and what

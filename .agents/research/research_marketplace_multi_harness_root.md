@@ -2,6 +2,7 @@
 
 ## Metadata
 - Date: 2026-09-28
+- **Expires:** 2027-03-28
 - Lane: two harness files one repo
 - Question: can one git repo root carry every harness's marketplace file at once, each pointing at a different per-harness-rendered plugin tree (`claude/<plugin>/`, `agent-plugins/<plugin>/`), such that each harness reads only its own file? Also: marketplace `name` uniqueness, and whether `source` may point outside the manifest dir (`../claude/foo`).
 - Extends: `research_marketplace_hosting_prior_art.md`, `research_plugin_support_matrix.md` (not redone).

@@ -1,6 +1,7 @@
 # Research: agentskills.io Spec + OpenCode + GitHub Copilot — Skills, Rules/Instructions, Agents
 
 - **Date**: 2026-06-12
+- **Expires:** 2026-12-12
 - **Method**: deep-research harness — 5 parallel search agents (spec, OpenCode skills/rules/config, OpenCode+Copilot agents, Copilot instructions/skills, cross-client portability), followed by a direct verification pass against primary sources (agentskills.io/specification, opencode.ai/docs/skills + /agents, code.claude.com/docs/en/skills, docs.github.com about-agent-skills).
 - **Confidence convention**: claims cite a URL. Claims sourced only from community mirrors (deepwiki, gists) or open GitHub issues are marked **[community]** or **[issue]** — treat as medium confidence.
 

@@ -1,5 +1,7 @@
 # Research v2 — Project install-state storage (devcontainerId keying vs relocation)
 
+**Expires:** n/a (historical — adr_install_state_portability.md)
+
 > Round-2 research triggered by maintainer pushback during `/swarm-execute`:
 > "could we key state by `${devcontainerId}` and keep it in `$GRIM_HOME`?" +
 > "too many files in the workspace root; a `.grimoire/` dir feels odd too."

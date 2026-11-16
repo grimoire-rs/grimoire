@@ -3,6 +3,7 @@
 ## Metadata
 
 Date: 2026-09-28 · Lane: codebase recon (hex-discuss entry wave, `.agents/discussions/marketplace-phase-2.md`)
+**Expires:** n/a (historical — adr_harness_marketplace_export.md)
 Question: how the index Pages site is built, which digests and caches exist, what `grim export plugin` emits, whether "commands" exist as a kind, and whether `/marketplace/` fits the site layout.
 Sources: grimoire-duo `src/export/*`, `src/command/export.rs`, `src/oci/artifact_kind.rs`, `src/store/*`, `.agents/discussions/harness-native-marketplaces.md`, `.agents/adr/adr_harness_plugin_export.md`; grimoire-indexer `src/{cli,enrich,data,renderer,ci.ts}`, `templates/ci/*`; grimoire-index `.github/workflows/*`, `index.config.json`, `package.json`, `dist/`, `enrich/`; grimoire-components `.gitlab-ci.yml`; `gh run view` of grimoire-rs/index run 36444909088.
 

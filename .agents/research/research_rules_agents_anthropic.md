@@ -1,6 +1,7 @@
 # Research: Claude Code Rules/Memory (CLAUDE.md, .claude/rules) and Subagents — Authoring Best Practices
 
 - **Date**: 2026-06-12
+- **Expires:** 2026-12-12
 - **Method**: deep-research workflow — 5 parallel search agents (official docs, subagents/hooks docs, Anthropic engineering posts, community practice, 2025–2026 changelog delta), followed by direct primary-source verification of contested claims against `code.claude.com/docs` and the official changelog.
 - **Claude Code version at research time**: v2.1.175 (changelog head).
 - **Confidence labels**: [verified] = fetched primary source directly during this research; [high] = verbatim-quoted primary source via research agent; [medium] = credible secondary/practitioner claim, not independently reproduced.

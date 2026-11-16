@@ -1,5 +1,7 @@
 # Claude Code marker tolerance + `settings.local.json` gitignore probe
 
+**Expires:** 2027-02-17
+
 Executed 2026-08-17 against **Claude Code 2.1.233** (native build,
 `/home/mherwig/.local/share/claude/versions/2.1.233`, commit `f8d57569aaf3`, linux-x64), real
 authenticated session. Scratch tree (session-local, never committed, outside the repo):

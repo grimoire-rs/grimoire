@@ -2,6 +2,7 @@
 
 ## Metadata
 Date: 2026-09-28 · Lane: neutral fact-check, web docs + Codex source · Extends (does not redo): `research_marketplace_hosting_prior_art.md`, `research_marketplace_multi_harness_root.md`, `research_url_marketplace_trust.md`.
+**Expires:** 2027-03-28
 Sources (all accessed 2026-09-28):
 - [C1] https://code.claude.com/docs/en/plugins/host-marketplace · [C2] https://code.claude.com/docs/en/plugins/marketplace-reference · [C3] https://code.claude.com/docs/en/plugins/cli-reference · [C4] https://code.claude.com/docs/en/plugins/loading · [C5] https://code.claude.com/docs/en/plugins/dependencies
 - [G1] https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference · [G2] https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-finding-installing · [G3] https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-marketplace

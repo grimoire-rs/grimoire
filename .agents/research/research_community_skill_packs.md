@@ -1,6 +1,7 @@
 # Research: Community Norms for Published AI Skill/Rule/Agent Packs
 
 **Date:** 2026-06-12
+**Expires:** 2026-12-12
 **Method:** Deep-research fan-out (5 parallel agents) over actual repo files via
 GitHub API / raw.githubusercontent.com, followed by adversarial spot-verification
 of load-bearing quotes against primary sources. All line/byte counts below were

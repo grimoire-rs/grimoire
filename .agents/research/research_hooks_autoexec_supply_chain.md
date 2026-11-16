@@ -7,7 +7,7 @@
 **Triggered by:** tier-high hex-architect run on the hooks feature — this axis feeds a mandatory
 `reviewer:security` pass on the ADR that will decide the consent model, mutator-tier controls,
 and audit design for `grim`'s three hook tiers.
-**Expires:** 2026-11-14 (three months — the AI-coding-agent hook surface and its incident history
+**Expires:** n/a (historical — adr_hooks_support.md) — was 2026-11-14 (three months — the AI-coding-agent hook surface and its incident history
 are both moving fast; re-verify against [`research_hooks_vendor_survey.md`](./research_hooks_vendor_survey.md)
 and any new CVE/GHSA activity before reuse)
 **Companion artifacts:** [`adr_hooks_support.md`](../adr/adr_hooks_support.md) (Proposed,

@@ -3,6 +3,7 @@
 ## Metadata
 
 - **Date**: 2026-09-27
+- **Expires:** 2027-03-27
 - **Domain**: packaging
 - **Triggered by**: "/hex-discuss harness-native-marketplaces — verify Agent Plugins 1.0 claim"
 - **Expires**: 2027-03-27

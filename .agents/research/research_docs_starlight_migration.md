@@ -1,6 +1,7 @@
 # Research: docs site migration from mdBook to Astro Starlight
 
 **Date:** 2026-09-06
+**Expires:** n/a (historical — adr_docs_site_starlight.md)
 **Question:** what the current grimoire.rs site depends on, how Starlight covers each dependency, and which URLs are shipped contracts.
 **Method:** read-only inventory of `docs/`, `.github/workflows/docs.yml`, `src/`, `catalog/`, and the indexer renderer (`grimoire-rs/indexer`, Astro), by a research subagent; Starlight capabilities from its published docs.
 **Consumers:** `adr_docs_site_starlight.md`, the docs redesign plan.

@@ -1,6 +1,7 @@
 # Research: Anthropic Agent Skills — Authoring Best Practices & Design Considerations
 
 **Date:** 2026-06-12 · **Scope:** Official Anthropic docs (platform.claude.com, code.claude.com), engineering blog, agentskills.io open standard, anthropics/skills repo, "Complete Guide to Building Skills for Claude" PDF (Jan 2026).
+**Expires:** 2026-12-12
 
 ---
 

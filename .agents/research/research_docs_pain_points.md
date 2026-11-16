@@ -1,6 +1,7 @@
 # Research: pain points that decide which use cases the docs lead with
 
 **Date:** 2026-09-06
+**Expires:** 2027-03-06
 **Question:** which reader tasks should front grimoire.rs, decided by what people
 complain about online and what comparable tools lead with, rather than by the
 owner's list alone.

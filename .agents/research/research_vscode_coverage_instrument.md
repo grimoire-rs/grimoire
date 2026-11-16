@@ -1,5 +1,7 @@
 # The VS Code extension's coverage number is not test coverage
 
+**Expires:** 2027-02-19
+
 Recorded 2026-08-19 during the ratings deferred-findings run (F-8, WP DF-H).
 Repo: `grimoire-vscode`, branch `feat/artifact-ratings`.
 

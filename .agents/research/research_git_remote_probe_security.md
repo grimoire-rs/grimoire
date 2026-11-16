@@ -1,5 +1,7 @@
 # Research: `git ls-remote` probe security (package-index freshness check)
 
+**Expires:** n/a (historical — adr_catalog_freshness_revalidation.md)
+
 **Axis**: domain/security · **Run**: `/hex-plan high` · **Scope**: replacing the
 unconditional `git clone --depth 1` in `fetch_git` (`src/catalog/index_source.rs:186-231`)
 with a cheap `git ls-remote` tip probe against a semi-trusted, user-configured

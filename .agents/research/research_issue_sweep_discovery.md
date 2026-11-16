@@ -5,7 +5,7 @@
 **Date:** 2026-11-10
 **Domain:** codebase
 **Triggered by:** `/hex-plan` on `.agents/goals/issue-sweep.md`; consumed by `.agents/plans/plan_issue_sweep.md`
-**Expires:** when `hex/issue-sweep` lands (line numbers drift; search by symbol)
+**Expires:** 2027-05-10 (line numbers drift; search by symbol)
 
 Six read-only Discover reports, verbatim. Nothing was built or run. Each section is one worker report;
 the plan cites them as `§ X1` … `§ AX`. Where a report and the plan differ, the plan decides (its § Decisions).

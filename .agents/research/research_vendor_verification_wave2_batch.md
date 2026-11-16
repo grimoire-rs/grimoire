@@ -1,5 +1,7 @@
 # Research: wave-2 skills-only batch surface verification
 
+**Expires:** 2027-01-27
+
 Live verification **2026-07-27** (six parallel `worker-researcher` passes,
 first-party sources only) for the six clients added in
 `feat/vendor-batch-tier-a`. Sibling artifacts:

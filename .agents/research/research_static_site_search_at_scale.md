@@ -3,6 +3,7 @@
 ## Metadata
 
 - **Date:** 2026-10-20
+- **Expires:** 2027-04-20
 - **Lane:** prior-art, opt-in (user-requested)
 - **Question:** how do sites serve search plus browse/filter over a large catalog (10k–100k items, ~1 KB searchable text each: name, title, summary, description, keywords, tags, kind, namespace, license) from static hosting only (GitHub Pages, GitLab Pages, S3/CDN), with no server-side logic?
 - **Output rule:** findings, `negative:`, `leads:` only. No recommendation.
