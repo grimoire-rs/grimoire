@@ -764,7 +764,7 @@ claude namespace to silence it and gain proper type conversion.
 
 [cline-docs]: https://cline.bot
 [droid-docs]: https://factory.ai
-[droid-subagents-docs]: https://docs.factory.ai/cli/configuration/custom-droids
+[droid-subagents-docs]: https://docs.factory.com/harness/subagents
 [goose-docs]: https://goose-docs.ai
 [warp-docs]: https://warp.dev
 [openclaw-docs]: https://github.com/openclaw/openclaw
