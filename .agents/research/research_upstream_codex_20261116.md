@@ -47,7 +47,9 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #31 `/tui/notification_method` `osc777`: confirmed (rust-v0.168.0 release note, rust-v0.169.0 schema enum); landed in `58754de8`.
 
 ## Routing
 
@@ -57,7 +59,7 @@ none required — no code landed in this run.
 - #8 MCP http_headers_helper exists (0.148+), cached helper → (a) ledger or doc text fix
 - #13 Client-side hook approval: non-managed hooks need review/trust before running → (a) ledger or doc text fix
 - #19 Settings key /approval_policy enum on-request/never → (a) ledger or doc text fix
-- #31 Settings key /tui/notification_method enum auto/osc9/bel → (b) additive renderer or metadata support — reported, not implemented in this run
+- #31 Settings key /tui/notification_method enum auto/osc9/bel → (b) landed in `58754de8`
 - #34 Vendor mapping stamp: 'Mapping verified 2026-09-27 against Codex CLI 0.157.1' → (a) ledger or doc text fix
 
 ## Issue drafts

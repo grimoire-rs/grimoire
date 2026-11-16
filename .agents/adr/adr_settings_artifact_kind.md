@@ -1184,12 +1184,26 @@ were appended, none renamed or removed (Principle 9). Evidence: the
 Cursor gained no row. Agents, Cline, Junie, Zed, OpenClaw and Goose stay without rows; the
 re-check trigger for each is in `.claude/skills/upstream-refresh/references/domains.md`. A key
 that switches off a harness's workspace or folder trust gate, or pre-trusts a folder, stays off,
-whatever its Routing line says (threat model T3). Four such keys are known: Gemini
+whatever its Routing line says (threat model T3). Seven such keys are known: Gemini
 `/security/folderTrust/enabled`, Antigravity `/trustedWorkspaces` and Kiro
 `chat.disableTrustAllConfirmation` (each routed off in its harness's 2026-11-05 research artifact),
-and Copilot `trustedFolders` (Appendix B). A value
+Copilot `trustedFolders` (Appendix B), and, found by the 2026-11-16 sweep, Qoder
+`security.folderTrust.enabled` and `permissions.trustDirectories`
+([settings reference](https://docs.qoder.com/cli/settings-reference.md): "Enable Folder Trust." and
+"Directories explicitly trusted by the user; stored in user-level configuration") and Amp
+`amp.mcpTrustedServers` ([settings](https://ampcode.com/docs/markdown/cli/settings): "`amp.mcpTrustedServers`
+is local to one machine."). A value
 holding an expansion token is refused at build: `{env:` and `{file:` for OpenCode (existing) and Kilo
 (PD-35), `$NAME` and `${NAME}` for Gemini (PD-37).
+
+### Rows added 2026-11-16
+
+Two rows, 318 in all: Cursor `/network/useHttp1ForAgent` (boolean, global) and Kilo `/memory_model`
+(string, global), both documented with a type. The same change widened existing value sets
+(Codex `/tui/notification_method` `osc777`; Copilot `/effortLevel` `none`, `minimal`, `max`;
+Antigravity `/agentMode` the empty string; Kiro `/chat.showThinking` also a string of `expanded`,
+`collapsed`, `off`; Claude project `/permissions/defaultMode` `dontAsk`, `manual`). Additive only
+(Principle 9). Evidence: `research_upstream_<harness>_20261116.md`.
 
 ## Appendix B: follow-up issue list
 

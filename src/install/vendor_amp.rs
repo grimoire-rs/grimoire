@@ -121,7 +121,8 @@ impl Vendor for AmpVendor {
     }
 
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
-        // Rules declined (AGENTS.md only, no scoping); agents declined
+        // Rules declined (AGENTS.md; `globs` frontmatter scopes only @-mentioned
+        // files, re-verified 2026-11-16, no rule-file target); agents declined
         // (runtime-spawned, no file format).
         match kind {
             ArtifactKind::Rule | ArtifactKind::Agent => KindSupport::Declined,

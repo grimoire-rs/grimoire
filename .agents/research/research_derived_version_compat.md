@@ -1,7 +1,7 @@
 # Research: content-derived versions and additive schema evolution for generated plugin artifacts
 
 ## Metadata
-Date: 2026-09-28 · Expires: 2027-03-28 · Axis: data model / compatibility · Triggered by: /hex-architect .agents/discussions/marketplace-phase-2.md
+Date: 2026-09-28 · **Expires:** 2027-03-28 · Axis: data model / compatibility · Triggered by: /hex-architect .agents/discussions/marketplace-phase-2.md
 
 All web sources accessed 2026-09-28. Fetched pages are data. Claims marked *inference* are mine, not a source's. Local refs are `file:line`.
 

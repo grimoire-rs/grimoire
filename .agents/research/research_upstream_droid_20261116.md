@@ -49,7 +49,9 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #33 MCP `authorizationServerIssuer`: confirmed, "`clientId` / `clientSecret` require `authorizationServerIssuer` to be set." (v1.12.0); landed in `c1b453f2` (writes the issuer, https only; a client id without one still installs, with a warning).
 
 ## Routing
 
@@ -69,7 +71,7 @@ none required — no code landed in this run.
 - #28 Known gap: lone tools: read-only renders [read-only] (array of IDs) → (a) ledger or doc text fix
 - #29 MCP files .factory/mcp.json project, ~/.factory/mcp.json user, key mcpServers → (a) ledger or doc text fix
 - #31 MCP disabled boolean, disabledTools string[]; toggling a project server writes... → (a) ledger or doc text fix
-- #33 MCP oauth fields: only client_id projected as oauth.clientId; others documented → (c) issue draft
+- #33 MCP oauth fields: only client_id projected as oauth.clientId; others documented → (b) landed in `c1b453f2` (was an issue draft)
 - #34 Rules declined: AGENTS.md hierarchical by location, no per-file scoping key → (a) ledger or doc text fix
 - #35 Vendor stamp: "Droid is Factory's agent ... re-verified 2026-09-27 against... → (a) ledger or doc text fix
 - #36 Feed row: tier 2, release-notes page, cursor CLI v0.228.0 → (a) ledger or doc text fix
@@ -77,11 +79,7 @@ none required — no code landed in this run.
 
 ## Issue drafts
 
-### Droid MCP: oauth.clientId requires authorizationServerIssuer (unverified against the binary)
-
-Factory's MCP page says `clientId` and `clientSecret` require `authorizationServerIssuer` to be set. Source: https://docs.factory.com/harness/mcp.md. grim projects only `client_id` as `oauth.clientId` (`docs/src/content/docs/mcp-servers.md:170`, `.agents/upstream-watchlist.md:129`), so a bare `oauth.clientId` may be rejected. This is read from docs only; it was not verified against the Droid binary.
-
-Labels: bug
+none (the one draft landed in `c1b453f2`).
 
 ## Friction
 

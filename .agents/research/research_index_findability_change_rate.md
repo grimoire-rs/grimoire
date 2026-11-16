@@ -5,7 +5,7 @@
 - Date: 2026-10-17
 - Domain: cli
 - Triggered by: discussion .agents/discussions/index-scale-rollout.md
-- Expires: 2027-04-17
+- **Expires:** 2027-04-17
 - Repos read: `grimoire` (`src/catalog`, `src/command/search.rs`, `src/tui`), `grimoire-indexer` (`src/data`, `src/enrich`, `src/ratings`, `src/downloads`, `src/validate`, `src/ci.ts`), `grimoire-index` (`.github/workflows`, stale local `dist/`), `grimoire-vscode` (`src/webview`, `src/views`, `src/grim.ts`)
 - Out of scope: transport size, 500-entry cap measurement, gzip/ETag (settled earlier). No network was used; nothing here is measured against a live index.
 

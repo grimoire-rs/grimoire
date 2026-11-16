@@ -273,7 +273,9 @@ const CLAUDE_SETTINGS_FIELDS: &[SettingsField] = &[
     // A relative entry resolves against the project root in a project or local
     // file and against `~/.claude` in the user file. An admin-required sandbox
     // ignores a repository file's `allowWrite` entries, and its `allowRead`
-    // entries under a path a managed, `--settings` or user file denies.
+    // entries under a path a managed, `--settings` or user file denies. While
+    // `permissions.blockReadsOutsideWorkingDirectories` is on, repository
+    // settings contribute no `allowWrite` or `allowRead` entries.
     SettingsField::new("/sandbox/filesystem/allowWrite", Ty::StringList, Set, Both),
     SettingsField::new("/sandbox/filesystem/denyWrite", Ty::StringList, Set, Both),
     SettingsField::new("/sandbox/filesystem/denyRead", Ty::StringList, Set, Both),

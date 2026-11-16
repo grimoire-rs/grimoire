@@ -39,11 +39,15 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- REFUTED: "OpenCode V2 ignores `OPENCODE_CONFIG`" (claim #13). V2 reads it (`packages/cli/src/server-process.ts:132`, v2.3.0). The default installer (`opencode.ai/install`) installs V1 only. V1 1.19.5 reads `opencode.json[c]` from `$OPENCODE_CONFIG_DIR` (`packages/opencode/src/config/config.ts:432-440`), from `$OPENCODE_CONFIG` (`:415-417`) and from the XDG file (`:273-274`).
+- NARROWED: claim #12 (V2 substitutes `OPENCODE_CONFIG_DIR`). The real gap is V2 with `OPENCODE_CONFIG_DIR` set and `OPENCODE_CONFIG` unset, where grim still edits the XDG file. V2 still accepts every settings key grim writes (deprecated only).
+- Config-file move to `$OPENCODE_CONFIG_DIR/opencode.json`: implemented, tested and reverted by the implementing worker: `reap_relocated_roots` keys only on `PathAnchor::VendorRoot` and `ClaudeUserDir`; OpenCode MCP and agent outputs anchor at the fixed `OpenCodeRoot`, which the reaper skips, and the reaper excludes `ArtifactKind::Settings` by design, so neither old XDG entry kind is reaped. Not landed.
 
 ## Routing
 
-- #1 Product line: opencode is now a V1/V2 split. V2 is the GitHub release stream... → (c) issue draft
+- #1 Product line: opencode is now a V1/V2 split. V2 is the GitHub release stream... → (c) issue draft (product line stamp)
 - #2 V1 config format still read by V2 (grim writes V1 shapes: flat mcp.<name>,... → (c) issue draft
 - #3 MCP: only type: "local" and type: "remote" (no ws) → (a) ledger or doc text fix
 - #5 MCP oauth block field names: clientId, scope, callbackPort → (c) issue draft
@@ -53,8 +57,8 @@ none required — no code landed in this run.
 - #9 Rule scoping: no per-file scoping; instructions files combined with AGENTS.md → (a) ledger or doc text fix
 - #10 Agent permission map; tools deprecated for it; maxSteps deprecated for steps → (c) issue draft
 - #11 Agent color: hex #RRGGBB or theme names; steps positive int → (a) ledger or doc text fix
-- #12 OPENCODE_CONFIG_DIR additive, appended, never substituted → (c) issue draft
-- #13 OPENCODE_CONFIG custom config file, precedence 3 of documented order → (c) issue draft
+- #12 OPENCODE_CONFIG_DIR additive, appended, never substituted → (c) narrowed, issue draft (V2 with `OPENCODE_CONFIG_DIR` set and `OPENCODE_CONFIG` unset)
+- #13 OPENCODE_CONFIG custom config file, precedence 3 of documented order → refuted: V2 reads `OPENCODE_CONFIG`; no action
 - #14 Config locations: global ~/.config/opencode/opencode.json(c), project... → (a) ledger or doc text fix
 - #15 {env: / {file: expansion in any config string → (a) ledger or doc text fix
 - #16 Hook kind: plugin-module only, no config-level hooks → (a) ledger or doc text fix
@@ -72,9 +76,11 @@ none required — no code landed in this run.
 
 ## Issue drafts
 
-### OpenCode V2: config paths, env variables and settings keys diverge from V1
+### OpenCode: global config edits ignore OPENCODE_CONFIG_DIR, and the reaper cannot move them
 
-OpenCode is now a V1/V2 split (V1 npm `latest` 1.19.5, V2 GitHub v2.2.0 to v2.3.0). V2 behaviour here is from docs and source; no binary was run. Per https://github.com/anomalyco/opencode/blob/v2.3.0/services/site/src/docs/content/migrate-v1.mdx and V2 source: `OPENCODE_CONFIG` is not read, `OPENCODE_CONFIG_DIR` replaces the global config dir instead of appending, `OPENCODE_DISABLE_EXTERNAL_SKILLS` was found only in V1 docs, `small_model`, `autoupdate`, `snapshot` and `permission` are schema-deprecated, `/compaction/prune` is ignored with a warning, MCP `oauth` is natively snake_case, and `policies` is a new access-control surface. grim writes V1 shapes and relies on V1-compat translation: `OPENCODE_CONFIG` at `docs/src/content/docs/settings.md:405` and `mcp-servers.md:543`, `OPENCODE_CONFIG_DIR` in `src/install/vendor_opencode.rs` (watchlist :167), the settings rows at `src/install/vendor_opencode.rs:107-146`, oauth names at `docs/src/content/docs/mcp-servers.md:168`, and the V1 product line stamp at `src/install/vendor_opencode.rs:13`.
+Corrected 2026-11-16 (the earlier draft claimed V2 ignores `OPENCODE_CONFIG`; it does not). OpenCode is a V1/V2 split (V1 npm `latest` 1.19.5, V2 GitHub v2.2.0 to v2.3.0); the default installer (`opencode.ai/install`) installs V1 only. Both read `$OPENCODE_CONFIG` (V1 `packages/opencode/src/config/config.ts:415-417`, V2 `packages/cli/src/server-process.ts:132`), and V1 also reads `opencode.json[c]` from `$OPENCODE_CONFIG_DIR` (`config.ts:432-440`). V2 still accepts every settings key grim writes (some are deprecated). The real gap: with V2, `OPENCODE_CONFIG_DIR` set and `OPENCODE_CONFIG` unset, grim still edits the XDG `opencode.json`, which a V2 install that relocated its config directory does not read.
+
+Moving the edit target to `$OPENCODE_CONFIG_DIR/opencode.json` was implemented, tested and reverted: `reap_relocated_roots` keys only on `PathAnchor::VendorRoot` and `ClaudeUserDir`, OpenCode MCP and agent outputs anchor at the fixed `OpenCodeRoot` (which the reaper skips), and the reaper excludes `ArtifactKind::Settings` by design, so neither old XDG entry kind is reaped. Needs an owner decision: extend the reaper's anchor match, and decide whether settings values are ever reaped from an old root. Also stamp the V1 product line (`src/install/vendor_opencode.rs:13`, "OpenCode 1.18.32") with the V1/V2 split.
 
 Labels: enhancement
 

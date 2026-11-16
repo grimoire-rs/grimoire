@@ -2,7 +2,8 @@
 // Copyright 2026 The Grimoire Authors
 
 //! OpenAI Codex's vendor strategy: universal skills, TOML agents, no rules.
-//! Mapping verified 2026-09-27 against Codex CLI 0.157.1 (`rust-v0.157.1`).
+//! Mapping verified 2026-09-27 against Codex CLI 0.157.1 (`rust-v0.157.1`); re-checked
+//! 2026-11-16, 0.158 to 0.169 touch no skill, agent, MCP or rules key.
 //!
 //! Codex reads only the universal agentskills `SKILL.md` fields and
 //! auto-discovers skills from the cross-vendor open standard directory

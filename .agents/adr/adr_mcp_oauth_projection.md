@@ -108,9 +108,9 @@ reason to skip.
 |---|---|---|---|
 | Claude | `client_id`, `scopes`, `callback_port`, `auth_server_metadata_url` | unchanged | Full mapping, already shipped |
 | OpenCode | `client_id`, `scopes`, `callback_port` | `oauth.clientId`, `oauth.scope` (space-joined), `oauth.callbackPort` | Remote entries only; a set `auth_server_metadata_url` skips. `callback_port = 0` also skips: OpenCode's schema takes 1..=65535 and rejects its whole config on anything else |
-| Copilot | `client_id` | `oauthClientId` | `callback_port` counts as unmapped: `auth.redirectPort` appears only in the changelog, never in the reference |
+| Copilot | `client_id`; `scopes` in the two CLI files, beside a client id (2026-11-16) | `oauthClientId`, `oauthScopes` | `callback_port` counts as unmapped: `auth.redirectPort` appears only in the changelog, never in the reference |
 | Zed | `client_id` | `oauth.client_id` | HTTP `context_servers` only. A `${VAR}` client id still skips, under Zed's existing env-ref skip (Zed expands none) |
-| Droid | `client_id` | `oauth.clientId` | `${VAR}` allowed in `oauth.clientId` |
+| Droid | `client_id`, `authorization_server_issuer` (2026-11-16) | `oauth.clientId`, `oauth.authorizationServerIssuer` | `${VAR}` allowed in `oauth.clientId`; the issuer is https only, and Droid documents that a client id requires one, so a client id without it still installs, with a warning |
 | Cline | none | — | Always skip: Cline's oauth shape is unverified |
 | Codex, Kiro, Cursor, Qoder, Amp, Antigravity, Gemini, Warp | unchanged | — | Out of scope for this decision; each keeps its current skip until its own row is decided |
 
@@ -122,7 +122,7 @@ reason to skip.
 - A dropped scope or metadata URL can no longer widen a grant.
 
 **Negative:**
-- A descriptor that sets `scopes` still skips Copilot, Zed and Droid. The
+- A descriptor that sets `scopes` still skips Zed and Droid, and Copilot's `.vscode/mcp.json`. The
   author has to publish a variant without it to reach them.
 
 **Risks:**

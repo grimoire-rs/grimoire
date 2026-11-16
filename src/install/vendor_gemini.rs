@@ -4,7 +4,7 @@
 //! Gemini CLI's vendor strategy: shared-pool skills, native agents, declined rules.
 //!
 //! Gemini CLI mapping (`adr_vendor_wave_expansion.md`; live-verified
-//! 2026-07-19, re-verified 2026-09-27 against v0.61.0,
+//! 2026-07-19, re-verified 2026-09-27 against v0.61.0 and 2026-11-16 against v0.68.0,
 //! `research_vendor_verification_junie_gemini.md`, `research_upstream_gemini_20260927.md`):
 //!
 //! - **Skills**: the shared `.agents/skills` pool (project `<ws>/.agents/skills`,

@@ -1,7 +1,7 @@
 # Research: harness marketplace manifest schemas (Claude, Copilot, Codex, Cursor, Droid, Junie, Qoder)
 
 ## Metadata
-Date: 2026-09-28 · Expires: 2027-03-28 · Axis: technology/tooling · Triggered by: /hex-architect .agents/discussions/marketplace-phase-2.md
+Date: 2026-09-28 · **Expires:** 2027-03-28 · Axis: technology/tooling · Triggered by: /hex-architect .agents/discussions/marketplace-phase-2.md
 
 Extends `research_marketplace_multi_harness_root.md` (lookup order, `..`, name collisions) and `research_marketplace_hosting_prior_art.md` (transports). Not redone here.
 

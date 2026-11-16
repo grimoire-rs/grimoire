@@ -35,12 +35,15 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #2 `/agentMode` `""`: confirmed in the CLI 1.5.7 changelog; landed in `58754de8` (grim accepts the empty string; the settings page still calls `""` the default).
+- MCP SSE / `httpUrl` finding: refuted, NOT REAL; grim writes `serverUrl` only (driver verification 2026-11-16).
 
 ## Routing
 
 - #1 Settings key list: 25 grim rows still exist upstream with same type/enum → (a) ledger or doc text fix
-- #2 /agentMode "" is the CLI default so grim omits it → (c) issue draft
+- #2 /agentMode "" is the CLI default so grim omits it → (b) landed in `58754de8` (was an issue draft)
 - #3 Default-valued keys dropped at startup → (a) ledger or doc text fix
 - #5 Settings path ~/.gemini/antigravity-cli/settings.json, global only → (a) ledger or doc text fix
 - #6 Expansion of variables / file refs in settings strings → (a) ledger or doc text fix
@@ -55,14 +58,9 @@ none required — no code landed in this run.
 - #21 Path-relocating env override: none honored → (a) ledger or doc text fix
 - #22 Hook kind declined; shell-command hooks spliced into a config file → (c) issue draft
 - #23 antigravity.* agent registry candidates → (a) ledger or doc text fix
+- MCP SSE / `httpUrl` → dropped: not real, grim writes `serverUrl` only
 
 ## Issue drafts
-
-### Antigravity: agentMode default changed to Auto in CLI 1.5.7, docs disagree
-
-The Antigravity changelog says CLI 1.5.7 changed the default Agent Mode to Auto and that `""` is now an explicit saved "Default" choice, while the settings page and CLI reference still call `""` the default. Source: https://antigravity.google/docs/changelog. grim omits `/agentMode` when it is `""` because the CLI deleted default-valued keys (`src/install/vendor_antigravity.rs:86-88`, `.agents/upstream-watchlist.md:301`).
-
-Labels: bug
 
 ### Antigravity hooks: dedicated hooks.json files (findings only)
 

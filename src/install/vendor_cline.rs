@@ -31,11 +31,12 @@
 //!   permanent name gets shipped wrong. Watchlisted with the evidence.
 //! - **Agents**: **declined**. Re-verified 2026-09-27 against source
 //!   (`sdk/packages/shared/src/storage/paths.ts::resolveAgentConfigSearchPaths`
-//!   at CLI v3.0.65): the CLI reads installable subagents (Markdown with
-//!   YAML frontmatter, `sdk/packages/core/src/extensions/tools/team/configured-agent-config.ts`)
+//!   at CLI v3.0.65): the CLI reads installable subagents (YAML frontmatter in
+//!   `.yml`/`.yaml` files only, not `.md`, re-verified 2026-11-16 at v4.1.26,
+//!   `sdk/packages/core/src/extensions/tools/team/configured-agent-config.ts`)
 //!   from `.cline/agents/` (project) and `~/.cline/agents/` (global). The VS
 //!   Code extension hardcodes `enableSpawnAgent: false`
-//!   (`apps/vscode/src/sdk/cline-session-factory.ts:1087` at v4.1.21), so the
+//!   (`apps/vscode/src/sdk/cline-session-factory.ts:1191` at v4.1.26), so the
 //!   format exists but is not rendered by grim yet.
 //! - **MCP**: **global scope only**, enabled 2026-09-27. Source-verified at
 //!   cline/cline@252082b9: the CLI and the VS Code extension resolve the

@@ -40,11 +40,15 @@
 
 ## Verifier sign-off
 
-none required — no code landed in this run.
+Signed off 2026-11-16 by three read-only sonnet verifiers (upstream re-fetched, grim code read) and by the implementing workers; one line per code-driving claim.
+
+- #8 `/network/useHttp1ForAgent` (typed boolean): confirmed; landed in `58754de8` as a row. `sandbox.mode` and `sandbox.networkAccess` have no documented value set: not added.
+- #20 `${PLUGIN_ROOT}` for Cursor in the export: refuted, NOT REAL. `family::agent_plugins_mcp_entry` has one caller (`stage::mcp_value`), so `${CURSOR_PLUGIN_ROOT}` already applies on both export paths (driver verification 2026-11-16; `src/export/stage.rs:1525`).
+- #19 root `plugin.json` versus the dual-manifest layout: confirmed upstream, not implemented; layout decision stays an issue draft.
 
 ## Routing
 
-- #8 Settings key list: reference lists keys grim has no row for → (b) additive renderer or metadata support — reported, not implemented in this run
+- #8 Settings key list: reference lists keys grim has no row for → (b) `/network/useHttp1ForAgent` landed in `58754de8`; sandbox keys not added (no value set)
 - #10 CURSOR_CONFIG_DIR documented only on CLI config page; no page ties it to... → (a) ledger or doc text fix
 - #11 Project .cursor/cli.json permissions replaces global (on-limited); docs state... → (a) ledger or doc text fix
 - #14 Config-string expansion: grim has no Cursor refusal; Cursor cli-config.json... → (a) ledger or doc text fix
@@ -53,7 +57,7 @@ none required — no code landed in this run.
 - #17 Hooks: allow/ask verdicts not enforced → (a) ledger or doc text fix
 - #18 Private repository import: GitLab/Bitbucket/Azure DevOps acceptance open → (a) ledger or doc text fix
 - #19 Plugin tree: root Agent Plugins plugin.json not in Cursor's lookup, hence... → (c) issue draft
-- #20 Cursor does not expand ${PLUGIN_ROOT}; grim renames Claude placeholders to it... → (c) issue draft
+- #20 Cursor does not expand ${PLUGIN_ROOT}; grim renames Claude placeholders to it... → dropped: not real, grim already emits `${CURSOR_PLUGIN_ROOT}`
 - #21 Marketplace entry: schema has only name/source/description/minClientVersions;... → (b) additive renderer or metadata support — reported, not implemented in this run
 - #24 Marketplace-level logo/icon: none; Cursor logo per plugin → (a) ledger or doc text fix
 - #26 Rules: .cursor/rules/*.mdc, globs comma-separated, alwaysApply → (a) ledger or doc text fix
@@ -61,11 +65,11 @@ none required — no code landed in this run.
 
 ## Issue drafts
 
-### Cursor plugins: expand ${CURSOR_PLUGIN_ROOT} and ${CLAUDE_PLUGIN_ROOT}, and decide the dual-manifest layout
+### Cursor plugins: decide the dual-manifest layout
 
-Cursor documents expansion of `${CURSOR_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` in command, args, env values and cwd, and now documents a root Agent Plugins `plugin.json` layout as loading in Cursor; precedence against `.cursor-plugin/plugin.json` is unstated. Source: https://cursor.com/docs/reference/plugins. grim renames Claude placeholders to `${PLUGIN_ROOT}` for Cursor, which Cursor does not expand, and emits a second `.cursor-plugin/plugin.json` because the root manifest was believed unread (`.agents/upstream-watchlist.md:59`, `:12`).
+Cursor's plugins reference now documents a root Agent Plugins `plugin.json` layout as loading in Cursor ("A plugin that conforms to the Agent Plugins specification loads in Cursor"); precedence against `.cursor-plugin/plugin.json` is unstated. Source: https://cursor.com/docs/reference/plugins. grim emits both manifests because the root one was believed unread (`.agents/upstream-watchlist.md`, Cursor plugin tree row). Needs a live Cursor smoke for root-only versus dual-manifest. The earlier `${PLUGIN_ROOT}` finding in this draft was wrong and is dropped: grim already emits `${CURSOR_PLUGIN_ROOT}`.
 
-Labels: bug
+Labels: enhancement
 
 ## Friction
 
