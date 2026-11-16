@@ -1370,6 +1370,42 @@ one only when someone pushed the tag by hand.
 
 ## Smaller notes {#smaller-notes}
 
+- **A Claude marketplace entry no longer carries `documentationUrl` or
+  `supportUrl`.** Claude defines them only in `plugin.json`, and
+  `claude plugin validate` reports them as unknown fields in an entry. Since
+  0.16.0 [`grim export marketplace`][export-marketplace] writes them to the
+  plugin's `plugin.json` and leaves them out of the entry. Qoder entries are
+  unchanged. Export again to move them. A Claude plugin that sets a
+  `documentation` or `support` link gets a new version suffix on the next
+  `grim export`, with no source change. The suffix hashes the rendered tree,
+  and `plugin.json` now carries the two links.
+- **A Copilot MCP server with `client_id` and `scopes` is written.** grim
+  used to skip a server whose `[server.oauth]` block set scopes. Since 0.16.0 it
+  writes `oauthScopes` beside `oauthClientId` in `.github/mcp.json` and in the
+  global `mcp-config.json`, and not in `.vscode/mcp.json`. A same-named `mcpServers.<name>` entry you added by hand
+  makes `grim install` exit `65` until you delete it or pass `--force`.
+- **Junie receives an MCP server's `timeout`.** grim used to drop it. Since
+  0.16.0 a value from 1000 to 3600000 milliseconds is written as `timeout`. Any
+  other value is not written, and grim warns.
+- **A Kilo global agent with an expansion token is skipped.** Kilo substitutes
+  `{env:NAME}` and `{file:path}` in the body of a global agent. Since 0.16.0
+  `grim install --global` skips such an agent for Kilo and warns with the
+  token. Project scope is unchanged ([agent limitations][agents-limitations]).
+  An agent an earlier grim installed stays in place while its pin holds.
+  `grim update --global` to a version that holds a token removes the Kilo copy,
+  and `grim status` then reports the agent as `missing`.
+- **An unusable `KIRO_HOME` falls back to `~/.kiro`.** Kiro ignores a
+  `KIRO_HOME` that names a filesystem root, your home directory or an ancestor
+  of it. grim used to write there. Since 0.16.0 grim writes to `~/.kiro`
+  instead, as Kiro reads it. The next `grim install --global` moves what an
+  earlier grim wrote under the old value and leaves your own files alone. A
+  relative value is still followed.
+- **Settings accept more values.** 0.16.0 accepts Codex
+  `/tui/notification_method` `osc777`, Copilot `/effortLevel` `none`, `minimal`
+  and `max`, Antigravity `/agentMode` `""`, and Kiro `/chat.showThinking`
+  `expanded`, `collapsed` and `off`. A project Claude `/permissions/defaultMode`
+  takes `dontAsk` and `manual`. Cursor `/network/useHttp1ForAgent` and Kilo
+  `/memory_model` are new rows. See [settings][settings].
 - **`grim uninstall` keeps an emptied JSON container that holds a comment.**
   Before 0.16.0, removing the last entry of an `mcpServers`-style object, an
   `instructions` array or a hook list removed the container too. That deleted a
@@ -1640,6 +1676,7 @@ one only when someone pushed the tag by hand.
 [requires]: ./artifacts.md#requires
 [claude-md-excludes]: ./vendor-metadata.md#claude-md-excludes
 [entry-readme]: ./publishing.md#description-entry-readme
+[agents-limitations]: ./agents.md#limitations
 [agent-locations]: ./agents.md#locations
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
 [mcp-oauth]: ./mcp-servers.md#server-oauth

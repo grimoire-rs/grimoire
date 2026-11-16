@@ -467,10 +467,10 @@ grim installs skills into the directories each client scans for
 | [Kiro][kiro-docs] | `.kiro/skills/<name>/` |
 | [Junie][junie-docs] | `.junie/skills/<name>/` |
 | [Codex][codex-skills-docs], [Gemini][gemini-subagents-docs], [Zed][zed-docs], [Amp][amp-docs], [Antigravity][antigravity-skills-docs], [Goose][goose-docs] | `.agents/skills/<name>/` (shared pool) |
-| [Cline][cline-docs] | `.cline/skills/<name>/` — first in Cline's own precedence (`.cline/` → `.clinerules/` → `.claude/`); native by default; pool-capable via `[options.vendors.cline].shared_skills` |
+| [Cline][cline-docs] | `.cline/skills/<name>/` — Cline's source scan lists `.clinerules/skills` before `.cline/skills`; native by default; pool-capable via `[options.vendors.cline].shared_skills` |
 | [Droid][droid-docs] | `.factory/skills/<name>/` — the client is `droid`, the directory is `.factory`; native by default; pool-capable via `[options.vendors.droid].shared_skills` |
 | [Warp][warp-docs] | `.warp/skills/<name>/` — native by default; pool-capable via `[options.vendors.warp].shared_skills` |
-| [Kilo][kilo-docs] | `.kilo/skills/<name>/` — never the deprecated `.kilocode/`; native by default; pool-capable via `[options.vendors.kilo].shared_skills` |
+| [Kilo][kilo-docs] | `.kilo/skills/<name>/` — never the legacy `.kilocode/`; native by default; pool-capable via `[options.vendors.kilo].shared_skills` |
 | [Qoder][qoder-docs] | `.qoder/skills/<name>/` |
 | [OpenClaw][openclaw-docs] | *(none — no project scope; see the global table)* |
 | `agents` (vendor-neutral) | `.agents/skills/<name>/` (shared pool — its only surface; never auto-detected, only selected) |
@@ -486,7 +486,7 @@ environment variable):
 |---|---|---|
 | [Claude Code][claude-code-docs] | `~/.claude/skills/<name>/` | `$CLAUDE_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.claude` tree ([claude-directory reference][claude-dir-docs]). grim also reads it from the `env` block of Claude's managed and user settings, which win over the shell export as they do in Claude |
 | [GitHub Copilot][copilot-skills-docs] | `~/.copilot/skills/<name>/` | `$COPILOT_HOME/skills/<name>/` — the variable replaces the entire `~/.copilot` path ([Copilot CLI config-dir reference][copilot-config-dir-docs]) |
-| [OpenCode][opencode-skills-docs] | `~/.config/opencode/skills/<name>/` (or `$XDG_CONFIG_HOME/opencode/skills/<name>/`) | `$OPENCODE_CONFIG_DIR/skills/<name>/` — OpenCode's *additive* scan directory ([OpenCode config docs][opencode-config-docs]): the XDG default stays scanned either way; grim prefers the override as install target when set. `$OPENCODE_CONFIG` (a config *file* path) does not affect skill discovery and plays no role here |
+| [OpenCode][opencode-skills-docs] | `~/.config/opencode/skills/<name>/` (or `$XDG_CONFIG_HOME/opencode/skills/<name>/`) | `$OPENCODE_CONFIG_DIR/skills/<name>/` — OpenCode's *additive* scan directory ([OpenCode config docs][opencode-config-docs]): the XDG default stays scanned either way; grim prefers the override as install target when set. OpenCode V2 replaces its global config directory with the variable instead ([source][opencode-v2-global]). `$OPENCODE_CONFIG` (a config *file* path) does not affect skill discovery and plays no role here |
 | [Cursor][cursor-subagents-docs] | `~/.cursor/skills/<name>/` | None — `CURSOR_CONFIG_DIR` is not honored (possibly CLI-only; watchlisted) |
 | [Kiro][kiro-docs] | `~/.kiro/skills/<name>/` | `$KIRO_HOME/skills/<name>/` — the variable replaces the entire `~/.kiro` tree, with **no** `.kiro` segment appended ([Kiro CLI configuration reference][kiro-cli-config-docs]). grim follows the **CLI**. The Kiro **IDE** still hardcodes `~/.kiro` and ignores the variable ([kiro #9148]), so a user who sets `KIRO_HOME` and also uses the IDE gets grim's output where the CLI reads it, not the IDE |
 | [Junie][junie-docs] | `~/.junie/skills/<name>/` | `$JUNIE_HOME/skills/<name>/` — the variable replaces the entire `~/.junie` tree, with **no** `.junie` segment appended. The per-kind `JUNIE_*_LOCATIONS` family only adds search paths, so it is not needed |
@@ -743,6 +743,7 @@ claude namespace to silence it and gain proper type conversion.
 [antigravity-rules-docs]: https://antigravity.google/docs/rules
 [opencode-rules-docs]: https://opencode.ai/docs/rules
 [opencode-config-docs]: https://opencode.ai/docs/config
+[opencode-v2-global]: https://github.com/anomalyco/opencode/blob/v2.3.0/packages/util/src/global.ts
 [codex-skills-docs]: https://developers.openai.com/codex/skills
 [codex-subagents-docs]: https://developers.openai.com/codex/subagents
 [cursor-subagents-docs]: https://cursor.com/docs/context/subagents

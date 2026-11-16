@@ -1202,8 +1202,16 @@ format lacks is left out rather than guessed.
 |---|---|---|---|---|---|
 | `category` in the marketplace entry | yes | yes | yes | yes | yes |
 | `author`, `homepage`, `repository`, `license`, `keywords`, `tags` in the entry | yes | yes | no | yes | yes, `author` without `url` |
-| `documentation`, `support` and `owner.url` | yes | no | no | yes | no |
+| `owner.url` in the marketplace | yes | no | no | yes | no |
+| `documentation`, `support` in the entry | no | no | no | yes | no |
+| `documentation`, `support` in `plugin.json` | yes | no | no | no | no |
 | `author`, `homepage`, `repository`, `license`, `keywords` in `plugin.json` | yes | yes | yes | yes | yes, `author` without `url` |
+
+Claude defines `documentation` and `support` only in `plugin.json`, as
+`documentationUrl` and `supportUrl`. In a marketplace entry,
+`claude plugin validate` reports each as an unknown field, so grim writes them
+to the manifest and not to the entry ([Claude plugins reference][claude-dir-listing]).
+Before 0.16.0 grim wrote them to the entry. Export again to move them.
 
 Codex also reads an `interface` block in `plugin.json`. grim fills its
 `category`, `websiteURL` (from `homepage`) and `developerName` (from
@@ -1436,8 +1444,8 @@ applies.
 | `DOCKER_CONFIG` | Directory holding the Docker-compatible `config.json` that [`grim login`](./authentication.md) reads and writes. | `~/.docker` |
 | `CLAUDE_CONFIG_DIR` | Claude Code config-dir override (vendor variable, honored read-only). Global-scope installs follow it: it replaces `~/.claude` for skills, rules, and agents, relocates the global MCP registration file to `$CLAUDE_CONFIG_DIR/.claude.json`, and relocates the `settings.json` grim writes for a support-dir rule's `claudeMdExcludes` registration. Also drives global-scope client detection. grim also reads it from the `env` block of Claude's managed settings file and of the user `settings.json` (in the shell-resolved root), which win over the shell export in that order, as in Claude Code itself; project and local settings cannot set it (Claude Code 2.1.251+). A settings value must be an absolute path without `..`, else it is ignored. Not seen by grim: MDM, registry and server-managed values, `claude --settings`, and a second `settings.json` hop in the new root. | unset |
 | `COPILOT_HOME` | GitHub Copilot home override (vendor variable). Replaces `~/.copilot` for global-scope skills and agents, and relocates `mcp-config.json`. Also drives detection. | unset |
-| `OPENCODE_CONFIG_DIR` | OpenCode config-dir override (vendor variable). Preferred over the XDG default (`$XDG_CONFIG_HOME/opencode`) as the global-scope install target for skills and agents — additive, OpenCode scans both. Also drives detection. | unset |
-| `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`. No effect on skill/agent paths. | unset |
+| `OPENCODE_CONFIG_DIR` | OpenCode config-dir override (vendor variable). Preferred over the XDG default (`$XDG_CONFIG_HOME/opencode`) as the global-scope install target for skills and agents — additive in OpenCode V1, which scans both. OpenCode V2 replaces its global config directory with the variable instead ([source][opencode-v2-global]). Also drives detection. | unset |
+| `OPENCODE_CONFIG` | OpenCode config **file** that grim edits for global-scope rule and MCP registration (read and written). Falls back to `$XDG_CONFIG_HOME/opencode/opencode.json`, even when `OPENCODE_CONFIG_DIR` is set. Under OpenCode V2 that pair reads a different global directory than the one grim edits. No effect on skill/agent paths. | unset |
 | `CODEX_HOME` | Codex home override (vendor variable). Replaces `~/.codex` for global-scope agents and the MCP `config.toml`. Does **not** relocate Codex skills — those follow the cross-vendor `$HOME/.agents/skills` standard. Also drives detection. | unset |
 | `KIRO_HOME` | Kiro home override (vendor variable). Replaces `~/.kiro` **outright, with no `.kiro` segment appended**, for global-scope skills, `steering/` rules, `settings/mcp.json`, and the settings kind's `settings/cli.json`. Also drives detection. grim follows the Kiro **CLI**; the Kiro IDE ignores this variable upstream. A filesystem root, `$HOME` or an ancestor of `$HOME` falls back to `~/.kiro`, as in Kiro. | unset |
 | `QODER_CONFIG_DIR` | Qoder config-dir override (vendor variable). Replaces `~/.qoder` **outright, with no `.qoder` segment appended**, for global-scope skills, rules, agents, and the `settings.json` MCP registration. Also drives detection. | unset |
@@ -1615,3 +1623,5 @@ that claims a value as grim's. Global-scope settings records sit in
 [gitignore]: https://git-scm.com/docs/gitignore#_pattern_format
 [ripgrep]: https://github.com/BurntSushi/ripgrep
 [upgrading-credential]: ./upgrading.md#credential-project-insecure
+[claude-dir-listing]: https://code.claude.com/docs/en/plugins-reference#directory-listing-fields
+[opencode-v2-global]: https://github.com/anomalyco/opencode/blob/v2.3.0/packages/util/src/global.ts

@@ -303,8 +303,9 @@ Four things are worth knowing before you file this and forget it:
   a *human* — satisfying the marker rule's author check with exactly the
   identity that rule exists to keep out. A run with no
   `GRIM_RATINGS_TOKEN` exits `65` asking for one rather than degrading.
-- **[Token expiry is mandatory][gl-token-expiry]** since GitLab 16.0 — at
-  most 365 days. GitLab 17.6 raised that ceiling to 400 days, but only
+- **[Token expiry is required by default][gl-token-expiry]** since GitLab 16.0,
+  at most 365 days. An administrator can turn the requirement off, and a token
+  made without a date then never expires. GitLab 17.6 raised that ceiling to 400 days, but only
   behind the `buffered_token_expiration_limit` feature flag, which ships
   **disabled by default** — an instance stays capped at 365 days unless an
   administrator turns it on. Set a rotation reminder when you create the

@@ -228,6 +228,11 @@ grim uninstall agent code-reviewer         # removes files + declaration
 - **No model translation.** The common `model` passes through verbatim;
   use `opencode.model` when the OpenCode side needs a
   `provider/model-id` value.
+- **A global [Kilo][kilo-agents-docs] agent with an expansion token is skipped.**
+  Kilo substitutes `{env:NAME}` and `{file:path}` in the body of a global
+  agent, so such a body would read a variable or a file into the prompt. At
+  global scope grim skips the agent for Kilo with a warning that names the
+  token, and reports it `skipped`. Project scope writes the body as published.
 - **[Codex][codex-subagents-docs] `tools` field dropped.** [Codex][codex-subagents-docs]
   has no native equivalent for the `tools` field. When installing for
   [Codex][codex-subagents-docs], grim drops `tools` entirely and emits a

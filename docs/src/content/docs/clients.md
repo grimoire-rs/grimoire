@@ -154,11 +154,12 @@ for any client that cannot carry every field it sets. No surveyed client other t
 native config surface for `ws`, so grim skips a ws-bearing server for that
 client with a warning rather than writing an entry the client cannot honor.
 [OpenCode], [Zed], [Copilot] and [Droid] write an `oauth` block when they can
-carry every field it sets: OpenCode all but `auth_server_metadata_url`, Zed,
-Copilot and Droid only `client_id` ([the per-client table](./mcp-servers.md#server-oauth)).
+carry every field it sets: OpenCode all but `auth_server_metadata_url`, Zed
+only `client_id`. Copilot adds `scopes` and Droid adds
+`authorization_server_issuer` ([the per-client table](./mcp-servers.md#server-oauth)).
 Droid writes it as `oauth.clientId`; see [Droid's entry](#gap-droid).
-Copilot writes it as `oauthClientId` in its CLI files and as `oauth.clientId`
-in `.vscode/mcp.json`. A field the client cannot carry skips the server with a
+Copilot writes `oauthClientId` and `oauthScopes` in its CLI files, and only
+`oauth.clientId` in `.vscode/mcp.json`. A field the client cannot carry skips the server with a
 warning naming the field. Several other clients — [Codex], [Gemini], [Kiro],
 [Antigravity], [Qoder], and [Cursor] — document their own native OAuth
 configuration (most as an `oauth` object; [Cursor]'s is `auth`). None of
@@ -334,7 +335,12 @@ Two [Codex] surfaces are declined for good, not waiting on a render:
   win over it. A helper written for [Claude] could fail silently under
   [Codex], so grim drops the descriptor's `headers_helper` field for [Codex].
 
-### Kiro: rule scoping is inert on the CLI and at global scope {#gap-kiro-rules}
+A project-level [Codex] config is trust-gated. `codex exec` keeps project
+configuration and MCP servers disabled in an untrusted directory
+([Codex release notes][codex-0-169]). A project MCP server grim wrote may not
+load there until you trust the folder.
+
+### Kiro: rule scoping is inert at global scope and on CLI V1 and V2 {#gap-kiro-rules}
 
 [Kiro] steering rules are native at both scopes, but a global-scope scoped rule
 is written correctly yet ignored by the [Kiro] IDE because of upstream bug
@@ -343,10 +349,10 @@ citing the issue. The file self-heals (becomes active) once upstream fixes the
 bug, with no grim change. An inactivity bot closed #9176 in August 2026 without
 a confirmed fix, so grim keeps the warning.
 
-The [Kiro] CLI ignores scoping at every scope. Its docs state that inclusion
-modes are not supported on the CLI and that every steering file loads
-([Kiro steering docs][kiro-steering-docs]). A path-scoped rule is therefore
-always-on for CLI users, at project scope too, and grim does not warn about it.
+The [Kiro] CLI treats scoping by version. CLI V3 supports all four inclusion
+modes, so a path-scoped rule loads there by its `fileMatch`. In V1 and V2 only
+`always` files load automatically, and a `fileMatch` file is excluded
+([Kiro steering docs][kiro-steering-docs]). grim does not warn about this.
 
 A manual workaround exists today: switching the steering block to
 `inclusion: auto` makes [Kiro] load it heuristically at the global scope. grim
@@ -394,6 +400,11 @@ as a pending install.
 `.cursor/agents/` and `.codex/agents/`. An imported copy is [Junie]'s own
 file, not grim's: grim does not track, update or remove it. When grim already
 installs the agent for [Junie], decline the import.
+
+An untrusted project does not implicitly load project configuration, MCP
+servers, custom agents, skills or guidelines in [Junie]
+([Junie configuration docs][junie-config-docs]). A project artifact grim
+installed may not load until you trust the folder.
 
 ### Gemini: rules declined, agents gated by a setting {#gap-gemini}
 
@@ -444,7 +455,7 @@ in the pool would go unread there:
 
 | Client | Stays native when |
 |---|---|
-| [OpenCode] | `OPENCODE_DISABLE_EXTERNAL_SKILLS` is set |
+| [OpenCode] | `OPENCODE_DISABLE_EXTERNAL_SKILLS` is set (OpenCode V1's CLI docs list this variable) |
 | [Kilo] | `KILO_DISABLE_EXTERNAL_SKILLS` is set |
 | [Copilot] | global scope, and `COPILOT_HOME` points anywhere but `~/.copilot` (verified against CLI 1.0.88) |
 
@@ -498,9 +509,11 @@ server with a warning.
 
 ### Amp: rules and agents declined {#gap-amp}
 
-[Amp]'s only instruction surface is `AGENTS.md` (falling back to `AGENT.md`, then
-`CLAUDE.md`) with no per-file scoping, so rules are declined. [Amp] subagents are
-spawned at runtime with no installable file format, so agents are declined.
+[Amp]'s only instruction surface is `AGENTS.md`, falling back to `AGENT.md`, then
+`CLAUDE.md`. A file that `AGENTS.md` mentions can scope itself with `globs` front
+matter ([Amp AGENTS.md docs][amp-agents-md-docs]). Grim has no per-rule file
+target there, so rules are declined. [Amp] subagents are spawned at runtime
+with no installable file format. Agents are declined too.
 
 ### Antigravity: project detection is opt-in {#gap-antigravity}
 
@@ -602,14 +615,14 @@ Client-specific detail worth knowing:
   beside it. `[options.vendors.warp].shared_skills` sets the choice outright.
   `~/.warp/` is the same path on macOS, Linux and Windows. MCP servers go
   into `.warp/.mcp.json`, described under [Warp: MCP](#gap-warp-mcp).
-- **[OpenClaw]** installs at **global scope only**. It has no per-repository
-  concept: the path its documentation calls "project" is a fixed daemon home
-  under `~/.openclaw/workspace` that does not follow the repository you run
-  grim in, so installing there would mix unrelated projects' skills into one
-  directory. A project-scope install warns, writes nothing, and records no
-  outputs. Use `--global`.
+- **[OpenClaw]** installs at **global scope only**. Its default workspace is a
+  fixed daemon home under `~/.openclaw/workspace` that does not follow the
+  repository you run grim in. Installing there would mix unrelated projects'
+  skills into one directory. Its Control UI can add a registered project's
+  skills to the `$` picker, which grim does not use. A project-scope install
+  warns, writes nothing, and records no outputs. Use `--global`.
 - **[Kilo]** was formerly Kilo Code, and grim uses the current name. It writes
-  `.kilo/` exclusively; the older `.kilocode/` is deprecated upstream and grim
+  `.kilo/` exclusively; `.kilocode/` is legacy upstream and grim
   never writes it, though an existing one is still recognized when detecting
   whether Kilo is in use. Kilo reads the pool at both scopes, so its skills
   join the pool beside a pool writer, and
@@ -622,6 +635,8 @@ Client-specific detail worth knowing:
   file name is the agent name, so the `name` field is dropped, and `tools`
   is dropped with a warning. `kilo.*` metadata keys set Kilo's own agent
   fields, listed under [vendor metadata](./vendor-metadata.md#kilo-agent-registry).
+  A global agent whose body holds a `{env:` or `{file:` token is skipped, as
+  [agent limitations](./agents.md#limitations) explain.
 
 ### Warp: MCP {#gap-warp-mcp}
 
@@ -675,9 +690,10 @@ MCP servers go into `.factory/mcp.json`. Droid expands `${VAR}` references in
 `env` values, `headers` values and `oauth.clientId` only. A server with a
 reference in `command`, `args` or `url` is skipped for Droid with a warning,
 because Droid would run or dial the literal text. An `oauth` block is written
-only when it sets `client_id` alone; `scopes`, `callback_port` or
-`auth_server_metadata_url` skip the server, since dropping them could widen
-what the server is granted.
+only when it sets `client_id` and optionally `authorization_server_issuer`.
+`scopes`, `callback_port` or `auth_server_metadata_url` skip the server, since
+dropping them could widen what the server is granted. A client id without an
+issuer is written with a warning, because Droid's docs require the issuer.
 
 When you toggle a project server on or off in Droid's UI, Droid writes a copy
 of it to your user config, `~/.factory/mcp.json`. That copy is not grim's, so
@@ -773,6 +789,7 @@ where.
 [gemini]: https://geminicli.com
 [zed]: https://zed.dev
 [amp]: https://ampcode.com
+[amp-agents-md-docs]: https://ampcode.com/docs/markdown/customize/agents-md
 [antigravity]: https://antigravity.google
 [cline]: https://cline.bot
 [droid]: https://factory.ai
@@ -785,6 +802,8 @@ where.
 [cursor-glob-split]: https://forum.cursor.com/t/76648
 [kiro #9176]: https://github.com/kirodotdev/Kiro/issues/9176
 [kiro-steering-docs]: https://kiro.dev/docs/steering/
+[codex-0-169]: https://github.com/openai/codex/releases/tag/rust-v0.169.0
+[junie-config-docs]: https://junie.jetbrains.com/docs/junie-cli-configuration.html
 [kiro #8040]: https://github.com/kirodotdev/Kiro/issues/8040
 [gemini-antigravity]: https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/
 
