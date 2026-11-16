@@ -70,6 +70,10 @@ struct ClaudeManifest<'a> {
     license: Option<&'a str>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     keywords: &'a [String],
+    #[serde(rename = "documentationUrl", skip_serializing_if = "Option::is_none")]
+    documentation_url: Option<&'a str>,
+    #[serde(rename = "supportUrl", skip_serializing_if = "Option::is_none")]
+    support_url: Option<&'a str>,
 }
 
 /// Agent Plugins `plugin.json`: exactly these keys, in this order;
@@ -297,6 +301,8 @@ pub fn claude_plugin_json(name: &str, version: &str, description: &str, profile:
         repository: profile.repository.as_deref(),
         license: profile.license.as_deref(),
         keywords: &profile.keywords,
+        documentation_url: profile.documentation.as_deref(),
+        support_url: profile.support.as_deref(),
     })
 }
 

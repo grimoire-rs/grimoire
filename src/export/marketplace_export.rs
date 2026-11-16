@@ -906,6 +906,8 @@ impl EntryDoc {
     ) -> Self {
         let profile = family::manifest_profile(client.client, profile);
         let EntryFields { descriptive, links } = client.fields;
+        // Claude's validator flags these keys in an entry (they live in its plugin.json); Qoder documents no such rule.
+        let links = links && client.client != ClientTarget::Claude;
         EntryDoc {
             name: name.to_string(),
             source,
@@ -1812,7 +1814,7 @@ mod tests {
         };
         let category: &[&str] = &["category"];
         let links: &[&str] = &["documentationUrl", "supportUrl"];
-        assert_eq!(entry_keys("claude"), expect(&[&descriptive, category, links]));
+        assert_eq!(entry_keys("claude"), expect(&[&descriptive, category]));
         assert_eq!(entry_keys("qoder"), expect(&[&descriptive, category, links]));
         assert_eq!(entry_keys("copilot"), expect(&[&descriptive, category]));
         assert_eq!(entry_keys("cursor"), expect(&[&descriptive, category]));
@@ -2750,8 +2752,7 @@ mod tests {
         let claude = json_of(&dir.join(".claude-plugin/marketplace.json"));
         assert_eq!(claude["owner"]["url"], "https://acme.example");
         let entry = plugin_entry(&claude);
-        assert_eq!(entry["documentationUrl"], "https://acme.example/docs");
-        assert_eq!(entry["supportUrl"], "https://github.com/acme/team/issues");
+        assert!(entry.get("documentationUrl").is_none() && entry.get("supportUrl").is_none());
         assert_eq!(entry["category"], "developer-tools");
         assert_eq!(entry["tags"], serde_json::json!(["team"]));
         let manifest = json_of(&dir.join("claude/team/.claude-plugin/plugin.json"));
@@ -2759,6 +2760,8 @@ mod tests {
             assert_eq!(entry[key], manifest[key], "claude entry and manifest agree on {key}");
         }
         assert_eq!(manifest["author"]["url"], "https://acme.example");
+        assert_eq!(manifest["documentationUrl"], "https://acme.example/docs");
+        assert_eq!(manifest["supportUrl"], "https://github.com/acme/team/issues");
 
         let codex = json_of(&dir.join(".agents/plugins/marketplace.json"));
         let mut keys: Vec<&String> = plugin_entry(&codex).as_object().unwrap().keys().collect();
