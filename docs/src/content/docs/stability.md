@@ -649,6 +649,14 @@ exclusions are what keep 1.x able to move at all:
   nobody has exercised buys a guarantee no one asked for at the cost of
   never being able to fix it. It freezes in a later minor, once a real
   consumer has shaped it. Anything you script against it today may move.
+- **Record adoption by `status`, the TUI and `grim_status`.** These
+  commands write install records they prove from the files on disk, and
+  online they fetch a missing pin. That behaviour, its fetch bounds, its
+  stderr outcome lines, the TUI status lines and the miss memo at
+  `$GRIM_HOME/state/adoption-misses.json` may change in any minor release.
+  The frozen parts stay frozen: the `status` report shape and `state`
+  literals, the documented exit codes, and the state schema. See [Records
+  that follow the disk][status-adoption].
 - **[Telemetry][telemetry].** The opt-in usage export is Unstable
   through 1.0. That covers the `GRIM_TELEMETRY` and
   `GRIM_TELEMETRY_REPOSITORY` switches, `GRIM_CONFIG`, the `[telemetry]`
@@ -1142,3 +1150,4 @@ unaffected — they read straight from disk and never touch a manifest.
 [npm-package-json]: https://docs.npmjs.com/cli/v10/configuring-npm/package-json
 [helm-chart]: https://helm.sh/docs/topics/charts/#the-chartyaml-file
 [npm-install]: https://docs.npmjs.com/cli/commands/npm-install
+[status-adoption]: ./commands.md#status-adoption

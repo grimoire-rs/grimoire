@@ -821,10 +821,18 @@ config-versus-environment conflict to resolve.
 
 > **A committed `grimoire.toml` downgrades transport for everyone who
 > clones it.** The environment variable is per-user and per-shell;
-> `insecure` in the config is not. Credentials and artifact bytes for that
-> host travel in cleartext for every collaborator and every CI job that
-> runs in the project. Use it for a registry that is genuinely local or
-> in-cluster, and check the box knowingly.
+> `insecure` in the config is not. Artifact bytes for that host travel in
+> cleartext for every collaborator and every CI job that runs in the
+> project. Use it for a registry that is genuinely local or in-cluster, and
+> check the box knowingly.
+
+A stored credential is not sent to a host that only a project
+`grimoire.toml` marks `insecure = true`. grim sends it only where
+`GRIM_INSECURE_REGISTRIES` or your global config also declares the host. A
+global-scope run treats its own declaration as the global config. The pull
+runs anonymously, and one stderr warning per host names the cause. A registry
+that needs a credential then fails the command with exit `80`. This applies to
+pulls and pushes alike. See [the upgrading note][upgrading-credential].
 
 `grim context --format json` reports each entry's `insecure` field, so a
 UI can show which sources are HTTP. It echoes the authored value only —
@@ -1606,3 +1614,4 @@ that claims a value as grim's. Global-scope settings records sit in
 [cargo-include]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-exclude-and-include-fields
 [gitignore]: https://git-scm.com/docs/gitignore#_pattern_format
 [ripgrep]: https://github.com/BurntSushi/ripgrep
+[upgrading-credential]: ./upgrading.md#credential-project-insecure

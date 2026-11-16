@@ -291,6 +291,8 @@ session:
   `CLAUDE.md` do reach a cloud session, and so do skills enabled on
   claude.ai. Committed files are not marketplace consumption, but they
   are what [`grim install`](../commands.md#install) writes for a project.
+  A pull of committed files is recognised by `grim install`; see
+  [Two checkout models](./shared-skills.md#checkout-models).
 
 Anthropic documents no supported way to run `claude plugin marketplace
 add` from a setup script. Treat that idea as untested.

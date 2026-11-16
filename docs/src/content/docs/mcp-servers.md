@@ -454,8 +454,9 @@ descriptor. Once registered it exposes five tools — `grim_search`,
 `grim_status`, `grim_fetch`, `grim_describe`, and (behind `--allow-writes`)
 `grim_render` — each taking the install scope as optional per-call
 arguments; `grim_status` also takes an optional `check` argument for a
-live catalog re-check (network read, same as CLI `grim status --check`);
-the full tool table lives at [`grim mcp`](./commands.md#mcp).
+live catalog re-check (network read, same as CLI `grim status --check`).
+Under `--allow-writes` it also records the install records it proves.
+The full tool table lives at [`grim mcp`](./commands.md#mcp).
 
 ## Limitations {#limitations}
 
