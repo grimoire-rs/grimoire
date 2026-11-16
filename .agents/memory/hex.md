@@ -45,7 +45,7 @@ preferences, not copies. Team-shared — commit it.
   Contract detail: `docs/src/content/docs/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
-  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `shell-activation.md` (→ architect, 2026-11-11).
+  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `stale-outputs-without-state.md` (→ architect, 2026-11-15).
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -106,10 +106,48 @@ research-axes:
 
 ## Memory
 
+- **Reviewed plan (2026-11-15, hex-plan high; executed 2026-11-16; review call 3 of 3 approved 2026-11-16, State `done`, not yet landed, next `/hex-finalize`; fold target: none, no `## Spec Deltas`):**
+  Execution: all eight pipelines merged, integration gate green on `1b9827aa`; decisions and owner residuals under the plan's Notes.
+  Review call 1 (xhigh): Request Changes. RF pass (outer cycle 1 of 2) merged RF1 to RF5 and the gate is green again; its decisions are in the plan's Notes. Review call 2 (anchor `cb62a25b`): Request Changes, rows RF6 to RF8. RF pass 2 (outer cycle 2 of 2, the last) merged RF6 to RF8 and the gate is green on `7ecbcd9b`. It inventoried two defect classes on the gesture-free paths (repository-controlled reads, layer decodes); mid-pass the owner narrowed it to the cited sites, so the class lists in the plan's Notes mark the rest "not fixed". Review call 3 (anchor `67c34324`, head `88df9e14`, under the owner's 2026-11-16 calibration: only functional defects gate): Approve, no functional defect, every area converged; 2 Warns (one docs sentence, one test gap) left for the PR.
+  **Pitfall:** two review calls found the same defect class at a different line each, because each fix closed only the cited line. When a finding is a read, a bound or a charge, inventory every site of its class first and fix the list.
+  **Pitfall:** before splitting a fix across pipelines, grep for the tests the fix breaks: RF1.2's one conflicting test lived in another pipeline's `app.rs`, which blocked the step until it moved to that tree.
+  **Pitfall:** advice in a line that names files a run dropped from the lock cannot say "retry": the evidence lock is gone after the run.
+  **Pitfall:** a shared cargo target needs a hard cap per run: one hung unit test held the run's build lock 24 minutes (`lane.sh` now wraps each run in `timeout 900`).
+  **Pitfall:** `test/tests/conftest.py` must import any module that imports `src.registry` lazily; an eager import freezes the registry host before `pytest_configure` sets it.
+  **Pitfall:** a pre-pass called once per node loses the in-pass failed-host set; share one bounded reader per run.
+  `.agents/plans/plan_install_record_cache.md`, built from `.agents/adr/adr_output_ownership_without_state.md`; test design in `.agents/research/research_install_record_cache_test_matrix.md`. Goal loop `.agents/goals/plan-install-record-cache.md`; branch `hex/plan-install-record-cache`, created from `origin/main` on 2026-11-15 (the plan's header still says `hex/install-record-cache`).
+  - Contract wave, then 8 pipelines in 6 waves. Part A (clone, pull, checkout for `install`, `update`, `uninstall`, `remove`, status precedence) ships after wave 2. The credential-transport fix and the fetch bounds (P4) ship alone.
+  - Three open questions ride with recommendations: ratify the ADR's behaviour changes; judge each output on its own when one artifact sits at two versions; give `grim lock` and `grim add` the `remove` pre-pass.
+  - The planner's rulings R-1 to R-13 are in the plan's Key decisions table. They are not owner decisions.
+  **Pitfall:** the ADR's line anchors are right, but four of its statements were wrong against the code: `warn_left_behind` is not record-based, a clone refused at the update gate reads `untracked-destination`, an unreadable state can exit `77`, and the install gate adopts a live link to a file.
+  **Pitfall:** `GrimRunner` derives `HOME` from the parent of `GRIM_HOME`, so two cold homes under one directory share `HOME` and the global skill pool.
+  **Pitfall:** the credential fix may need a change in the `external/rust-oci-client` submodule, which needs a push only the owner can make.
+
 - **Active plan (2026-11-12, hex-plan high, built from an accepted ADR):** `.agents/plans/plan_dependency_version_claims.md`, state `review`, next `/hex-finalize`. ADR `.agents/adr/adr_dependency_version_claims.md` is **Accepted** (owner, 2026-11-12: a release never moves a float to a lower version; a bare direct line is answered by any tagged pin of its repository; `grim add` force stays target-only). It amends Decision 3 of `adr_artifact_dependencies.md`, the pin rule of `adr_lock_pin_stability.md` and "floats always move" of `adr_unified_publish_version_cascade.md`. `requires` tags become Cargo-style claims, the pick is the newest in the claimed major, and resolve is a fixpoint with sticky lines. Research: `.agents/research/research_dependency_version_claims_codebase.md` (resolver map), `.agents/research/research_dependency_version_claims_plan_surface.md` (files, tests, CLI, docs). Plan: 27 contracts, 20 scenarios, nine pipelines in five waves after a contract wave; one spec review round on the decomposition, one fix pass, no second round. Not reviewed after the ADR's last text pass: the seven wording fixes, the `X.Y` partial-tag admission in ladder step 3, and the deferred `latest` miss on a still-empty line (both found while planning). Accepted residual: `grim why`'s `overrides` stays on digest and tag equality; `status --check`'s held-back note judges range requests by the pinned version beside the range claims it meets alone. Unmeasured picks: work budget 16 × node cap, listing cap 32 MiB.
   **Pitfall:** `grim release` moves `X`, `X.Y` and `latest` on every release, a backport included (true only for releases made before this change: a grim that has it keeps a float on a higher version and reports it in `floats_kept`; older floats and floats moved by other tools stay where they are), so a cascade tag is not "newest in the major". `grim add X --force` does not reach X's dependencies; only `grim update X --force` covers the closure.
-- **Active plan (2026-11-13, hex-execute high, goal loop `.agents/goals/issue-334.md`):**
-  `.agents/plans/plan_grim_config_telemetry.md`, State `review`, Next `/hex-finalize` (execute pass and review call 1 done, two fix rounds, converged; PD-16…PD-22), branch `hex/issue-334` (worktree `/home/mherwig/.herdr/worktrees/grimoire/duo`). `GRIM_CONFIG` `[telemetry]` files, `GRIM_TELEMETRY_OTLP_HEADERS`; ADRs `adr_grim_config_layers.md` and the 2026-11-13 amendment of `adr_otel_usage_telemetry.md`. Windows proof of the `;` separator owed to a CI deep run (PD-22).
+
+- **ADR drafted (2026-11-15, Proposed, hex-architect high; rewritten around the owner's model, last revision unreviewed):**
+  `.agents/adr/adr_output_ownership_without_state.md` ("Install records as a cache of the disk"), from dossier `.agents/discussions/stale-outputs-without-state.md`. Facts in `.agents/research/research_output_ownership_claim_diff.md`.
+  - Model (owner, confirmed 2026-11-15): `state.json` is the last state grim observed on disk, keyed by the pinned digest it rendered. It is checked against the files first and against the lock only when the files disagree. Five rows: files same and digest same is `installed`; files same and digest changed is `outdated`; files changed and digest same is `modified`; files changed and digest changed is compared with a render of the lock's digest (match re-records, else `modified`); no record with files present gets the same comparison.
+  - Only the last two rows are broken today: the hash check runs before any pin comparison, and removal walks records only.
+  - Part A (the core fix: gate, status precedence, `update`/`uninstall`/`remove` pre-pass) ships alone. Part B (owner decision: `grim status`, TUI open and the MCP status tool apply the rule automatically and fetch when online) carries the security findings and needs the credential-transport fix first.
+  - Rejected with decisive facts: mapping in the lock (every lock table is `deny_unknown_fields` since v0.1.0, an older grim exits 78; the client set is partly per machine; gitignored outputs); voiding the record on a pin mismatch (it is the normal `update` flow and the correct state for gitignored outputs); removing the state file (old-renderer bytes, dev installs).
+  - No status literal and no JSON field is added.
+  - Reviews: round 1 (spec, quality, security, codex `gpt-6.1-sol`) one Block, fixed; two re-checks without a Block. The rewrite around the model has had no review.
+  **Pitfall:** `/hex-architect <path>` typed right after a restate-gate arrives while the artifact is still `State: active`; the fast path refuses that state as written.
+  **Pitfall:** a look command that starts fetching breaks a consumer's trust model: `grimoire-vscode` runs plain `grim status` in untrusted workspaces because it is offline today.
+  **Pitfall:** neither the lock nor the record alone describes the disk: committed outputs move with the lock, gitignored outputs stay with the record. Any rule keyed on a pin mismatch alone is wrong for one of the two.
+
+- **Discussion drained (2026-11-15, → architect):**
+  `.agents/discussions/stale-outputs-without-state.md`. After a clone that commits rendered outputs there is no `.grimoire/state.json`, so `grim update` leaves the files a newer version dropped.
+  - Ownership is proven by content only. Mutating commands adopt every recordless destination whose footprint hash-matches the lock as found; `grim update` adopts against the previous lock before it relocks, so the normal prune removes the rest.
+  - `grim status` never writes and never fetches for this. It verifies against local content, else reports one new additive literal (working name `untracked`).
+  - Cold store: fetch the old pin once when online; offline, skip adoption and warn.
+  - Issue 257 (gitignore flag) stays an opt-in with its own plan. Seven open questions are carried in the artifact.
+  Research: `.agents/research/research_output_ownership_without_state.md`, `.agents/research/research_generated_files_ownership_prior_art.md`.
+
+- **Landed plan (2026-11-13, hex-execute high, goal loop `.agents/goals/issue-334.md`; merged as [grimoire-rs/grimoire#357](https://github.com/grimoire-rs/grimoire/pull/357)):**
+  `.agents/plans/plan_grim_config_telemetry.md` (its Status block was not advanced after the merge), branch `hex/issue-334`. `GRIM_CONFIG` `[telemetry]` files, `GRIM_TELEMETRY_OTLP_HEADERS`; ADRs `adr_grim_config_layers.md` and the 2026-11-13 amendment of `adr_otel_usage_telemetry.md`. Windows proof of the `;` separator owed to a CI deep run (PD-22).
   **Pitfall:** the pre-commit hook denies any Bash command whose text holds the git commit subcommand, heredoc bodies included; write plan text and retro entries with Edit/Write, and tell workers never to type the phrase.
   **Pitfall:** `std::env::var(..).ok()` maps a non-UTF-8 value to absent; a tri-state switch must read `var_os`, or an explicit off becomes unset (codex Block, round 1).
   **Pitfall:** a 1 ms timeout can still succeed against a loopback collector; prove timeout isolation with the fixture's `delay=<ms>` mode and the debug `failed` line.
