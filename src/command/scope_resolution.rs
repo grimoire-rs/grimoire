@@ -18,7 +18,7 @@ use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
 use crate::config::scope::{ConfigScope, Invocation};
 use crate::context::Context;
-use crate::install::install_state::InstallState;
+use crate::install::install_state::{InstallState, Unadopted};
 use crate::install::path_anchor::AnchorRoots;
 
 /// A resolved scope: everything the lock/install/update/status commands
@@ -294,28 +294,54 @@ fn resolves_outside_workspace(base: &Path, relative: &Path) -> bool {
     resolved.len() < base_components.len() || resolved[..base_components.len()] != base_components[..]
 }
 
-/// Load the install state for a resolved scope, routing project scope
-/// through the [`InstallState::load_project`] legacy fallback (it anchors to
+/// Read the install state for a resolved scope, routing project scope
+/// through the [`InstallState::read_project`] legacy fallback (it anchors to
 /// the workspace and falls back to the pre-relocation
 /// `$GRIM_HOME/state/projects/<sha>.json` file) and global scope through
-/// [`InstallState::load_global`] (it threads the vendor anchor roots so a
-/// legacy V1 `global.json` converts to anchored outputs in memory).
-///
-/// This is the single seam every consumer must use instead of bare
-/// [`InstallState::load`]: bare `load` cannot anchor a V1 file (no roots),
-/// and the project arm needs the legacy fallback so a first post-upgrade read
-/// sees migrated state.
+/// [`InstallState::read_global`] (it threads the vendor anchor roots so a
+/// legacy V1 `global.json` converts to anchored outputs in memory). A command
+/// reads its scope's state here and hands it over through [`Unadopted`].
 ///
 /// # Errors
 ///
 /// An [`std::io::Error`] for a read failure; a corrupt or unknown-version
 /// file is surfaced as [`std::io::ErrorKind::InvalidData`].
+pub(crate) fn read_state(scope: &ResolvedScope) -> std::io::Result<Unadopted> {
+    read_state_at(
+        scope.scope,
+        &scope.workspace,
+        &scope.config_path,
+        &scope.state_path,
+        &scope.roots,
+    )
+}
+
+/// The state [`read_state`] reads, for a test.
+///
+/// # Errors
+///
+/// As [`read_state`].
+#[cfg(test)]
 pub fn load_state(scope: &ResolvedScope) -> std::io::Result<InstallState> {
-    match scope.scope {
-        ConfigScope::Project => {
-            InstallState::load_project(&scope.workspace, &scope.roots.grim_home, &scope.config_path)
-        }
-        ConfigScope::Global => InstallState::load_global(&scope.state_path, &scope.roots),
+    read_state(scope).map(Unadopted::into_state)
+}
+
+/// [`read_state`] from the parts of a scope, for a caller that holds no
+/// [`ResolvedScope`].
+///
+/// # Errors
+///
+/// As [`read_state`].
+pub(crate) fn read_state_at(
+    scope: ConfigScope,
+    workspace: &Path,
+    config_path: &Path,
+    state_path: &Path,
+    roots: &AnchorRoots,
+) -> std::io::Result<Unadopted> {
+    match scope {
+        ConfigScope::Project => InstallState::read_project(workspace, &roots.grim_home, config_path),
+        ConfigScope::Global => InstallState::read_global(state_path, roots),
     }
 }
 
@@ -365,6 +391,56 @@ mod tests {
     use super::*;
     use crate::cli::options::{GlobalOptions, OutputFormat};
     use crate::config::project_config::lock_path_for;
+
+    /// [`read_state`] reads the project file at project scope and `global.json`
+    /// at global scope, each holding its own record.
+    #[test]
+    fn read_state_reads_the_file_of_its_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, grim_home) = (tmp.path().join("ws"), tmp.path().join("home"));
+        InstallState::ensure_project_state_dir(&workspace).unwrap();
+        std::fs::create_dir_all(grim_home.join("state")).unwrap();
+        let global_path = InstallState::global_path(&grim_home.join("state"));
+        let project_path = InstallState::project_state_path(&workspace);
+        for (path, name) in [(&project_path, "in-project"), (&global_path, "in-global")] {
+            let mut state = InstallState::empty(path);
+            let id = crate::oci::Identifier::new_registry(name, "localhost:5000")
+                .clone_with_digest(crate::oci::Digest::Sha256("a".repeat(64)));
+            let pinned = crate::oci::PinnedIdentifier::try_from(id).unwrap();
+            state.record(crate::install::install_state::InstallRecord {
+                kind: crate::oci::ArtifactKind::Skill,
+                name: name.to_string(),
+                source: crate::lock::locked_source::LockedSource::Registry(pinned),
+                dev: false,
+                outputs: Vec::new(),
+            });
+            state.save().unwrap();
+        }
+        for (scope, state_path, name) in [
+            (ConfigScope::Project, project_path, "in-project"),
+            (ConfigScope::Global, global_path, "in-global"),
+        ] {
+            let resolved = ResolvedScope {
+                scope,
+                set: DesiredSet::default(),
+                options: ConfigOptions::default(),
+                registries: Vec::new(),
+                config_path: workspace.join("grimoire.toml"),
+                lock_path: workspace.join("grimoire.lock"),
+                state_path,
+                workspace: workspace.clone(),
+                roots: AnchorRoots {
+                    workspace: workspace.clone(),
+                    grim_home: grim_home.clone(),
+                    ..Default::default()
+                },
+                invocation: Invocation::WALKED,
+            };
+            let state = read_state(&resolved).unwrap().adopt();
+            let names: Vec<_> = state.iter_records().map(|r| r.name.as_str()).collect();
+            assert_eq!(names, [name], "{scope:?}");
+        }
+    }
 
     fn opts() -> GlobalOptions {
         GlobalOptions {

@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -48,9 +49,49 @@ use crate::install::json_splice;
 use crate::install::path_anchor::{AnchorError, AnchorRoots, AnchoredPath, Containment, PathAnchor, candidate_anchors};
 use crate::install::settings_store;
 use crate::install::vendor::{MergeClass, SettingsField};
+use crate::lock::advisory_lock::AdvisoryFileLock;
+use crate::lock::lock_error::LockErrorKind;
+use crate::lock::locked_source::LockedSource;
 use crate::oci::mcp::McpDescriptor;
-use crate::oci::{ArtifactKind, Digest, PinnedIdentifier};
+use crate::oci::{ArtifactKind, Digest, NodeKey, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
+
+/// How long [`InstallState::persist`] polls a held state-file lock before it writes unlocked.
+const PERSIST_LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The pause between two tries of a held state-file lock.
+const LOCK_POLL: Duration = Duration::from_millis(20);
+
+/// A record a caller proved in memory, for [`InstallState::commit_proven`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProvenRecord {
+    /// The record the proof read, or `None` when it proved a new one.
+    pub prior: Option<InstallRecord>,
+    /// The record to write: the evidence pin, and each matched output's hash.
+    pub record: InstallRecord,
+}
+
+/// What [`InstallState::commit_proven`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitOutcome {
+    /// This many records were written; zero leaves the state file untouched.
+    Written(usize),
+    /// Nothing was written, for this cause.
+    Skipped(SkipCause),
+}
+
+/// Why a commit wrote nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkipCause {
+    /// Another process holds the state-file lock.
+    Contended,
+    /// Locking, reading or writing failed.
+    Io,
+    /// The state directory cannot be written.
+    ReadOnly,
+    /// `.grimoire` or the state file is a link, or resolves outside the workspace.
+    LinkedOrOutside,
+}
 
 /// On-disk install-state envelope version.
 ///
@@ -760,6 +801,58 @@ pub struct InstallState {
     withheld: WithheldOutputs,
 }
 
+/// Install state as a loader read it, not yet handed to its caller. The caller
+/// says how it treats files that no record describes yet, as after a clone, a
+/// pull or a checkout: [`Self::adopt`], [`Self::defer`] or [`Self::exempt`].
+/// Outside test builds every loader returns this.
+#[must_use = "hand the state over with adopt, defer or exempt"]
+pub(crate) struct Unadopted {
+    state: InstallState,
+}
+
+/// Why a caller reads install state without adopting what is on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Exempt {
+    /// The install gate, which compares each output itself after staging.
+    InstallGate,
+    /// Search rows and badges.
+    Browse,
+    /// Hook records: a hook is never proven.
+    HookRecords,
+    /// The settings conflict check: a settings package is never proven.
+    SettingsPreflight,
+    /// Dev records: no lock describes a dev install.
+    DevRecords,
+    /// The other scope's records, read to warn of a shadowed install.
+    CrossScopeShadow,
+}
+
+impl Unadopted {
+    /// The state for a caller that reports or changes install state: it hands
+    /// the state to its pre-pass with the lock that describes the disk.
+    pub(crate) fn adopt(self) -> InstallState {
+        self.state
+    }
+
+    /// The state for a caller that adopts in a background task.
+    pub(crate) fn defer(self) -> InstallState {
+        self.state
+    }
+
+    /// The state for a caller that does not adopt; `why` names the reason at the call site.
+    pub(crate) fn exempt(self, _why: Exempt) -> InstallState {
+        self.state
+    }
+}
+
+#[cfg(test)]
+impl Unadopted {
+    /// The state for a test, which has no reason to give.
+    pub(crate) fn into_state(self) -> InstallState {
+        self.state
+    }
+}
+
 impl InstallState {
     /// The global-scope state file under `state_dir`.
     pub fn global_path(state_dir: &Path) -> PathBuf {
@@ -853,28 +946,15 @@ impl InstallState {
         }
     }
 
-    /// Load the state at `scope_path`. An absent file yields empty state
-    /// (a never-installed scope is not an error).
-    ///
-    /// # CAUTION — V2 only
-    ///
-    /// This method is V2-only: a V1 file at `scope_path` is rejected with
-    /// [`std::io::ErrorKind::InvalidData`] because no [`AnchorRoots`] are
-    /// available to relativize its absolute paths. **All production scope
-    /// loading must go through the dedicated entry points**:
-    /// - [`Self::load_project`] — for project scope (handles V1 legacy fallback)
-    /// - [`Self::load_global`] — for global scope (threads `roots` so V1 converts)
-    ///
-    /// Calling bare `load` on a file that may be V1 is a logic error.
+    /// Load the state at `scope_path` in a test. An absent file yields empty
+    /// state. V2 only: with no [`AnchorRoots`] to relativize its absolute paths,
+    /// a V1 file is rejected as [`std::io::ErrorKind::InvalidData`].
     ///
     /// # Errors
     ///
     /// [`std::io::Error`] for a read failure; an unknown version or a
     /// corrupt file is surfaced as [`std::io::ErrorKind::InvalidData`].
-    #[allow(
-        dead_code,
-        reason = "V2-only test seam; production always goes through load_project/load_global (see doc above)"
-    )]
+    #[cfg(test)]
     pub fn load(scope_path: &Path) -> std::io::Result<Self> {
         let bytes = match crate::store::read_regular(scope_path) {
             Ok(b) => b,
@@ -899,12 +979,22 @@ impl InstallState {
         })
     }
 
-    /// Load the global-scope state at `scope_path`, threading `roots` so a
+    /// The state [`Self::read_global`] reads, for a test.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_global`].
+    #[cfg(test)]
+    pub fn load_global(scope_path: &Path, roots: &AnchorRoots) -> std::io::Result<Self> {
+        Self::read_global(scope_path, roots).map(|read| read.state)
+    }
+
+    /// Read the global-scope state at `scope_path`, threading `roots` so a
     /// legacy V1 `global.json` converts to anchored outputs in memory (no
     /// disk write). An absent file yields empty state.
     ///
-    /// This is the global-scope counterpart of [`Self::load_project`]: bare
-    /// [`Self::load`] cannot anchor a V1 global file (it has no vendor roots),
+    /// This is the global-scope counterpart of [`Self::read_project`]: a bare
+    /// `load` cannot anchor a V1 global file (it has no vendor roots),
     /// so a global V1 file would be rejected as `InvalidData`. Threading
     /// `roots` lets the global vendor anchors (`VendorRoot("claude")` /
     /// `OpenCodeSkills` / `GrimHome`) classify each legacy absolute target.
@@ -913,16 +1003,18 @@ impl InstallState {
     ///
     /// [`std::io::Error`] for a read failure; an unknown version or a corrupt
     /// file is surfaced as [`std::io::ErrorKind::InvalidData`].
-    pub fn load_global(scope_path: &Path, roots: &AnchorRoots) -> std::io::Result<Self> {
+    pub(crate) fn read_global(scope_path: &Path, roots: &AnchorRoots) -> std::io::Result<Unadopted> {
         let bytes = match crate::store::read_regular(scope_path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    path: scope_path.to_path_buf(),
-                    records: BTreeMap::new(),
-                    settings_store: SettingsStore::Inline,
-                    legacy_migration_lossy: false,
-                    withheld: WithheldOutputs::new(),
+                return Ok(Unadopted {
+                    state: Self {
+                        path: scope_path.to_path_buf(),
+                        records: BTreeMap::new(),
+                        settings_store: SettingsStore::Inline,
+                        legacy_migration_lossy: false,
+                        withheld: WithheldOutputs::new(),
+                    },
                 });
             }
             Err(e) => return Err(e),
@@ -934,12 +1026,14 @@ impl InstallState {
         if validate_grim_home(&roots.grim_home, &roots.grim_home, ConfigScope::Global).is_err() {
             withhold_settings_outputs(&mut records, &mut withheld);
         }
-        Ok(Self {
-            path: scope_path.to_path_buf(),
-            records,
-            settings_store: SettingsStore::Inline,
-            legacy_migration_lossy,
-            withheld,
+        Ok(Unadopted {
+            state: Self {
+                path: scope_path.to_path_buf(),
+                records,
+                settings_store: SettingsStore::Inline,
+                legacy_migration_lossy,
+                withheld,
+            },
         })
     }
 
@@ -1097,10 +1191,20 @@ impl InstallState {
     pub(crate) const UNREADABLE_STORE_REMEDY: &str =
         "make that path a file your user can read, then re-run the command";
 
-    /// Load the project-scope state for a workspace, with a V1 legacy
+    /// The state [`Self::read_project`] reads, for a test.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_project`].
+    #[cfg(test)]
+    pub fn load_project(workspace: &Path, grim_home: &Path, config_path: &Path) -> std::io::Result<Self> {
+        Self::read_project(workspace, grim_home, config_path).map(|read| read.state)
+    }
+
+    /// Read the project-scope state for a workspace, with a V1 legacy
     /// fallback.
     ///
-    /// This is the project-scope variant of [`Self::load`] that also checks
+    /// This is the project-scope variant of a bare `load` that also checks
     /// for a legacy `$GRIM_HOME/state/projects/<sha>.json` file when the
     /// new `<workspace>/.grimoire/state.json` is absent. If found, the V1
     /// file is converted in memory (no disk write). If neither file exists,
@@ -1115,7 +1219,7 @@ impl InstallState {
     ///
     /// [`std::io::Error`] for a read failure; an unknown version or a
     /// corrupt file is surfaced as [`std::io::ErrorKind::InvalidData`].
-    pub fn load_project(workspace: &Path, grim_home: &Path, config_path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn read_project(workspace: &Path, grim_home: &Path, config_path: &Path) -> std::io::Result<Unadopted> {
         let (records, legacy_migration_lossy) = Self::read_project_records(workspace, grim_home, config_path)?;
         let mut state = Self {
             path: Self::project_state_path(workspace),
@@ -1145,7 +1249,7 @@ impl InstallState {
                 ),
             }
         }
-        Ok(state)
+        Ok(Unadopted { state })
     }
 
     /// Add the store's records. Only the kind the store holds: the output rule
@@ -1199,8 +1303,8 @@ impl InstallState {
         // before the relocation. Discovered via the legacy sha formula
         // (`sha256(canonicalize(config_path))`, matching the V1 writer and the
         // reap step) and converted in memory only — nothing is written, so a
-        // read-only consumer (status/search/TUI) sees migrated outputs without
-        // a write.
+        // consumer sees migrated outputs without a write; only `commit_proven`
+        // persists, and only what a proof covered.
         let state_dir = grim_home.join("state");
         let canonical = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
         let legacy_path = Self::legacy_project_path(&state_dir, &canonical);
@@ -1239,6 +1343,18 @@ impl InstallState {
 
     /// [`Self::save`], naming the file that failed.
     fn write_files(&self) -> Result<(), (PathBuf, std::io::Error)> {
+        let settings = self.write_state_file()?;
+        // State first: a store failure in a mid-run save, which only logs, must
+        // not cost the ordinary records this run has already materialized.
+        if let SettingsStore::Workspace { path, workspace } = &self.settings_store {
+            let settings: Vec<&InstallRecord> = settings.iter().collect();
+            settings_store::save(path, workspace, &settings).map_err(|source| (path.clone(), source))?;
+        }
+        Ok(())
+    }
+
+    /// Write the state file alone, returning the settings records it leaves to the store.
+    fn write_state_file(&self) -> Result<Vec<InstallRecord>, (PathBuf, std::io::Error)> {
         if self.legacy_migration_lossy() {
             Self::snapshot_lossy_migration(&self.path);
         }
@@ -1269,13 +1385,7 @@ impl InstallState {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             .and_then(|bytes| atomic_write(&self.path, &bytes))
             .map_err(|source| (self.path.clone(), source))?;
-        // State first: a store failure in a mid-run save, which only logs, must
-        // not cost the ordinary records this run has already materialized.
-        if let SettingsStore::Workspace { path, workspace } = &self.settings_store {
-            let settings: Vec<&InstallRecord> = settings.iter().collect();
-            settings_store::save(path, workspace, &settings).map_err(|source| (path.clone(), source))?;
-        }
-        Ok(())
+        Ok(settings)
     }
 
     /// Best-effort removal of the legacy `$GRIM_HOME/state/projects/<sha>.json`
@@ -1335,6 +1445,10 @@ impl InstallState {
                 source,
             })?;
         }
+        // Held across the write: a status commit that reloads before it and
+        // writes after it would drop this run's records. Past the wait the
+        // write goes ahead unlocked, so a commit may delay a persist, never fail it.
+        let _lock = self.save_lock();
         // The reap below is skipped when the V1→V2 conversion dropped any
         // output/record, keeping the legacy file as the sole recovery
         // breadcrumb. (`save` owns the `.v1.bak` snapshot — it is the one
@@ -1346,6 +1460,159 @@ impl InstallState {
             Self::reap_legacy_project_state(grim_home, config_path);
         }
         Ok(())
+    }
+
+    /// [`Self::save`] holding the state-file lock as [`Self::persist`] holds it,
+    /// for a save that runs while a status commit may.
+    ///
+    /// # Errors
+    ///
+    /// Serialization or atomic-write I/O failure, as [`Self::save`].
+    pub fn save_locked(&self) -> std::io::Result<()> {
+        let _lock = self.save_lock();
+        self.save()
+    }
+
+    /// The lock a save holds across its write, polled for up to
+    /// `PERSIST_LOCK_WAIT`; `None` past it. A state file that is a link takes
+    /// none: its sidecar would land beside the file the link names, outside
+    /// the workspace when a repository carries the link.
+    fn save_lock(&self) -> Option<AdvisoryFileLock> {
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return None;
+        }
+        Self::lock_within(&self.path, PERSIST_LOCK_WAIT)
+    }
+
+    /// The state-file lock at `path`, polled while another holder keeps it, for
+    /// up to `wait`. `None` past the wait or on any other failure.
+    fn lock_within(path: &Path, wait: Duration) -> Option<AdvisoryFileLock> {
+        let started = Instant::now();
+        loop {
+            match AdvisoryFileLock::try_acquire(path) {
+                Ok(lock) => return Some(lock),
+                Err(e) if matches!(e.kind, LockErrorKind::Locked) && started.elapsed() < wait => {
+                    // shortcut: blocks the calling thread while a status commit holds
+                    // the lock, move to spawn_blocking if a commit ever holds it longer.
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Write records a caller proved in memory, each only while its node is
+    /// unchanged since the proof: the same record (or still none), an evidence
+    /// pin the reader `evidence` builds still names, and present outputs that
+    /// still hash to the record, at least one for a node with no record. The
+    /// state-file lock is taken with `try_acquire` and held only to reload,
+    /// re-check and write the state file; `evidence` is called again after it
+    /// is taken. The config lock is never taken and the settings store never written.
+    ///
+    /// Nothing proven touches nothing. Contention, an I/O failure, a read-only
+    /// directory, or a `.grimoire` or state file that is a link or resolves
+    /// outside the workspace skips the commit, and the caller reports from memory.
+    pub(crate) fn commit_proven<E: Fn(&NodeKey) -> Option<LockedSource>>(
+        scope: ConfigScope,
+        roots: &AnchorRoots,
+        config_path: &Path,
+        proven: &[ProvenRecord],
+        evidence: impl Fn() -> E,
+    ) -> CommitOutcome {
+        if proven.is_empty() {
+            return CommitOutcome::Written(0);
+        }
+        match Self::commit_checked(scope, roots, config_path, proven, evidence) {
+            Ok(written) => CommitOutcome::Written(written),
+            Err(cause) => CommitOutcome::Skipped(cause),
+        }
+    }
+
+    /// [`Self::commit_proven`] for a non-empty `proven`.
+    fn commit_checked<E: Fn(&NodeKey) -> Option<LockedSource>>(
+        scope: ConfigScope,
+        roots: &AnchorRoots,
+        config_path: &Path,
+        proven: &[ProvenRecord],
+        evidence: impl Fn() -> E,
+    ) -> Result<usize, SkipCause> {
+        let path = match scope {
+            ConfigScope::Project => Self::project_state_path(&roots.workspace),
+            ConfigScope::Global => Self::global_path(&roots.grim_home.join("state")),
+        };
+        // A commit that writes nothing creates nothing: with no `.grimoire/`
+        // yet, re-check before creating it, and again under the lock.
+        if scope == ConfigScope::Project
+            && std::fs::symlink_metadata(roots.workspace.join(".grimoire"))
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+        {
+            let now = Self::reload(scope, roots, config_path, &path)?;
+            if surviving(&now, proven, roots, &evidence()).is_empty() {
+                return Ok(0);
+            }
+        }
+        Self::ready_commit_dir(scope, &roots.workspace, &path)?;
+        let _lock = AdvisoryFileLock::try_acquire(&path).map_err(|e| match e.kind {
+            LockErrorKind::Locked => SkipCause::Contended,
+            LockErrorKind::Io(io) => skip_cause(&io),
+            _ => SkipCause::Io,
+        })?;
+        let mut fresh = Self::reload(scope, roots, config_path, &path)?;
+        // Read again under the lock, so the re-check never reuses the pre-check's evidence.
+        let survivors = surviving(&fresh, proven, roots, &evidence());
+        let written = survivors.len();
+        for record in survivors {
+            fresh.record(record.clone());
+        }
+        if written > 0 {
+            fresh.write_state_file().map_err(|(_, e)| skip_cause(&e))?;
+        }
+        Ok(written)
+    }
+
+    /// The state a commit re-checks against, read from `path`'s scope.
+    fn reload(
+        scope: ConfigScope,
+        roots: &AnchorRoots,
+        config_path: &Path,
+        path: &Path,
+    ) -> Result<InstallState, SkipCause> {
+        match scope {
+            ConfigScope::Project => Self::read_project(&roots.workspace, &roots.grim_home, config_path),
+            ConfigScope::Global => Self::read_global(path, roots),
+        }
+        .map(|read| read.adopt())
+        .map_err(|e| skip_cause(&e))
+    }
+
+    /// Ready the directory a commit writes into, refusing a link: create a
+    /// missing `.grimoire/` with its gitignore, never follow one that is a link.
+    fn ready_commit_dir(scope: ConfigScope, workspace: &Path, path: &Path) -> Result<(), SkipCause> {
+        if scope == ConfigScope::Project {
+            let dir = workspace.join(".grimoire");
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.file_type().is_symlink() => return Err(SkipCause::LinkedOrOutside),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    Self::ensure_project_state_dir(workspace).map_err(|e| skip_cause(&e))?;
+                }
+                Err(e) => return Err(skip_cause(&e)),
+            }
+            // A Windows junction is no symlink here, so judge where the directory resolves.
+            let resolved = dunce::canonicalize(&dir).map_err(|e| skip_cause(&e))?;
+            let root = dunce::canonicalize(workspace).map_err(|e| skip_cause(&e))?;
+            if !resolved.starts_with(&root) {
+                return Err(SkipCause::LinkedOrOutside);
+            }
+        } else if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| skip_cause(&e))?;
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => Err(SkipCause::LinkedOrOutside),
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(skip_cause(&e)),
+        }
     }
 
     /// Copy the pre-migration state file to `<file>.v1.bak` before a lossy
@@ -1405,6 +1672,68 @@ impl InstallState {
             ),
         }
     }
+}
+
+/// The skip cause an I/O failure of a commit maps to.
+fn skip_cause(error: &io::Error) -> SkipCause {
+    tracing::debug!(error = %error, "install-state commit skipped");
+    match error.kind() {
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => SkipCause::ReadOnly,
+        _ => SkipCause::Io,
+    }
+}
+
+/// Whether a commit may write `record`: an adoption candidate's kind, never a dev record.
+fn adoptable(record: &InstallRecord) -> bool {
+    !record.dev
+        && matches!(
+            record.kind,
+            ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Mcp
+        )
+}
+
+/// The proven records a commit may write over `fresh`: an adoption candidate
+/// whose node is unchanged since the proof.
+fn surviving<'a>(
+    fresh: &InstallState,
+    proven: &'a [ProvenRecord],
+    roots: &AnchorRoots,
+    evidence_now: &impl Fn(&NodeKey) -> Option<LockedSource>,
+) -> Vec<&'a InstallRecord> {
+    proven
+        .iter()
+        .filter(|item| {
+            let record = &item.record;
+            // A new record needs a present match: one whose outputs are all gone
+            // was uninstalled after the proof, and writing it would resurrect it.
+            adoptable(record)
+                && fresh.get(record.kind, &record.name) == item.prior.as_ref()
+                && evidence_now(&(record.kind, record.name.clone())).is_some_and(|pin| pin.eq_content(&record.source))
+                && present_matches(record, roots).is_some_and(|present| present > 0 || item.prior.is_some())
+        })
+        .map(|item| &item.record)
+        .collect()
+}
+
+/// How many outputs of `record` are present, `None` when a present one no
+/// longer hashes to its recorded match. An absent output passes: it reads
+/// `missing`, never as an edit the record hides.
+fn present_matches(record: &InstallRecord, roots: &AnchorRoots) -> Option<usize> {
+    let mut present = 0;
+    for out in &record.outputs {
+        match out.presence(record.kind, roots, Containment::Strict) {
+            Ok(Presence::Absent) => {}
+            Ok(Presence::Present)
+                if out
+                    .current_hash(record.kind, roots, Containment::Strict)
+                    .is_ok_and(|hash| hash == out.content_hash) =>
+            {
+                present += 1;
+            }
+            Ok(Presence::Present | Presence::Unreadable(_)) | Err(_) => return None,
+        }
+    }
+    Some(present)
 }
 
 /// The outputs `before` recorded that `after` no longer does — the set an
@@ -1841,10 +2170,7 @@ fn is_own_mcp_member(
     scope: ConfigScope,
     roots: &AnchorRoots,
 ) -> bool {
-    let (Some(pointer), Ok((probe, _))) = (
-        out.entry.as_deref(),
-        McpDescriptor::from_toml_str_with_requires(MCP_POINTER_PROBE),
-    ) else {
+    let Some(pointer) = out.entry.as_deref() else {
         return false;
     };
     let vendor = client.vendor();
@@ -1861,11 +2187,16 @@ fn is_own_mcp_member(
                     here == *path
                 }
             });
-        same_file
-            && vendor
-                .mcp_entry_for(scope, path, name, &probe)
-                .is_some_and(|(own, _)| own == pointer)
+        same_file && mcp_member_pointer(client, scope, path, name).is_some_and(|own| own == pointer)
     })
+}
+
+/// The pointer at which `client` writes MCP server `name` into its config
+/// file `path`; `None` where the vendor declines a plain stdio server there.
+pub(crate) fn mcp_member_pointer(client: ClientTarget, scope: ConfigScope, path: &Path, name: &str) -> Option<String> {
+    let (probe, _) = McpDescriptor::from_toml_str_with_requires(MCP_POINTER_PROBE).ok()?;
+    let (pointer, _) = client.vendor().mcp_entry_for(scope, path, name, &probe)?;
+    Some(pointer)
 }
 
 fn json_spelling(path: &Path) -> PathBuf {
@@ -2348,6 +2679,77 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let st = InstallState::load(&dir.path().join("nope.json")).unwrap();
         assert!(st.get(ArtifactKind::Skill, "x").is_none());
+    }
+
+    /// Every way out of [`Unadopted`] hands over the records the loader read,
+    /// for both scopes.
+    #[test]
+    fn every_way_out_hands_over_the_records_it_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let grim_home = dir.path().join("home");
+        let config_path = workspace.join("grimoire.toml");
+        InstallState::ensure_project_state_dir(&workspace).unwrap();
+        std::fs::create_dir_all(grim_home.join("state")).unwrap();
+        let global_path = InstallState::global_path(&grim_home.join("state"));
+        for path in [InstallState::project_state_path(&workspace), global_path.clone()] {
+            let mut st = InstallState::empty(&path);
+            st.record(record("code-review", ArtifactKind::Skill));
+            st.save().unwrap();
+        }
+        let roots = AnchorRoots {
+            workspace: workspace.clone(),
+            grim_home: grim_home.clone(),
+            ..Default::default()
+        };
+        let project = || InstallState::read_project(&workspace, &grim_home, &config_path).unwrap();
+        let global = || InstallState::read_global(&global_path, &roots).unwrap();
+        let reasons = [
+            Exempt::InstallGate,
+            Exempt::Browse,
+            Exempt::HookRecords,
+            Exempt::SettingsPreflight,
+            Exempt::DevRecords,
+            Exempt::CrossScopeShadow,
+        ];
+        for read in [&project as &dyn Fn() -> Unadopted, &global] {
+            let mut handed = vec![read().adopt(), read().defer()];
+            handed.extend(reasons.map(|why| read().exempt(why)));
+            for state in handed {
+                let names: Vec<_> = state.iter_records().map(|r| r.name.as_str()).collect();
+                assert_eq!(names, ["code-review"]);
+            }
+        }
+    }
+
+    /// No loader that returns a bare [`InstallState`] is visible outside a test
+    /// build, so production code reads state only through [`Unadopted`].
+    #[test]
+    fn a_bare_loader_is_declared_only_for_test_builds() {
+        let lines: Vec<&str> = include_str!("install_state.rs").lines().map(str::trim).collect();
+        for name in ["load", "load_project", "load_global"] {
+            let signature = format!("fn {name}(");
+            let visible = format!(" {signature}");
+            let declared: Vec<usize> = (0..lines.len())
+                .filter(|&at| {
+                    let line = lines[at];
+                    line.starts_with(&signature) || (line.starts_with("pub") && line.contains(&visible))
+                })
+                .collect();
+            assert!(!declared.is_empty(), "no declaration of `{name}` found");
+            for at in declared {
+                let attributes = lines[..at]
+                    .iter()
+                    .rev()
+                    .take_while(|line| line.starts_with("#[") || line.starts_with("///"));
+                let test_only = attributes.into_iter().any(|line| *line == "#[cfg(test)]");
+                assert!(
+                    test_only || !lines[at].starts_with("pub"),
+                    "line {}: `{name}` is visible outside test builds",
+                    at + 1
+                );
+            }
+        }
     }
 
     /// An unknown on-disk version (e.g. 99) is rejected with `InvalidData`,
@@ -6673,6 +7075,427 @@ mod tests {
             assert!(!file(claude, "settings.json", "backup/settings.json"));
             assert!(!file(kiro, "settings/cli.json", "cli.json"), "the name alone");
             assert!(!file(kiro, "settings/cli.json", "other/cli.json"));
+        }
+    }
+
+    /// A status write of proven records under the state-file lock, and the
+    /// `persist` that waits for it.
+    mod commit_proven {
+        use super::*;
+
+        /// A project workspace with `GRIM_HOME` beside it.
+        struct Scope {
+            dir: tempfile::TempDir,
+            roots: AnchorRoots,
+            config: PathBuf,
+        }
+
+        fn scope() -> Scope {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let grim_home = dir.path().join("home");
+            std::fs::create_dir_all(&workspace).unwrap();
+            std::fs::create_dir_all(&grim_home).unwrap();
+            let config = workspace.join("grimoire.toml");
+            std::fs::write(&config, "").unwrap();
+            let roots = AnchorRoots {
+                workspace,
+                grim_home,
+                vendor_roots: Default::default(),
+                opencode_skills: None,
+                claude_user_dir: None,
+                agents_skills: None,
+            };
+            Scope { dir, roots, config }
+        }
+
+        impl Scope {
+            fn state_path(&self) -> PathBuf {
+                InstallState::project_state_path(&self.roots.workspace)
+            }
+
+            fn load(&self) -> InstallState {
+                InstallState::load_project(&self.roots.workspace, &self.roots.grim_home, &self.config).unwrap()
+            }
+
+            /// A rule record pinned to `pin` whose one output holds `body` on disk.
+            fn rule(&self, name: &str, body: &str, pin: char) -> InstallRecord {
+                let mut rec = record(name, ArtifactKind::Rule);
+                rec.source = LockedSource::Registry(pinned(name, pin));
+                // The load drops an output off the client's rule surface.
+                rec.outputs[0].target.relative = format!(".claude/rules/{name}.md");
+                let file = self.roots.workspace.join(&rec.outputs[0].target.relative);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, body).unwrap();
+                rec.outputs[0].content_hash = rec.outputs[0]
+                    .current_hash(ArtifactKind::Rule, &self.roots, Containment::Strict)
+                    .unwrap();
+                rec
+            }
+
+            /// Another writer's state: exactly `records`, persisted.
+            fn seed(&self, records: &[InstallRecord]) {
+                let mut state = InstallState::empty(&self.state_path());
+                for rec in records {
+                    state.record(rec.clone());
+                }
+                state
+                    .persist(
+                        ConfigScope::Project,
+                        &self.roots.workspace,
+                        &self.roots.grim_home,
+                        &self.config,
+                    )
+                    .unwrap();
+            }
+
+            /// A commit whose evidence lock names `pin` for every node.
+            fn commit(&self, proven: &[ProvenRecord], pin: char) -> CommitOutcome {
+                InstallState::commit_proven(ConfigScope::Project, &self.roots, &self.config, proven, || {
+                    move |key: &NodeKey| Some(LockedSource::Registry(pinned(&key.1, pin)))
+                })
+            }
+
+            fn on_disk(&self, name: &str) -> Option<InstallRecord> {
+                self.load().get(ArtifactKind::Rule, name).cloned()
+            }
+        }
+
+        fn proven(prior: Option<&InstallRecord>, record: &InstallRecord) -> ProvenRecord {
+            ProvenRecord {
+                prior: prior.cloned(),
+                record: record.clone(),
+            }
+        }
+
+        #[test]
+        fn a_proven_record_is_written_atomically_without_the_config_lock() {
+            let s = scope();
+            let old = s.rule("x", "old", 'a');
+            s.seed(std::slice::from_ref(&old));
+            let new = s.rule("x", "new", 'b');
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt as _;
+                std::fs::metadata(s.state_path()).unwrap().ino()
+            };
+            let _config_lock = AdvisoryFileLock::try_acquire(&s.config).unwrap();
+
+            assert_eq!(s.commit(&[proven(Some(&old), &new)], 'b'), CommitOutcome::Written(1));
+
+            assert_eq!(s.on_disk("x"), Some(new));
+            // temp + rename: a new inode, and no temp file or lock sidecar left behind.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt as _;
+                assert_ne!(std::fs::metadata(s.state_path()).unwrap().ino(), inode);
+            }
+            let mut names: Vec<String> = std::fs::read_dir(s.state_path().parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, [".gitignore", "state.json"]);
+        }
+
+        #[test]
+        fn a_new_record_creates_the_state_directory_with_its_gitignore() {
+            let s = scope();
+            let new = s.rule("x", "new", 'b');
+
+            assert_eq!(s.commit(&[proven(None, &new)], 'b'), CommitOutcome::Written(1));
+
+            assert_eq!(s.on_disk("x"), Some(new));
+            assert!(s.roots.workspace.join(".grimoire/.gitignore").is_file());
+        }
+
+        #[test]
+        fn a_record_another_writer_changed_removed_repinned_or_added_is_left_alone() {
+            let changed = |rec: &InstallRecord| {
+                let mut rec = rec.clone();
+                rec.outputs[0].content_hash = Algorithm::Sha256.hash(b"theirs");
+                rec
+            };
+            let repinned = |rec: &InstallRecord| InstallRecord {
+                source: LockedSource::Registry(pinned("x", 'c')),
+                ..rec.clone()
+            };
+            for case in ["changed", "removed", "repinned", "added"] {
+                let s = scope();
+                let old = s.rule("x", "old", 'a');
+                let (prior, theirs) = match case {
+                    "changed" => (Some(&old), Some(changed(&old))),
+                    "removed" => (Some(&old), None),
+                    "repinned" => (Some(&old), Some(repinned(&old))),
+                    _ => (None, Some(old.clone())),
+                };
+                let new = s.rule("x", "new", 'b');
+                s.seed(theirs.as_slice());
+                let before = std::fs::read(s.state_path()).unwrap();
+
+                assert_eq!(
+                    s.commit(&[proven(prior, &new)], 'b'),
+                    CommitOutcome::Written(0),
+                    "{case}"
+                );
+
+                assert_eq!(
+                    std::fs::read(s.state_path()).unwrap(),
+                    before,
+                    "{case}: nothing written"
+                );
+            }
+        }
+
+        #[test]
+        fn a_node_whose_evidence_pin_or_files_moved_is_skipped_and_the_rest_written() {
+            let s = scope();
+            let (a0, b0, c0) = (
+                s.rule("a", "old", 'a'),
+                s.rule("b", "old", 'a'),
+                s.rule("c", "old", 'a'),
+            );
+            s.seed(&[a0.clone(), b0.clone(), c0.clone()]);
+            let a1 = s.rule("a", "new", 'b');
+            // Proven against pin `c`, while the evidence lock now names `b`.
+            let b1 = s.rule("b", "new", 'c');
+            let c1 = s.rule("c", "new", 'b');
+            std::fs::write(
+                s.roots.workspace.join(&c1.outputs[0].target.relative),
+                "edited after the proof",
+            )
+            .unwrap();
+            // Never adoption candidates, whatever the proof says.
+            let hook = InstallRecord {
+                kind: ArtifactKind::Hook,
+                name: "h".into(),
+                source: LockedSource::Registry(pinned("h", 'b')),
+                dev: false,
+                outputs: vec![],
+            };
+            let dev = InstallRecord {
+                name: "d".into(),
+                source: LockedSource::Registry(pinned("d", 'b')),
+                dev: true,
+                outputs: vec![],
+                ..a1.clone()
+            };
+            let items = [
+                proven(Some(&a0), &a1),
+                proven(Some(&b0), &b1),
+                proven(Some(&c0), &c1),
+                proven(None, &hook),
+                proven(None, &dev),
+            ];
+
+            assert_eq!(s.commit(&items, 'b'), CommitOutcome::Written(1));
+
+            let state = s.load();
+            assert_eq!(state.get(ArtifactKind::Rule, "a"), Some(&a1));
+            assert_eq!(state.get(ArtifactKind::Rule, "b"), Some(&b0));
+            assert_eq!(state.get(ArtifactKind::Rule, "c"), Some(&c0));
+            assert_eq!(state.get(ArtifactKind::Hook, "h"), None);
+            assert_eq!(state.get(ArtifactKind::Rule, "d"), None);
+        }
+
+        /// A new record whose outputs are all gone at commit time, as after an
+        /// uninstall that ran between the proof and the commit, is not written;
+        /// one present matching output still writes the record.
+        #[test]
+        fn a_new_record_whose_outputs_are_all_gone_is_not_written() {
+            let s = scope();
+            s.seed(&[]);
+            let gone = s.rule("x", "new", 'b');
+            std::fs::remove_file(s.roots.workspace.join(&gone.outputs[0].target.relative)).unwrap();
+            let mut kept = s.rule("y", "new", 'b');
+            let absent = ClientOutput {
+                client: "copilot".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".github/instructions/y.instructions.md".to_string(),
+                },
+                ..kept.outputs[0].clone()
+            };
+            kept.outputs.push(absent);
+
+            assert_eq!(
+                s.commit(&[proven(None, &gone), proven(None, &kept)], 'b'),
+                CommitOutcome::Written(1)
+            );
+
+            assert_eq!(s.on_disk("x"), None);
+            assert!(s.on_disk("y").is_some());
+        }
+
+        #[test]
+        fn a_held_state_lock_skips_the_commit() {
+            let s = scope();
+            let old = s.rule("x", "old", 'a');
+            s.seed(std::slice::from_ref(&old));
+            let new = s.rule("x", "new", 'b');
+            let before = std::fs::read(s.state_path()).unwrap();
+            let _held = AdvisoryFileLock::try_acquire(&s.state_path()).unwrap();
+
+            assert_eq!(
+                s.commit(&[proven(Some(&old), &new)], 'b'),
+                CommitOutcome::Skipped(SkipCause::Contended)
+            );
+
+            assert_eq!(std::fs::read(s.state_path()).unwrap(), before);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_linked_grimoire_or_state_file_is_refused_and_nothing_is_written_outside() {
+            use std::os::unix::fs::symlink;
+            let refused = CommitOutcome::Skipped(SkipCause::LinkedOrOutside);
+
+            let s = scope();
+            let outside = s.dir.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            symlink(&outside, s.roots.workspace.join(".grimoire")).unwrap();
+            let new = s.rule("x", "new", 'b');
+            assert_eq!(s.commit(&[proven(None, &new)], 'b'), refused);
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing lands outside");
+
+            let s = scope();
+            s.seed(&[]);
+            let outside = s.dir.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            let elsewhere = outside.join("state.json");
+            std::fs::rename(s.state_path(), &elsewhere).unwrap();
+            symlink(&elsewhere, s.state_path()).unwrap();
+            let before = std::fs::read(&elsewhere).unwrap();
+            let new = s.rule("x", "new", 'b');
+            assert_eq!(s.commit(&[proven(None, &new)], 'b'), refused);
+            assert_eq!(std::fs::read(&elsewhere).unwrap(), before);
+            assert_eq!(
+                std::fs::read_dir(&outside).unwrap().count(),
+                1,
+                "no lock sidecar outside"
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_read_only_state_directory_skips_the_commit() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let s = scope();
+            let old = s.rule("x", "old", 'a');
+            s.seed(std::slice::from_ref(&old));
+            let new = s.rule("x", "new", 'b');
+            let dir = s.state_path().parent().unwrap().to_path_buf();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let writable = tempfile::tempfile_in(&dir).is_ok();
+
+            let outcome = s.commit(&[proven(Some(&old), &new)], 'b');
+
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Root writes through 0o555, so the failure cannot be provoked.
+            if writable {
+                return;
+            }
+            assert_eq!(outcome, CommitOutcome::Skipped(SkipCause::ReadOnly));
+            assert_eq!(s.on_disk("x"), Some(old));
+        }
+
+        #[test]
+        fn nothing_proven_writes_nothing_and_creates_no_directory() {
+            let s = scope();
+            assert_eq!(s.commit(&[], 'b'), CommitOutcome::Written(0));
+            assert!(!s.roots.workspace.join(".grimoire").exists());
+
+            s.seed(&[s.rule("x", "old", 'a')]);
+            let bytes = std::fs::read(s.state_path()).unwrap();
+            let mtime = std::fs::metadata(s.state_path()).unwrap().modified().unwrap();
+            assert_eq!(s.commit(&[], 'b'), CommitOutcome::Written(0));
+            assert_eq!(std::fs::read(s.state_path()).unwrap(), bytes);
+            assert_eq!(std::fs::metadata(s.state_path()).unwrap().modified().unwrap(), mtime);
+        }
+
+        #[test]
+        fn a_commit_whose_every_item_fails_the_re_check_creates_no_directory() {
+            let s = scope();
+            // Proven against pin `c`, while the evidence lock now names `b`.
+            let moved = s.rule("x", "new", 'c');
+
+            assert_eq!(s.commit(&[proven(None, &moved)], 'b'), CommitOutcome::Written(0));
+
+            assert!(!s.roots.workspace.join(".grimoire").exists());
+        }
+
+        /// A lock keyed on a linked state file would put its sidecar beside the
+        /// file the link names, so a persist through a link takes none.
+        #[cfg(unix)]
+        #[test]
+        fn persist_through_a_linked_state_file_locks_nothing_beside_its_target() {
+            let s = scope();
+            s.seed(&[]);
+            let outside = s.dir.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            let elsewhere = outside.join("state.json");
+            std::fs::rename(s.state_path(), &elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, s.state_path()).unwrap();
+            // Held on the target's sidecar: a persist that locked it would wait the lock out.
+            let _held = AdvisoryFileLock::try_acquire(&elsewhere).unwrap();
+            let state = InstallState::empty(&s.state_path());
+
+            let started = Instant::now();
+            state
+                .persist(ConfigScope::Project, &s.roots.workspace, &s.roots.grim_home, &s.config)
+                .unwrap();
+            let waited = started.elapsed();
+
+            assert!(
+                waited < PERSIST_LOCK_WAIT,
+                "locked beside the link's target: {waited:?}"
+            );
+        }
+
+        #[test]
+        fn persist_waits_at_most_two_seconds_on_a_held_lock_then_writes() {
+            let s = scope();
+            std::fs::create_dir_all(s.state_path().parent().unwrap()).unwrap();
+            let rec = s.rule("x", "old", 'a');
+            let mut state = s.load();
+            state.record(rec.clone());
+            let _held = AdvisoryFileLock::try_acquire(&s.state_path()).unwrap();
+
+            let started = Instant::now();
+            state
+                .persist(ConfigScope::Project, &s.roots.workspace, &s.roots.grim_home, &s.config)
+                .expect("a held lock delays a persist, never fails it");
+            let waited = started.elapsed();
+
+            assert!(waited >= PERSIST_LOCK_WAIT, "{waited:?}");
+            assert!(waited < PERSIST_LOCK_WAIT * 3, "{waited:?}");
+            assert_eq!(s.on_disk("x"), Some(rec));
+        }
+
+        #[test]
+        fn persist_takes_the_lock_once_its_holder_releases_it() {
+            let s = scope();
+            std::fs::create_dir_all(s.state_path().parent().unwrap()).unwrap();
+            let rec = s.rule("x", "old", 'a');
+            let mut state = s.load();
+            state.record(rec.clone());
+            let held = AdvisoryFileLock::try_acquire(&s.state_path()).unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(held);
+            });
+
+            let started = Instant::now();
+            state
+                .persist(ConfigScope::Project, &s.roots.workspace, &s.roots.grim_home, &s.config)
+                .unwrap();
+            let waited = started.elapsed();
+            release.join().unwrap();
+
+            assert!(waited >= Duration::from_millis(150), "{waited:?}");
+            assert!(waited < PERSIST_LOCK_WAIT, "took the lock on release: {waited:?}");
+            assert_eq!(s.on_disk("x"), Some(rec));
+            AdvisoryFileLock::try_acquire(&s.state_path()).expect("persist releases the lock");
         }
     }
 }

@@ -25,6 +25,7 @@ use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
+use crate::oci::access::bounded_access::{DecodeBudget, Limit, Refusal};
 use crate::oci::manifest::LayerLayout;
 use crate::oci::mcp::MCP_LAYER_SIZE_LIMIT;
 use crate::oci::reference::ArtifactRef;
@@ -36,7 +37,7 @@ use super::content_hash::footprint_hash;
 use super::content_hash::{footprint_hash_for_kind, footprint_hash_for_record};
 use super::expected_outputs::{destination_among, effective_clients, expected_clients, pending_outputs, writes_output};
 use super::install_error::{InstallError, InstallErrorKind};
-use super::install_state::{ClientOutput, InstallRecord, InstallState, PersistError, SettingsStore};
+use super::install_state::{ClientOutput, Exempt, InstallRecord, InstallState, PersistError, SettingsStore};
 use super::materializer::ArtifactMaterializer;
 use super::path_anchor::{AnchorError, AnchorRoots, Containment, PathAnchor};
 use super::progress::{InstallProgress, SilentProgress};
@@ -633,7 +634,9 @@ pub(crate) fn persist_progress(state: &InstallState, target: &InstallTarget) {
         tracing::debug!("install-state directory not ready for a mid-run save: {e}");
         return;
     }
-    if let Err(e) = state.save() {
+    // Under the state-file lock: a status commit that reloads before this save
+    // and writes after it would drop the record this run just wrote.
+    if let Err(e) = state.save_locked() {
         tracing::debug!("mid-run install-state save failed; deferred to the batch-end persist: {e}");
     }
 }
@@ -652,11 +655,15 @@ fn other_scope_state(target: &InstallTarget, roots: &AnchorRoots) -> Option<Inst
     match target.scope() {
         ConfigScope::Project => {
             let path = InstallState::global_path(&roots.grim_home.join("state"));
-            InstallState::load_global(&path, roots).ok()
+            InstallState::read_global(&path, roots)
+                .ok()
+                .map(|read| read.exempt(Exempt::CrossScopeShadow))
         }
         ConfigScope::Global => {
             let workspace = target.workspace();
-            InstallState::load_project(workspace, &roots.grim_home, &workspace.join("grimoire.toml")).ok()
+            InstallState::read_project(workspace, &roots.grim_home, &workspace.join("grimoire.toml"))
+                .ok()
+                .map(|read| read.exempt(Exempt::CrossScopeShadow))
         }
     }
 }
@@ -1019,7 +1026,7 @@ async fn install_one<M: ArtifactMaterializer>(
     // MCP descriptors never materialize files; they register entries in
     // client MCP configs on a dedicated path.
     if kind == ArtifactKind::Mcp {
-        return install_mcp(artifact, access, target, state, roots, force, intent, abandoned).await;
+        return install_mcp(artifact, access, target, state, roots, anchor, force, intent, abandoned).await;
     }
 
     if kind == ArtifactKind::Hook
@@ -1028,7 +1035,6 @@ async fn install_one<M: ArtifactMaterializer>(
         return Ok(skip);
     }
 
-    let recorded = state.get(kind, &artifact.name).cloned();
     let pinned_str = artifact.source.provenance();
 
     // Integrity gate (shared helper): refuses on drift, and short-circuits to
@@ -1037,7 +1043,8 @@ async fn install_one<M: ArtifactMaterializer>(
     // declined-kind record has zero outputs, so `covers_targets` is false for
     // any client that could support the kind, which never masks a later
     // supported install (F-1).
-    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)? {
+    let (gate, recorded) = gate_after_proof(artifact, access, target, state, roots, anchor, force).await?;
+    if let Some(outcome) = gate {
         return Ok(outcome);
     }
 
@@ -1283,26 +1290,21 @@ async fn install_one<M: ArtifactMaterializer>(
                 continue;
             }
             // Would-be output: render into a staging preview and hash it.
-            let preview_root = staging.path().join(format!("preview-{client}"));
-            std::fs::create_dir_all(&preview_root).map_err(|e| target_io(&preview_root, e))?;
-            let preview_dest = preview_root.join(dest_file_name(&dest)?);
-            client
-                .materialize(crate::install::client_target::MaterializeRequest {
-                    kind,
-                    name: &artifact.name,
-                    artifact_root: &canonical,
-                    dest: &preview_dest,
-                    scope: target.scope(),
-                    pinned: &pinned_str,
-                    support_dir: staged_support.as_deref(),
-                })
-                .map_err(crate::error::Error::from)?;
-            let preview_support = staged_support.as_ref().map(|_| preview_root.join(&artifact.name));
-            let would = footprint_hash_for_kind(kind, &preview_dest, preview_support.as_deref())
-                .map_err(|e| target_io(&preview_dest, e))?;
-            let current =
-                footprint_hash_for_kind(kind, &dest, existing_support.as_deref()).map_err(|e| target_io(&dest, e))?;
-            if current != would {
+            let request = crate::install::client_target::MaterializeRequest {
+                kind,
+                name: &artifact.name,
+                artifact_root: &canonical,
+                dest: &dest,
+                scope: target.scope(),
+                pinned: &pinned_str,
+                support_dir: staged_support.as_deref(),
+            };
+            if !super::adoption::preview_footprint_matches(
+                *client,
+                request,
+                existing_support.as_deref(),
+                staging.path(),
+            )? {
                 return Ok(InstallOutcome::RefusedUntracked {
                     client: client.to_string(),
                     path: dest,
@@ -1969,11 +1971,39 @@ fn preserved_recorded_clients(
     preserved
 }
 
+/// [`integrity_gate`] over `artifact`'s record, judged without its descriptor,
+/// and the record it judged. Drift behind a moved pin may be a pulled render of
+/// the lock's pin, not an edit: a proof re-pins the record and the gate judges
+/// again, writing no byte for it. One artifact at two versions, each output at
+/// the record's pin or the lock's, is no edit either and installs as a pin move.
+/// Without a proof the refusal stands as it was, whatever kept the content
+/// unread. A path source resolves against `anchor`.
+async fn gate_after_proof(
+    artifact: &LockedArtifact,
+    access: &Arc<dyn OciAccess>,
+    target: &InstallTarget,
+    state: &mut InstallState,
+    roots: &AnchorRoots,
+    anchor: &Path,
+    force: bool,
+) -> Result<(Option<InstallOutcome>, Option<InstallRecord>), crate::error::Error> {
+    let mut recorded = state.get(artifact.kind, &artifact.name).cloned();
+    let mut gate = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)?;
+    if matches!(gate, Some(InstallOutcome::Refused { .. }))
+        && super::adoption::repin_at_gate(state, artifact, target, roots, anchor, access).await
+    {
+        recorded = state.get(artifact.kind, &artifact.name).cloned();
+        gate = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)?;
+    }
+    Ok((gate, recorded))
+}
+
 /// Integrity gate shared by every install path: for every client output of a
 /// prior record that this pass writes, an on-disk state that drifted from what
 /// was recorded is a local modification. Refuse unless forced; if every output
 /// this pass writes is intact, the pin is unchanged, AND the record already
 /// covers every client this install targets, the install is a no-op.
+/// A refusal behind a moved pin is judged again by [`gate_after_proof`].
 ///
 /// `Ok(Some(outcome))` short-circuits the install; `Ok(None)` proceeds.
 // The sibling install functions return the same `crate::error::Error`
@@ -2731,10 +2761,38 @@ pub(crate) async fn stage_locked_artifact(
     materializer: &impl ArtifactMaterializer,
     staging_parent: &Path,
 ) -> Result<StagedArtifact, crate::error::Error> {
+    stage_locked_artifact_within(artifact, kind, access, anchor, materializer, staging_parent, None).await
+}
+
+/// [`stage_locked_artifact`] charging what it decodes, and a path source's
+/// packed bytes, to `budget` when one is given ([`fetch_verified_layer_within`]).
+///
+/// # Errors
+///
+/// As [`stage_locked_artifact`], plus a [`Limit::DecodedBytes`] refusal once
+/// the budget is spent; a pack starts only while some budget is left.
+pub(crate) async fn stage_locked_artifact_within(
+    artifact: &LockedArtifact,
+    kind: ArtifactKind,
+    access: &Arc<dyn OciAccess>,
+    anchor: &Path,
+    materializer: &impl ArtifactMaterializer,
+    staging_parent: &Path,
+    budget: Option<&DecodeBudget>,
+) -> Result<StagedArtifact, crate::error::Error> {
     let blob = match &artifact.source {
-        crate::lock::locked_source::LockedSource::Registry(_) => fetch_verified_layer(artifact, kind, access).await?,
+        crate::lock::locked_source::LockedSource::Registry(_) => {
+            fetch_verified_layer_within(artifact, kind, access, budget).await?
+        }
         crate::lock::locked_source::LockedSource::Path { path, hash } => {
-            pack_verified_local(artifact, kind, path, hash, anchor).await?
+            if budget.is_some_and(|budget| budget.remaining() == 0) {
+                return Err(decode_refused(Refusal::FetchBudget(Limit::DecodedBytes)));
+            }
+            let packed = pack_verified_local(artifact, kind, path, hash, anchor).await?;
+            if let Some(budget) = budget {
+                budget.charge(packed.len() as u64).map_err(decode_refused)?;
+            }
+            packed
         }
     };
 
@@ -2819,6 +2877,24 @@ pub(crate) async fn fetch_verified_layer(
     kind: ArtifactKind,
     access: &Arc<dyn OciAccess>,
 ) -> Result<Vec<u8>, crate::error::Error> {
+    fetch_verified_layer_within(artifact, kind, access, None).await
+}
+
+/// [`fetch_verified_layer`] charging a tar layer's decode to `budget` when one
+/// is given: success charges the tar, a failure what it decoded first. A
+/// layer the run failed to decode before, or one stored larger than what is
+/// left, is not read; a decode is capped at what is left.
+///
+/// # Errors
+///
+/// As [`fetch_verified_layer`], plus a [`Limit::DecodedBytes`] refusal for a
+/// spent budget, and a [`crate::oci::layer::LayerError`] for a layer that failed earlier.
+pub(crate) async fn fetch_verified_layer_within(
+    artifact: &LockedArtifact,
+    kind: ArtifactKind,
+    access: &Arc<dyn OciAccess>,
+    budget: Option<&DecodeBudget>,
+) -> Result<Vec<u8>, crate::error::Error> {
     // Defensive: the caller's source match routes path entries to
     // `pack_verified_local`; only registry pins reach a fetch.
     let Some(pinned) = artifact.source.pinned() else {
@@ -2878,6 +2954,17 @@ pub(crate) async fn fetch_verified_layer(
         )
         .into());
     }
+    // MCP, settings and requires layers are parsed, never expanded, and are capped before the read.
+    let budget = budget.filter(|_| tar_layer);
+    if let Some(budget) = budget {
+        if budget.failed(&layer_digest) {
+            let earlier = std::io::Error::other("the layer failed to decode earlier in this run");
+            return Err(crate::oci::layer::LayerError::Corrupt(earlier).into());
+        }
+        if layer.size > budget.remaining() {
+            return Err(decode_refused(Refusal::FetchBudget(Limit::DecodedBytes)));
+        }
+    }
 
     // Bound the streamed body at the descriptor's declared size so a
     // registry serving more than it declared aborts mid-stream (CWE-770).
@@ -2897,7 +2984,25 @@ pub(crate) async fn fetch_verified_layer(
     if !tar_layer {
         return Ok(blob);
     }
-    Ok(crate::oci::layer::decode_layer_blocking(layer.clone(), blob, cap).await?)
+    let Some(budget) = budget else {
+        return Ok(crate::oci::layer::decode_layer_blocking(layer.clone(), blob, cap).await?);
+    };
+    let limit = cap.min(budget.remaining());
+    let (decoded, len) = crate::oci::layer::decode_layer_counted_blocking(layer.clone(), blob, limit).await;
+    // Charged after the decode, so sound only while a run decodes one layer at a
+    // time, as a status proof does. A decode cut at the remainder counts one byte
+    // past it, so this charge spends the rest and refuses.
+    budget.charge(len).map_err(decode_refused)?;
+    decoded.map_err(|e| {
+        budget.note_failed(layer_digest);
+        e.into()
+    })
+}
+
+/// A decode budget's refusal, classified as the bounded reader's refusals are.
+fn decode_refused(refusal: Refusal) -> crate::error::Error {
+    use crate::oci::access::error::{AccessError, AccessErrorKind};
+    AccessError::without_identifier(AccessErrorKind::Registry(Box::new(refusal))).into()
 }
 
 /// Refuse the whole run, before the first destination or state write, when an
@@ -3079,6 +3184,7 @@ async fn install_mcp(
     target: &InstallTarget,
     state: &mut InstallState,
     roots: &AnchorRoots,
+    anchor: &Path,
     force: bool,
     intent: InstallIntent,
     abandoned: &mut Vec<super::uninstall::AbandonedEntry>,
@@ -3089,9 +3195,8 @@ async fn install_mcp(
     use crate::install::vendor::McpConfigFormat;
 
     let kind = ArtifactKind::Mcp;
-    let recorded = state.get(kind, &artifact.name).cloned();
-
-    if let Some(outcome) = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)? {
+    let (gate, recorded) = gate_after_proof(artifact, access, target, state, roots, anchor, force).await?;
+    if let Some(outcome) = gate {
         return Ok(outcome);
     }
 
@@ -3241,11 +3346,7 @@ async fn install_mcp(
             // instead (the upsert below is a no-op for it). Keys the client
             // writes into the member itself (Cline's `autoApprove`, tokens)
             // are neither an edit nor a difference.
-            let existing_value = match format {
-                McpConfigFormat::Json => json_splice::member_value(&raw, &container, &member),
-                McpConfigFormat::Toml => toml_splice::member_value(&raw, &container, &member),
-            }
-            .map(|v| without_vendor_owned(&v, vendor.mcp_entry_vendor_owned_keys()));
+            let existing_value = super::adoption::comparable_mcp_member(*client, &raw, &container, &member);
             // A client name is not proof grim wrote THIS member of THIS file: a
             // vendor variable can repoint a config path between runs, and the
             // recorded client string says nothing about the bytes now sitting at
@@ -3631,7 +3732,7 @@ fn locate_canonical(
 /// [`InstallErrorKind::MaterializeFailed`] when the destination has none.
 /// Install destinations are always `<root>/…/<name[.md]>`, so that is a
 /// `path_for` bug rather than anything a user can provoke.
-fn dest_file_name(dest: &std::path::Path) -> Result<&std::ffi::OsStr, InstallError> {
+pub(crate) fn dest_file_name(dest: &std::path::Path) -> Result<&std::ffi::OsStr, InstallError> {
     dest.file_name().ok_or_else(|| {
         InstallError::without_reference(InstallErrorKind::MaterializeFailed(format!(
             "install destination '{}' has no final path component",
@@ -3671,7 +3772,7 @@ fn fsync_tree(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-fn target_io(path: &std::path::Path, source: std::io::Error) -> InstallError {
+pub(crate) fn target_io(path: &std::path::Path, source: std::io::Error) -> InstallError {
     InstallError::without_reference(InstallErrorKind::TargetIo {
         path: path.to_path_buf(),
         source,
@@ -3710,6 +3811,39 @@ mod tests {
     }
 
     use super::super::materializer::DefaultMaterializer;
+
+    // ── persist_progress ───────────────────────────────────────────
+
+    /// A mid-run save waits for a status commit's state lock instead of
+    /// writing under it, and writes once the holder lets it go.
+    #[test]
+    fn a_mid_run_save_waits_for_the_state_lock_and_writes_once_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![]);
+        let path = InstallState::project_state_path(dir.path());
+        InstallState::ensure_project_state_dir(dir.path()).unwrap();
+        let state = InstallState::empty(&path);
+        let held = crate::lock::advisory_lock::AdvisoryFileLock::try_acquire(&path).unwrap();
+        let watched = path.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let written_while_held = watched.exists();
+            drop(held);
+            written_while_held
+        });
+
+        let started = std::time::Instant::now();
+        persist_progress(&state, &target);
+        let waited = started.elapsed();
+
+        assert!(!release.join().unwrap(), "a mid-run save wrote under a held state lock");
+        assert!(waited >= std::time::Duration::from_millis(250), "{waited:?}");
+        assert!(
+            waited < std::time::Duration::from_secs(2),
+            "took the lock on release: {waited:?}"
+        );
+        assert!(path.is_file());
+    }
 
     // ── locate_canonical ───────────────────────────────────────────
 
@@ -6092,6 +6226,102 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited\n");
+    }
+
+    /// The untracked gate adopts a live link to a file whose bytes equal the
+    /// render: the footprint hash reads through the link, so it matches. The
+    /// link's target is never written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_gate_adopts_a_live_link_to_an_identical_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let real = ws.join("outside/real.md");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"# rust\n").unwrap();
+        let dest = ws.join(".claude/rules/rust-style.md");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &dest).unwrap();
+
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let lock = lock_of(vec![locked_rule("rust-style", &blob)]);
+        let target = InstallTarget::new(ws, ConfigScope::Project, vec![ClientTarget::Claude]);
+        let mut state = InstallState::load(&ws.join("state.json")).unwrap();
+        let r = install_all(
+            &lock,
+            &arc(BlobMock { blob }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(ws),
+            Path::new("."),
+            false,
+        )
+        .await;
+
+        assert_eq!(r[0].result.as_ref().unwrap(), &InstallOutcome::AlreadyInstalled);
+        let rec = state
+            .get(ArtifactKind::Rule, "rust-style")
+            .expect("adopted into a record");
+        let clients: Vec<&str> = rec.outputs.iter().map(|o| o.client.as_str()).collect();
+        assert_eq!(clients, ["claude"]);
+        assert_eq!(std::fs::read(&real).unwrap(), b"# rust\n");
+    }
+
+    /// A destination adopted while a record for the node already exists reads
+    /// `Updated` (`updated` in the install report), not `AlreadyInstalled`: the
+    /// label keys on the prior record. Here the record names only Copilot.
+    #[tokio::test]
+    async fn install_gate_adoption_beside_an_existing_record_reads_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let blob = rule_tar("rust-style", b"# rust\n");
+        let locked = locked_rule("rust-style", &blob);
+        let write = |relative: &str, bytes: &[u8]| {
+            let path = ws.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            footprint_hash(&path, None).unwrap()
+        };
+        let copilot = ".github/instructions/rust-style.instructions.md";
+        let mut state = InstallState::load(&ws.join("state.json")).unwrap();
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            source: locked.source.clone(),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: "copilot".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: copilot.to_string(),
+                },
+                content_hash: write(copilot, b"# rust copilot\n"),
+                support_dir: None,
+                entry: None,
+                adopted: false,
+                element: None,
+            }],
+        });
+        // Claude's destination holds the render's bytes, put there by hand.
+        write(".claude/rules/rust-style.md", b"# rust\n");
+
+        let target = InstallTarget::new(ws, ConfigScope::Project, vec![ClientTarget::Claude]);
+        let r = install_all(
+            &lock_of(vec![locked]),
+            &arc(BlobMock { blob }),
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(ws),
+            Path::new("."),
+            false,
+        )
+        .await;
+
+        assert_eq!(r[0].result.as_ref().unwrap(), &InstallOutcome::Updated);
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        assert!(rec.outputs.iter().any(|o| o.client == "claude"), "{:?}", rec.outputs);
     }
 
     /// One install of a lock holding the single MCP artifact.
@@ -9581,6 +9811,55 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::NotFound);
+    }
+
+    /// A status run charges a path source's packed bytes, and packs nothing once its budget is spent.
+    #[tokio::test]
+    async fn a_path_source_pack_is_charged_and_none_starts_on_a_spent_budget() {
+        async fn stage(artifact: &LockedArtifact, anchor: &Path, budget: &DecodeBudget) -> crate::error::Error {
+            let access = arc(OfflineMock);
+            let staged = stage_locked_artifact_within(
+                artifact,
+                ArtifactKind::Skill,
+                &access,
+                anchor,
+                &DefaultMaterializer,
+                anchor,
+                Some(budget),
+            );
+            staged.await.err().expect("the stage is refused")
+        }
+        let spent = |err: &crate::error::Error| matches!(err, crate::error::Error::Access(e) if Refusal::of(e) == Some(Refusal::FetchBudget(Limit::DecodedBytes)));
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = tmp.path().join("skills").join("code-review");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), SKILL_DOC).unwrap();
+        let artifact = locked_path("code-review", ArtifactKind::Skill, tmp.path(), "./skills/code-review");
+        let (_, packed) = crate::skill::pack_local_artifact(ArtifactKind::Skill, &skill).unwrap();
+        let budget = DecodeBudget::with_limit(packed.len() as u64 + 1);
+
+        let access = arc(OfflineMock);
+        let staged = stage_locked_artifact_within(
+            &artifact,
+            ArtifactKind::Skill,
+            &access,
+            tmp.path(),
+            &DefaultMaterializer,
+            tmp.path(),
+            Some(&budget),
+        )
+        .await;
+        assert!(staged.is_ok(), "a pack inside the budget stages");
+        assert_eq!(budget.remaining(), 1, "the pack is charged its length");
+
+        let err = stage(&artifact, tmp.path(), &budget).await;
+        assert!(spent(&err), "{err:?}");
+        assert_eq!(budget.remaining(), 0, "the pack past the remainder spends the rest");
+
+        // Gone, the source could not pack: a budget refusal says no pack was tried.
+        std::fs::remove_dir_all(&skill).unwrap();
+        let err = stage(&artifact, tmp.path(), &budget).await;
+        assert!(spent(&err), "{err:?}");
     }
 
     #[tokio::test]

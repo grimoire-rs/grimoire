@@ -33,6 +33,7 @@ use crate::command::add::{declare, restore_config_unless_edited, snapshot_config
 use crate::command::grim;
 use crate::command::hook_consent::ConsentSite;
 use crate::command::lock::load_previous;
+use crate::command::scope_resolution;
 use crate::command::status::{
     self, SettingsArmingInputs, SettingsGateScope, SettingsGates, declares_settings, settings_arming,
 };
@@ -49,7 +50,7 @@ use crate::config::{ResolvedOptions, ResolvedRegistry};
 use crate::env::grim_home;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_error::{InstallError, InstallErrorKind, settings_refusal_heading};
-use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
+use crate::install::install_state::{ClientOutput, Exempt, InstallState, Unadopted, active_outputs};
 use crate::install::installer::{
     ForceScope, InstallIntent, InstallOutcome, SettingsOutcome, SettingsRun, install_and_persist, persist_and_converge,
 };
@@ -81,6 +82,7 @@ use crate::resolve::resolver::{LockRun, TargetLock, moved_pins, refuse_stale_nam
 use crate::store::paths::GrimPaths;
 use crate::tui::install_progress::InstallModal;
 
+use super::adoption::{self, Background};
 use super::event::{BatchOp, TuiAction, TuiInput, drop_typeahead, handle};
 use super::render::{draw, frame, sanitize_member_label};
 use super::state::{ArtifactState, Mode, PinChanges, TuiRow, TuiState};
@@ -325,6 +327,8 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
     // Initial async catalog load: show `loading`, then populate.
     terminal.draw(|f| draw(f, &frame(&state)))?;
     load_into(&ctx, &mut state).await;
+    let mut adoption = Background::new(crate::oci::access::bounded_access::TUI_RUN_DEADLINE);
+    start_adoption(&ctx, &mut state, &mut adoption);
     if project_init.as_ref().is_some_and(|p| p.fell_back) {
         state.set_status("no grimoire.toml · g sets one up");
     }
@@ -373,6 +377,10 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
             arm_settings_gates(&ctx, &mut state, &mut settings_gates);
         }
         if drain_settings_gates(&ctx, &mut state, &mut settings_gates) {
+            terminal.draw(|f| draw(f, &frame(&state)))?;
+        }
+        // Between actions: an action runs to its end before the loop comes back here.
+        if drain_adoption(&ctx, &mut state, &mut adoption) {
             terminal.draw(|f| draw(f, &frame(&state)))?;
         }
 
@@ -528,7 +536,9 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
                 // the offline gate and keeps UX snappy — the lock is always
                 // fresher than any previous network fetch in most sessions.
                 let lock = lock_io::load(&ctx.lock_path).ok();
-                let install_state = load_state(&ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+                let install_state = read_state(&ctx)
+                    .map(|read| read.exempt(Exempt::Browse))
+                    .unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
                 let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
                 // Direct declarations decide the via-bundle badge; a declaration-
                 // matched bundle snapshot lets a stale-dropped member still derive
@@ -633,7 +643,7 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
             }
             TuiAction::ToggleScope => {
                 if ctx.toggle_scope() {
-                    after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker);
+                    after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker, &mut adoption);
                 } else if let Some(init) = &project_init {
                     state.open_confirm_init(&init.config_path.display().to_string());
                 } else {
@@ -648,7 +658,7 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
                             project_init = None;
                             ctx.alt = Some(swap);
                             ctx.toggle_scope();
-                            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker);
+                            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker, &mut adoption);
                             state.set_status(format!("created {created}"));
                         }
                         // The session stays in its current scope, and `g`
@@ -689,12 +699,14 @@ fn next_queued_event() -> Option<Option<(u16, u16)>> {
 }
 
 /// Bring `state` in line with the scope `ctx` just swapped to: labels,
-/// registries, tree options, install states, and the scope-keyed caches.
+/// registries, tree options, install states, and the scope-keyed caches; then
+/// start the new scope's adoption in place of the old one's.
 fn after_scope_swap(
     ctx: &TuiContext,
     state: &mut TuiState,
     checker: &mut UpdateChecker,
     bundle_checker: &mut super::bundle_member_fetch::BundleMemberChecker,
+    adoption: &mut Background,
 ) {
     state.set_scope_label(&ctx.scope_label);
     state.set_invocation(&ctx.invocation);
@@ -745,6 +757,7 @@ fn after_scope_swap(
     // The colored MODE box already shows the active scope
     // — no redundant title-bar status.
     state.set_status("");
+    start_adoption(ctx, state, adoption);
 }
 
 /// Spawn the launch/refresh/scope-toggle round of background checks against
@@ -1136,7 +1149,9 @@ fn drain_bundle_member_checks(
                 // was incorrect: a member's repo may be directly declared in
                 // the catalog even when the bundle itself has no lock snapshot.
                 let lock = lock_io::load(&ctx.lock_path).ok();
-                let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+                let install_state = read_state(ctx)
+                    .map(|read| read.exempt(Exempt::Browse))
+                    .unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
                 let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
                 let (direct_repos, snapshot_repos, target, lock_matches_config) = load_scope_declaration(ctx)
                     .map(|(options, _, set)| {
@@ -2189,18 +2204,23 @@ fn member_display_state(
     }
 }
 
-/// Load the active scope's install state, routing through the scope-aware
-/// seam so a project legacy file (or a V1 global file) migrates to anchored
-/// outputs in memory (no disk write on the read path). Project scope uses
-/// the workspace + the legacy `$GRIM_HOME/state/projects/<sha>.json`
-/// fallback; global scope threads the vendor roots.
+/// Read the active scope's install state through the scope seam
+/// ([`scope_resolution::read_state_at`]), so a project legacy file (or a V1
+/// global file) migrates to anchored outputs in memory (no disk write on the
+/// read path).
 ///
 /// # Errors
 ///
 /// An [`std::io::Error`] for a read failure; a corrupt or unknown-version
 /// file is surfaced as [`std::io::ErrorKind::InvalidData`].
+fn read_state(ctx: &TuiContext) -> io::Result<Unadopted> {
+    scope_resolution::read_state_at(ctx.scope, &ctx.workspace, &ctx.config_path, &ctx.state_path, &ctx.roots)
+}
+
+/// The state [`read_state`] reads, for a test.
+#[cfg(test)]
 fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
-    SettingsGateRequest::of(ctx).load_state()
+    read_state(ctx).map(Unadopted::into_state)
 }
 
 /// Surface a lock that exists but cannot be read, on the status line and in
@@ -2252,7 +2272,9 @@ fn load_scope_for_badges(
     Option<InstallTarget>,
 ) {
     let lock = lock_io::load(&ctx.lock_path).ok();
-    let state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+    let state = read_state(ctx)
+        .map(|read| read.exempt(Exempt::Browse))
+        .unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
     let cached = lock.as_ref();
     let (set, declared_bundle_repos, direct_repos, snapshot_repos, target) = load_scope_declaration(ctx)
         .map(|(options, _registries, set)| {
@@ -3102,7 +3124,9 @@ async fn perform_uninstall(
     // files. Held to function end.
     let _guard = config_guard(ctx)?;
     require_in_line(ctx)?;
-    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let mut install_state = read_state(ctx)
+        .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+        .adopt();
 
     // The install-state records this row owns: itself for a skill/rule;
     // for a bundle, exactly the lock entries the undeclare would drop
@@ -3157,7 +3181,7 @@ async fn perform_uninstall(
     let relock = relock_delete(ctx, kind, &name, force).await?;
     let mut targets = targets;
     settle_relocked(relock.as_ref(), &(kind, name.clone()), &mut targets, &mut orphans);
-    let mut hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force)?;
+    let mut hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force).await?;
 
     // Undeclare from the config + lock through the `grim uninstall` seam
     // (the config flock acquired at the top is still held for this
@@ -3213,7 +3237,9 @@ async fn perform_local_uninstall(
     let _guard = config_guard(ctx)?;
     require_in_line(ctx)?;
 
-    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let mut install_state = read_state(ctx)
+        .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+        .adopt();
     // A view another grim outdated still shows the row after its name was bound
     // at a registry or another path, and acting on it would delete that package.
     let elsewhere = local_bound_elsewhere(ctx, &install_state, kind, &name, &row.repository);
@@ -3244,7 +3270,7 @@ async fn perform_local_uninstall(
     };
     let relock = relock_delete(ctx, kind, &name, force).await?;
     settle_relocked(relock.as_ref(), &(kind, name.clone()), &mut targets, &mut orphans);
-    let mut hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force)?;
+    let mut hooks = delete_targets(ctx, &mut install_state, &targets, ledger, force).await?;
 
     // Undeclare a path declaration from config + lock (a no-op for a bare dev
     // record — nothing declared, and dev installs never write a lock entry). If
@@ -3380,7 +3406,7 @@ async fn perform(
         };
     let key = (kind, name.clone());
     let relocked = match relocked_ahead {
-        Some(target) => save_relock(ctx, op, *target, previous.as_ref()).await?,
+        Some(target) => save_relock(ctx, op, &row_refresh(op, kind, &name), *target, previous.as_ref()).await?,
         None => {
             let remedy = row_remedy(op, id.to_string(), &name);
             // The shared `declare` seam routes a bundle into `[bundles]`.
@@ -3818,21 +3844,12 @@ async fn install_row(
     policies: crate::hook::policy::ConsentPolicies,
     ledger: &mut SettingsLedger,
 ) -> anyhow::Result<(Vec<crate::install::installer::ArtifactInstall>, Vec<NodeKey>)> {
-    let target = InstallTarget::parse_with_global(
-        &ctx.workspace,
-        ctx.scope,
-        &[],
-        &ctx.clients_default,
-        &ctx.clients_global,
-        &ctx.vendors,
-    )
-    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
-    .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
-    // The target reads the ambient `$GRIM_HOME`; a hermetic test's roots do not.
-    #[cfg(test)]
-    let target = target.with_grim_home(&ctx.roots.grim_home);
-    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let target = action_target(ctx)?
+        .with_hook_policy(policies.hooks)
+        .with_settings_policy(policies.settings);
+    let mut install_state = read_state(ctx)
+        .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+        .exempt(Exempt::InstallGate);
     let materializer = DefaultMaterializer;
 
     // Both `install` and `update` honour the integrity gate — `force` comes
@@ -4125,21 +4142,29 @@ async fn relock_row(
     let target = target_lock(set, prior, refresh, &ctx.access, &options, &config_anchor(ctx), run)
         .await
         .map_err(|e| with_remedy(e.naming(&ctx.invocation), remedy));
-    save_relock(ctx, op, grim(target)?, previous).await
+    save_relock(ctx, op, refresh, grim(target)?, previous).await
 }
 
-/// Save `target` over `previous`, with every pin it moved or dropped: the
-/// status line has no other way to say a pin left the digest it held. An
-/// Update first refuses a conflict among the armed settings packages, as
-/// `grim update <binding>` exits 78 before its save.
+/// Save `target`, the relock `refresh` selected, over `previous`, with every pin
+/// it moved or dropped: the status line has no other way to say a pin left the
+/// digest it held. An Update first refuses a conflict among the armed settings
+/// packages, then proves what it may touch ([`prove_update`]), as
+/// `grim update <binding>` does before its save; an Install proves the pins it
+/// drops ([`prove_dropped`]), as `grim add` does.
 async fn save_relock(
     ctx: &TuiContext,
     op: BatchOp,
+    refresh: &Refresh,
     target: TargetLock,
     previous: Option<&GrimoireLock>,
 ) -> anyhow::Result<Relocked> {
     if op == BatchOp::Update {
         refuse_settings_conflict(ctx, &target.lock).await?;
+        if let Some(previous) = previous {
+            prove_update(ctx, refresh, &target.lock, previous).await?;
+        }
+    } else if let Some(previous) = previous {
+        prove_dropped(ctx, previous, &target.lock).await;
     }
     grim(lock_io::save(&ctx.lock_path, &target.lock, previous))?;
     let pins = PinChanges {
@@ -4154,6 +4179,148 @@ async fn save_relock(
         pins,
         dispositions: target.dispositions,
     })
+}
+
+/// Prove the nodes of `previous` the Update `refresh` selects may touch, its
+/// [`NamedScope::force`], and persist what proved: the save of `lock` that
+/// follows destroys the evidence. Content comes from the store, then the registry.
+///
+/// # Errors
+///
+/// Target parse, install-state load, or persisting the proven records.
+async fn prove_update(
+    ctx: &TuiContext,
+    refresh: &Refresh,
+    lock: &GrimoireLock,
+    previous: &GrimoireLock,
+) -> anyhow::Result<()> {
+    let named = NamedScope::of(refresh, lock, Some(previous));
+    let target = action_target(ctx)?;
+    let mut state = read_state(ctx)
+        .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+        .adopt();
+    let (roots, source_dir) = (&ctx.roots, config_anchor(ctx));
+    let proof = crate::command::update::prove_records(
+        &mut state,
+        previous,
+        named.as_ref(),
+        &target,
+        roots,
+        &source_dir,
+        &ctx.access,
+    );
+    let (_, changed) = proof.await;
+    if changed {
+        persist_proof(ctx, &state)?;
+    }
+    Ok(())
+}
+
+/// Prove the nodes of `previous` that `lock` no longer names, from the local
+/// store alone, and persist what proved: the save of `lock` that follows
+/// destroys their evidence. As in `grim add`, every failure only warns, and
+/// `tui.log` names each node left on disk with nothing recording it, the
+/// proven ones too when their records cannot be saved.
+async fn prove_dropped(ctx: &TuiContext, previous: &GrimoireLock, lock: &GrimoireLock) {
+    let kept: BTreeSet<NodeKey> = lock.node_keys().collect();
+    let dropped: BTreeSet<NodeKey> = previous.node_keys().filter(|key| !kept.contains(key)).collect();
+    if dropped.is_empty() {
+        return;
+    }
+    let mut state = match read_state(ctx) {
+        Ok(read) => read.adopt(),
+        Err(e) => {
+            tracing::warn!("the install state was not read, so no file the relock drops was proven: {e}");
+            return;
+        }
+    };
+    let target = match action_target(ctx) {
+        Ok(target) => target,
+        Err(e) => {
+            tracing::warn!("the client set was not read, so no file was proven: {e:#}");
+            return;
+        }
+    };
+    let source_dir = config_anchor(ctx);
+    let store = || local_store(ctx);
+    let before = state.clone();
+    let proof =
+        crate::command::remove::prove_in_store(&mut state, previous, &dropped, &target, &ctx.roots, &source_dir, store);
+    let Some(report) = proof.await else {
+        return;
+    };
+    crate::command::remove::persist_or_name(report, state, before, &ctx.roots, |state| persist_proof(ctx, state));
+}
+
+/// Prove `targets` against `evidence`, the lock as found, from the local store
+/// alone, as `grim uninstall` does, and persist what proved: the delete removes
+/// only what a record names. Returns the lines naming what the delete leaves on
+/// disk. A client set that does not parse proves nothing.
+///
+/// # Errors
+///
+/// Persisting the proven records.
+async fn prove_deletions(
+    ctx: &TuiContext,
+    state: &mut InstallState,
+    evidence: &GrimoireLock,
+    targets: &[NodeKey],
+    force: &ForceScope,
+) -> anyhow::Result<Vec<String>> {
+    let target = match action_target(ctx) {
+        Ok(target) => target,
+        Err(e) => {
+            tracing::warn!("the client set was not read, so no file was proven: {e:#}");
+            return Ok(Vec::new());
+        }
+    };
+    let nodes = targets.iter().cloned().collect();
+    let source_dir = config_anchor(ctx);
+    let store = || local_store(ctx);
+    let proof =
+        crate::command::remove::prove_in_store(state, evidence, &nodes, &target, &ctx.roots, &source_dir, store);
+    let Some(report) = proof.await else {
+        return Ok(Vec::new());
+    };
+    if !report.proven.is_empty() {
+        persist_proof(ctx, state)?;
+    }
+    let forced = |(kind, name): &NodeKey| force.overrides(*kind, name);
+    Ok(crate::command::uninstall::left_by_delete(&report, state, forced))
+}
+
+/// The local content store alone, as `grim --offline` reads it: no request leaves.
+fn local_store(ctx: &TuiContext) -> io::Result<Arc<dyn OciAccess>> {
+    use crate::oci::access::{AccessMode, cached_access::CachedAccess, registry_client::RegistryClient};
+    let paths = GrimPaths::new(ctx.roots.grim_home.clone());
+    paths.ensure_layout()?;
+    let unused = RegistryClient::with_plain_http_hosts(Vec::new().into());
+    let tags = crate::oci::tag_cache::TagCache::new(paths.tags_dir());
+    let blobs = crate::store::BlobStore::new(paths.blobs_dir());
+    Ok(Arc::new(CachedAccess::new(unused, tags, blobs, AccessMode::Offline)))
+}
+
+fn persist_proof(ctx: &TuiContext, state: &InstallState) -> anyhow::Result<()> {
+    state
+        .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+        .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))
+}
+
+/// The clients an action renders into, parsed as `grim install` parses them.
+fn action_target(ctx: &TuiContext) -> anyhow::Result<InstallTarget> {
+    let target = InstallTarget::parse_with_global(
+        &ctx.workspace,
+        ctx.scope,
+        &[],
+        &ctx.clients_default,
+        &ctx.clients_global,
+        &ctx.vendors,
+    )
+    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    // The target reads the ambient `$GRIM_HOME`; a hermetic test's roots do not.
+    #[cfg(test)]
+    let target = target.with_grim_home(&ctx.roots.grim_home);
+    Ok(target)
 }
 
 /// Refuse `lock` when the settings packages it arms conflict, through the
@@ -4171,20 +4338,10 @@ async fn refuse_settings_conflict(ctx: &TuiContext, lock: &GrimoireLock) -> anyh
     let policy = tui_hook_policy(ctx, Some(lock))
         .with_locked(BTreeSet::new(), bindings)
         .settings;
-    let target = InstallTarget::parse_with_global(
-        &ctx.workspace,
-        ctx.scope,
-        &[],
-        &ctx.clients_default,
-        &ctx.clients_global,
-        &ctx.vendors,
-    )
-    .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
-    .with_settings_policy(policy);
-    // The target reads the ambient `$GRIM_HOME`; a hermetic test's roots do not.
-    #[cfg(test)]
-    let target = target.with_grim_home(&ctx.roots.grim_home);
-    let state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let target = action_target(ctx)?.with_settings_policy(policy);
+    let state = read_state(ctx)
+        .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+        .exempt(Exempt::SettingsPreflight);
     // A refused store applies nothing, so nothing it would apply can conflict.
     if *state.settings_store() == crate::install::install_state::SettingsStore::Refused {
         return Ok(());
@@ -4250,7 +4407,9 @@ async fn perform_local(
 
     // Otherwise route a dev-install record (`grim install <path>`, no
     // declaration) through the Dev re-materialize path.
-    let install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let install_state = read_state(ctx)
+        .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+        .exempt(Exempt::DevRecords);
     let Some(record) = install_state
         .get(kind, &name)
         .filter(|r| r.dev && r.source.path().is_some())
@@ -4419,7 +4578,9 @@ async fn perform_local_dev(
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
     .with_hook_policy(policies.hooks)
     .with_settings_policy(policies.settings);
-    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let mut install_state = read_state(ctx)
+        .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+        .exempt(Exempt::InstallGate);
     let materializer = DefaultMaterializer;
     let closure = BTreeSet::from([(kind, name.to_string())]);
     let run = install_and_persist(
@@ -5373,15 +5534,6 @@ impl SettingsGateRequest {
         }
     }
 
-    fn load_state(&self) -> io::Result<InstallState> {
-        match self.scope {
-            ConfigScope::Project => {
-                InstallState::load_project(&self.workspace, &self.roots.grim_home, &self.config_path)
-            }
-            ConfigScope::Global => InstallState::load_global(&self.state_path, &self.roots),
-        }
-    }
-
     /// The blocking half of the read. `None` when the configured clients do
     /// not resolve, which costs the rows their gates and nothing else.
     fn read(&self) -> anyhow::Result<Option<(SettingsGates, InstallTarget, InstallState)>> {
@@ -5397,9 +5549,15 @@ impl SettingsGateRequest {
             return Ok(None);
         };
         let lock = lock_io::load(&self.lock_path).ok();
-        let state = self
-            .load_state()
-            .unwrap_or_else(|_| InstallState::empty(&self.state_path));
+        let state = scope_resolution::read_state_at(
+            self.scope,
+            &self.workspace,
+            &self.config_path,
+            &self.state_path,
+            &self.roots,
+        )
+        .map(|read| read.exempt(Exempt::SettingsPreflight))
+        .unwrap_or_else(|_| InstallState::empty(&self.state_path));
         let at = SettingsGateScope {
             flags: &options.experimental,
             grim_home: &self.roots.grim_home,
@@ -5471,6 +5629,100 @@ fn land_settings_gates(
             false
         }
     }
+}
+
+/// Start the active scope's background adoption in place of a running one.
+/// Nothing starts under a stale lock, with nothing to prove, or when the
+/// declaration, the lock or the state cannot be read.
+fn start_adoption(ctx: &TuiContext, state: &mut TuiState, adoption: &mut Background) {
+    adoption.stop();
+    let Some(proof) = adoption_proof(ctx) else {
+        return;
+    };
+    state.set_status(adoption::adopting_line(proof.nodes.len()));
+    adoption.spawn(proof);
+}
+
+/// What the active scope's task proves, as `grim status` picks it; `None` when nothing.
+fn adoption_proof(ctx: &TuiContext) -> Option<adoption::Proof> {
+    let (options, _, set) = load_scope_declaration(ctx).ok()?;
+    let lock = lock_io::load(&ctx.lock_path).ok()?;
+    if !status::lock_matches_config(&set, Some(&lock)) {
+        return None;
+    }
+    let install_state = read_state(ctx).ok()?.defer();
+    let target = InstallTarget::parse_with_global(
+        &ctx.workspace,
+        ctx.scope,
+        &[],
+        &options.clients,
+        &ctx.clients_global,
+        &options.vendors,
+    )
+    .ok()?;
+    let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
+    let nodes = status::adoption_candidates(&lock, &install_state, &target, &ctx.roots, &active);
+    if nodes.is_empty() {
+        return None;
+    }
+    // Opened only now: opening the store creates its directories under `$GRIM_HOME`.
+    let store = local_store(ctx)
+        .inspect_err(|e| tracing::debug!("local store not readable, so no record is proven: {e}"))
+        .ok()?;
+    Some(adoption::Proof {
+        lock,
+        state: install_state,
+        nodes,
+        target,
+        roots: ctx.roots.clone(),
+        store,
+        registry: (!ctx.offline).then(|| Arc::clone(&ctx.access)),
+    })
+}
+
+/// Land the adoption task once it ended, returning whether the screen changed.
+fn drain_adoption(ctx: &TuiContext, state: &mut TuiState, adoption: &mut Background) -> bool {
+    adoption
+        .try_join()
+        .is_some_and(|joined| land_adoption(ctx, state, adoption, joined))
+}
+
+/// Commit a finished task's proofs and re-derive the badges. A task that
+/// failed or passed its deadline commits nothing. The outcome replaces the
+/// "adopting" line only, never a line an action wrote meanwhile.
+fn land_adoption(ctx: &TuiContext, state: &mut TuiState, adoption: &Background, joined: adoption::Joined) -> bool {
+    let line = match joined {
+        Ok(Ok(proven)) => {
+            let (roots, config, lock) = (&ctx.roots, &ctx.config_path, &ctx.lock_path);
+            let written = match status::commit_adopted(ctx.scope, roots, config, lock, adoption.lossy, &proven) {
+                Ok(written) => {
+                    let left = adoption.candidates.saturating_sub(written);
+                    tracing::warn!("{}", status::adopted_text(written, left));
+                    written
+                }
+                Err(cause) => {
+                    tracing::warn!("records not written: {}", status::skip_cause_text(cause));
+                    0
+                }
+            };
+            if written > 0 {
+                rederive_states(ctx, state);
+            }
+            adoption::adopted_line(written, adoption.candidates)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("{e:#}; nothing was adopted");
+            String::new()
+        }
+        Err(e) => {
+            tracing::warn!("the background adoption ended without a result, so nothing was adopted: {e}");
+            String::new()
+        }
+    };
+    if state.status_line == adoption::adopting_line(adoption.candidates) {
+        state.set_status(line);
+    }
+    true
 }
 
 /// The policies a TUI mutating action attaches — resolved without
@@ -5561,16 +5813,17 @@ fn consent_site(ctx: &TuiContext, hooks_enabled: bool) -> ConsentSite<'_> {
 /// Delete `targets` (files, install records, vendor config, hook
 /// convergence) through [`crate::command::uninstall::delete_nodes`], the
 /// deletion half of `grim uninstall`, forcing the nodes `force` names.
-/// Every refusal is found before the first removal, so a refused delete
+/// Each target first proves against the lock as found ([`prove_deletions`]),
+/// and every refusal is found before the first removal, so a refused delete
 /// removes nothing. Returns the gatekeepers the delete left with no client
-/// registration.
+/// registration; `tui.log` names the files it left on disk.
 ///
 /// # Errors
 ///
 /// A [`HeldRefusal`] when values changed outside grim refused the delete
 /// and a declaration still reaches each of their packages, so `grim
 /// uninstall` would keep them: only a forced delete here removes them.
-fn delete_targets(
+async fn delete_targets(
     ctx: &TuiContext,
     install_state: &mut crate::install::install_state::InstallState,
     targets: &[crate::lock::effective_set::NodeKey],
@@ -5578,6 +5831,12 @@ fn delete_targets(
     force: &ForceScope,
 ) -> anyhow::Result<HookNote> {
     use crate::command::uninstall::{DeleteEnv, DeleteFailure, delete_nodes};
+    let lock = lock_io::load(&ctx.lock_path).ok();
+    // Ahead of the refusal check too: a drifted entry that proves is re-recorded, not refused.
+    let left = match &lock {
+        Some(evidence) => prove_deletions(ctx, install_state, evidence, targets, force).await?,
+        None => Vec::new(),
+    };
     if let Some(refused) = refuse_delete(ctx, checked_refusals(install_state, targets, &ctx.roots, force), ledger) {
         return Err(refused);
     }
@@ -5585,7 +5844,6 @@ fn delete_targets(
     // consent record always covers (see `delete_nodes`).
     let hook_policy = tui_hook_policy(ctx, None).hooks;
     // The install a remedy names reads the lock's hooks and the config's, which the delete's does not.
-    let lock = lock_io::load(&ctx.lock_path).ok();
     let install_hooks = tui_policy_over(ctx, lock.as_ref(), true).hooks;
     let deletion = delete_nodes(
         install_state,
@@ -5616,7 +5874,12 @@ fn delete_targets(
         Some(DeleteFailure::Persist(e)) => Some(anyhow::Error::new(e).context("install-state persist failed")),
     };
     match failed {
-        None => Ok(hooks),
+        None => {
+            for line in left {
+                tracing::warn!("{line}");
+            }
+            Ok(hooks)
+        }
         Some(failed) if hooks.is_empty() => Err(failed),
         Some(failed) => Err(failed.context(HooksAhead(hooks))),
     }
@@ -6361,7 +6624,9 @@ async fn perform_member_uninstall(
     let key = (member_kind, name.clone());
     let mut targets = Vec::new();
     if hold.is_none() {
-        let state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+        let state = read_state(ctx)
+            .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+            .adopt();
         // A view another grim outdated still shows the member after its name was
         // bound at another repository, and acting on it would delete that package.
         refuse_bound_elsewhere(ctx, &state, member_kind, &repo, &name)?;
@@ -6385,9 +6650,11 @@ async fn perform_member_uninstall(
     if install_state.is_some() || !targets.is_empty() {
         let mut install_state = match install_state {
             Some(state) => state,
-            None => load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?,
+            None => read_state(ctx)
+                .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
+                .adopt(),
         };
-        hooks = delete_targets(ctx, &mut install_state, &targets, ledger, &ForceScope::None)?;
+        hooks = delete_targets(ctx, &mut install_state, &targets, ledger, &ForceScope::None).await?;
     }
 
     // Undeclare from config + lock, threading notes back to the caller. The
@@ -12959,6 +13226,968 @@ mod tests {
         );
     }
 
+    /// [`pack_dropping_x`] as a clone has it: the files and the lock, no install state.
+    async fn pack_dropping_x_in_a_clone(
+        workspace: &std::path::Path,
+    ) -> (crate::oci::access::memory_registry::MemoryRegistry, TuiContext) {
+        let (reg, ctx) = pack_dropping_x(workspace).await;
+        std::fs::remove_file(ctx.workspace.join(".grimoire/state.json")).unwrap();
+        (reg, ctx)
+    }
+
+    /// In a clone, an Update proves its row's closure in the previous lock from the
+    /// files, as `grim update <binding>` does: the member still shipped installs
+    /// over no untracked refusal, the dropped one is pruned, and an artifact
+    /// outside the closure stays unrecorded.
+    #[tokio::test]
+    async fn a_clone_update_proves_its_closure_and_prunes_the_dropped_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_reg, ctx) = pack_dropping_x_in_a_clone(tmp.path()).await;
+
+        let summary = perform(&ctx, &bundle_row("pack"), None, BatchOp::Update, &SilentProgress, false)
+            .await
+            .expect("pack updates");
+
+        assert_eq!(summary.forceable_refusal, None, "{summary:?}");
+        assert!(
+            !ctx.workspace.join(".claude/skills/x").exists(),
+            "x proved, so the prune takes it"
+        );
+        let state = load_state(&ctx).unwrap();
+        assert!(state.get(ArtifactKind::Skill, "x").is_none());
+        assert!(state.get(ArtifactKind::Skill, "y").is_some(), "y proved");
+        assert!(
+            state.get(ArtifactKind::Skill, "z").is_none(),
+            "z is outside the closure"
+        );
+        assert!(ctx.workspace.join(".claude/skills/z/SKILL.md").is_file());
+    }
+
+    /// The proof persists before the lock save: a save that then fails leaves the
+    /// lock as found and keeps the records the proof wrote.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clone_update_whose_lock_save_fails_keeps_the_proven_records() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (_reg, ctx) = pack_dropping_x_in_a_clone(tmp.path()).await;
+        let lock = std::fs::read(&ctx.lock_path).unwrap();
+        // The lock writer follows a link, so only the link target's directory is read-only.
+        let pinned = ctx.workspace.join("pinned");
+        std::fs::create_dir(&pinned).unwrap();
+        std::fs::rename(&ctx.lock_path, pinned.join("grimoire.lock")).unwrap();
+        std::os::unix::fs::symlink(pinned.join("grimoire.lock"), &ctx.lock_path).unwrap();
+        let mode = std::fs::metadata(&pinned).unwrap().permissions();
+        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let out = perform(&ctx, &bundle_row("pack"), None, BatchOp::Update, &SilentProgress, false).await;
+
+        std::fs::set_permissions(&pinned, mode).unwrap();
+        let err = out.expect_err("a read-only lock directory refuses the save");
+        assert_eq!(std::fs::read(&ctx.lock_path).unwrap(), lock);
+        let state = load_state(&ctx).unwrap();
+        for name in ["x", "y"] {
+            assert!(
+                state.get(ArtifactKind::Skill, name).is_some(),
+                "{name} has no record: {err:#}"
+            );
+        }
+    }
+
+    /// In a clone, an Install whose relock drops a pin proves that pin's files from
+    /// the local store before the save, as `grim add` does: the saved lock no
+    /// longer names it, so nothing could prove them later.
+    #[tokio::test]
+    async fn a_clone_install_proves_the_pin_its_relock_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        for name in ["b", "c"] {
+            publish_skill(&reg, name, "first").await;
+        }
+        store_skill(&reg, workspace, "b").await;
+        let ctx = test_ctx(workspace, store_backed(reg, workspace));
+        perform(&ctx, &skill_row("b"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect("b installs");
+        std::fs::remove_file(workspace.join(".grimoire/state.json")).unwrap();
+        // A hand edit takes b's line out, so the next relock drops its pin.
+        let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+        let edited = config.replace("b = \"localhost:5050/acme/b:1\"\n", "");
+        assert_ne!(edited, config, "the fixture: b's line");
+        std::fs::write(&ctx.config_path, edited).unwrap();
+
+        perform(&ctx, &skill_row("c"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect("c installs");
+
+        assert_eq!(pin_of(&ctx, "b"), None, "the relock drops b");
+        assert!(workspace.join(".claude/skills/b/SKILL.md").is_file());
+        assert!(
+            load_state(&ctx).unwrap().get(ArtifactKind::Skill, "b").is_some(),
+            "b was not proven before its pin left the lock"
+        );
+    }
+
+    /// The Install's proof of the pin its relock drops cannot be saved: `tui.log`
+    /// names that pin's files with the lost record as the reason, and no record
+    /// holds it. Root writes through 0o555, so there the test returns.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clone_install_whose_proof_is_not_saved_names_the_dropped_pin() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        for name in ["b", "c"] {
+            publish_skill(&reg, name, "first").await;
+        }
+        store_skill(&reg, workspace, "b").await;
+        let ctx = test_ctx(workspace, store_backed(reg, workspace));
+        perform(&ctx, &skill_row("b"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect("b installs");
+        std::fs::remove_file(workspace.join(".grimoire/state.json")).unwrap();
+        let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+        std::fs::write(
+            &ctx.config_path,
+            config.replace("b = \"localhost:5050/acme/b:1\"\n", ""),
+        )
+        .unwrap();
+        let state_dir = workspace.join(".grimoire");
+        let mode = |bits| std::fs::Permissions::from_mode(bits);
+        std::fs::set_permissions(&state_dir, mode(0o555)).unwrap();
+        let writable = tempfile::tempfile_in(&state_dir).is_ok();
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        // c's own record cannot be saved either, so the Install's outcome is not the point.
+        let _ = perform(&ctx, &skill_row("c"), None, BatchOp::Install, &SilentProgress, false).await;
+
+        std::fs::set_permissions(&state_dir, mode(0o755)).unwrap();
+        if writable {
+            return;
+        }
+        let logs = capture.text();
+        assert_eq!(pin_of(&ctx, "b"), None, "the relock drops b: {logs}");
+        let line = logs
+            .lines()
+            .find(|line| line.contains("skill 'b' left"))
+            .unwrap_or_else(|| panic!("b's files are named: {logs}"));
+        assert!(line.contains(".claude/skills/b"), "{line}");
+        assert!(line.contains("could not be saved"), "{line}");
+        let recorded = load_state(&ctx).is_ok_and(|state| state.get(ArtifactKind::Skill, "b").is_some());
+        assert!(!recorded, "{logs}");
+    }
+
+    /// `reg` behind the local store at `home`, as the CLI's seam is: stored content wins.
+    fn store_backed(
+        reg: crate::oci::access::memory_registry::MemoryRegistry,
+        home: &std::path::Path,
+    ) -> Arc<dyn OciAccess> {
+        let paths = GrimPaths::new(home.to_path_buf());
+        Arc::new(crate::oci::access::cached_access::CachedAccess::new(
+            reg,
+            crate::oci::tag_cache::TagCache::new(paths.tags_dir()),
+            crate::store::BlobStore::new(paths.blobs_dir()),
+            crate::oci::access::AccessMode::Online,
+        ))
+    }
+
+    /// Copy `acme/<name>:1` into the local store at `home`, under the digest its
+    /// manifest JSON hashes to, and move the tag there: `reg` then names the tag
+    /// and serves none of the content.
+    async fn store_skill(
+        reg: &crate::oci::access::memory_registry::MemoryRegistry,
+        home: &std::path::Path,
+        name: &str,
+    ) {
+        use crate::oci::{Algorithm, PinnedIdentifier};
+        let id = Identifier::new_registry(format!("acme/{name}"), "localhost:5050");
+        let operation = crate::oci::access::Operation::Resolve;
+        let digest = reg
+            .resolve_digest(&id.clone_with_tag("1"), operation)
+            .await
+            .unwrap()
+            .unwrap();
+        let pin = PinnedIdentifier::try_from(id.clone_with_digest(digest)).unwrap();
+        let manifest = reg.fetch_manifest(&pin).await.unwrap().unwrap();
+        let paths = GrimPaths::new(home.to_path_buf());
+        paths.ensure_layout().unwrap();
+        let blobs = crate::store::BlobStore::new(paths.blobs_dir());
+        let mut layers = Vec::new();
+        for layer in &manifest.layers {
+            let bytes = reg.fetch_blob(&id, &layer.digest, u64::MAX).await.unwrap().unwrap();
+            blobs.put(&layer.digest, &bytes).unwrap();
+            layers.push(serde_json::json!({
+                "mediaType": layer.media_type,
+                "digest": layer.digest.to_string(),
+                "size": layer.size,
+            }));
+        }
+        let json = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": manifest.artifact_type,
+            "config": {
+                "mediaType": "application/vnd.oci.empty.v1+json",
+                "digest": Algorithm::Sha256.hash(b"{}").to_string(),
+                "size": 2,
+            },
+            "layers": layers,
+        }))
+        .unwrap();
+        let stored = Algorithm::Sha256.hash(&json);
+        blobs.put(&stored, &json).unwrap();
+        reg.put_tag(&id, "1", &stored).await.unwrap();
+    }
+
+    /// Skills `a` and `b` installed from the local store, then cloned: the files,
+    /// the lock and the store stay, the install state is gone.
+    async fn clone_with_a_warm_store(workspace: &std::path::Path) -> TuiContext {
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        for name in ["a", "b"] {
+            publish_skill(&reg, name, "first").await;
+            store_skill(&reg, workspace, name).await;
+        }
+        let ctx = test_ctx(workspace, store_backed(reg, workspace));
+        for name in ["a", "b"] {
+            perform(&ctx, &skill_row(name), None, BatchOp::Install, &SilentProgress, false)
+                .await
+                .expect("the first install succeeds");
+        }
+        std::fs::remove_file(workspace.join(".grimoire/state.json")).unwrap();
+        ctx
+    }
+
+    /// A delete in a clone proves the row from the local store, so it removes
+    /// the files no record named, as `grim uninstall` does.
+    #[tokio::test]
+    async fn a_clone_delete_removes_the_files_the_store_proves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = clone_with_a_warm_store(tmp.path()).await;
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/a"))
+            .await
+            .expect("delete a");
+
+        let logs = capture.text();
+        assert!(!tmp.path().join(".claude/skills/a").exists(), "{logs}");
+        assert!(!logs.contains("on disk"), "{logs}");
+        assert!(tmp.path().join(".claude/skills/b/SKILL.md").is_file());
+    }
+
+    /// The member delete proves from the local store too.
+    #[tokio::test]
+    async fn a_clone_member_delete_removes_the_files_the_store_proves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = clone_with_a_warm_store(tmp.path()).await;
+
+        perform_member_uninstall(
+            &ctx,
+            "localhost:5050/acme/b".to_string(),
+            ArtifactKind::Skill,
+            "b".to_string(),
+            &mut SettingsLedger::default(),
+        )
+        .await
+        .expect("delete b");
+
+        assert!(!tmp.path().join(".claude/skills/b").exists());
+        assert!(tmp.path().join(".claude/skills/a/SKILL.md").is_file());
+    }
+
+    /// Over a cold store a delete proves nothing, though the registry serves the
+    /// content: the files stay, and `tui.log` names them once.
+    #[tokio::test]
+    async fn a_clone_delete_over_a_cold_store_keeps_the_files_and_names_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_reg, ctx) = project_with_two_rows(tmp.path()).await;
+        std::fs::remove_file(ctx.workspace.join(".grimoire/state.json")).unwrap();
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        perform_uninstall(&ctx, &installed_row("localhost:5050/acme/a"))
+            .await
+            .expect("delete a");
+
+        let logs = capture.text();
+        assert!(tmp.path().join(".claude/skills/a/SKILL.md").is_file(), "{logs}");
+        let left: Vec<&str> = logs.lines().filter(|line| line.contains("on disk")).collect();
+        assert_eq!(left.len(), 1, "{logs}");
+        assert!(left[0].contains("skill 'a'"), "{logs}");
+        assert!(left[0].contains(".claude/skills/a"), "{logs}");
+    }
+
+    /// Background adoption: the task proves, and the loop commits between actions.
+    mod background_adoption {
+        use super::*;
+        use crate::oci::access::bounded_access::TUI_RUN_DEADLINE;
+        use crate::oci::access::error::AccessError;
+        use crate::oci::access::{CatalogListing, Operation};
+        use crate::oci::manifest::OciManifest;
+        use crate::oci::{Digest, PinnedIdentifier};
+        use crate::tui::adoption::Joined;
+
+        /// A registry that never answers.
+        struct Silent;
+
+        #[async_trait::async_trait]
+        impl OciAccess for Silent {
+            async fn resolve_digest(&self, _: &Identifier, _: Operation) -> Result<Option<Digest>, AccessError> {
+                std::future::pending().await
+            }
+            async fn fetch_manifest(&self, _: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+                std::future::pending().await
+            }
+            async fn fetch_manifest_bytes(&self, _: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+                std::future::pending().await
+            }
+            async fn fetch_blob(&self, _: &Identifier, _: &Digest, _: u64) -> Result<Option<Vec<u8>>, AccessError> {
+                std::future::pending().await
+            }
+            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+                std::future::pending().await
+            }
+            async fn list_catalog(&self, _: &str) -> Result<CatalogListing, AccessError> {
+                std::future::pending().await
+            }
+            async fn push_blob(&self, _: &Identifier, _: &[u8]) -> Result<Digest, AccessError> {
+                std::future::pending().await
+            }
+            async fn push_manifest(&self, _: &Identifier, _: &OciManifest) -> Result<Digest, AccessError> {
+                std::future::pending().await
+            }
+            async fn put_tag(&self, _: &Identifier, _: &str, _: &Digest) -> Result<(), AccessError> {
+                std::future::pending().await
+            }
+        }
+
+        /// The task's end, waited for at most ten seconds.
+        async fn ended(adoption: &mut Background) -> Joined {
+            tokio::time::timeout(Duration::from_secs(10), adoption.join())
+                .await
+                .expect("the task ends inside ten seconds")
+                .expect("a task was running")
+        }
+
+        /// [`drain_adoption`] polled as the loop polls it, until it lands or
+        /// `within` passes; whether it landed.
+        async fn drained(ctx: &TuiContext, state: &mut TuiState, adoption: &mut Background, within: Duration) -> bool {
+            let until = tokio::time::Instant::now() + within;
+            while tokio::time::Instant::now() < until {
+                if drain_adoption(ctx, state, adoption) {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+
+        /// A landing within ten seconds, through the loop's [`drain_adoption`].
+        async fn lands(ctx: &TuiContext, state: &mut TuiState, adoption: &mut Background) {
+            let landed = drained(ctx, state, adoption, Duration::from_secs(10)).await;
+            assert!(landed, "the task did not land inside ten seconds");
+        }
+
+        fn state_file(ctx: &TuiContext) -> std::path::PathBuf {
+            ctx.workspace.join(".grimoire/state.json")
+        }
+
+        /// Rows `a` and `b`, their badges derived as the first load derives them.
+        fn with_rows(ctx: &TuiContext) -> TuiState {
+            let mut state = TuiState::new();
+            state.set_rows(vec![skill_row("a"), skill_row("b")]);
+            rederive_states(ctx, &mut state);
+            state
+        }
+
+        fn badges(state: &TuiState) -> Vec<ArtifactState> {
+            state.rows.iter().map(|r| r.state).collect()
+        }
+
+        fn recorded(ctx: &TuiContext, kind: ArtifactKind, name: &str) -> bool {
+            load_state(ctx).unwrap().get(kind, name).is_some()
+        }
+
+        fn warnings(logs: &str) -> usize {
+            logs.lines().filter(|line| line.contains("WARN")).count()
+        }
+
+        /// [`project_with_two_rows`] cloned over a cold store, behind a registry that never answers.
+        async fn cold_clone_behind_silence(workspace: &std::path::Path) -> TuiContext {
+            let (_reg, ctx) = project_with_two_rows(workspace).await;
+            std::fs::remove_file(ctx.workspace.join(".grimoire/state.json")).unwrap();
+            TuiContext {
+                access: Arc::new(Silent),
+                ..ctx
+            }
+        }
+
+        /// research_install_record_cache_test_matrix.md M11b (TUI form): the task
+        /// proves both rows from the store and writes nothing; the loop commits,
+        /// the badges follow, and the next open finds nothing to prove.
+        #[tokio::test]
+        async fn a_clone_is_adopted_by_the_loop_and_not_by_the_task() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = clone_with_a_warm_store(tmp.path()).await;
+            let mut state = with_rows(&ctx);
+            assert!(
+                !badges(&state).contains(&ArtifactState::Installed),
+                "{:?}",
+                badges(&state)
+            );
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(
+                state.status_line.contains("adopting 2 artifacts"),
+                "{}",
+                state.status_line
+            );
+            assert!(state.status_line.contains("in the background"), "{}", state.status_line);
+            let joined = ended(&mut adoption).await;
+            assert!(!state_file(&ctx).exists(), "the task wrote the state file");
+            assert!(land_adoption(&ctx, &mut state, &adoption, joined));
+
+            assert!(
+                state.status_line.contains("adopted 2 · 0 unproven"),
+                "{}",
+                state.status_line
+            );
+            assert!(state.status_line.contains("(tui.log)"), "{}", state.status_line);
+            assert!(recorded(&ctx, ArtifactKind::Skill, "a") && recorded(&ctx, ArtifactKind::Skill, "b"));
+            assert_eq!(badges(&state), [ArtifactState::Installed; 2]);
+
+            let bytes = std::fs::read(state_file(&ctx)).unwrap();
+            let mtime = std::fs::metadata(state_file(&ctx)).unwrap().modified().unwrap();
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(!adoption.is_running(), "a second open has nothing to prove");
+            assert_eq!(std::fs::read(state_file(&ctx)).unwrap(), bytes);
+            assert_eq!(std::fs::metadata(state_file(&ctx)).unwrap().modified().unwrap(), mtime);
+        }
+
+        /// research_install_record_cache_test_matrix.md S51: a delete that runs
+        /// while the task does stays deleted when the loop commits after it.
+        #[tokio::test]
+        async fn a_delete_during_the_task_stays_deleted() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = clone_with_a_warm_store(tmp.path()).await;
+            let mut state = with_rows(&ctx);
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+            start_adoption(&ctx, &mut state, &mut adoption);
+            let joined = ended(&mut adoption).await;
+
+            perform_uninstall(&ctx, &installed_row("localhost:5050/acme/b"))
+                .await
+                .expect("delete b");
+            state.set_status("uninstalled (1 ok)");
+            assert!(land_adoption(&ctx, &mut state, &adoption, joined));
+
+            assert!(!tmp.path().join(".claude/skills/b").exists());
+            assert!(recorded(&ctx, ArtifactKind::Skill, "a"));
+            assert!(!recorded(&ctx, ArtifactKind::Skill, "b"), "the commit brought b back");
+            assert_eq!(state.rows[0].state, ArtifactState::Installed);
+            assert_eq!(state.status_line, "uninstalled (1 ok)", "the action's line stays");
+        }
+
+        /// The swappable half of an empty project at `dir`: nothing to prove.
+        fn empty_scope(dir: &std::path::Path) -> ScopeSwap {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+            ScopeSwap {
+                scope: ConfigScope::Project,
+                invocation: crate::config::scope::Invocation::WALKED,
+                workspace: dir.to_path_buf(),
+                lock_path: dir.join("grimoire.lock"),
+                state_path: dir.join(".grimoire/state.json"),
+                config_path: dir.join("grimoire.toml"),
+                roots: test_roots(dir),
+                clients_default: vec!["claude".to_string()],
+                clients_global: Vec::new(),
+                vendors: Default::default(),
+                clients_selected: Vec::new(),
+                label: "other".to_string(),
+                resolved_options: ConfigOptions::default().resolved(),
+                registries: Vec::new(),
+                primary_registry: "localhost:5050".to_string(),
+            }
+        }
+
+        /// adr_output_ownership_without_state.md § Validation, case 35: a scope
+        /// toggle starts the new scope's task, and its landing re-derives the badges.
+        #[tokio::test]
+        async fn a_scope_toggle_starts_the_new_scopes_task() {
+            let tmp = tempfile::tempdir().unwrap();
+            let clone = tmp.path().join("clone");
+            std::fs::create_dir(&clone).unwrap();
+            let mut ctx = clone_with_a_warm_store(&clone).await;
+            ctx.alt = Some(empty_scope(&tmp.path().join("other")));
+            let mut state = with_rows(&ctx);
+            let (mut checker, _rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.primary_registry.clone());
+            let (mut bundle_checker, _bundle_rx) =
+                crate::tui::bundle_member_fetch::BundleMemberChecker::new(Arc::clone(&ctx.access));
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+
+            assert!(ctx.toggle_scope());
+            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker, &mut adoption);
+            assert!(!adoption.is_running(), "the other scope has nothing to prove");
+            assert!(ctx.toggle_scope());
+            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker, &mut adoption);
+            assert!(adoption.is_running(), "toggling back starts the clone's task");
+            assert!(
+                state.status_line.contains("adopting 2 artifacts"),
+                "{}",
+                state.status_line
+            );
+
+            lands(&ctx, &mut state, &mut adoption).await;
+            assert_eq!(badges(&state), [ArtifactState::Installed; 2]);
+        }
+
+        /// A scope toggle drops the running task: what it proved for the scope it
+        /// left lands in neither that scope's state nor the new one's, though the
+        /// new scope's lock names every pin it proved.
+        #[tokio::test]
+        async fn a_scope_toggle_drops_the_old_scopes_proofs() {
+            let tmp = tempfile::tempdir().unwrap();
+            let clone = tmp.path().join("clone");
+            std::fs::create_dir(&clone).unwrap();
+            let mut ctx = clone_with_a_warm_store(&clone).await;
+            // The same declaration and lock with no files on disk: nothing to prove there.
+            let other = empty_scope(&tmp.path().join("other"));
+            std::fs::copy(&ctx.config_path, &other.config_path).unwrap();
+            std::fs::copy(&ctx.lock_path, &other.lock_path).unwrap();
+            let other_state = other.state_path.clone();
+            ctx.alt = Some(other);
+            let mut state = with_rows(&ctx);
+            let (mut checker, _rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.primary_registry.clone());
+            let (mut bundle_checker, _bundle_rx) =
+                crate::tui::bundle_member_fetch::BundleMemberChecker::new(Arc::clone(&ctx.access));
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(adoption.is_running(), "the clone's task runs");
+
+            assert!(ctx.toggle_scope());
+            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker, &mut adoption);
+            // The other scope has nothing to prove, so a task still held is the clone's.
+            assert!(!adoption.is_running(), "the swap kept the clone's task");
+            drained(&ctx, &mut state, &mut adoption, Duration::from_secs(3)).await;
+
+            assert!(!other_state.exists(), "the clone's proofs landed in the other scope");
+            assert!(!recorded(&ctx, ArtifactKind::Skill, "a"));
+            assert!(
+                !clone.join(".grimoire/state.json").exists(),
+                "the landing wrote the clone's state"
+            );
+            assert!(!state.status_line.contains("adopted"), "{}", state.status_line);
+        }
+
+        /// adr_output_ownership_without_state.md § Validation, case 35, at global
+        /// scope: the task proves from `global.json` and the loop commits into it.
+        /// A record behind the lock stands in for a deleted `global.json`, whose
+        /// recordless proof looks under the real `$HOME`, which a unit test may not set.
+        #[tokio::test]
+        async fn a_global_scope_is_adopted_into_global_json() {
+            use crate::install::install_state::{ClientOutput, InstallRecord};
+            use crate::install::path_anchor::{AnchoredPath, PathAnchor};
+            let tmp = tempfile::tempdir().unwrap();
+            let (home, project) = (tmp.path().join("home"), tmp.path().join("project"));
+            let (grim_home, claude) = (home.join(".grimoire"), home.join(".claude"));
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::create_dir_all(claude.join("skills/a")).unwrap();
+            std::fs::write(project.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+            let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+            publish_skill(&reg, "a", "first").await;
+            store_skill(&reg, &grim_home, "a").await;
+            // The render the global files hold: a project install of the same pin.
+            let mut rendered = test_ctx(&project, store_backed(reg, &grim_home));
+            rendered.roots.grim_home = grim_home.clone();
+            perform(
+                &rendered,
+                &skill_row("a"),
+                None,
+                BatchOp::Install,
+                &SilentProgress,
+                false,
+            )
+            .await
+            .expect("the render installs");
+            let skill = std::fs::read(project.join(".claude/skills/a/SKILL.md")).unwrap();
+            std::fs::write(claude.join("skills/a/SKILL.md"), skill).unwrap();
+            let config = std::fs::read_to_string(project.join("grimoire.toml")).unwrap();
+            std::fs::write(
+                grim_home.join("grimoire.toml"),
+                format!("[options]\nclients = [\"claude\"]\n\n{config}"),
+            )
+            .unwrap();
+            std::fs::copy(project.join("grimoire.lock"), grim_home.join("grimoire.lock")).unwrap();
+            let mut ctx = test_ctx(&home, Arc::clone(&rendered.access));
+            ctx.scope = ConfigScope::Global;
+            ctx.lock_path = grim_home.join("grimoire.lock");
+            ctx.state_path = grim_home.join("state/global.json");
+            ctx.config_path = grim_home.join("grimoire.toml");
+            ctx.roots.grim_home = grim_home.clone();
+            ctx.roots.vendor_roots.insert("claude", claude.clone());
+            // Claude stays active whatever clients the host's real `$HOME` holds.
+            ctx.clients_global = vec![crate::install::client_target::ClientTarget::Claude];
+            let (_, _, set) = load_scope_declaration(&ctx).unwrap();
+            let mut lock = lock_io::load(&ctx.lock_path).unwrap();
+            lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
+            lock_io::save(&ctx.lock_path, &lock, None).unwrap();
+            let behind =
+                Identifier::new_registry("acme/a", "localhost:5050").clone_with_digest(Digest::Sha256("0".repeat(64)));
+            let mut global = InstallState::empty(&ctx.state_path);
+            global.record(InstallRecord {
+                kind: ArtifactKind::Skill,
+                name: "a".to_string(),
+                source: crate::lock::locked_source::LockedSource::Registry(PinnedIdentifier::try_from(behind).unwrap()),
+                dev: false,
+                outputs: vec![ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::VendorRoot("claude"),
+                        relative: "skills/a".to_string(),
+                    },
+                    content_hash: Digest::Sha256("0".repeat(64)),
+                    support_dir: None,
+                    entry: None,
+                    adopted: false,
+                    element: None,
+                }],
+            });
+            global
+                .persist(ConfigScope::Global, &home, &grim_home, &ctx.config_path)
+                .unwrap();
+            let mut state = TuiState::new();
+            state.set_rows(vec![skill_row("a")]);
+            rederive_states(&ctx, &mut state);
+            assert_eq!(state.rows[0].state, ArtifactState::Modified, "the fixture");
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            lands(&ctx, &mut state, &mut adoption).await;
+
+            assert!(
+                state.status_line.contains("adopted 1 · 0 unproven"),
+                "{}",
+                state.status_line
+            );
+            let saved = load_state(&ctx).unwrap();
+            let pin = lock.iter_artifacts().find(|a| a.name == "a").unwrap().source.clone();
+            let record = saved.get(ArtifactKind::Skill, "a").unwrap();
+            assert!(record.source.eq_content(&pin));
+            // The global list names claude, so the proof re-records claude's global output.
+            let global =
+                |out: &ClientOutput| out.client == "claude" && out.target.anchor == PathAnchor::VendorRoot("claude");
+            assert!(
+                !record.outputs.is_empty() && record.outputs.iter().all(global),
+                "{:?}",
+                record.outputs
+            );
+            assert_ne!(
+                state.rows[0].state,
+                ArtifactState::Modified,
+                "the badge was not re-derived"
+            );
+            assert_eq!(state.rows[0].state, ArtifactState::Installed);
+            assert!(
+                !home.join(".grimoire/state.json").exists(),
+                "the commit wrote a project state"
+            );
+        }
+
+        /// A pin no store holds, the fixture of a declared hook and settings package.
+        fn locked(kind: ArtifactKind, name: &str, repository: &str) -> LockedArtifact {
+            let digest = Digest::Sha256("e".repeat(64));
+            let id = Identifier::new_registry(repository, "localhost:5050").clone_with_digest(digest);
+            LockedArtifact {
+                name: name.to_string(),
+                kind,
+                source: crate::lock::locked_source::LockedSource::Registry(PinnedIdentifier::try_from(id).unwrap()),
+                bundles: Vec::new(),
+                requires: Vec::new(),
+            }
+        }
+
+        /// research_install_record_cache_test_matrix.md S45 (TUI half): opening a
+        /// clone that declares a hook and a settings package adopts its skills and
+        /// writes no hook or settings record; the dispatch table and the settings
+        /// file keep their bytes.
+        #[tokio::test]
+        async fn opening_leaves_hooks_and_settings_alone() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = clone_with_a_warm_store(tmp.path()).await;
+            let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+            let declared = "\n[hooks]\nguard = \"localhost:5050/acme/guard:1\"\n\n[settings]\nteam = \"localhost:5050/acme/team:1\"\n";
+            std::fs::write(&ctx.config_path, format!("{config}{declared}")).unwrap();
+            let mut lock = lock_io::load(&ctx.lock_path).unwrap();
+            lock.hooks.push(locked(ArtifactKind::Hook, "guard", "acme/guard"));
+            lock.settings.push(locked(ArtifactKind::Settings, "team", "acme/team"));
+            let (_, _, set) = load_scope_declaration(&ctx).unwrap();
+            lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
+            lock_io::save(&ctx.lock_path, &lock, None).unwrap();
+            let dispatch = ctx.roots.grim_home.join("hooks/dispatch.json");
+            let settings = ctx.workspace.join(".claude/settings.local.json");
+            std::fs::create_dir_all(dispatch.parent().unwrap()).unwrap();
+            std::fs::write(&dispatch, br#"{"planted":true}"#).unwrap();
+            std::fs::write(&settings, br#"{"model":"opus"}"#).unwrap();
+            let mut state = with_rows(&ctx);
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            lands(&ctx, &mut state, &mut adoption).await;
+
+            assert!(
+                state.status_line.contains("adopted 2 · 0 unproven"),
+                "{}",
+                state.status_line
+            );
+            assert!(recorded(&ctx, ArtifactKind::Skill, "a") && recorded(&ctx, ArtifactKind::Skill, "b"));
+            assert!(!recorded(&ctx, ArtifactKind::Hook, "guard"));
+            assert!(!recorded(&ctx, ArtifactKind::Settings, "team"));
+            assert_eq!(std::fs::read(&dispatch).unwrap(), br#"{"planted":true}"#);
+            assert_eq!(std::fs::read(&settings).unwrap(), br#"{"model":"opus"}"#);
+            assert!(
+                !ctx.roots.grim_home.join("settings").exists(),
+                "a settings record was written"
+            );
+        }
+
+        /// research_install_record_cache_test_matrix.md M01b and M05b (TUI form): a
+        /// steady or hand-edited install starts no task, and the state file keeps
+        /// its bytes and mtime.
+        #[tokio::test]
+        async fn current_and_edited_records_start_no_task() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (_reg, ctx) = project_with_two_rows(tmp.path()).await;
+            let bytes = std::fs::read(state_file(&ctx)).unwrap();
+            let mtime = std::fs::metadata(state_file(&ctx)).unwrap().modified().unwrap();
+            let mut state = with_rows(&ctx);
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(!adoption.is_running(), "steady state");
+            std::fs::write(ctx.workspace.join(".claude/skills/a/SKILL.md"), b"hand edited\n").unwrap();
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(!adoption.is_running(), "hand edit");
+
+            assert_eq!(state.status_line, "");
+            assert_eq!(std::fs::read(state_file(&ctx)).unwrap(), bytes);
+            assert_eq!(std::fs::metadata(state_file(&ctx)).unwrap().modified().unwrap(), mtime);
+        }
+
+        /// research_install_record_cache_test_matrix.md M13b (TUI form): files no
+        /// render of the pin produces stay unproven and unrecorded.
+        #[tokio::test]
+        async fn foreign_bytes_stay_unproven() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = clone_with_a_warm_store(tmp.path()).await;
+            std::fs::write(tmp.path().join(".claude/skills/b/SKILL.md"), b"someone else's\n").unwrap();
+            let mut state = with_rows(&ctx);
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            lands(&ctx, &mut state, &mut adoption).await;
+
+            assert!(
+                state.status_line.contains("adopted 1 · 1 unproven"),
+                "{}",
+                state.status_line
+            );
+            assert!(recorded(&ctx, ArtifactKind::Skill, "a"));
+            assert!(!recorded(&ctx, ArtifactKind::Skill, "b"));
+        }
+
+        /// research_install_record_cache_test_matrix.md M11b offline and cold (TUI
+        /// form): no registry is asked, so the task ends well inside its deadline
+        /// and records nothing.
+        #[tokio::test]
+        async fn offline_over_a_cold_store_asks_no_registry() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = TuiContext {
+                offline: true,
+                ..cold_clone_behind_silence(tmp.path()).await
+            };
+            let mut state = with_rows(&ctx);
+            let mut adoption = Background::new(Duration::from_secs(5));
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(
+                state.status_line.contains("adopting 2 artifacts"),
+                "{}",
+                state.status_line
+            );
+            let joined = ended(&mut adoption).await;
+            assert!(matches!(joined, Ok(Ok(_))), "{joined:?}");
+            assert!(land_adoption(&ctx, &mut state, &adoption, joined));
+
+            assert!(
+                state.status_line.contains("adopted 0 · 2 unproven"),
+                "{}",
+                state.status_line
+            );
+            assert!(!state_file(&ctx).exists());
+        }
+
+        /// A registry that never answers: the task passes its backstop, commits
+        /// nothing, leaves the badges, writes one warning and clears its line.
+        /// The backstop comes first here, ahead of the reader's run deadline.
+        #[tokio::test]
+        async fn a_task_past_its_deadline_commits_nothing() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = cold_clone_behind_silence(tmp.path()).await;
+            let mut state = with_rows(&ctx);
+            let before = badges(&state);
+            let mut adoption = Background::with_backstop(TUI_RUN_DEADLINE, Duration::from_millis(200));
+            let capture = crate::catalog::test_hosts::LogCapture::start();
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(
+                state.status_line.contains("adopting 2 artifacts"),
+                "{}",
+                state.status_line
+            );
+            lands(&ctx, &mut state, &mut adoption).await;
+
+            let logs = capture.text();
+            assert_eq!(warnings(&logs), 1, "{logs}");
+            assert!(logs.contains("deadline"), "{logs}");
+            assert!(!state_file(&ctx).exists());
+            assert_eq!(badges(&state), before);
+            assert_eq!(state.status_line, "");
+        }
+
+        /// The reader ends the run, not the task's backstop: a run that reaches its
+        /// run deadline lands the proof it made, and the miss memo names the host
+        /// that hung past its call deadline. A second hung host carries the run to
+        /// its run deadline, which cuts that call short, so the memo leaves it out.
+        #[tokio::test]
+        async fn the_reader_ends_the_run_and_keeps_its_proofs() {
+            use crate::oci::access::bounded_access::CALL_DEADLINE;
+            let tmp = tempfile::tempdir().unwrap();
+            let workspace = tmp.path();
+            std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+            let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+            for name in ["a", "b", "c"] {
+                publish_skill(&reg, name, "first").await;
+                store_skill(&reg, workspace, name).await;
+            }
+            let ctx = test_ctx(workspace, store_backed(reg, workspace));
+            for name in ["a", "b", "c"] {
+                perform(&ctx, &skill_row(name), None, BatchOp::Install, &SilentProgress, false)
+                    .await
+                    .expect("the first install succeeds");
+            }
+            std::fs::remove_file(state_file(&ctx)).unwrap();
+            // b and c move to pins no store holds, each on a host of its own that never answers.
+            let mut lock = lock_io::load(&ctx.lock_path).unwrap();
+            for (name, host) in [("b", "hung-one.test"), ("c", "hung-two.test")] {
+                let id = Identifier::new_registry(format!("acme/{name}"), host)
+                    .clone_with_tag("1")
+                    .clone_with_digest(Digest::Sha256("e".repeat(64)));
+                let entry = lock.skills.iter_mut().find(|s| s.name == name).unwrap();
+                entry.source =
+                    crate::lock::locked_source::LockedSource::Registry(PinnedIdentifier::try_from(id).unwrap());
+            }
+            lock_io::save(&ctx.lock_path, &lock, None).unwrap();
+            let ctx = TuiContext {
+                access: Arc::new(Silent),
+                ..ctx
+            };
+            let mut state = TuiState::new();
+            state.set_rows(vec![skill_row("a")]);
+            rederive_states(&ctx, &mut state);
+            // One call deadline for b's host, then two seconds left for c's: about 12 s of real time.
+            let mut adoption = Background::new(CALL_DEADLINE + Duration::from_secs(2));
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+            assert!(
+                state.status_line.contains("adopting 3 artifacts"),
+                "{}",
+                state.status_line
+            );
+            let landed = drained(&ctx, &mut state, &mut adoption, Duration::from_secs(30)).await;
+
+            assert!(landed, "the task did not land");
+            assert!(
+                state.status_line.contains("adopted 1 · 2 unproven"),
+                "{}",
+                state.status_line
+            );
+            assert!(recorded(&ctx, ArtifactKind::Skill, "a"));
+            let memo = GrimPaths::new(ctx.roots.grim_home.clone())
+                .state_dir()
+                .join(crate::oci::access::miss_memo::FILE_NAME);
+            let memo = std::fs::read_to_string(&memo).unwrap_or_default();
+            assert!(memo.contains("hung-one.test"), "{memo}");
+            assert!(!memo.contains("hung-two.test"), "{memo}");
+        }
+
+        /// A task that failed lands as one past its deadline does.
+        #[tokio::test]
+        async fn a_failed_task_commits_nothing() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = clone_with_a_warm_store(tmp.path()).await;
+            let mut state = with_rows(&ctx);
+            let before = badges(&state);
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+            adoption.candidates = 2;
+            state.set_status(adoption::adopting_line(2));
+            let capture = crate::catalog::test_hosts::LogCapture::start();
+
+            let failed: Joined = Ok(Err(anyhow::anyhow!("boom")));
+            assert!(land_adoption(&ctx, &mut state, &adoption, failed));
+
+            let logs = capture.text();
+            assert_eq!(warnings(&logs), 1, "{logs}");
+            assert!(logs.contains("boom"), "{logs}");
+            assert!(!state_file(&ctx).exists());
+            assert_eq!(badges(&state), before);
+            assert_eq!(state.status_line, "");
+        }
+
+        /// Keys are handled while the task waits on a registry.
+        #[tokio::test]
+        async fn input_is_handled_while_the_task_runs() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = cold_clone_behind_silence(tmp.path()).await;
+            let mut state = with_rows(&ctx);
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+            start_adoption(&ctx, &mut state, &mut adoption);
+            // Long enough for the task to reach the registry and wait on it.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            handle(&mut state, TuiInput::Char('/'));
+
+            assert_eq!(state.mode, Mode::Search);
+            assert!(adoption.is_running());
+            assert!(adoption.try_join().is_none(), "the task ended");
+        }
+
+        /// A declaration the lock no longer matches proves nothing.
+        #[tokio::test]
+        async fn a_stale_lock_starts_no_task() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ctx = clone_with_a_warm_store(tmp.path()).await;
+            let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+            std::fs::write(
+                &ctx.config_path,
+                format!("{config}\n[agents]\nc = \"localhost:5050/acme/c:1\"\n"),
+            )
+            .unwrap();
+            let mut state = with_rows(&ctx);
+            let mut adoption = Background::new(TUI_RUN_DEADLINE);
+
+            start_adoption(&ctx, &mut state, &mut adoption);
+
+            assert!(!adoption.is_running());
+            assert!(!state_file(&ctx).exists());
+        }
+    }
+
     #[tokio::test]
     async fn perform_local_declared_force_never_overwrites_a_dependency() {
         let tmp = tempfile::tempdir().unwrap();
@@ -18300,6 +19529,7 @@ mod tests {
                 &mut SettingsLedger::default(),
                 &ForceScope::None,
             )
+            .await
             .expect("a record of no known client deletes");
 
             let logs = capture.text();
@@ -18342,6 +19572,7 @@ mod tests {
             let mut ledger = SettingsLedger::default();
 
             let error = delete_targets(&ctx, &mut install_state, &targets, &mut ledger, &ForceScope::None)
+                .await
                 .expect_err("the second node fails");
 
             assert!(error.to_string().starts_with("uninstall failed"), "{error:#}");
@@ -18726,6 +19957,50 @@ mod tests {
             assert!(!mcp.contains("mine"), "{mcp}");
             let config = std::fs::read_to_string(&ctx.config_path).unwrap();
             assert!(!config.contains("pack"), "{config}");
+        }
+
+        /// research_install_record_cache_test_matrix.md M07f (TUI form): a delete
+        /// proves before it checks for refusals, so an MCP entry that drifted from
+        /// its record to the render of the lock's pin is re-recorded and removed.
+        #[tokio::test]
+        async fn a_delete_proves_a_drifted_entry_before_it_refuses() {
+            let tmp = tempfile::tempdir().unwrap();
+            let workspace = tmp.path();
+            std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+            let reg = MemoryRegistry::new();
+            publish_mcp(&reg, "acme/srv", "srv-one").await;
+            let ctx = test_ctx(workspace, Arc::new(reg.clone()));
+            let mut row = installed_row("localhost:5050/acme/srv");
+            row.kind = "mcp".to_string();
+            row.latest_tag = "1".to_string();
+            row.state = ArtifactState::NotInstalled;
+            perform(&ctx, &row, None, BatchOp::Install, &SilentProgress, false)
+                .await
+                .expect("srv installs");
+            let recorded = lock_io::load(&ctx.lock_path).unwrap().mcp[0].source.content_digest();
+            // A pull: the lock moves to a pin the store holds, and `.mcp.json` already holds its entry.
+            publish_mcp(&reg, "acme/srv", "srv-two").await;
+            store_skill(&reg, workspace, "srv").await;
+            let tag = Identifier::new_registry("acme/srv", "localhost:5050").clone_with_tag("1");
+            let operation = crate::oci::access::Operation::Resolve;
+            let pulled = reg.resolve_digest(&tag, operation).await.unwrap().unwrap();
+            let lock = std::fs::read_to_string(&ctx.lock_path).unwrap();
+            let moved = lock.replace(&recorded.to_string(), &pulled.to_string());
+            assert_ne!(moved, lock, "the fixture: the lock's pin");
+            std::fs::write(&ctx.lock_path, moved).unwrap();
+            let mcp = workspace.join(".mcp.json");
+            std::fs::write(
+                &mcp,
+                std::fs::read_to_string(&mcp).unwrap().replace("srv-one", "srv-two"),
+            )
+            .unwrap();
+
+            perform_uninstall(&ctx, &row)
+                .await
+                .expect("the proven entry is not refused");
+
+            let left = std::fs::read_to_string(&mcp).unwrap_or_default();
+            assert!(!left.contains("srv-"), "{left}");
         }
 
         /// One MCP member registered for two clients, both entries edited: the
@@ -19360,7 +20635,8 @@ mod tests {
             let (mut checker, _rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.primary_registry.clone());
             let (mut bundle_checker, _bundle_rx) =
                 crate::tui::bundle_member_fetch::BundleMemberChecker::new(Arc::clone(&ctx.access));
-            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker);
+            let mut adoption = Background::new(crate::oci::access::bounded_access::TUI_RUN_DEADLINE);
+            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker, &mut adoption);
             assert!(state.settings_inputs.is_none());
         }
 
@@ -19375,7 +20651,8 @@ mod tests {
             let (mut bundle_checker, _bundle_rx) =
                 crate::tui::bundle_member_fetch::BundleMemberChecker::new(Arc::clone(&ctx.access));
 
-            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker);
+            let mut adoption = Background::new(crate::oci::access::bounded_access::TUI_RUN_DEADLINE);
+            after_scope_swap(&ctx, &mut state, &mut checker, &mut bundle_checker, &mut adoption);
 
             assert_eq!(state.invocation, ctx.invocation);
         }

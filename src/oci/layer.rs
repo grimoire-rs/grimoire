@@ -146,6 +146,12 @@ pub fn compression_of(manifest: &OciManifest) -> Option<Compression> {
 ///
 /// Every [`LayerError`] variant.
 pub fn decode_layer(desc: &Descriptor, blob: Vec<u8>, limit: u64) -> Result<Vec<u8>, LayerError> {
+    decode_layer_counted(desc, blob, limit).0
+}
+
+/// [`decode_layer`], with the bytes it decoded, the tar's length or what it
+/// decoded before it failed; a raw tar counts its blob.
+pub fn decode_layer_counted(desc: &Descriptor, blob: Vec<u8>, limit: u64) -> (Result<Vec<u8>, LayerError>, u64) {
     decode_with_floor(desc, blob, limit, EXPANSION_FLOOR)
 }
 
@@ -164,25 +170,48 @@ pub async fn decode_layer_blocking(desc: Descriptor, blob: Vec<u8>, limit: u64) 
         .expect("layer decode task panicked")
 }
 
+/// [`decode_layer_counted`] on a blocking thread.
+#[expect(
+    clippy::expect_used,
+    reason = "a panic in the decode task is a bug, not an input error"
+)]
+pub async fn decode_layer_counted_blocking(
+    desc: Descriptor,
+    blob: Vec<u8>,
+    limit: u64,
+) -> (Result<Vec<u8>, LayerError>, u64) {
+    tokio::task::spawn_blocking(move || decode_layer_counted(&desc, blob, limit))
+        .await
+        .expect("layer decode task panicked")
+}
+
 /// The decoded-byte cap for a gzip blob of `stored` bytes: `limit`, tightened
 /// to `max(floor, 100 × stored)` so a tiny blob cannot claim the whole cap.
 fn expansion_limit(limit: u64, stored: usize, floor: u64) -> u64 {
     limit.min(floor.max(MAX_EXPANSION_RATIO.saturating_mul(stored as u64)))
 }
 
-fn decode_with_floor(desc: &Descriptor, blob: Vec<u8>, limit: u64, floor: u64) -> Result<Vec<u8>, LayerError> {
-    if classify(&desc.media_type)? == LayerEncoding::Tar {
-        return Ok(blob);
+fn decode_with_floor(desc: &Descriptor, blob: Vec<u8>, limit: u64, floor: u64) -> (Result<Vec<u8>, LayerError>, u64) {
+    match classify(&desc.media_type) {
+        Err(e) => return (Err(e), 0),
+        Ok(LayerEncoding::Tar) => {
+            let len = blob.len() as u64;
+            return (Ok(blob), len);
+        }
+        Ok(LayerEncoding::TarGzip) => {}
     }
-    let tar = gunzip_single_member(&blob, expansion_limit(limit, blob.len(), floor))?;
-    if let Some(expected) = desc
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(UNCOMPRESSED_DIGEST_ANNOTATION))
-    {
-        verify_uncompressed_digest(expected, &tar)?;
-    }
-    Ok(tar)
+    let (tar, decoded) = gunzip_single_member(&blob, expansion_limit(limit, blob.len(), floor));
+    let checked = tar.and_then(|tar| {
+        let expected = desc
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(UNCOMPRESSED_DIGEST_ANNOTATION));
+        match expected {
+            Some(expected) => verify_uncompressed_digest(expected, &tar).map(|()| tar),
+            None => Ok(tar),
+        }
+    });
+    (checked, decoded)
 }
 
 /// Refuse a gzip layer this grim's own reader would refuse, using the reader's
@@ -286,29 +315,35 @@ fn gzip_deterministic(tar: &[u8]) -> Vec<u8> {
     encoder.finish().expect("writing into a Vec cannot fail")
 }
 
-fn gunzip_single_member(blob: &[u8], limit: u64) -> Result<Vec<u8>, LayerError> {
+/// The decoded tar, and how many bytes were decoded, success or not.
+fn gunzip_single_member(blob: &[u8], limit: u64) -> (Result<Vec<u8>, LayerError>, u64) {
     if !blob.starts_with(&[0x1f, 0x8b]) {
-        return Err(corrupt("not a gzip stream"));
+        return (Err(corrupt("not a gzip stream")), 0);
     }
     let Some(flags) = blob.get(3) else {
-        return Err(corrupt("truncated gzip header"));
+        return (Err(corrupt("truncated gzip header")), 0);
     };
     if flags & REFUSED_GZIP_FLAGS != 0 {
-        return Err(corrupt("gzip header carries FEXTRA, FNAME or FCOMMENT"));
+        return (Err(corrupt("gzip header carries FEXTRA, FNAME or FCOMMENT")), 0);
     }
     // `bufread::GzDecoder` stops after one member, leaving any rest unread in
     // the slice; `MultiGzDecoder` would decode a second member that
     // single-member readers never see.
     let mut decoded = flate2::bufread::GzDecoder::new(blob).take(limit.saturating_add(1));
     let mut tar = Vec::new();
-    decoded.read_to_end(&mut tar).map_err(LayerError::Corrupt)?;
-    if tar.len() as u64 > limit {
-        return Err(LayerError::DecompressedTooLarge { limit });
+    // On an error `read_to_end` keeps what it read, so `tar` is what was decoded.
+    let read = decoded.read_to_end(&mut tar);
+    let len = tar.len() as u64;
+    if let Err(e) = read {
+        return (Err(LayerError::Corrupt(e)), len);
+    }
+    if len > limit {
+        return (Err(LayerError::DecompressedTooLarge { limit }), len);
     }
     if !decoded.into_inner().into_inner().is_empty() {
-        return Err(corrupt("trailing bytes after the gzip member"));
+        return (Err(corrupt("trailing bytes after the gzip member")), len);
     }
-    Ok(tar)
+    (Ok(tar), len)
 }
 
 fn verify_uncompressed_digest(expected: &str, tar: &[u8]) -> Result<(), LayerError> {
@@ -549,6 +584,41 @@ mod tests {
         assert!(matches!(decode_err(&gzip_desc(None), bad_crc), LayerError::Corrupt(_)));
     }
 
+    /// The count is what the decoder produced, success or failure.
+    #[test]
+    fn a_decode_counts_what_it_decoded() {
+        let content = vec![0u8; 4096];
+        let count = |desc: &Descriptor, blob: Vec<u8>, limit: u64| decode_layer_counted(desc, blob, limit).1;
+        let (raw, raw_desc) = encode_layer(TAR, Compression::None);
+        assert_eq!(count(&raw_desc, raw, 0), TAR.len() as u64, "a raw tar counts its blob");
+        assert_eq!(count(&gzip_desc(None), gzip(&content), 1 << 20), 4096);
+        assert_eq!(
+            count(&gzip_desc(None), gzip(&content), 1024),
+            1025,
+            "a cut counts limit + 1"
+        );
+        assert_eq!(
+            count(&gzip_desc(None), TAR.to_vec(), 1 << 20),
+            0,
+            "a header refusal decodes nothing"
+        );
+        let mut bad_crc = gzip(&content);
+        let crc_at = bad_crc.len() - 8;
+        bad_crc[crc_at] ^= 0xff;
+        assert_eq!(
+            count(&gzip_desc(None), bad_crc, 1 << 20),
+            4096,
+            "a bad CRC follows the body"
+        );
+        let wrong = Algorithm::Sha256.hash(b"other").to_string();
+        let (got, len) = decode_layer_counted(&gzip_desc(Some(&wrong)), gzip(&content), 1 << 20);
+        assert!(
+            matches!(got, Err(LayerError::UncompressedDigestMismatch { .. })),
+            "{got:?}"
+        );
+        assert_eq!(len, 4096);
+    }
+
     #[test]
     fn trailing_bytes_and_second_member_are_refused() {
         let mut trailing = gzip(TAR);
@@ -777,7 +847,7 @@ mod tests {
         let blob = gzip(&vec![0u8; 1 << 20]);
         let effective = 100 * blob.len() as u64;
         assert!(effective < 1 << 20);
-        let err = decode_with_floor(&gzip_desc(None), blob, u64::MAX, 1024).unwrap_err();
+        let err = decode_with_floor(&gzip_desc(None), blob, u64::MAX, 1024).0.unwrap_err();
         assert!(
             matches!(err, LayerError::DecompressedTooLarge { limit } if limit == effective),
             "{err:?}"

@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! `grim status` — read-only state report for every declared artifact.
+//! `grim status` — state report for every declared artifact.
 //!
-//! No network and no flock: state is data, not a failure, so `status`
-//! exits 0 even when artifacts are missing or modified. Per declared
+//! No config lock: state is data, not a failure, so `status` exits 0 even
+//! when artifacts are missing or modified. Per declared
 //! artifact the state is derived from: the live config vs. the lock's
 //! declaration hash (`stale`), the lock pin vs. the install-state record
 //! (`outdated`), the recorded pin missing (`missing`), and the on-disk
-//! content hash vs. the recorded one (`modified`).
+//! content hash vs. the recorded one (`modified`). Files whose record drifted
+//! while the lock moved, or that have no record, are first compared with a
+//! render of the lock's pin, from the local store and, online, from the
+//! registry within fixed fetch bounds; a match reads `installed` and its
+//! record is written under the state-file lock, a write that never changes
+//! the report or the exit.
 //!
 //! Each row also reports `clients_missing`/`clients_extra`: the project's
 //! *explicitly configured* client target (`[options].clients`) diffed
@@ -34,7 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use clap::Args;
 use semver::VersionReq;
@@ -54,15 +59,21 @@ use crate::context::Context;
 use crate::hook::consent::{self, Consent};
 use crate::hook::policy::{ConsentInputs, ConsentPolicies, HookPolicy};
 use crate::hook::trust::{Arming, Interactivity, NotArmedReason};
+use crate::install::adoption::{self, ContentMode, NotAttempted, Row, Unproven};
 use crate::install::client_target::ClientTarget;
+use crate::install::content_hash::footprint_hash_for_kind;
+use crate::install::expected_outputs::{destination, effective_clients};
 use crate::install::hook_registrar::{
     ArmRefusal, CLAUDE_LOCAL_SETTINGS, arming_refusal, client_arms_on_this_host, is_tracked_within,
     settings_use_local_file, validate_grim_home,
 };
-use crate::install::install_state::{ClientOutput, InstallRecord, InstallState, SettingsStore, active_outputs};
+use crate::install::install_state::{
+    ClientOutput, CommitOutcome, InstallRecord, InstallState, ProvenRecord, SettingsStore, SkipCause, active_outputs,
+};
 use crate::install::installer::{client_hosts, client_supports_kind};
 use crate::install::launcher::{self, LauncherState};
-use crate::install::path_anchor::{AnchorRoots, Containment};
+use crate::install::path_anchor::{AnchorRoots, AnchoredPath, Containment};
+use crate::install::progress::InstallProgress;
 use crate::install::settings_phase::{RootFence, SettingsDecline, recorded_refusal, report_fence, settings_surface};
 use crate::install::settings_store;
 use crate::install::target::{InstallTarget, active_clients, clients_note};
@@ -74,7 +85,10 @@ use crate::lock::locked_source::LockedSource;
 use crate::lock::merge_policy;
 use crate::lock::pin_rule::recorded_reference;
 use crate::oci::access::OciAccess;
+use crate::oci::access::bounded_access::{BoundedAccess, CLI_RUN_DEADLINE, DecodeBudget};
 use crate::oci::access::error::AccessError;
+use crate::oci::access::miss_memo::MissMemo;
+use crate::oci::access::registry_client::RegistryClient;
 use crate::oci::identifier::is_valid_oci_tag;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::text::{escape_controls, registry_text};
@@ -208,15 +222,168 @@ pub struct StatusArgs {
     pub workspace: Option<std::path::PathBuf>,
 }
 
+/// How a status run adopts what it proves, a parameter the CLI does not expose.
+#[derive(Clone, Copy)]
+pub(crate) struct StatusMode<'a> {
+    /// Where a proof may read the lock's pin from.
+    pub(crate) content: ContentMode,
+    /// Whether proven records are written to the state file; else they stay in memory.
+    pub(crate) commit: bool,
+    /// Proofs kept from earlier runs in this process, replayed while their inputs hold.
+    pub(crate) memo: Option<&'a ProofMemo>,
+}
+
+impl StatusMode<'static> {
+    /// `grim status`: proves from the local store, then the registry, and records what it proves.
+    pub(crate) const CLI: Self = Self {
+        content: ContentMode::StoreThenRegistry,
+        commit: true,
+        memo: None,
+    };
+}
+
+/// Proofs a long-running caller keeps between status runs.
+///
+/// A node is proven again only when its scope, its lock pin, the client set,
+/// its record, or the files where a proof reads differ from the last proof,
+/// or when that proof could not read the pin's content.
+#[derive(Default)]
+pub(crate) struct ProofMemo(std::sync::Mutex<HashMap<(PathBuf, NodeKey), (ProofInputs, Adoption)>>);
+
+impl ProofMemo {
+    /// The outcome kept for `key` in `scope`, if it was proven from `inputs`.
+    fn recall(&self, scope: &Path, key: &NodeKey, inputs: &ProofInputs) -> Option<Adoption> {
+        // A poisoned lock reads as nothing kept: the node is proven again.
+        let kept = self.0.lock().ok()?;
+        let (was, outcome) = kept.get(&(scope.to_path_buf(), key.clone()))?;
+        (was == inputs).then(|| outcome.clone())
+    }
+
+    /// Keeps `outcome` for `key` in `scope`, proven from `inputs`.
+    fn keep(&self, scope: &Path, key: &NodeKey, inputs: ProofInputs, outcome: Adoption) {
+        if let Ok(mut kept) = self.0.lock() {
+            kept.insert((scope.to_path_buf(), key.clone()), (inputs, outcome));
+        }
+    }
+}
+
+/// A path a proof reads: where it resolves, and when present its link bit and
+/// its footprint, where the proof would read that path.
+type SeenPath = (PathBuf, Option<PathBuf>, Option<(bool, Option<Digest>)>);
+
+/// What a proof of one node depends on, besides content a digest names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProofInputs {
+    pin: LockedSource,
+    clients: Vec<ClientTarget>,
+    prior: Option<InstallRecord>,
+    disk: Vec<SeenPath>,
+}
+
+impl ProofInputs {
+    /// The inputs of a proof of `key` against `lock`; `None` for a path source,
+    /// whose content no pin fixes.
+    fn read(
+        lock: &GrimoireLock,
+        key: &NodeKey,
+        prior: Option<&InstallRecord>,
+        target: &InstallTarget,
+        roots: &AnchorRoots,
+    ) -> Option<Self> {
+        let pin = lock_entry(lock, key)?.source.clone();
+        pin.pinned()?;
+        let (kind, name) = (key.0, key.1.as_str());
+        let anchor = |path: &Path, client| AnchoredPath::from_target(path, target.scope(), client, kind, roots).ok();
+        let mut paths: BTreeMap<PathBuf, Option<AnchoredPath>> = prior
+            .iter()
+            .flat_map(|record| &record.outputs)
+            .filter_map(|out| Some((out.target.lexical(roots)?, Some(out.target.clone()))))
+            .collect();
+        for client in effective_clients(target, kind, name, prior, roots) {
+            if kind == ArtifactKind::Mcp {
+                for path in client.vendor().mcp_config_paths(target.workspace(), target.scope()) {
+                    let anchored = anchor(&path, client);
+                    paths.entry(path).or_insert(anchored);
+                }
+                continue;
+            }
+            let dest = destination(target, client, kind, name, prior, roots);
+            if kind == ArtifactKind::Rule
+                && let Some(parent) = dest.parent()
+            {
+                let support = parent.join(name);
+                let anchored = anchor(&support, client);
+                paths.entry(support).or_insert(anchored);
+            }
+            let anchored = anchor(&dest, client);
+            paths.entry(dest).or_insert(anchored);
+        }
+        // Hashed as the proof reads: a vendor config through its reader (a refused
+        // or over-cap one unread), a file unlinked inside the root (a walk past them has no bound).
+        let disk = paths
+            .into_iter()
+            .map(|(path, anchored)| {
+                let seen = std::fs::symlink_metadata(&path).ok().map(|meta| {
+                    let link = meta.file_type().is_symlink();
+                    let hash = if kind == ArtifactKind::Mcp {
+                        anchored
+                            .and_then(|at| adoption::read_vendor_config(target.scope(), &path, &at, roots).ok()?)
+                            .map(|raw| crate::oci::Algorithm::Sha256.hash(raw.as_bytes()))
+                    } else {
+                        anchored
+                            .filter(|_| !link)
+                            .and_then(|at| at.resolve(roots, Containment::Strict).ok())
+                            .and_then(|at| footprint_hash_for_kind(kind, &at, None).ok())
+                    };
+                    (link, hash)
+                });
+                let resolved = std::fs::canonicalize(&path).ok();
+                (path, resolved, seen)
+            })
+            .collect();
+        Some(Self {
+            pin,
+            clients: target.clients().to_vec(),
+            prior: prior.cloned(),
+            disk,
+        })
+    }
+}
+
 /// Run `grim status`.
+///
+/// # Errors
+///
+/// As [`run_with`].
+pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusReport, ExitCode)> {
+    let progress = crate::cli::progress::select_progress(ctx.progress(), true);
+    run_with(ctx, args, StatusMode::CLI, progress.as_ref()).await
+}
+
+/// Run `grim status` in `mode`, naming each proof on `progress`.
 ///
 /// # Errors
 ///
 /// A config (78/79), lock-parse (78), or install-state load failure, or an
 /// invalid configured client name in `[options].clients` (65, same as `grim
 /// context`). An **absent** lock or state file is not a failure; per-artifact
-/// state is data and never fails the command.
-pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusReport, ExitCode)> {
+/// state is data and never fails the command, and neither does a record write
+/// that cannot happen.
+pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
+    ctx: &Context,
+    args: &StatusArgs,
+    mode: StatusMode<'_>,
+    progress: &P,
+) -> anyhow::Result<(StatusReport, ExitCode)> {
+    // Offline, and under `--check`, whose own fetches keep today's bounds, a proof reads the store only.
+    let mode = if ctx.offline() || args.check {
+        StatusMode {
+            content: ContentMode::StoreOnly,
+            ..mode
+        }
+    } else {
+        mode
+    };
     let scope = super::grim(scope_resolution::resolve_in(
         ctx,
         args.global,
@@ -247,7 +414,8 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // Routes through the scope seam so a project legacy file (or a V1 global
     // file) migrates in memory.
     let state =
-        super::grim(scope_resolution::load_state(&scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
+        super::grim(scope_resolution::read_state(&scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?
+            .adopt();
 
     let lock_matches_config = lock_matches_config(&scope.set, lock.as_ref());
 
@@ -288,6 +456,20 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         &global_clients,
         &scope.options.vendors,
     ))?;
+    // One hash per recorded output a run: the candidate pass and the report share it.
+    let hashes = OutputHashes::default();
+    let state = adopt_proven(
+        ctx,
+        &scope,
+        lock.as_ref(),
+        state,
+        &target,
+        &active,
+        mode,
+        &hashes,
+        progress,
+    )
+    .await;
 
     // The *explicitly configured* client set, or `None` under autodetect —
     // a deliberately narrower question than `target` above, and it must stay
@@ -418,7 +600,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
         let mut entry_state = derive_settings_aware(
             settings_row.as_ref(),
             || {
-                derive_state(
+                derive_state_with(
                     decl.kind,
                     &decl.name,
                     locked,
@@ -426,6 +608,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                     &scope.roots,
                     &active,
                     lock_matches_config,
+                    &hashes,
                 )
             },
             lock_matches_config,
@@ -586,7 +769,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
             let mut st = derive_settings_aware(
                 settings_row.as_ref(),
                 || {
-                    derive_state(
+                    derive_state_with(
                         member.kind,
                         &member.name,
                         Some(member),
@@ -594,6 +777,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
                         &scope.roots,
                         &active,
                         lock_matches_config,
+                        &hashes,
                     )
                 },
                 lock_matches_config,
@@ -1559,7 +1743,7 @@ where
     let mut answers = Vec::new();
     while let Some(joined) = set.join_next().await {
         // A panicked task degrades to no result for that item (its row stays
-        // null); a read-only status report never fails on a check.
+        // null); a status report never fails on a check.
         if let Ok(answer) = joined {
             answers.push(answer);
         }
@@ -1808,7 +1992,7 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
 /// contributes nothing, so `[]` means "armed everywhere" for a hook and
 /// "not applicable" for every other kind — never "unknown". Sorted by client
 /// name (see [`HookArmingInputs::resolve`]) so the report is deterministic.
-/// Never fails: `status` is a read-only report, and an unanswerable question
+/// Never fails: `status` is a report, and an unanswerable question
 /// yields no verdict rather than an error (invariant I3).
 ///
 /// **`pub` because `grim hook list` calls it too, and that is the point.** This
@@ -1826,7 +2010,7 @@ pub fn hook_arming(
         return Vec::new();
     }
     // `None` only when no hook is declared anywhere, in which case `kind` cannot
-    // be `Hook` — but a read-only report answers "nothing to say" rather than
+    // be `Hook` — but a report answers "nothing to say" rather than
     // panicking on a combination it believes impossible (invariant I3).
     let Some(inputs) = inputs else {
         return Vec::new();
@@ -2926,7 +3110,7 @@ fn find_locked_bundle<'a>(lock: &'a GrimoireLock, name: &str) -> Option<&'a crat
 /// re-resolves — not its pin. A member claimed by several agreeing bundles
 /// carries one id, so the first match answers for all of them; an unparseable
 /// id yields `None` and the row simply reports no update availability rather
-/// than failing a read-only report.
+/// than failing the report.
 fn member_declared_id(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<Identifier> {
     lock.bundles
         .iter()
@@ -3203,6 +3387,25 @@ pub fn derive_state(
     active: &[ClientTarget],
     lock_matches_config: bool,
 ) -> ArtifactStatus {
+    let hashes = OutputHashes::default();
+    derive_state_with(kind, name, locked, state, roots, active, lock_matches_config, &hashes)
+}
+
+/// [`derive_state`] reading each output's current hash through the run's `hashes`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "derive_state's inputs and the run's hash cache"
+)]
+fn derive_state_with(
+    kind: ArtifactKind,
+    name: &str,
+    locked: Option<&LockedArtifact>,
+    state: &InstallState,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    lock_matches_config: bool,
+    hashes: &OutputHashes,
+) -> ArtifactStatus {
     if !lock_matches_config {
         return ArtifactStatus::Stale;
     }
@@ -3213,13 +3416,539 @@ pub fn derive_state(
         return ArtifactStatus::Missing;
     };
     let fence = report_fence(record, state);
-    match footprint(record, roots, active, fence.as_ref()) {
+    match footprint_with(record, roots, active, fence.as_ref(), hashes) {
         Footprint::Fenced => ArtifactStatus::NotArmed,
         Footprint::Missing => ArtifactStatus::Missing,
         Footprint::Modified => ArtifactStatus::Modified,
         Footprint::Intact if record.source.eq_content(&locked.source) => ArtifactStatus::Installed,
         Footprint::Intact => ArtifactStatus::Outdated,
     }
+}
+
+/// `state` with every proven render re-recorded, for status to derive from.
+///
+/// Rows 4 and 5 of the lock as found are proven from the store, then, as
+/// `mode.content` allows, from the registry ([`Fetcher`]): a proof
+/// re-pins a record or adds one (`installed`); outputs split between the
+/// record's pin and the lock's take the record the prepass settles them to, in
+/// memory, keeping the record's pin (`outdated`). Recorded rows whose pin could not be read stay
+/// `modified` and share one warning. A stale lock proves nothing, and rows 1
+/// to 3 read no content. With `mode.commit` the proven records are written
+/// ([`commit_adopted`]); a write that cannot happen changes nothing reported.
+/// `progress` names each proof; one `warn` line on stderr says what came of them.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scope, its lock, state and clients, the run's mode, hash cache and sink"
+)]
+async fn adopt_proven<P: InstallProgress + ?Sized>(
+    ctx: &Context,
+    scope: &scope_resolution::ResolvedScope,
+    lock: Option<&GrimoireLock>,
+    mut state: InstallState,
+    target: &InstallTarget,
+    active: &[ClientTarget],
+    mode: StatusMode<'_>,
+    hashes: &OutputHashes,
+    progress: &P,
+) -> InstallState {
+    let Some(lock) = lock.filter(|lock| lock_matches_config(&scope.set, Some(lock))) else {
+        return state;
+    };
+    let roots = &scope.roots;
+    let nodes = adoption_candidates_with(lock, &state, target, roots, active, hashes);
+    if nodes.is_empty() {
+        return state;
+    }
+    // Opened only here: opening the store creates its directories under `$GRIM_HOME`.
+    let store = match ctx.access_with_mode(crate::oci::access::AccessMode::Offline, Vec::new()) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::debug!("local store not readable, so no record is proven: {e}");
+            return state;
+        }
+    };
+    let priors: BTreeMap<NodeKey, Option<InstallRecord>> = nodes
+        .iter()
+        .map(|key| (key.clone(), state.get(key.0, &key.1).cloned()))
+        .collect();
+    let budget = DecodeBudget::run();
+    let run = ProofRun {
+        lock,
+        target,
+        roots,
+        store: &store,
+        memo: mode.memo.map(|memo| (memo, scope.state_path.as_path())),
+        budget: &budget,
+    };
+    let mut fetch = (mode.content == ContentMode::StoreThenRegistry)
+        .then(|| Fetcher::new(ctx.paths().state_dir(), Box::new(move || open_bounded(ctx))));
+    let outcomes = prove_nodes(&mut state, &nodes, &run, fetch.as_mut(), progress).await;
+    if let Some(fetch) = fetch {
+        fetch.finish();
+    }
+    let unproven =
+        |key: &NodeKey, reason: &Unproven| matches!(outcomes.get(key), Some(Adoption::Unproven(r)) if r == reason);
+    for (key, outcome) in &outcomes {
+        if let Adoption::Unproven(reason) = outcome {
+            tracing::debug!("{} '{}' left unproven: {reason:?}", key.0, registry_text(&key.1));
+        }
+    }
+    let not_stored: Vec<NodeKey> = nodes
+        .iter()
+        .filter(|key| {
+            matches!(outcomes.get(*key), Some(Adoption::Unproven(r)) if content_unread(r))
+                && priors.get(*key).is_some_and(Option::is_some)
+        })
+        .cloned()
+        .collect();
+    warn_not_stored(&not_stored, &scope.invocation);
+    let misses = if ctx.offline() {
+        nodes.iter().filter(|key| unproven(key, &Unproven::NotInStore)).count()
+    } else {
+        0
+    };
+    if misses > 0 {
+        tracing::warn!("{}", offline_text(misses, &scope.invocation));
+    }
+    if mode.commit {
+        let proven = proven_records(&outcomes, &priors);
+        let lossy = state.legacy_migration_lossy();
+        match commit_adopted(
+            scope.scope,
+            &scope.roots,
+            &scope.config_path,
+            &scope.lock_path,
+            lossy,
+            &proven,
+        ) {
+            Ok(adopted) => {
+                let left = nodes.len() - adopted;
+                // Offline misses already have their own line.
+                if adopted > 0 || left > misses {
+                    tracing::warn!("{}", adopted_text(adopted, left));
+                }
+            }
+            Err(cause) => tracing::warn!("records not written: {}", skip_cause_text(cause)),
+        }
+    }
+    state
+}
+
+/// Proves `nodes` as `grim status` does and writes nothing, for a caller that
+/// commits the records later ([`commit_adopted`]): the TUI's background task.
+pub(crate) async fn prove_detached<A: OciAccess>(
+    lock: &GrimoireLock,
+    mut state: InstallState,
+    nodes: &BTreeSet<NodeKey>,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    store: &Arc<dyn OciAccess>,
+    mut fetch: Option<Fetcher<'_, A>>,
+) -> Vec<ProvenRecord> {
+    let priors: BTreeMap<NodeKey, Option<InstallRecord>> = nodes
+        .iter()
+        .map(|key| (key.clone(), state.get(key.0, &key.1).cloned()))
+        .collect();
+    let budget = DecodeBudget::run();
+    let run = ProofRun {
+        lock,
+        target,
+        roots,
+        store,
+        memo: None,
+        budget: &budget,
+    };
+    let silent = crate::install::progress::SilentProgress;
+    let outcomes = prove_nodes(&mut state, nodes, &run, fetch.as_mut(), &silent).await;
+    if let Some(fetch) = fetch {
+        fetch.finish();
+    }
+    for (key, outcome) in &outcomes {
+        if let Adoption::Unproven(reason) = outcome {
+            tracing::debug!("{} '{}' left unproven: {reason:?}", key.0, registry_text(&key.1));
+        }
+    }
+    proven_records(&outcomes, &priors)
+}
+
+/// The records a commit writes: each proof whose record differs from the one it read.
+fn proven_records(
+    outcomes: &BTreeMap<NodeKey, Adoption>,
+    priors: &BTreeMap<NodeKey, Option<InstallRecord>>,
+) -> Vec<ProvenRecord> {
+    outcomes
+        .iter()
+        .filter_map(|(key, outcome)| {
+            let Adoption::Proven(record) = outcome else {
+                return None;
+            };
+            let prior = priors.get(key).cloned().flatten();
+            (prior.as_ref() != Some(record)).then(|| ProvenRecord {
+                prior,
+                record: record.clone(),
+            })
+        })
+        .collect()
+}
+
+/// What a proof of one node came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Adoption {
+    /// The node's record after the proof re-recorded it.
+    Proven(InstallRecord),
+    /// Its outputs are split between the record's pin and the lock's: the
+    /// record it settles to, under its own pin.
+    Mixed(InstallRecord),
+    /// It stayed unproven, for this reason.
+    Unproven(Unproven),
+}
+
+/// Where a status run proves its candidates.
+struct ProofRun<'a> {
+    /// The evidence lock.
+    lock: &'a GrimoireLock,
+    target: &'a InstallTarget,
+    roots: &'a AnchorRoots,
+    store: &'a Arc<dyn OciAccess>,
+    /// Proofs kept between runs, with the state path that names the scope.
+    memo: Option<(&'a ProofMemo, &'a Path)>,
+    /// The run's decoded layer bytes, store and registry passes alike.
+    budget: &'a DecodeBudget,
+}
+
+/// Proves each of `nodes` in turn, re-recording `state`, so `progress` can
+/// name the node being proven. A node the memo proved from the same inputs
+/// is replayed without a render; one the store lacks goes to `fetch`, if any.
+async fn prove_nodes<P: InstallProgress + ?Sized, A: OciAccess>(
+    state: &mut InstallState,
+    nodes: &BTreeSet<NodeKey>,
+    run: &ProofRun<'_>,
+    mut fetch: Option<&mut Fetcher<'_, A>>,
+    progress: &P,
+) -> BTreeMap<NodeKey, Adoption> {
+    progress.start(nodes.len());
+    let mut outcomes = BTreeMap::new();
+    for (position, key) in nodes.iter().enumerate() {
+        progress.advance(position + 1, &format!("adopt {} {}", key.0, registry_text(&key.1)));
+        let memo = run.memo.and_then(|(memo, scope)| {
+            let inputs = ProofInputs::read(run.lock, key, state.get(key.0, &key.1), run.target, run.roots)?;
+            Some((memo, scope, inputs))
+        });
+        if let Some(outcome) = memo
+            .as_ref()
+            .and_then(|(memo, scope, inputs)| memo.recall(scope, key, inputs))
+        {
+            if let Adoption::Proven(record) | Adoption::Mixed(record) = &outcome {
+                state.record(record.clone());
+            }
+            outcomes.insert(key.clone(), outcome);
+            continue;
+        }
+        // One node a pass: a host failed earlier in the run is the access layer's to remember.
+        let one = BTreeSet::from([key.clone()]);
+        let workspace = run.target.workspace();
+        let report = adoption::prepass_within(
+            state,
+            run.lock,
+            &one,
+            ContentMode::StoreOnly,
+            run.target,
+            run.roots,
+            workspace,
+            run.store,
+            Some(run.budget),
+        )
+        .await;
+        let mut outcome = outcome_of(state, key, report);
+        if outcome == Some(Adoption::Unproven(Unproven::NotInStore))
+            && let Some(fetch) = fetch.as_deref_mut()
+        {
+            outcome = fetch.prove(state, key, run).await.or(outcome);
+        }
+        if let Some(outcome) = outcome {
+            // Kept unread, a pin the store gains later would read unproven for the process's life.
+            let read = !matches!(&outcome, Adoption::Unproven(reason) if content_unread(reason));
+            if let Some((memo, scope, inputs)) = memo.filter(|_| read) {
+                memo.keep(scope, key, inputs, outcome.clone());
+            }
+            outcomes.insert(key.clone(), outcome);
+        }
+    }
+    progress.finish();
+    outcomes
+}
+
+/// What a prepass of the one node `key` came to, keeping a mixed node's
+/// settled record in `state`; `None` when it named nothing.
+fn outcome_of(state: &mut InstallState, key: &NodeKey, report: adoption::PrepassReport) -> Option<Adoption> {
+    if !report.proven.is_empty() {
+        state.get(key.0, &key.1).cloned().map(Adoption::Proven)
+    } else if !report.mixed.is_empty() {
+        let record = report.settled.into_iter().next()?;
+        state.record(record.clone());
+        Some(Adoption::Mixed(record))
+    } else {
+        report
+            .unproven
+            .into_iter()
+            .next()
+            .map(|node| Adoption::Unproven(node.reason))
+    }
+}
+
+/// Why a node was left unproven when its pin's content could not be read.
+fn content_unread(reason: &Unproven) -> bool {
+    matches!(
+        reason,
+        Unproven::NotInStore
+            | Unproven::FetchFailed
+            | Unproven::HostFailedEarlier
+            | Unproven::NeverAttempted(NotAttempted::FetchBudget)
+    )
+}
+
+/// The store-first reader of one bounded run, and the bounded reader that reports on it.
+pub(crate) type BoundedSeam<A = RegistryClient> = (Arc<dyn OciAccess>, BoundedAccess<A>);
+
+/// Builds a run's [`BoundedSeam`] on first need; `None` leaves the run store-only.
+pub(crate) type OpenSeam<'a, A> = Box<dyn FnOnce() -> Option<BoundedSeam<A>> + Send + 'a>;
+
+/// The registry half of an online proof, opened on the first node the store
+/// lacks. One bounded reader serves the whole run, so a host that fails once
+/// is not contacted again; the miss memo carries failures to later runs.
+pub(crate) struct Fetcher<'a, A = RegistryClient> {
+    /// Where the miss memo is kept.
+    state_dir: PathBuf,
+    now: SystemTime,
+    memo: Option<MissMemo>,
+    /// Taken on first use; a seam it cannot build leaves the run on the store.
+    open: Option<OpenSeam<'a, A>>,
+    seam: Option<BoundedSeam<A>>,
+    /// A pin was answered `404` this run.
+    noted_pin: bool,
+}
+
+impl<'a, A: OciAccess> Fetcher<'a, A> {
+    /// A fetcher keeping its misses under `state_dir`, reading through what `open` builds.
+    pub(crate) fn new(state_dir: PathBuf, open: OpenSeam<'a, A>) -> Self {
+        Self {
+            state_dir,
+            now: SystemTime::now(),
+            memo: None,
+            open: Some(open),
+            seam: None,
+            noted_pin: false,
+        }
+    }
+
+    /// Proves `key` from its registry; `None` keeps the store's verdict.
+    async fn prove(&mut self, state: &mut InstallState, key: &NodeKey, run: &ProofRun<'_>) -> Option<Adoption> {
+        let pin = lock_entry(run.lock, key)?.source.pinned()?;
+        let memo = self.memo.get_or_insert_with(|| MissMemo::load(&self.state_dir));
+        if memo.skips_host(pin.registry(), self.now) {
+            return Some(Adoption::Unproven(Unproven::HostFailedEarlier));
+        }
+        if memo.skips_pin(pin, self.now) {
+            return Some(Adoption::Unproven(Unproven::FetchFailed));
+        }
+        if self.seam.is_none() {
+            self.seam = self.open.take().and_then(|open| open());
+        }
+        let (access, _) = self.seam.as_ref()?;
+        // The manifest first, so a `404` is told from other failures; the proof then reads it from the store.
+        match access.fetch_manifest(pin).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                memo.note_missing_pin(pin, self.now);
+                self.noted_pin = true;
+                return Some(Adoption::Unproven(Unproven::FetchFailed));
+            }
+            Err(e) => {
+                let reason = adoption::fetch_reason(&e.into(), ContentMode::StoreThenRegistry);
+                return Some(Adoption::Unproven(reason));
+            }
+        }
+        let one = BTreeSet::from([key.clone()]);
+        let (workspace, mode) = (run.target.workspace(), ContentMode::StoreThenRegistry);
+        let budget = Some(run.budget);
+        let report = adoption::prepass_within(
+            state, run.lock, &one, mode, run.target, run.roots, workspace, access, budget,
+        )
+        .await;
+        outcome_of(state, key, report)
+    }
+
+    /// Records the hosts that failed and the pins answered `404` for later runs.
+    fn finish(self) {
+        let failed = match &self.seam {
+            Some((_, bounded)) => bounded.failed_hosts(),
+            None => Vec::new(),
+        };
+        let Some(mut memo) = self.memo else {
+            return;
+        };
+        if failed.is_empty() && !self.noted_pin {
+            return;
+        }
+        for host in &failed {
+            memo.note_failed_host(host, self.now);
+        }
+        if let Err(e) = memo.save(&self.state_dir, self.now) {
+            tracing::debug!("adoption misses not recorded: {e}");
+        }
+    }
+}
+
+/// The store-first bounded seam of one run; one that cannot be built leaves the run store-only.
+fn open_bounded(ctx: &Context) -> Option<BoundedSeam> {
+    ctx.bounded_access(super::transport_hosts(ctx), CLI_RUN_DEADLINE)
+        .inspect_err(|e| tracing::debug!("registry not read, so no record is proven from it: {e}"))
+        .ok()
+}
+
+/// `artifact` for one, `artifacts` otherwise.
+pub(crate) fn artifacts(count: usize) -> &'static str {
+    if count == 1 { "artifact" } else { "artifacts" }
+}
+
+/// The `adopted` outcome line: records a commit wrote, and nodes it left unproven.
+pub(crate) fn adopted_text(adopted: usize, left: usize) -> String {
+    format!(
+        "adopted {adopted} {} into the install record; {left} left unproven",
+        artifacts(adopted)
+    )
+}
+
+/// The `offline:` outcome line, naming the online run that proves the misses.
+fn offline_text(misses: usize, grim: &Invocation) -> String {
+    let (verb, them) = if misses == 1 { ("was", "it") } else { ("were", "them") };
+    format!(
+        "offline: {misses} {} {verb} not proven; run `{grim} status` again online to prove {them}",
+        artifacts(misses)
+    )
+}
+
+/// The cause a `records not written:` line names.
+pub(crate) fn skip_cause_text(cause: SkipCause) -> &'static str {
+    match cause {
+        SkipCause::Contended => "another grim holds the state-file lock",
+        SkipCause::Io => "the state file could not be read or written",
+        SkipCause::ReadOnly => "the state directory is read-only",
+        SkipCause::LinkedOrOutside => "the state file or its directory is a link or lies outside its root",
+    }
+}
+
+/// The lock's nodes worth a proof: a record that reads `modified` while the
+/// lock names another pin, or no record with a destination on disk.
+pub(crate) fn adoption_candidates(
+    lock: &GrimoireLock,
+    state: &InstallState,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+) -> BTreeSet<NodeKey> {
+    adoption_candidates_with(lock, state, target, roots, active, &OutputHashes::default())
+}
+
+/// [`adoption_candidates`] keeping the hashes it reads in `hashes`, for the report to reuse.
+fn adoption_candidates_with(
+    lock: &GrimoireLock,
+    state: &InstallState,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    hashes: &OutputHashes,
+) -> BTreeSet<NodeKey> {
+    let mut seen = HashSet::new();
+    lock.iter_artifacts()
+        .filter(|a| seen.insert((a.kind, a.name.clone())))
+        // `missing` comes first, so a record is proven only where it reads `modified`.
+        .filter(|a| match state.get(a.kind, &a.name) {
+            Some(rec) => {
+                !rec.source.eq_content(&a.source)
+                    && derive_state_with(a.kind, &a.name, Some(a), state, roots, active, true, hashes)
+                        == ArtifactStatus::Modified
+            }
+            None => true,
+        })
+        .map(|a| ((a.kind, a.name.clone()), a))
+        .filter(|(key, a)| {
+            let row = adoption::classify(key, state.get(key.0, &key.1), Some(a), target, roots);
+            matches!(row, Row::Row4Candidate | Row::Row5Candidate)
+        })
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// The first lock entry for `key`, the one a prepass proves against.
+fn lock_entry<'a>(lock: &'a GrimoireLock, key: &NodeKey) -> Option<&'a LockedArtifact> {
+    lock.iter_artifacts().find(|a| a.kind == key.0 && a.name == key.1)
+}
+
+/// Writes `proven` through the state-file lock, re-checked against the lock at
+/// `lock_path` read under it, and returns how many records it wrote; never
+/// fails the run. A skipped write leaves the report from memory. `lossy` is
+/// whether the state the proofs started from was migrated lossily.
+pub(crate) fn commit_adopted(
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+    config_path: &Path,
+    lock_path: &Path,
+    lossy: bool,
+    proven: &[ProvenRecord],
+) -> Result<usize, SkipCause> {
+    commit_adopted_with(scope, roots, config_path, lossy, proven, || {
+        lock_io::load(lock_path).ok()
+    })
+}
+
+/// [`commit_adopted`] reading the evidence lock with `read_lock`.
+fn commit_adopted_with(
+    scope: ConfigScope,
+    roots: &AnchorRoots,
+    config_path: &Path,
+    lossy: bool,
+    proven: &[ProvenRecord],
+    read_lock: impl Fn() -> Option<GrimoireLock>,
+) -> Result<usize, SkipCause> {
+    // Read for the pre-check and again under the state-file lock, so a pin moved
+    // before the lock is taken is not written. A `grim lock` takes the config lock
+    // only, so a save during the locked re-check and write still goes unseen.
+    let evidence = || {
+        let lock = read_lock();
+        move |key: &NodeKey| {
+            lock.as_ref()
+                .and_then(|lock| lock_entry(lock, key))
+                .map(|entry| entry.source.clone())
+        }
+    };
+    match InstallState::commit_proven(scope, roots, config_path, proven, evidence) {
+        CommitOutcome::Written(0) => Ok(0),
+        CommitOutcome::Written(written) => {
+            // The write relocated a legacy file's records; a lossy migration keeps it as the only copy.
+            if scope == ConfigScope::Project && !lossy {
+                InstallState::reap_legacy_project_state(&roots.grim_home, config_path);
+            }
+            Ok(written)
+        }
+        CommitOutcome::Skipped(cause) => Err(cause),
+    }
+}
+
+/// One warning for every row whose lock pin the store lacks: only a render of
+/// that pin tells a pulled update from a local edit, and `install` fetches it.
+fn warn_not_stored(keys: &[NodeKey], grim: &Invocation) {
+    if keys.is_empty() {
+        return;
+    }
+    let rows: Vec<String> = keys
+        .iter()
+        .map(|(kind, name)| format!("{kind} '{}'", registry_text(name)))
+        .collect();
+    tracing::warn!(
+        "{}: the lock's pin is not in the local store, so these files read modified; run `{grim} install` to check them against it",
+        rows.join(", ")
+    );
 }
 
 /// What an install record's recorded outputs look like on disk.
@@ -3257,13 +3986,24 @@ enum Footprint {
 /// must as well or the two commands disagree about the same bytes.
 ///
 /// An unresolvable anchored target (corrupt/tampered `relative`, an anchor
-/// root absent on this machine) degrades to `Missing` for a read-only report
+/// root absent on this machine) degrades to `Missing` for the report
 /// rather than `?`-propagating — state is data, and `status` exits 0.
 fn footprint(
     record: &InstallRecord,
     roots: &AnchorRoots,
     active: &[ClientTarget],
     fence: Option<&RootFence>,
+) -> Footprint {
+    footprint_with(record, roots, active, fence, &OutputHashes::default())
+}
+
+/// [`footprint`] reading each output's current hash through the run's `hashes`.
+fn footprint_with(
+    record: &InstallRecord,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    fence: Option<&RootFence>,
+    hashes: &OutputHashes,
 ) -> Footprint {
     // Reuse the reconciliation predicate rather than restating it, so a change
     // to what counts as active cannot drift between here and the installer.
@@ -3289,18 +4029,52 @@ fn footprint(
         any_present = true;
         // Any drifted client output (canonical OR generated — the recorded
         // hash for a generated target is over its expected bytes) ⇒ modified.
-        match out.current_hash(record.kind, roots, Containment::AllowRelocatedAncestor) {
-            Ok(actual) if actual != out.content_hash => modified = true,
-            Ok(_) => {}
+        match hashes.current(record.kind, out, roots) {
+            Some(actual) if actual != out.content_hash => modified = true,
+            Some(_) => {}
             // Present but unreadable / unresolvable: effectively gone.
-            Err(_) if client_is_active(out) => return Footprint::Missing,
-            Err(_) => {}
+            None if client_is_active(out) => return Footprint::Missing,
+            None => {}
         }
     }
     match (any_present, modified) {
         (false, _) => Footprint::Missing,
         (true, true) => Footprint::Modified,
         (true, false) => Footprint::Intact,
+    }
+}
+
+/// The outputs hashed at one remainder, each with its hash; `None` when unreadable.
+type HashedAt = Vec<(ClientOutput, Option<Digest>)>;
+
+/// The current hashes of recorded outputs, read once a status run: status
+/// writes no output, so a hash read in the candidate pass holds for the report.
+#[derive(Default)]
+struct OutputHashes(std::sync::Mutex<HashMap<(ArtifactKind, String), HashedAt>>);
+
+impl OutputHashes {
+    /// `out`'s current hash for a record of `kind`; `None` when it cannot be read.
+    fn current(&self, kind: ArtifactKind, out: &ClientOutput, roots: &AnchorRoots) -> Option<Digest> {
+        // The whole output is the key: the legacy hash it falls back to depends on its recorded one.
+        let key = (kind, out.target.relative.clone());
+        if let Ok(kept) = self.0.lock()
+            && let Some((_, hash)) = kept.get(&key).and_then(|seen| seen.iter().find(|(was, _)| was == out))
+        {
+            return hash.clone();
+        }
+        let hash = out.current_hash(kind, roots, Containment::AllowRelocatedAncestor).ok();
+        if let Ok(mut kept) = self.0.lock() {
+            kept.entry(key).or_default().push((out.clone(), hash.clone()));
+        }
+        hash
+    }
+}
+
+#[cfg(test)]
+impl OutputHashes {
+    /// How many outputs were hashed.
+    fn read(&self) -> usize {
+        self.0.lock().map_or(0, |kept| kept.values().map(Vec::len).sum())
     }
 }
 
@@ -3324,7 +4098,7 @@ fn reportable_outputs<'a>(record: &'a InstallRecord, active: &'a [ClientTarget])
 /// the locked content hash. A source that is missing or will not pack
 /// counts as drift (a warning is logged): a declared path whose source
 /// vanished is not a clean install, and the remediation is `grim update`.
-/// Status is a read-only report and stays exit-0 regardless.
+/// Status is a report and stays exit-0 regardless.
 async fn path_source_drifted(locked: &LockedArtifact, anchor: &std::path::Path) -> bool {
     let crate::lock::locked_source::LockedSource::Path { path, hash } = &locked.source else {
         return false;
@@ -3467,6 +4241,19 @@ mod tests {
         assert_eq!(declared.len(), 1);
         assert_eq!(declared[0].kind, ArtifactKind::Settings);
         assert_eq!(declared[0].name, "team");
+    }
+
+    /// The outcome lines agree with their count, and the offline line names the run that proves them.
+    #[test]
+    fn outcome_lines_agree_with_their_count() {
+        assert!(adopted_text(1, 0).starts_with("adopted 1 artifact into"));
+        assert!(adopted_text(2, 1).starts_with("adopted 2 artifacts into"));
+        let one = offline_text(1, &Invocation::WALKED);
+        assert!(one.starts_with("offline: 1 artifact was not proven;"), "{one}");
+        assert!(one.ends_with("run `grim status` again online to prove it"), "{one}");
+        let three = offline_text(3, &Invocation::WALKED);
+        assert!(three.starts_with("offline: 3 artifacts were not proven;"), "{three}");
+        assert!(three.ends_with("to prove them"), "{three}");
     }
 
     fn catalog_row(
@@ -7625,5 +8412,1066 @@ mod tests {
 
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(reads, 0);
+    }
+}
+
+#[cfg(test)]
+mod fetch_budget_tests {
+    use super::*;
+
+    use std::future::Future;
+    use std::io::{self, Read as _};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::install::installer::install_all;
+    use crate::install::materializer::DefaultMaterializer;
+    use crate::install::progress::SilentProgress;
+    use crate::lock::grimoire_lock::LockMetadata;
+    use crate::lock::lock_version::LockVersion;
+    use crate::oci::Algorithm;
+    use crate::oci::access::bounded_access::DECODED_LAYER_LIMIT;
+    use crate::oci::access::cached_access::CachedAccess;
+    use crate::oci::access::memory_registry::MemoryRegistry;
+    use crate::oci::access::{AccessMode, CatalogListing, Operation};
+    use crate::oci::layer::{Compression, TAR_GZIP_LAYER_MEDIA_TYPE, UNCOMPRESSED_DIGEST_ANNOTATION, encode_layer};
+    use crate::oci::manifest::{Descriptor, OciManifest};
+    use crate::oci::tag_cache::TagCache;
+    use crate::store::BlobStore;
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// A registry serving raw manifest bytes, which the bounded reader checks against the pin.
+    #[derive(Clone, Default)]
+    struct Served {
+        manifests: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+        blobs: MemoryRegistry,
+        /// Layer reads the registry answered.
+        blob_reads: Arc<AtomicUsize>,
+    }
+
+    /// The tar of rule `name`: one file of about 8 KiB, about 10 KiB in all.
+    fn rule_tar(name: &str) -> Vec<u8> {
+        let body = format!("# {name}\n{}\n", "x".repeat(8000));
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, format!("{name}.md"), body.as_bytes())
+            .unwrap();
+        tar.into_inner().unwrap()
+    }
+
+    /// `n` zero bytes gzipped as they stream in, so no `n`-byte buffer is built.
+    fn gzip_zeros(n: u64) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        io::copy(&mut io::repeat(0).take(n), &mut encoder).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// A gzip layer descriptor for `blob`, with `uncompressed` as its uncompressed-digest annotation.
+    fn gzip_layer(blob: &[u8], uncompressed: Option<Digest>) -> Descriptor {
+        Descriptor {
+            digest: Algorithm::Sha256.hash(blob),
+            media_type: TAR_GZIP_LAYER_MEDIA_TYPE.to_string(),
+            size: blob.len() as u64,
+            annotations: uncompressed
+                .map(|digest| BTreeMap::from([(UNCOMPRESSED_DIGEST_ANNOTATION.to_string(), digest.to_string())])),
+        }
+    }
+
+    /// `test` cut off after 30 s, so a decode that never ends fails the test.
+    async fn within<T>(test: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(30), test)
+            .await
+            .expect("the proof ends within 30 s")
+    }
+
+    impl Served {
+        /// Publishes rule `name` as a gzip layer of a few hundred bytes that
+        /// decodes to about 10 KiB, and returns its pin.
+        async fn rule(&self, name: &str) -> PinnedIdentifier {
+            let (blob, layer) = encode_layer(&rule_tar(name), Compression::Gzip);
+            self.publish(name, &blob, layer).await
+        }
+
+        /// Publishes `blob` as rule `name`'s one layer, described by `layer`,
+        /// and returns its pin; each name gets its own manifest.
+        async fn publish(&self, name: &str, blob: &[u8], layer: Descriptor) -> PinnedIdentifier {
+            let repo = Identifier::new_registry(name, "localhost:5000");
+            self.blobs.push_blob(&repo, blob).await.unwrap();
+            let manifest = serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "artifactType": "application/vnd.grimoire.rule.v1",
+                "config": {
+                    "mediaType": "application/vnd.oci.empty.v1+json",
+                    "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                    "size": 2,
+                },
+                "layers": [{
+                    "mediaType": layer.media_type,
+                    "digest": layer.digest.to_string(),
+                    "size": layer.size,
+                    "annotations": layer.annotations,
+                }],
+                "annotations": {"org.opencontainers.image.title": name},
+            });
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            let digest = Algorithm::Sha256.hash(&bytes);
+            self.manifests.lock().unwrap().insert(digest.to_string(), bytes);
+            PinnedIdentifier::try_from(repo.clone_with_digest(digest)).unwrap()
+        }
+
+        fn bytes(&self, id: &PinnedIdentifier) -> Option<Vec<u8>> {
+            self.manifests.lock().unwrap().get(&id.digest().to_string()).cloned()
+        }
+
+        fn blob_reads(&self) -> usize {
+            self.blob_reads.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for Served {
+        async fn resolve_digest(&self, id: &Identifier, op: Operation) -> Result<Option<Digest>, AccessError> {
+            self.blobs.resolve_digest(id, op).await
+        }
+        async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Ok(self.bytes(id).map(|bytes| OciManifest::from_json(&bytes).unwrap()))
+        }
+        async fn fetch_manifest_bytes(&self, id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+            Ok(self.bytes(id))
+        }
+        async fn fetch_blob(&self, repo: &Identifier, d: &Digest, max: u64) -> Result<Option<Vec<u8>>, AccessError> {
+            self.blob_reads.fetch_add(1, Ordering::SeqCst);
+            self.blobs.fetch_blob(repo, d, max).await
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<CatalogListing, AccessError> {
+            panic!("a proof never lists a catalog")
+        }
+        async fn push_blob(&self, _repo: &Identifier, _bytes: &[u8]) -> Result<Digest, AccessError> {
+            panic!("a proof never pushes")
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            panic!("a proof never pushes")
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            panic!("a proof never tags")
+        }
+    }
+
+    /// A project whose rules are on disk, with no record and a cold store.
+    struct World {
+        dir: tempfile::TempDir,
+        target: InstallTarget,
+        roots: AnchorRoots,
+        lock: GrimoireLock,
+        registry: Served,
+    }
+
+    /// What one proof run came to, and what it charged for decoded bytes.
+    struct Proved {
+        outcomes: BTreeMap<NodeKey, Adoption>,
+        limit: u64,
+        remaining: u64,
+    }
+
+    impl Proved {
+        fn outcome(&self, name: &str) -> &Adoption {
+            &self.outcomes[&(ArtifactKind::Rule, name.to_string())]
+        }
+
+        fn charged(&self) -> u64 {
+            self.limit - self.remaining
+        }
+    }
+
+    impl World {
+        /// Rules `names`, each published and installed as it is pinned.
+        async fn new(names: &[&str]) -> Self {
+            let registry = Served::default();
+            let mut pins = Vec::new();
+            for name in names {
+                pins.push((name.to_string(), registry.rule(name).await));
+            }
+            let world = Self::locking(registry, pins);
+            let access: Arc<dyn OciAccess> = Arc::new(world.registry.clone());
+            let mut installed = InstallState::empty(&world.dir.path().join("installed.json"));
+            let run = install_all(
+                &world.lock,
+                &access,
+                &DefaultMaterializer,
+                &world.target,
+                &mut installed,
+                &world.roots,
+                world.dir.path(),
+                false,
+            )
+            .await;
+            assert!(run.iter().all(|one| one.result.is_ok()), "the fixture installs");
+            world
+        }
+
+        /// Rules each publishing its blob under its descriptor, a file written by hand at
+        /// each destination, so every rule is a proof candidate that no install could make.
+        async fn publishing(layers: &[(&str, &[u8], &Descriptor)]) -> Self {
+            let registry = Served::default();
+            let mut pins = Vec::new();
+            for (name, blob, layer) in layers {
+                pins.push((name.to_string(), registry.publish(name, blob, (*layer).clone()).await));
+            }
+            let world = Self::locking(registry, pins);
+            for (name, ..) in layers {
+                let dest = world.dir.path().join(format!(".claude/rules/{name}.md"));
+                std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                std::fs::write(dest, format!("# {name}\n")).unwrap();
+            }
+            world
+        }
+
+        fn locking(registry: Served, pins: Vec<(String, PinnedIdentifier)>) -> Self {
+            let rules = pins
+                .into_iter()
+                .map(|(name, pin)| LockedArtifact::direct(name, ArtifactKind::Rule, pin))
+                .collect();
+            let lock = GrimoireLock {
+                metadata: LockMetadata {
+                    lock_version: LockVersion::V1,
+                    declaration_hash_version: 1,
+                    declaration_hash: format!("sha256:{}", "d".repeat(64)),
+                    generated_by: "grim 0.1.0".to_string(),
+                    generated_at: "2026-01-01T00:00:00Z".to_string(),
+                },
+                skills: Vec::new(),
+                rules,
+                agents: Vec::new(),
+                mcp: Vec::new(),
+                hooks: Vec::new(),
+                settings: Vec::new(),
+                bundles: Vec::new(),
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+            let roots = AnchorRoots {
+                workspace: dir.path().to_path_buf(),
+                grim_home: dir.path().to_path_buf(),
+                vendor_roots: Default::default(),
+                opencode_skills: None,
+                claude_user_dir: None,
+                agents_skills: None,
+            };
+            Self {
+                dir,
+                target,
+                roots,
+                lock,
+                registry,
+            }
+        }
+
+        fn nodes(&self) -> BTreeSet<NodeKey> {
+            self.lock.rules.iter().map(|r| (r.kind, r.name.clone())).collect()
+        }
+
+        /// Proves every rule through a [`Fetcher`] over an empty store, in a run
+        /// that may decode `budget` bytes.
+        async fn prove(&self, budget: u64) -> Proved {
+            let bounded = BoundedAccess::new(self.registry.clone(), CLI_RUN_DEADLINE);
+            let cached: Arc<dyn OciAccess> = Arc::new(CachedAccess::new(
+                bounded.clone(),
+                TagCache::new(self.dir.path().join("tags")),
+                BlobStore::new(self.dir.path().join("blobs")),
+                AccessMode::Online,
+            ));
+            let seam = (cached, bounded.clone());
+            let mut fetch = Fetcher::new(self.dir.path().join("state"), Box::new(move || Some(seam)));
+            let store: Arc<dyn OciAccess> = Arc::new(MemoryRegistry::new());
+            let decode = DecodeBudget::with_limit(budget);
+            let run = ProofRun {
+                lock: &self.lock,
+                target: &self.target,
+                roots: &self.roots,
+                store: &store,
+                memo: None,
+                budget: &decode,
+            };
+            let mut state = InstallState::empty(&self.dir.path().join("state.json"));
+            let outcomes = prove_nodes(&mut state, &self.nodes(), &run, Some(&mut fetch), &SilentProgress).await;
+            Proved {
+                outcomes,
+                limit: budget,
+                remaining: decode.remaining(),
+            }
+        }
+
+        /// Proves every rule from a store that holds it, with no registry, in a
+        /// run that may decode `budget` bytes.
+        async fn prove_stored(&self, budget: u64) -> Proved {
+            let store: Arc<dyn OciAccess> = Arc::new(self.registry.clone());
+            let decode = DecodeBudget::with_limit(budget);
+            let run = ProofRun {
+                lock: &self.lock,
+                target: &self.target,
+                roots: &self.roots,
+                store: &store,
+                memo: None,
+                budget: &decode,
+            };
+            let mut state = InstallState::empty(&self.dir.path().join("state.json"));
+            let nodes = self.nodes();
+            let outcomes = prove_nodes(&mut state, &nodes, &run, None::<&mut Fetcher<'_>>, &SilentProgress).await;
+            Proved {
+                outcomes,
+                limit: budget,
+                remaining: decode.remaining(),
+            }
+        }
+    }
+
+    const SPENT: Adoption = Adoption::Unproven(Unproven::NeverAttempted(NotAttempted::FetchBudget));
+    const FAILED: Adoption = Adoption::Unproven(Unproven::FetchFailed);
+
+    /// A decode cut off at what the run has left spends the rest of the run.
+    #[tokio::test]
+    async fn a_cut_at_the_run_budget_spends_the_remainder() {
+        within(async {
+            let world = World::new(&["big"]).await;
+            let proved = world.prove(4 * 1024).await;
+
+            assert_eq!(proved.outcome("big"), &SPENT);
+            assert_eq!(proved.remaining, 0, "the cut spends what the run had left");
+        })
+        .await;
+    }
+
+    /// The guard against a second decode: a proven layer is charged its tar once.
+    #[tokio::test]
+    async fn a_proven_layer_charges_its_tar_once() {
+        within(async {
+            let world = World::new(&["big"]).await;
+            let proved = world.prove(64 * 1024).await;
+
+            assert!(
+                matches!(proved.outcome("big"), Adoption::Proven(_)),
+                "{:?}",
+                proved.outcomes
+            );
+            assert_eq!(proved.charged(), rule_tar("big").len() as u64);
+        })
+        .await;
+    }
+
+    /// Each layer fits the budget alone; the second does not fit what the first left.
+    #[tokio::test]
+    async fn the_run_not_the_call_is_charged_for_decoded_bytes() {
+        within(async {
+            let world = World::new(&["a", "b"]).await;
+            let proved = world.prove(16 * 1024).await;
+
+            assert!(
+                matches!(proved.outcome("a"), Adoption::Proven(_)),
+                "{:?}",
+                proved.outcomes
+            );
+            assert_eq!(proved.outcome("b"), &SPENT);
+            assert_eq!(proved.remaining, 0);
+        })
+        .await;
+    }
+
+    /// A layer whose stored size is past what the run has left is never fetched.
+    #[tokio::test]
+    async fn a_layer_larger_than_the_remainder_is_never_read() {
+        within(async {
+            let world = World::new(&["big"]).await;
+            let reads = world.registry.blob_reads();
+            let proved = world.prove(16).await;
+
+            assert_eq!(proved.outcome("big"), &SPENT);
+            assert_eq!(
+                world.registry.blob_reads(),
+                reads,
+                "a layer that cannot fit is never fetched"
+            );
+        })
+        .await;
+    }
+
+    /// A gzip layer past the 64 MiB expansion floor fails its policy, not the
+    /// budget, and is charged what it decoded, once.
+    #[tokio::test]
+    async fn a_bomb_past_the_expansion_floor_is_charged_once() {
+        within(async {
+            let blob = gzip_zeros(64 * MIB + 1);
+            let layer = gzip_layer(&blob, None);
+            let world = World::publishing(&[("bomb", &blob, &layer)]).await;
+            let proved = world.prove(DECODED_LAYER_LIMIT).await;
+
+            assert_eq!(proved.outcome("bomb"), &FAILED);
+            assert_eq!(proved.charged(), 64 * MIB + 1);
+        })
+        .await;
+    }
+
+    /// A gzip layer that fails after decoding 1 MiB, on its CRC or on its
+    /// uncompressed digest, is charged the 1 MiB.
+    #[tokio::test]
+    async fn a_corrupt_layer_charges_what_it_decoded() {
+        within(async {
+            let mut crc = gzip_zeros(MIB);
+            let at = crc.len() - 8;
+            crc[at] ^= 0xff;
+            let wrong = gzip_zeros(MIB);
+            let cases = [
+                ("crc", gzip_layer(&crc, None), crc.clone()),
+                (
+                    "digest",
+                    gzip_layer(&wrong, Some(Algorithm::Sha256.hash(b"other"))),
+                    wrong,
+                ),
+            ];
+            for (case, layer, blob) in cases {
+                let world = World::publishing(&[("bad", &blob, &layer)]).await;
+                let proved = world.prove(DECODED_LAYER_LIMIT).await;
+
+                assert_eq!(proved.outcome("bad"), &FAILED, "{case}");
+                assert_eq!(proved.charged(), MIB, "{case}");
+            }
+        })
+        .await;
+    }
+
+    /// A layer that failed to decode is not decoded again for another candidate in the run.
+    #[tokio::test]
+    async fn two_candidates_sharing_a_bad_layer_decode_it_once() {
+        within(async {
+            let mut blob = gzip_zeros(MIB);
+            let at = blob.len() - 8;
+            blob[at] ^= 0xff;
+            let layer = gzip_layer(&blob, None);
+            let world = World::publishing(&[("one", &blob, &layer), ("two", &blob, &layer)]).await;
+            let proved = world.prove(DECODED_LAYER_LIMIT).await;
+
+            assert_eq!(proved.outcome("one"), &FAILED);
+            assert_eq!(proved.outcome("two"), &FAILED);
+            assert_eq!(proved.charged(), MIB, "the shared layer is decoded once");
+        })
+        .await;
+    }
+
+    /// The commit's evidence lock is read again under the state-file lock, so a
+    /// pin that moved before the lock was taken is not written. The reader
+    /// names pin B only while the commit holds the lock, pin A otherwise.
+    #[tokio::test]
+    async fn a_commit_reads_its_evidence_under_the_state_file_lock() {
+        use crate::lock::advisory_lock::AdvisoryFileLock;
+        use crate::lock::lock_error::LockErrorKind;
+        within(async {
+            let world = World::new(&["big"]).await;
+            let proved = world.prove(DECODED_LAYER_LIMIT).await;
+            let Adoption::Proven(record) = proved.outcome("big").clone() else {
+                panic!("{:?}", proved.outcomes);
+            };
+            let mut moved = world.lock.clone();
+            let pin_b =
+                Identifier::new_registry("big", "localhost:5000").clone_with_digest(Algorithm::Sha256.hash(b"b"));
+            moved.rules[0].source = LockedSource::Registry(PinnedIdentifier::try_from(pin_b).unwrap());
+            let state_path = InstallState::project_state_path(&world.roots.workspace);
+            let read_lock = || match AdvisoryFileLock::try_acquire(&state_path) {
+                Err(e) if matches!(e.kind, LockErrorKind::Locked) => Some(moved.clone()),
+                _ => Some(world.lock.clone()),
+            };
+            // No state directory yet: the commit's pre-check then runs before the lock exists.
+            let state_dir = world.dir.path().join(".grimoire");
+            if state_dir.exists() {
+                std::fs::remove_dir_all(&state_dir).unwrap();
+            }
+            let proven = [ProvenRecord { prior: None, record }];
+            let config = world.dir.path().join("grimoire.toml");
+
+            let written = commit_adopted_with(ConfigScope::Project, &world.roots, &config, false, &proven, read_lock);
+
+            assert_eq!(written, Ok(0), "the pin moved before the state-file lock was taken");
+            assert!(!state_path.exists(), "no record is written at pin A");
+        })
+        .await;
+    }
+
+    /// The store pass decodes under the run's budget too.
+    #[tokio::test]
+    async fn a_store_only_pass_is_charged() {
+        within(async {
+            let world = World::new(&["big"]).await;
+            let proved = world.prove_stored(4 * 1024).await;
+
+            assert_eq!(proved.outcome("big"), &SPENT);
+        })
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod proof_memo_tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::install::installer::install_all;
+    use crate::install::materializer::DefaultMaterializer;
+    use crate::install::progress::SilentProgress;
+    use crate::lock::grimoire_lock::LockMetadata;
+    use crate::lock::lock_version::LockVersion;
+    use crate::oci::Algorithm;
+    use crate::oci::access::Operation;
+    use crate::oci::manifest::{Descriptor, OciManifest};
+
+    /// A store serving one rule layer for every pin and counting each content
+    /// read; a proof reads the content once for every render it makes.
+    struct CountingStore {
+        blob: Vec<u8>,
+        reads: AtomicUsize,
+        /// Whether the store holds the pin; when not, every manifest read misses.
+        stored: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for CountingStore {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if !self.stored.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            Ok(Some(OciManifest {
+                media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+                artifact_type: Some("application/vnd.grimoire.rule.v1".to_string()),
+                config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+                layers: vec![Descriptor {
+                    digest: Algorithm::Sha256.hash(&self.blob),
+                    media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                    size: self.blob.len() as u64,
+                    annotations: None,
+                }],
+                annotations: BTreeMap::new(),
+            }))
+        }
+        async fn fetch_blob(&self, _repo: &Identifier, _d: &Digest, _max: u64) -> Result<Option<Vec<u8>>, AccessError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(self.blob.clone()))
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            panic!("a proof never lists a catalog")
+        }
+        async fn push_blob(&self, _repo: &Identifier, _bytes: &[u8]) -> Result<Digest, AccessError> {
+            panic!("a proof never pushes")
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            panic!("a proof never pushes")
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            panic!("a proof never tags")
+        }
+    }
+
+    /// A project whose rule `style` is on disk as installed, with no record.
+    struct World {
+        dir: tempfile::TempDir,
+        target: InstallTarget,
+        roots: AnchorRoots,
+        lock: GrimoireLock,
+        store: Arc<CountingStore>,
+    }
+
+    impl World {
+        async fn new() -> Self {
+            let mut tar = tar::Builder::new(Vec::new());
+            let body = b"# style\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, "style.md", &body[..]).unwrap();
+            let blob = tar.into_inner().unwrap();
+            let id =
+                Identifier::new_registry("style", "localhost:5000").clone_with_digest(Algorithm::Sha256.hash(&blob));
+            let rule = LockedArtifact::direct(
+                "style".to_string(),
+                ArtifactKind::Rule,
+                PinnedIdentifier::try_from(id).unwrap(),
+            );
+            let lock = GrimoireLock {
+                metadata: LockMetadata {
+                    lock_version: LockVersion::V1,
+                    declaration_hash_version: 1,
+                    declaration_hash: format!("sha256:{}", "d".repeat(64)),
+                    generated_by: "grim 0.1.0".to_string(),
+                    generated_at: "2026-01-01T00:00:00Z".to_string(),
+                },
+                skills: Vec::new(),
+                rules: vec![rule],
+                agents: Vec::new(),
+                mcp: Vec::new(),
+                hooks: Vec::new(),
+                settings: Vec::new(),
+                bundles: Vec::new(),
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+            let roots = AnchorRoots {
+                workspace: dir.path().to_path_buf(),
+                grim_home: dir.path().to_path_buf(),
+                vendor_roots: Default::default(),
+                opencode_skills: None,
+                claude_user_dir: None,
+                agents_skills: None,
+            };
+            let store = Arc::new(CountingStore {
+                blob,
+                reads: AtomicUsize::new(0),
+                stored: AtomicBool::new(true),
+            });
+            let access: Arc<dyn OciAccess> = store.clone();
+            let mut installed = InstallState::empty(&dir.path().join("state.json"));
+            let run = install_all(
+                &lock,
+                &access,
+                &DefaultMaterializer,
+                &target,
+                &mut installed,
+                &roots,
+                dir.path(),
+                false,
+            )
+            .await;
+            assert!(run[0].result.is_ok(), "{:?}", run[0].result);
+            Self {
+                dir,
+                target,
+                roots,
+                lock,
+                store,
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.store.reads.load(Ordering::SeqCst)
+        }
+
+        /// `style` installed and recorded, under a lock that names another pin
+        /// and whose declaration hash is an empty config's.
+        async fn recorded_under_another_pin(&self) -> (InstallState, GrimoireLock) {
+            let access: Arc<dyn OciAccess> = self.store.clone();
+            let mut state = InstallState::empty(&self.dir.path().join("state.json"));
+            let run = install_all(
+                &self.lock,
+                &access,
+                &DefaultMaterializer,
+                &self.target,
+                &mut state,
+                &self.roots,
+                self.dir.path(),
+                false,
+            )
+            .await;
+            assert!(run[0].result.is_ok(), "{:?}", run[0].result);
+            let other =
+                Identifier::new_registry("style", "localhost:5000").clone_with_digest(Algorithm::Sha256.hash(b"x"));
+            let mut lock = self.lock.clone();
+            lock.metadata.declaration_hash = DesiredSet::default().declaration_hash_cached().to_string();
+            lock.rules = vec![LockedArtifact::direct(
+                "style".to_string(),
+                ArtifactKind::Rule,
+                PinnedIdentifier::try_from(other).unwrap(),
+            )];
+            (state, lock)
+        }
+
+        /// One status proof of `style` from an empty state, as a server call without writes makes it.
+        async fn prove(&self, memo: Option<&ProofMemo>) -> Adoption {
+            let access: Arc<dyn OciAccess> = self.store.clone();
+            let scope = self.dir.path().join("state.json");
+            let budget = DecodeBudget::run();
+            let run = ProofRun {
+                lock: &self.lock,
+                target: &self.target,
+                roots: &self.roots,
+                store: &access,
+                memo: memo.map(|memo| (memo, scope.as_path())),
+                budget: &budget,
+            };
+            let key = (ArtifactKind::Rule, "style".to_string());
+            let mut state = InstallState::empty(&scope);
+            let mut outcomes = prove_nodes(
+                &mut state,
+                &BTreeSet::from([key.clone()]),
+                &run,
+                None::<&mut Fetcher<'_>>,
+                &SilentProgress,
+            )
+            .await;
+            let outcome = outcomes.remove(&key).expect("a candidate always has an outcome");
+            if let Adoption::Proven(record) = &outcome {
+                assert_eq!(
+                    state.get(key.0, &key.1),
+                    Some(record),
+                    "a replay re-records like a proof"
+                );
+            }
+            outcome
+        }
+    }
+
+    #[tokio::test]
+    async fn two_identical_calls_render_once() {
+        let world = World::new().await;
+        let memo = ProofMemo::default();
+        let before = world.reads();
+        let first = world.prove(Some(&memo)).await;
+        let once = world.reads();
+        assert!(matches!(first, Adoption::Proven(_)), "{first:?}");
+        assert!(once > before, "the first call renders");
+        assert_eq!(world.prove(Some(&memo)).await, first);
+        assert_eq!(world.reads(), once, "the second call renders nothing");
+    }
+
+    #[tokio::test]
+    async fn no_memo_or_a_changed_file_renders_again() {
+        let world = World::new().await;
+        let before = world.reads();
+        world.prove(None).await;
+        let once = world.reads() - before;
+        world.prove(None).await;
+        assert_eq!(world.reads() - before, 2 * once, "without a memo every call renders");
+
+        let memo = ProofMemo::default();
+        assert!(matches!(world.prove(Some(&memo)).await, Adoption::Proven(_)));
+        std::fs::write(world.dir.path().join(".claude/rules/style.md"), b"# edited\n").unwrap();
+        let kept = world.reads();
+        let edited = world.prove(Some(&memo)).await;
+        assert!(world.reads() > kept, "a changed file is proven again");
+        assert!(matches!(edited, Adoption::Unproven(_)), "{edited:?}");
+    }
+
+    /// A proof that could not read its pin is not kept, so a long-running
+    /// caller proves the node once the store gains the pin.
+    #[tokio::test]
+    async fn a_pin_the_store_lacked_is_proven_once_it_arrives() {
+        let world = World::new().await;
+        let memo = ProofMemo::default();
+        world.store.stored.store(false, Ordering::SeqCst);
+        assert_eq!(world.prove(Some(&memo)).await, Adoption::Unproven(Unproven::NotInStore));
+        world.store.stored.store(true, Ordering::SeqCst);
+        let second = world.prove(Some(&memo)).await;
+        assert!(matches!(second, Adoption::Proven(_)), "{second:?}");
+    }
+
+    /// A destination that leaves its root through a link is keyed by its link
+    /// bit alone, unread, and still keys apart from the real file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_destination_outside_its_root_is_keyed_unread() {
+        let world = World::new().await;
+        let key = (ArtifactKind::Rule, "style".to_string());
+        let rules = world.dir.path().join(".claude/rules");
+        let dest = rules.join("style.md");
+        let read = || ProofInputs::read(&world.lock, &key, None, &world.target, &world.roots).unwrap();
+        let seen = |inputs: &ProofInputs| {
+            inputs
+                .disk
+                .iter()
+                .find(|(path, ..)| path == &dest)
+                .and_then(|(_, _, seen)| seen.clone())
+        };
+        let real = read();
+        assert!(matches!(seen(&real), Some((false, Some(_)))), "{:?}", seen(&real));
+
+        // The rules directory moves out of the workspace and a link takes its place.
+        let outside = tempfile::tempdir().unwrap();
+        let moved = outside.path().join("rules");
+        std::fs::rename(&rules, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &rules).unwrap();
+        let through = read();
+        assert_eq!(
+            seen(&through),
+            Some((false, None)),
+            "a file past a link out of the root is not read"
+        );
+        assert_ne!(through, real);
+
+        // The destination itself links to a file outside the workspace.
+        std::fs::remove_file(&rules).unwrap();
+        std::fs::create_dir(&rules).unwrap();
+        std::os::unix::fs::symlink(moved.join("style.md"), &dest).unwrap();
+        let linked = read();
+        assert_eq!(seen(&linked), Some((true, None)), "a link is not followed");
+        assert_ne!(linked, real);
+    }
+
+    /// A lagging record's output is hashed once a run, for the candidate pass
+    /// and the report together.
+    #[tokio::test]
+    async fn a_lagging_record_is_hashed_once_a_run() {
+        let world = World::new().await;
+        let (state, lock) = world.recorded_under_another_pin().await;
+        let active = [ClientTarget::Claude];
+        let hashes = OutputHashes::default();
+
+        let nodes = adoption_candidates_with(&lock, &state, &world.target, &world.roots, &active, &hashes);
+        let row = derive_state_with(
+            ArtifactKind::Rule,
+            "style",
+            lock.rules.first(),
+            &state,
+            &world.roots,
+            &active,
+            true,
+            &hashes,
+        );
+
+        assert!(nodes.is_empty(), "{nodes:?}");
+        assert_eq!(row, ArtifactStatus::Outdated);
+        let outputs = state
+            .get(ArtifactKind::Rule, "style")
+            .map_or(0, |record| record.outputs.len());
+        assert_eq!((outputs, hashes.read()), (1, 1), "one hash for each output");
+    }
+
+    /// A store that cannot be opened proves nothing, writes nothing, and hands
+    /// the state back as it came, though it holds what would prove the candidate.
+    #[tokio::test]
+    async fn a_store_that_cannot_be_opened_proves_and_writes_nothing() {
+        let world = World::new().await;
+        // `style` as installed, with no record, its pin's manifest and layer in the store.
+        let layer = &world.store.blob;
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": "application/vnd.grimoire.rule.v1",
+            "config": {
+                "mediaType": "application/vnd.oci.empty.v1+json",
+                "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "size": 2,
+            },
+            "layers": [{
+                "mediaType": "application/vnd.grimoire.artifact.layer.v1.tar",
+                "digest": Algorithm::Sha256.hash(layer).to_string(),
+                "size": layer.len(),
+            }],
+        }))
+        .unwrap();
+        let digest = Algorithm::Sha256.hash(&manifest);
+        let home = tempfile::tempdir().unwrap();
+        let blobs = crate::store::BlobStore::new(home.path().join("blobs"));
+        blobs.put(&digest, &manifest).unwrap();
+        blobs.put(&Algorithm::Sha256.hash(layer), layer).unwrap();
+        let pin = Identifier::new_registry("style", "localhost:5000").clone_with_digest(digest);
+        let mut lock = world.lock.clone();
+        lock.metadata.declaration_hash = DesiredSet::default().declaration_hash_cached().to_string();
+        lock.rules = vec![LockedArtifact::direct(
+            "style".to_string(),
+            ArtifactKind::Rule,
+            PinnedIdentifier::try_from(pin).unwrap(),
+        )];
+        lock_io::save(&world.dir.path().join("grimoire.lock"), &lock, None).unwrap();
+        let state = InstallState::empty(&world.dir.path().join("state.json"));
+        let active = [ClientTarget::Claude];
+        assert_eq!(
+            adoption_candidates(&lock, &state, &world.target, &world.roots, &active).len(),
+            1
+        );
+        // `tags` is a file, so the store's layout cannot be made; `blobs` is made before it.
+        std::fs::write(home.path().join("tags"), b"").unwrap();
+        let ctx = Context::hermetic(home.path().to_path_buf());
+        let state_path = InstallState::project_state_path(world.dir.path());
+        let scope = scope_resolution::ResolvedScope {
+            scope: ConfigScope::Project,
+            set: DesiredSet::default(),
+            options: Default::default(),
+            registries: Default::default(),
+            config_path: world.dir.path().join("grimoire.toml"),
+            lock_path: world.dir.path().join("grimoire.lock"),
+            state_path: state_path.clone(),
+            workspace: world.dir.path().to_path_buf(),
+            roots: world.roots.clone(),
+            invocation: Invocation::WALKED,
+        };
+        let before: Vec<InstallRecord> = state.iter_records().cloned().collect();
+        let on_disk = std::fs::read(&state_path).ok();
+        let mode = StatusMode {
+            content: ContentMode::StoreOnly,
+            commit: true,
+            memo: None,
+        };
+        let hashes = OutputHashes::default();
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let after = adopt_proven(
+            &ctx,
+            &scope,
+            Some(&lock),
+            state,
+            &world.target,
+            &active,
+            mode,
+            &hashes,
+            &SilentProgress,
+        )
+        .await;
+
+        let logs = capture.text();
+        assert_eq!(after.iter_records().cloned().collect::<Vec<_>>(), before);
+        assert_eq!(std::fs::read(&state_path).ok(), on_disk, "the state file is untouched");
+        assert!(logs.contains("local store not readable"), "{logs}");
+        assert!(!logs.contains("adopted"), "{logs}");
+    }
+
+    /// At global scope a vendor config linked from a dotfiles directory is
+    /// keyed on its content, as the proof reads it, so an edit behind the link
+    /// changes the key.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_global_mcp_config_keys_on_its_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, dotfiles) = (dir.path().join("user"), dir.path().join("dotfiles"));
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let roots = AnchorRoots {
+            workspace: dir.path().join("home"),
+            grim_home: dir.path().join("home"),
+            vendor_roots: Default::default(),
+            opencode_skills: None,
+            claude_user_dir: Some(user.clone()),
+            agents_skills: None,
+        };
+        let target = InstallTarget::new(&roots.grim_home, ConfigScope::Global, vec![ClientTarget::Claude]);
+        let config = user.join(".claude.json");
+        let linked = dotfiles.join(".claude.json");
+        std::fs::write(&linked, br#"{"mcpServers":{"srv":{"command":"a"}}}"#).unwrap();
+        std::os::unix::fs::symlink(&linked, &config).unwrap();
+        let id = Identifier::new_registry("srv", "localhost:5000").clone_with_digest(Algorithm::Sha256.hash(b"srv"));
+        let entry = LockedArtifact::direct(
+            "srv".to_string(),
+            ArtifactKind::Mcp,
+            PinnedIdentifier::try_from(id).unwrap(),
+        );
+        let record = InstallRecord {
+            kind: ArtifactKind::Mcp,
+            name: "srv".to_string(),
+            source: entry.source.clone(),
+            dev: false,
+            outputs: vec![ClientOutput {
+                client: ClientTarget::Claude.to_string(),
+                target: AnchoredPath {
+                    anchor: crate::install::path_anchor::PathAnchor::ClaudeUserDir,
+                    relative: ".claude.json".to_string(),
+                },
+                content_hash: Algorithm::Sha256.hash(b"recorded"),
+                support_dir: None,
+                entry: Some("/mcpServers/srv".to_string()),
+                adopted: false,
+                element: None,
+            }],
+        };
+        let lock = GrimoireLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V1,
+                declaration_hash_version: 1,
+                declaration_hash: format!("sha256:{}", "d".repeat(64)),
+                generated_by: "grim 0.1.0".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            skills: Vec::new(),
+            rules: Vec::new(),
+            agents: Vec::new(),
+            mcp: vec![entry],
+            hooks: Vec::new(),
+            settings: Vec::new(),
+            bundles: Vec::new(),
+        };
+        let key = (ArtifactKind::Mcp, "srv".to_string());
+        let read = || ProofInputs::read(&lock, &key, Some(&record), &target, &roots).unwrap();
+        let seen = |inputs: &ProofInputs| {
+            inputs
+                .disk
+                .iter()
+                .find(|(path, ..)| path == &config)
+                .and_then(|(_, _, seen)| seen.clone())
+        };
+
+        let before = read();
+        std::fs::write(&linked, br#"{"mcpServers":{"srv":{"command":"b"}}}"#).unwrap();
+        let after = read();
+
+        assert!(matches!(seen(&before), Some((true, Some(_)))), "{:?}", seen(&before));
+        assert_ne!(seen(&after), seen(&before), "an edit behind the link changes the key");
+    }
+
+    /// A project MCP config past the config cap is keyed unread. The key is
+    /// read on its own thread behind a 10 s bound, so a read past the cap cannot hang the suite.
+    #[test]
+    fn the_memo_key_reads_a_project_mcp_config_capped() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let dir = tempfile::tempdir().unwrap();
+            let roots = AnchorRoots {
+                workspace: dir.path().to_path_buf(),
+                grim_home: dir.path().to_path_buf(),
+                vendor_roots: Default::default(),
+                opencode_skills: None,
+                claude_user_dir: None,
+                agents_skills: None,
+            };
+            let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+            let config = dir.path().join(".mcp.json");
+            // Sparse: no byte of it is written.
+            let file = std::fs::File::create(&config).unwrap();
+            file.set_len(crate::config::FILE_SIZE_LIMIT_BYTES + 1).unwrap();
+            let id =
+                Identifier::new_registry("srv", "localhost:5000").clone_with_digest(Algorithm::Sha256.hash(b"srv"));
+            let entry = LockedArtifact::direct(
+                "srv".to_string(),
+                ArtifactKind::Mcp,
+                PinnedIdentifier::try_from(id).unwrap(),
+            );
+            let lock = GrimoireLock {
+                metadata: LockMetadata {
+                    lock_version: LockVersion::V1,
+                    declaration_hash_version: 1,
+                    declaration_hash: format!("sha256:{}", "d".repeat(64)),
+                    generated_by: "grim 0.1.0".to_string(),
+                    generated_at: "2026-01-01T00:00:00Z".to_string(),
+                },
+                skills: Vec::new(),
+                rules: Vec::new(),
+                agents: Vec::new(),
+                mcp: vec![entry],
+                hooks: Vec::new(),
+                settings: Vec::new(),
+                bundles: Vec::new(),
+            };
+            let key = (ArtifactKind::Mcp, "srv".to_string());
+            let inputs = ProofInputs::read(&lock, &key, None, &target, &roots).unwrap();
+            let seen = inputs
+                .disk
+                .iter()
+                .find(|(path, ..)| path == &config)
+                .and_then(|(_, _, seen)| seen.clone());
+            // The receiver is gone only once the timeout below has failed the test.
+            let _ = tx.send(seen);
+        });
+        let seen = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the key is read within 10 s");
+        assert_eq!(seen, Some((false, None)));
     }
 }

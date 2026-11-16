@@ -41,6 +41,7 @@ use crate::export::ExportError;
 use crate::export::marketplace;
 use crate::export::resolve::{self, IncludeOrigin, PluginPick, PluginSelection};
 use crate::hook::policy::FLAG_ALSO_GRANTS;
+use crate::install::adoption::{self, ContentMode, NotAttempted, PrepassReport, Unproven, UnprovenOutput};
 use crate::install::client_target::ClientTarget;
 use crate::install::hook_dispatch::existing_root_token;
 use crate::install::hook_registrar::{
@@ -186,9 +187,6 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
             .await?;
     }
 
-    super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
-    super::lock::warn_moved_bundle_pins(previous.as_ref(), &new_lock);
-
     // Re-materialize through the SAME integrity gate `grim install` runs:
     // `--force` as `force_scope` reaches, never a hard-coded `true`.
     //
@@ -206,6 +204,19 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let target = super::install::install_target(&scope, &args.client, &global)?
         .with_hook_policy(policies.hooks)
         .with_settings_policy(policies.settings);
+    // Read ahead of the save, which destroys the previous lock: a client set or
+    // state that fails here leaves the lock as it was found.
+    let mut state = scope_resolution::read_state(&scope)
+        .map_err(|e| state_io(&scope.state_path, e))?
+        .adopt();
+    let prepass = match &previous {
+        Some(evidence) => Some(prove_previous(&mut state, evidence, named.as_ref(), &target, &scope, &access).await?),
+        None => None,
+    };
+
+    super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
+    super::lock::warn_moved_bundle_pins(previous.as_ref(), &new_lock);
+
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     // `install_and_persist` runs this same check; `update` calls
@@ -213,8 +224,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // about the Copilot pool gap (the docs promise it on both `install` and
     // `update`).
     crate::install::installer::warn_copilot_pool_gap(&target, scope.scope);
-    let mut state = scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e))?;
-    // Snapshot before any mutation: the vendor config sync below needs the
+    // Snapshot after the proof, before the install mutates it: vendor sync needs the
     // outputs this run retires — pruned orphans, reaped dropped clients, and
     // a re-materialized rule whose new version dropped its support directory
     // — none of which the post-mutation state can still name.
@@ -294,18 +304,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // as `modified` and refused with IntegrityMismatch, and each retry failed
     // on the same orphan. Same persist-before-surfacing doctrine the installer
     // documents (`installer.rs`).
-    state
-        .persist(
-            scope.scope,
-            &scope.workspace,
-            &scope.roots.grim_home,
-            &scope.config_path,
-        )
-        .map_err(|e| match e {
-            crate::install::install_state::PersistError::EnsureDir { path, source }
-            | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
-        })
-        .map_err(keep_settings(&settings))?;
+    persist(&state, &scope).map_err(keep_settings(&settings))?;
 
     // Reconcile the materialized tree back to the new lock: an artifact the
     // resolve dropped (most visibly a bundle that stopped including a
@@ -511,7 +510,229 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     }
 
     refuse_dropped(&settings.pieces, &dropped, &scope.invocation);
-    Ok(settle_settings(report, settings, refused, &dropped))
+    let settled = settle_settings(report, settings, refused, &dropped);
+    if let Some(prepass) = &prepass {
+        warn_unproven(prepass, &new_lock, &pruned);
+    }
+    Ok(settled)
+}
+
+/// [`prove_records`], then persists what proved: the lock save that follows
+/// destroys the evidence.
+async fn prove_previous(
+    state: &mut InstallState,
+    evidence: &GrimoireLock,
+    named: Option<&NamedScope>,
+    target: &InstallTarget,
+    scope: &scope_resolution::ResolvedScope,
+    access: &Arc<dyn OciAccess>,
+) -> Result<PrepassReport, crate::error::Error> {
+    let (roots, source_dir) = (&scope.roots, scope.config_dir());
+    let (report, changed) = prove_records(state, evidence, named, target, roots, source_dir, access).await;
+    if changed {
+        persist(state, scope)?;
+    }
+    Ok(report)
+}
+
+/// Proves the nodes of `evidence` this run may touch against the disk and
+/// re-records what proved, with whether `state` changed, which the caller
+/// persists before its lock save. A named run proves only its
+/// [`NamedScope::force`] nodes; every other node keeps its record. A node split
+/// between its record and the evidence takes the evidence's hashes for the
+/// outputs that proved, under its old pin, as the install gate does. Content
+/// comes from the store, then the registry.
+pub(crate) async fn prove_records(
+    state: &mut InstallState,
+    evidence: &GrimoireLock,
+    named: Option<&NamedScope>,
+    target: &InstallTarget,
+    roots: &crate::install::path_anchor::AnchorRoots,
+    source_dir: &Path,
+    access: &Arc<dyn OciAccess>,
+) -> (PrepassReport, bool) {
+    let reach = named.map(NamedScope::force);
+    let nodes = evidence
+        .iter_artifacts()
+        .map(|a| (a.kind, a.name.clone()))
+        .filter(|key| reach.as_ref().is_none_or(|reach| reach.contains(key)))
+        .collect();
+    let mode = ContentMode::StoreThenRegistry;
+    let report = adoption::prepass(state, evidence, &nodes, mode, target, roots, source_dir, access).await;
+    for record in &report.settled {
+        state.record(record.clone());
+    }
+    let changed = !report.proven.is_empty() || !report.settled.is_empty();
+    (report, changed)
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "crate::error::Error is the classified error every command returns"
+)]
+fn persist(state: &InstallState, scope: &scope_resolution::ResolvedScope) -> Result<(), crate::error::Error> {
+    state
+        .persist(
+            scope.scope,
+            &scope.workspace,
+            &scope.roots.grim_home,
+            &scope.config_path,
+        )
+        .map_err(|e| match e {
+            crate::install::install_state::PersistError::EnsureDir { path, source }
+            | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
+        })
+}
+
+/// One warning per node `lock` dropped whose files stayed unproven and
+/// unrecorded. A recorded one has its prune row, and a locked one was
+/// installed or refused, so neither gets a second line; nor does a proven one
+/// the prune already warned about, keeping an adopted entry or an edit.
+fn warn_unproven(prepass: &PrepassReport, lock: &GrimoireLock, pruned: &[PrunedArtifact]) {
+    let locked = |key: &NodeKey| lock.iter_artifacts().any(|a| a.kind == key.0 && a.name == key.1);
+    let row = |key: &NodeKey| pruned.iter().find(|row| row.kind == key.0 && row.name == key.1);
+    let warned = |row: &PrunedArtifact| row.outcome == PruneOutcome::KeptModified || !row.abandoned_entries.is_empty();
+    let unrecorded = prepass
+        .unproven
+        .iter()
+        .filter(|node| row(&node.key).is_none())
+        .map(|node| (&node.key, &node.outputs));
+    let partial = prepass
+        .proven
+        .iter()
+        .filter(|node| !row(&node.key).is_some_and(warned))
+        .map(|node| (&node.key, &node.unproven));
+    let mut left: Vec<_> = unrecorded.chain(partial).filter(|(key, _)| !locked(key)).collect();
+    left.sort_by_key(|(key, _)| *key);
+    for (key, outputs) in left {
+        if let Some(line) = unproven_line(key, outputs) {
+            tracing::warn!("{line}");
+        }
+    }
+}
+
+/// `<kind> '<name>' left <paths> on disk: grim could not prove it wrote them
+/// (<reasons>)`, then what to do with each path, grouped by advice when the
+/// paths need different ones; `None` when no path stayed. An MCP node's paths
+/// are config files other servers share, so its line names the entry in them
+/// and never advises deleting one. A node that proved whole but whose record
+/// was not saved reads "grim proved it wrote".
+pub(crate) fn unproven_line(key: &NodeKey, outputs: &[UnprovenOutput]) -> Option<String> {
+    let mcp = key.0 == ArtifactKind::Mcp;
+    let mut paths: Vec<(String, Advice)> = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
+    for out in outputs {
+        let (path, advice) = (
+            escape_controls(&out.path.display().to_string()),
+            Advice::of(mcp, &out.reason),
+        );
+        // Pool clients name one path twice: it keeps the most cautious advice either gives.
+        match paths.iter_mut().find(|(seen, _)| *seen == path) {
+            Some((_, kept)) => *kept = (*kept).min(advice),
+            None => paths.push((path, advice)),
+        }
+        let reason = unproven_reason(&out.reason);
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
+    if paths.is_empty() {
+        return None;
+    }
+    let them = |n: usize| if n == 1 { "it" } else { "them" };
+    let mut groups: BTreeMap<Advice, Vec<&str>> = BTreeMap::new();
+    for (path, advice) in &paths {
+        groups.entry(*advice).or_default().push(path);
+    }
+    let single = groups.len() == 1;
+    let entry = registry_text(&key.1);
+    let advice: String = groups
+        .iter()
+        .filter_map(|(advice, group)| {
+            let text = advice.text(them(group.len()), &entry)?;
+            Some(if single {
+                format!("; {text}")
+            } else {
+                format!("; for {}: {text}", group.join(", "))
+            })
+        })
+        .collect();
+    let shown = paths
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let left = if mcp {
+        format!("left its entry in {shown}:")
+    } else {
+        format!("left {shown} on disk:")
+    };
+    let saved_only = outputs.iter().all(|out| out.reason == Unproven::NotRecorded);
+    let proof = if saved_only { "proved" } else { "could not prove" };
+    Some(format!(
+        "{} {left} grim {proof} it wrote {} ({}){advice}",
+        node_label(key.0, &key.1),
+        them(paths.len()),
+        reasons.join("; ")
+    ))
+}
+
+/// What an unproven line tells the user to do with one path, most cautious first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Advice {
+    /// Under a link that leaves its root: no removal advice.
+    Nothing,
+    LinkOnly,
+    /// An MCP config file: remove the node's entry, never the file.
+    Entry,
+    Delete,
+}
+
+impl Advice {
+    /// A path grim could not check gets the delete advice too: every caller
+    /// names a node its run drops, so no later run can prove it. A linked MCP
+    /// config may be the user's whole shared config, so it gets the entry
+    /// advice, not the link's.
+    fn of(mcp: bool, reason: &Unproven) -> Self {
+        match reason {
+            Unproven::UnderLinkOutsideRoot(_) => Self::Nothing,
+            _ if mcp => Self::Entry,
+            Unproven::SymlinkTo(_) => Self::LinkOnly,
+            _ => Self::Delete,
+        }
+    }
+
+    /// The advice for paths named `it` ("it" or "them") holding the entry
+    /// `name`, `None` for none.
+    fn text(self, it: &str, name: &str) -> Option<String> {
+        match self {
+            Self::Nothing => None,
+            Self::LinkOnly => Some("remove the link only".to_string()),
+            Self::Entry => Some(format!("remove the '{name}' entry from {it} by hand if unwanted")),
+            Self::Delete => Some(format!("delete {it} by hand if unwanted")),
+        }
+    }
+}
+
+fn unproven_reason(reason: &Unproven) -> String {
+    let shown = |path: &Path| escape_controls(&path.display().to_string());
+    match reason {
+        Unproven::FilesDiffer { pin } => format!("the files differ from {}", escape_controls(pin)),
+        Unproven::DirectoryWhereFile => "a directory stands where a file belongs".to_string(),
+        Unproven::RuleIndexGone => "the rule's index is gone".to_string(),
+        Unproven::NotInStore => "the content is not in the local store".to_string(),
+        Unproven::FetchFailed => "the fetch or verification failed".to_string(),
+        Unproven::HostFailedEarlier => "the host failed earlier".to_string(),
+        Unproven::LocalSourceChanged => "the local source no longer matches".to_string(),
+        Unproven::Unreadable => "unreadable".to_string(),
+        Unproven::RenderFailed => "render failed".to_string(),
+        Unproven::SymlinkTo(target) => format!("a symbolic link to {}", shown(target)),
+        Unproven::UnderLinkOutsideRoot(link) => format!("under {} outside its root", shown(link)),
+        Unproven::NeverAttempted(NotAttempted::NoEvidenceEntry) => "never attempted: no evidence entry".to_string(),
+        Unproven::NeverAttempted(NotAttempted::OutsideClosure) => "never attempted: outside the closure".to_string(),
+        Unproven::NeverAttempted(NotAttempted::FetchBudget) => "never attempted: the fetch budget is spent".to_string(),
+        Unproven::NotRecorded => "proven, but its record could not be saved".to_string(),
+    }
 }
 
 /// The settings packages that hold a refused piece and are no longer locked.
@@ -3265,6 +3486,304 @@ mod tests {
     /// A workspace declaring one local rule, for an update no registry serves.
     fn local_rule_config(clients: &str) -> String {
         format!("[options]\nclients = [{clients}]\n\n[rules]\nlocal = \"./local.md\"\n")
+    }
+
+    /// The line names every path, each reason once, and advice that fits: none
+    /// under a link that leaves its root, the link alone for a link.
+    #[test]
+    fn an_unproven_line_names_each_path_and_fits_its_advice() {
+        let key = (ArtifactKind::Skill, "extra".to_string());
+        let out = |path: &str, reason: Unproven| UnprovenOutput {
+            path: PathBuf::from(path),
+            reason,
+        };
+        let differ = Unproven::FilesDiffer {
+            pin: "r/extra@sha256:aa".to_string(),
+        };
+        let two = unproven_line(&key, &[out("/w/a/extra", differ.clone()), out("/w/b/extra", differ)]).unwrap();
+        assert!(
+            two.starts_with("skill 'extra' left /w/a/extra, /w/b/extra on disk"),
+            "{two}"
+        );
+        assert!(
+            two.contains("wrote them (the files differ from r/extra@sha256:aa)"),
+            "{two}"
+        );
+        assert!(two.ends_with("delete them by hand if unwanted"), "{two}");
+
+        let link = unproven_line(&key, &[out("/w/a/extra", Unproven::SymlinkTo("/elsewhere".into()))]).unwrap();
+        assert!(link.contains("wrote it (a symbolic link to /elsewhere)"), "{link}");
+        assert!(link.ends_with("remove the link only"), "{link}");
+
+        let outside = unproven_line(
+            &key,
+            &[out("/w/a/extra", Unproven::UnderLinkOutsideRoot("/w/a".into()))],
+        )
+        .unwrap();
+        assert!(outside.ends_with("(under /w/a outside its root)"), "{outside}");
+        assert_eq!(unproven_line(&key, &[]), None);
+    }
+
+    /// The `; `-separated advice clauses after the reasons of an unproven line.
+    fn advice_clauses(line: &str) -> Vec<&str> {
+        line.split_once("); ")
+            .map_or(vec![], |(_, advice)| advice.split("; ").collect())
+    }
+
+    /// Two pool clients name one path, not side by side: it and its reason appear once.
+    #[test]
+    fn an_unproven_line_names_a_shared_path_once() {
+        let key = (ArtifactKind::Skill, "extra".to_string());
+        let out = |path: &str, reason: Unproven| UnprovenOutput {
+            path: PathBuf::from(path),
+            reason,
+        };
+        let differ = Unproven::FilesDiffer {
+            pin: "r/extra@sha256:aa".to_string(),
+        };
+        let line = unproven_line(
+            &key,
+            &[
+                out("/w/.agents/skills/extra", differ.clone()),
+                out("/w/.claude/skills/extra", differ.clone()),
+                out("/w/.agents/skills/extra", differ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(line.matches("/w/.agents/skills/extra").count(), 1, "{line}");
+        assert_eq!(line.matches("/w/.claude/skills/extra").count(), 1, "{line}");
+        assert_eq!(line.matches("the files differ").count(), 1, "{line}");
+        assert!(line.contains("wrote them"), "{line}");
+    }
+
+    /// The advice fits each path: the link alone for a link, nothing for a path
+    /// under a link outside its root, deletion for the rest.
+    #[test]
+    fn an_unproven_line_gives_each_path_its_own_advice() {
+        let key = (ArtifactKind::Skill, "extra".to_string());
+        let out = |path: &str, reason: Unproven| UnprovenOutput {
+            path: PathBuf::from(path),
+            reason,
+        };
+        let differ = Unproven::FilesDiffer {
+            pin: "r/extra@sha256:aa".to_string(),
+        };
+        let line = unproven_line(
+            &key,
+            &[
+                out("/w/a/extra", Unproven::SymlinkTo("/elsewhere".into())),
+                out("/w/b/extra", differ.clone()),
+                out("/w/c/extra", Unproven::UnderLinkOutsideRoot("/w/c".into())),
+            ],
+        )
+        .unwrap();
+        let clauses = advice_clauses(&line);
+        assert_eq!(clauses.len(), 2, "{line}");
+        let link = clauses.iter().find(|c| c.contains("link only")).expect("link advice");
+        assert!(link.contains("/w/a/extra") && !link.contains("/w/b/extra"), "{line}");
+        let delete = clauses.iter().find(|c| c.contains("by hand")).expect("delete advice");
+        assert!(
+            delete.contains("/w/b/extra") && !delete.contains("/w/a/extra"),
+            "{line}"
+        );
+        assert!(!clauses.iter().any(|c| c.contains("/w/c/extra")), "{line}");
+    }
+
+    /// No later run can prove a dropped node, so a path grim could not check
+    /// and a proof whose record was lost get the delete advice and no retry.
+    #[test]
+    fn an_unproven_line_gives_the_delete_advice_where_grim_could_not_check() {
+        let key = (ArtifactKind::Skill, "extra".to_string());
+        let out = |path: &str, reason: Unproven| UnprovenOutput {
+            path: PathBuf::from(path),
+            reason,
+        };
+        for reason in [Unproven::NotInStore, Unproven::NotRecorded] {
+            let line = unproven_line(&key, &[out("/w/a/extra", reason)]).unwrap();
+            assert_eq!(advice_clauses(&line), ["delete it by hand if unwanted"], "{line}");
+            assert!(!line.contains("again"), "{line}");
+        }
+        let unsaved = unproven_line(&key, &[out("/w/a/extra", Unproven::NotRecorded)]).unwrap();
+        assert!(unsaved.contains("could not be saved"), "{unsaved}");
+        assert!(!unsaved.contains("unreadable"), "{unsaved}");
+    }
+
+    /// A node whose every output proved but whose record was lost does not read
+    /// as one grim could not prove; one with another reason beside it still does.
+    #[test]
+    fn a_proof_whose_record_was_lost_reads_as_proven() {
+        let key = (ArtifactKind::Skill, "extra".to_string());
+        let out = |path: &str, reason: Unproven| UnprovenOutput {
+            path: PathBuf::from(path),
+            reason,
+        };
+        let unsaved = unproven_line(&key, &[out("/w/a/extra", Unproven::NotRecorded)]).unwrap();
+        assert!(unsaved.contains("grim proved it wrote it"), "{unsaved}");
+        assert!(!unsaved.contains("could not prove"), "{unsaved}");
+        let mixed = unproven_line(
+            &key,
+            &[
+                out("/w/a/extra", Unproven::NotRecorded),
+                out("/w/b/extra", Unproven::NotInStore),
+            ],
+        )
+        .unwrap();
+        assert!(mixed.contains("could not prove it wrote them"), "{mixed}");
+    }
+
+    /// An MCP config file holds other servers too, at global scope the client's
+    /// whole config: the line names the entry in each file and advises removing
+    /// that entry alone, a linked file included.
+    #[test]
+    fn an_unproven_mcp_line_advises_removing_the_entry_never_the_file() {
+        let key = (ArtifactKind::Mcp, "srv".to_string());
+        let out = |path: &str, reason: Unproven| UnprovenOutput {
+            path: PathBuf::from(path),
+            reason,
+        };
+        let differ = Unproven::FilesDiffer {
+            pin: "r/srv@sha256:aa".to_string(),
+        };
+        let one = unproven_line(&key, &[out("/w/.mcp.json", Unproven::NotInStore)]).unwrap();
+        assert!(one.starts_with("mcp 'srv' left its entry in /w/.mcp.json:"), "{one}");
+        assert_eq!(
+            advice_clauses(&one),
+            ["remove the 'srv' entry from it by hand if unwanted"],
+            "{one}"
+        );
+        let two = unproven_line(
+            &key,
+            &[
+                out("/w/.mcp.json", Unproven::NotInStore),
+                out("/w/.cursor/mcp.json", differ),
+            ],
+        )
+        .unwrap();
+        assert!(two.contains("/w/.mcp.json, /w/.cursor/mcp.json"), "{two}");
+        assert_eq!(
+            advice_clauses(&two),
+            ["remove the 'srv' entry from them by hand if unwanted"],
+            "{two}"
+        );
+        let link = unproven_line(
+            &key,
+            &[out("/w/.mcp.json", Unproven::SymlinkTo("/shared/mcp.json".into()))],
+        )
+        .unwrap();
+        assert!(link.contains("a symbolic link to /shared/mcp.json"), "{link}");
+        assert_eq!(
+            advice_clauses(&link),
+            ["remove the 'srv' entry from it by hand if unwanted"],
+            "{link}"
+        );
+        for line in [&one, &two, &link] {
+            assert!(!line.contains("delete") && !line.contains("on disk"), "{line}");
+            assert!(!line.contains("link only"), "{line}");
+        }
+    }
+
+    /// An MCP config under a link that leaves its root keeps no removal advice.
+    #[test]
+    fn an_unproven_mcp_line_under_a_link_outside_its_root_advises_nothing() {
+        let key = (ArtifactKind::Mcp, "srv".to_string());
+        let outside = unproven_line(
+            &key,
+            &[UnprovenOutput {
+                path: PathBuf::from("/w/.mcp.json"),
+                reason: Unproven::UnderLinkOutsideRoot("/w".into()),
+            }],
+        )
+        .unwrap();
+        assert!(
+            outside.starts_with("mcp 'srv' left its entry in /w/.mcp.json:"),
+            "{outside}"
+        );
+        assert!(outside.ends_with("(under /w outside its root)"), "{outside}");
+        assert!(!outside.contains("delete") && !outside.contains("on disk"), "{outside}");
+    }
+
+    /// A dropped node proven for one destination and not another gets the
+    /// unproven line, unless the prune already warned that it kept an adopted
+    /// entry or an edit for it: one stderr line per node.
+    #[test]
+    fn a_node_the_prune_warned_about_gets_no_unproven_line() {
+        use crate::install::adoption::ProvenNode;
+        use crate::install::uninstall::AbandonedEntry;
+        let proven = |name: &str| ProvenNode {
+            key: (ArtifactKind::Mcp, name.to_string()),
+            source: locked(name, '2').source,
+            outputs: vec![],
+            unproven: vec![UnprovenOutput {
+                path: PathBuf::from(format!("/w/{name}.json")),
+                reason: Unproven::FilesDiffer {
+                    pin: "r@sha256:bb".to_string(),
+                },
+            }],
+        };
+        let prepass = PrepassReport {
+            proven: vec![proven("entry"), proven("edited"), proven("plain")],
+            ..PrepassReport::default()
+        };
+        let mut entry = pruned_row(ArtifactKind::Mcp, "entry", PruneOutcome::Pruned);
+        entry.abandoned_entries = vec![AbandonedEntry {
+            path: PathBuf::from("/w/.mcp.json"),
+            pointer: "/mcpServers/entry".to_string(),
+            element: None,
+        }];
+        let pruned = [
+            entry,
+            pruned_row(ArtifactKind::Mcp, "edited", PruneOutcome::KeptModified),
+            pruned_row(ArtifactKind::Mcp, "plain", PruneOutcome::Pruned),
+        ];
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        warn_unproven(&prepass, &lock_of(vec![]), &pruned);
+
+        let logs = capture.text();
+        let left: Vec<&str> = logs.lines().filter(|line| line.contains("left its entry in")).collect();
+        assert_eq!(left.len(), 1, "{logs}");
+        assert!(left[0].contains("mcp 'plain'"), "{logs}");
+    }
+
+    /// A clone's files prove against the lock as found, and the records persist
+    /// before the save: a lock write that then fails keeps both the old lock and
+    /// the proof, dropped rule included.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failing_lock_writer_leaves_the_proven_records_persisted() {
+        use std::os::unix::fs::PermissionsExt;
+        let rules = |names: &[&str]| {
+            let lines: String = names.iter().map(|n| format!("{n} = \"./{n}.md\"\n")).collect();
+            format!("[options]\nclients = [\"claude\"]\n\n[rules]\n{lines}")
+        };
+        let (_ws, _home, ctx, scope) = hook_workspace(&rules(&["dropped", "kept"]));
+        for name in ["dropped", "kept"] {
+            std::fs::write(scope.workspace.join(format!("{name}.md")), format!("# {name}\n")).unwrap();
+        }
+        run(&ctx, &update_all()).await.expect("the first update installs");
+        std::fs::remove_file(&scope.state_path).unwrap();
+        std::fs::write(&scope.config_path, rules(&["kept"])).unwrap();
+        let lock = std::fs::read(&scope.lock_path).unwrap();
+        // The lock writer follows a link, so only the link target's directory is read-only.
+        let pinned = scope.workspace.join("pinned");
+        std::fs::create_dir(&pinned).unwrap();
+        std::fs::rename(&scope.lock_path, pinned.join("grimoire.lock")).unwrap();
+        std::os::unix::fs::symlink(pinned.join("grimoire.lock"), &scope.lock_path).unwrap();
+        let mode = std::fs::metadata(&pinned).unwrap().permissions();
+        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let out = run(&ctx, &update_all()).await;
+
+        std::fs::set_permissions(&pinned, mode).unwrap();
+        let err = out.expect_err("a read-only workspace refuses the lock write");
+        assert_eq!(std::fs::read(&scope.lock_path).unwrap(), lock);
+        let state = scope_resolution::load_state(&scope).unwrap();
+        for name in ["dropped", "kept"] {
+            assert!(
+                state.get(ArtifactKind::Rule, name).is_some(),
+                "{name} has no record: {err:#}"
+            );
+        }
     }
 
     /// A named run leaves a dropped client's output for a bare `grim update`,

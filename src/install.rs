@@ -10,6 +10,7 @@
 //! installed where; [`installer`] coordinates the per-artifact pass with
 //! the local-modification refusal.
 
+pub mod adoption;
 pub mod claude_config;
 pub mod client_target;
 pub mod cline_lock;

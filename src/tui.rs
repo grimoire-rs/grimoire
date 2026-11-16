@@ -26,9 +26,13 @@
 //! are layer content rather than annotations, the channels because they are
 //! repository-level and mutable.
 //!
+//! [`adoption`] proves the lock's unrecorded outputs in a background task, as
+//! `grim status` does; the event loop commits what it proved between actions.
+//!
 //! When the session has no project scope, the scope key offers to create
 //! one in place through the same confirm popup the batch actions use.
 
+pub mod adoption;
 pub mod app;
 pub mod bundle_member_fetch;
 pub mod bundle_members;

@@ -91,6 +91,9 @@ pub async fn run(ctx: &Context, args: &LockArgs) -> anyhow::Result<(LockReport, 
         .map_err(|e| with_remedy(e.naming(&scope.invocation), &RemedyCommand::Lock)),
     )?;
     refuse_settings_conflict(ctx, &scope, &target.lock, &access).await?;
+    if let Some(previous) = &previous {
+        super::remove::prove_dropped(ctx, &scope, previous, &target.lock).await;
+    }
     super::grim(lock_io::save(&scope.lock_path, &target.lock, previous.as_ref()))?;
     warn_moved_bundle_pins(previous.as_ref(), &target.lock);
 

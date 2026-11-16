@@ -18,6 +18,7 @@ use crate::api::install_report::{InstallEntry, InstallReport};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
+use crate::install::install_state::Exempt;
 use crate::install::installer::{
     ArtifactInstall, InstallIntent, InstallOutcome, InstallRun, SettingsOutcome, SettingsRun, install_and_persist,
 };
@@ -104,7 +105,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     let access = super::access_seam(ctx)?;
-    let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
+    let mut state = super::grim(scope_resolution::read_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?
+        .exempt(Exempt::InstallGate);
     let materializer = DefaultMaterializer;
 
     // Progress rides stderr, never stdout, so the structured report (and
@@ -405,7 +407,8 @@ async fn dev_install(
         .with_settings_policy(policies.settings);
     say_clients(ctx, &target);
     let access = super::access_seam(ctx)?;
-    let mut state = super::grim(scope_resolution::load_state(scope).map_err(|e| state_io(&scope.state_path, e)))?;
+    let mut state = super::grim(scope_resolution::read_state(scope).map_err(|e| state_io(&scope.state_path, e)))?
+        .exempt(Exempt::InstallGate);
     let materializer = DefaultMaterializer;
     let progress = crate::cli::progress::select_progress(ctx.progress(), true);
 
