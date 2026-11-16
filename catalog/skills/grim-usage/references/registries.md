@@ -293,6 +293,14 @@ It does not widen where a credential may go: a registry reached over HTTPS
 must keep the credential on HTTPS, so a `Bearer realm="http://…"` challenge
 from it is refused regardless of what any entry declared.
 
+A stored credential is also withheld from a host that only the project's
+`grimoire.toml` marks `insecure = true`: a cloned repository could otherwise
+point grim's credential at a plain-HTTP host. grim sends it only where
+`GRIM_INSECURE_REGISTRIES` or your global config also declares the host. The
+pull runs anonymously with one stderr warning per host, and a registry that
+needs the credential then fails with exit 80. Details:
+[Plain-HTTP registries](https://grimoire.rs/configuration.html#plain-http-registries).
+
 Two things to say out loud when recommending it. `grimoire.toml` is
 normally committed, so the downgrade applies to every collaborator and CI
 job — unlike the environment variable, which is per-shell. And it is `oci`
@@ -1009,8 +1017,8 @@ and can call these tools:
 
 | Tool | What it returns | Gate |
 |------|-----------------|------|
-| `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override), `total` and `truncated` included. Args: `query?`, `refresh?`, `limit?` (positive integer, as `--limit`), `offset?` (non-negative integer, as `--offset`), scope | always |
-| `grim_status` | Same JSON as `grim status --format json` for the requested scope. Optional `check` forwards to the same live catalog re-check as CLI `--check` (deprecated/replaced_by/update_available/moved_nested_bundles; the report's `checked` field says whether it ran). Under `--allow-writes` it also records the install records it proves (store only). Args: `check?`, scope | always |
+| `grim_search` | Same JSON as `grim search --format json`, over the resolved scope's registries (no registry override), `total` and `truncated` included. Args: `query?`, `kind?` (a list of kinds, as `--kind`), `refresh?`, `limit?` (positive integer, as `--limit`), `offset?` (non-negative integer, as `--offset`), scope | always |
+| `grim_status` | Same JSON as `grim status --format json` for the requested scope. Optional `check` forwards to the same live catalog re-check as CLI `--check` (deprecated/replaced_by/update_available/moved_nested_bundles, covering bundle members and dependencies too; the report's `checked` field says whether it ran). Under `--allow-writes` it also records the install records it proves (store only). Args: `check?`, scope | always |
 | `grim_fetch` | An artifact's content in the tool result — no install. Canonical bytes, or a `vendor` (claude/opencode/copilot) projection, or one support file via `path` (binary → base64 with `encoding: "base64"`); a `files` listing is always included. `description` fetches the repository's description companion instead (every member inline); `digest_only` resolves `{ref, digest}` with no download and composes with `description`. Content caps at 256 KiB (marked truncation); needs network. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope | always |
 | `grim_describe` | Same JSON as `grim describe --format json` — manifest-level metadata (kind, curated annotations, tags, `has_description`) without downloading content. Args: `ref`, scope | always |
 | `grim_render` | Writes an artifact's vendor-native files into `dest_dir` (created if absent) — no install state. Args: `ref`, `vendor`, `dest_dir`, scope | `--allow-writes` |
