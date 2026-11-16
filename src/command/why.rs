@@ -23,9 +23,8 @@ use crate::lock::effective_set::{
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::oci::text::registry_text;
-use crate::oci::version_claim::{Claim, claim_of};
+use crate::oci::version_claim::{Claim, claim_of, edge_origin};
 use crate::oci::{ArtifactKind, Identifier};
-use crate::resolve::graph::edge_origin;
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
 use super::command_error::CommandError;

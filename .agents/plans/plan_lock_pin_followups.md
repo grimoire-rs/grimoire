@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_lock_pin_followups
-- **Active phase:** 2 — Graph split
+- **Active phase:** 3 — Perf
 - **Step:** /hex-execute → Implement
-- **Last update:** 2026-11-15 (after 8d81e92e: chore: split long sentences in the lock pin ADR)
+- **Last update:** 2026-11-16 (after cf837e79: refactor(resolve): move edge_origin beside EdgeOrigin)
 
 ---
 

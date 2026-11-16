@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 
 use semver::{BuildMetadata, Op, Version, VersionReq};
 
-use super::Identifier;
+use super::{ArtifactKind, Identifier, NodeKey};
 
 /// Where an edge comes from, which decides whether its tag may claim a range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,15 @@ pub enum EdgeOrigin {
     Requires,
     /// A bundle's member list, whose tags never claim a range.
     BundleMember,
+}
+
+/// A bundle's edges are its member list, whose tags keep their literal meaning.
+pub fn edge_origin(parent: &NodeKey) -> EdgeOrigin {
+    if parent.0 == ArtifactKind::Bundle {
+        EdgeOrigin::BundleMember
+    } else {
+        EdgeOrigin::Requires
+    }
 }
 
 /// What one edge reference claims of the artifact it names.
