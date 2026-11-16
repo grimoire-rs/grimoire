@@ -61,7 +61,9 @@ use crate::oci::manifest::LayerLayout;
 use crate::oci::member_ref::MemberRef;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::text::registry_text;
-use crate::oci::version_claim::{Claim as VersionClaim, EdgeOrigin, Line, claim_of, decimal_parts, highest_in_line};
+use crate::oci::version_claim::{
+    Claim as VersionClaim, EdgeOrigin, Line, claim_of, decimal_parts, edge_origin, highest_in_line,
+};
 use crate::oci::version_evidence::{Evidence, annotated_version, evidence, satisfies};
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::skill::SkillName;
@@ -325,15 +327,6 @@ fn label(key: &NodeKey) -> String {
 enum Direct {
     Registry(Identifier),
     Path(PathSource),
-}
-
-/// A bundle's edges are its member list, whose tags keep their literal meaning.
-pub fn edge_origin(parent: &NodeKey) -> EdgeOrigin {
-    if parent.0 == ArtifactKind::Bundle {
-        EdgeOrigin::BundleMember
-    } else {
-        EdgeOrigin::Requires
-    }
 }
 
 /// One edge naming a node.

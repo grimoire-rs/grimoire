@@ -21,8 +21,7 @@ use std::time::{Duration, Instant};
 use semver::VersionReq;
 
 use super::graph::{
-    CarriedPin, Carry, ExpandedGraph, GraphNode, GraphRoot, GraphWarning, PartCarry, RootSource, edge_origin,
-    expand_graph,
+    CarriedPin, Carry, ExpandedGraph, GraphNode, GraphRoot, GraphWarning, PartCarry, RootSource, expand_graph,
 };
 use super::part_bundles::{PartBundles, PartInputs, sort_part_bundles};
 use super::resolve_error::{ResolveError, ResolveErrorKind};
@@ -53,7 +52,7 @@ use crate::oci::member_ref::MemberRef;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::requires_decl;
 use crate::oci::text::registry_text;
-use crate::oci::version_claim::{Claim as VersionClaim, EdgeOrigin, Line, claim_of};
+use crate::oci::version_claim::{Claim as VersionClaim, EdgeOrigin, Line, claim_of, edge_origin};
 use crate::oci::version_evidence::{Evidence, evidence, satisfies};
 use crate::oci::{ArtifactKind, Digest, Identifier, PinnedIdentifier};
 use crate::skill::SkillName;
