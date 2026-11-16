@@ -2344,8 +2344,8 @@ fn relocated_vendor_roots(inputs: RelocationInputs) -> Vec<(&'static str, PathBu
         home,
     } = inputs;
     let mut rows = Vec::new();
-    if kiro_home.is_some()
-        && let Some(legacy) = super::vendor_kiro::kiro_root(None, home.clone())
+    if let Some(kiro_home) = kiro_home
+        && let Some(legacy) = super::vendor_kiro::pre_override_root(kiro_home, home.clone())
     {
         rows.push(("kiro", legacy));
     }
@@ -5399,6 +5399,91 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn relocated_kiro_row_follows_whether_kiro_home_is_usable() {
+        let row = |kiro_home: &str| {
+            relocated_vendor_roots(RelocationInputs {
+                kiro_home: Some(PathBuf::from(kiro_home)),
+                home: Some(PathBuf::from("/home/u")),
+                ..Default::default()
+            })
+        };
+        assert_eq!(row("/opt/kiro"), vec![("kiro", PathBuf::from("/home/u/.kiro"))]);
+        // An ignored value is where an earlier grim wrote: that is the old root.
+        for ignored in ["/home/u", "/home", "/"] {
+            assert_eq!(row(ignored), vec![("kiro", PathBuf::from(ignored))], "{ignored}");
+        }
+        assert!(
+            relocated_vendor_roots(RelocationInputs {
+                home: Some(PathBuf::from("/home/u")),
+                ..Default::default()
+            })
+            .is_empty()
+        );
+    }
+
+    /// An ignored `KIRO_HOME=$HOME` strands grim's earlier outputs at `$HOME`;
+    /// the sweep removes only the recorded ones and leaves user files and the
+    /// shared skill pool (an ancestor-rooted sibling) alone.
+    #[test]
+    fn reap_relocated_roots_sweeps_only_recorded_outputs_from_an_ignored_home_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let mut roots = roots(dir.path());
+        roots.vendor_roots.insert("kiro", home.join(".kiro"));
+        let relocated = relocated_vendor_roots(RelocationInputs {
+            kiro_home: Some(home.clone()),
+            home: Some(home.clone()),
+            ..Default::default()
+        });
+        assert_eq!(relocated, vec![("kiro", home.clone())]);
+        let old = home.join("steering/r.md");
+        let mine = home.join("steering/mine.md");
+        let pool = home.join(".agents/skills/p/SKILL.md");
+        for f in [&old, &mine, &pool] {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, b"body\n").unwrap();
+        }
+        let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&old, None).unwrap())]);
+
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+            false,
+        );
+
+        assert!(!old.exists(), "the recorded output is swept");
+        assert!(mine.exists() && pool.exists(), "unrecorded files and the pool stay");
+    }
+
+    /// Old root equal to the live root (what the pre-fix row produced for an
+    /// ignored `KIRO_HOME`) must be a no-op: guard 2.
+    #[test]
+    fn reap_relocated_roots_is_a_no_op_when_old_equals_the_live_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut roots = roots(dir.path());
+        roots.vendor_roots.insert("kiro", dir.path().join(".kiro"));
+        let relocated = vec![("kiro", dir.path().join(".kiro"))];
+        let live = dir.path().join(".kiro/steering/r.md");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, b"body\n").unwrap();
+        let prior = reap_record(vec![kiro_output("steering/r.md", footprint_hash(&live, None).unwrap())]);
+
+        reap_relocated_roots(
+            &prior,
+            &roots,
+            &relocated,
+            &[ClientTarget::Kiro],
+            ReapContext::Reinstalled,
+            false,
+        );
+
+        assert!(live.exists());
     }
 
     #[test]

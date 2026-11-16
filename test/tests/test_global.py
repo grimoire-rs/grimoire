@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_artifact
+from src.old_grim import OLD_BIN, checked_old_grim
 from src.registry import retag
 from src.runner import GrimRunner
 
@@ -1116,6 +1117,101 @@ def test_global_kiro_home_relocates_the_whole_kiro_root(
     assert not (runner.home / ".kiro/steering/kh-rule.md").exists(), (
         "with KIRO_HOME set, nothing may land in the ~/.kiro default"
     )
+
+
+@pytest.mark.skipif(not OLD_BIN, reason="GRIM_OLD_BIN names no grim 0.15.1 binary")
+def test_global_kiro_home_naming_the_home_dir_migrates_from_0_15_1(
+    tmp_path_factory: pytest.TempPathFactory,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+) -> None:
+    """0.15.1 followed ``KIRO_HOME=$HOME`` blindly and wrote ``$HOME/skills`` and
+    ``$HOME/steering``. This grim ignores that value, so it moves the outputs to
+    ``~/.kiro`` and sweeps only what 0.15.1 recorded."""
+    old_bin = checked_old_grim(tmp_path_factory.mktemp("old-grim-kiro-home"))
+    sk = make_artifact(
+        f"{unique_repo}/kh-skill",
+        "skill",
+        {"kh-skill/SKILL.md": "---\nname: kh-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    ru = make_artifact(
+        f"{unique_repo}/kh-rule",
+        "rule",
+        {"kh-rule.md": "---\npaths: ['**/*.rs']\n---\n# Kiro steering\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\nkh-skill = "{sk.fq}"\n[rules]\nkh-rule = "{ru.fq}"\n', encoding="utf-8", newline="\n"
+    )
+    old = GrimRunner(old_bin, grim_home)
+    home = old.home
+    old.env["KIRO_HOME"] = str(home)
+    old.json("lock", "--global")
+    rows = old.json("install", "--global", "--client", "kiro")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+    assert (home / "skills/kh-skill/SKILL.md").is_file()
+    assert (home / "steering/kh-rule.md").is_file()
+
+    mine = home / "skills/mine/SKILL.md"
+    mine.parent.mkdir(parents=True)
+    mine.write_bytes(b"# mine\n")
+    pool = home / ".agents/skills/pooled/SKILL.md"
+    pool.parent.mkdir(parents=True)
+    pool.write_bytes(b"# pooled\n")
+
+    new = GrimRunner(grim_binary, grim_home)
+    new.env["KIRO_HOME"] = str(home)
+    first = new.json("install", "--global", "--client", "kiro")["items"]
+    assert all(r["status"] == "updated" for r in first), first
+
+    assert (home / ".kiro/skills/kh-skill/SKILL.md").is_file()
+    assert (home / ".kiro/steering/kh-rule.md").is_file()
+    assert not (home / "skills/kh-skill").exists(), "the 0.15.1 skill copy must be swept"
+    assert not (home / "steering/kh-rule.md").exists(), "the 0.15.1 steering copy must be swept"
+    assert mine.read_bytes() == b"# mine\n", "a user file beside grim's output stays"
+    assert pool.read_bytes() == b"# pooled\n", "the shared skill pool is not a Kiro output"
+    assert new.json("status", "--global")["items"][0]["state"] == "installed"
+    second = new.json("install", "--global", "--client", "kiro")["items"]
+    assert all(r["status"] == "unchanged" for r in second), second
+
+
+@pytest.mark.skipif(not OLD_BIN, reason="GRIM_OLD_BIN names no grim 0.15.1 binary")
+def test_global_kiro_home_naming_the_home_dir_autodetects_and_migrates_from_0_15_1(
+    tmp_path_factory: pytest.TempPathFactory,
+    grim_binary: Path,
+    grim_home: Path,
+    registry: str,
+    unique_repo: str,
+) -> None:
+    """With no ``--client`` and no ``~/.kiro``, ``KIRO_HOME=$HOME`` still counts as
+    Kiro present, so the 0.15.1 outputs under ``$HOME`` are relocated."""
+    old_bin = checked_old_grim(tmp_path_factory.mktemp("old-grim-kiro-auto"))
+    sk = make_artifact(
+        f"{unique_repo}/ka-skill",
+        "skill",
+        {"ka-skill/SKILL.md": "---\nname: ka-skill\ndescription: d\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\nka-skill = "{sk.fq}"\n', encoding="utf-8", newline="\n")
+    old = GrimRunner(old_bin, grim_home)
+    home = old.home
+    old.env["KIRO_HOME"] = str(home)
+    old.json("lock", "--global")
+    rows = old.json("install", "--global", "--client", "kiro")["items"]
+    assert all(r["status"] == "installed" for r in rows), rows
+    assert (home / "skills/ka-skill/SKILL.md").is_file()
+    assert not (home / ".kiro").exists()
+
+    new = GrimRunner(grim_binary, grim_home)
+    new.env["KIRO_HOME"] = str(home)
+    new.json("install", "--global")
+
+    assert (home / ".kiro/skills/ka-skill/SKILL.md").is_file()
+    assert not (home / "skills/ka-skill").exists(), "the 0.15.1 skill copy must be swept"
+    assert new.json("status", "--global")["items"][0]["state"] == "installed"
 
 
 def test_global_kiro_home_relocates_mcp_config_too(

@@ -152,7 +152,7 @@ impl Vendor for KiroVendor {
     fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
         match scope {
             ConfigScope::Project => workspace.join(".kiro").exists(),
-            ConfigScope::Global => kiro_root(env_dir("KIRO_HOME"), home_dir()).is_some_and(|p| p.exists()),
+            ConfigScope::Global => global_detected(env_dir("KIRO_HOME"), home_dir(), Path::exists),
         }
     }
 
@@ -319,7 +319,51 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// grim follows the CLI. The [`PathAnchor`](super::path_anchor) `KiroRoot`
 /// anchor is rooted here.
 pub(crate) fn kiro_root(kiro_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    kiro_home.or_else(|| home.map(|h| h.join(".kiro")))
+    kiro_home
+        .filter(|v| usable_kiro_home(v, home.as_deref()))
+        .or_else(|| home.map(|h| h.join(".kiro")))
+}
+
+/// The root a grim that predates the `KIRO_HOME` fallback wrote to: `~/.kiro`
+/// for a usable override, the ignored value itself otherwise.
+pub(crate) fn pre_override_root(kiro_home: PathBuf, home: Option<PathBuf>) -> Option<PathBuf> {
+    if usable_kiro_home(&kiro_home, home.as_deref()) {
+        kiro_root(None, home)
+    } else {
+        Some(kiro_home)
+    }
+}
+
+/// Global detection: the resolved root exists, or an ignored `KIRO_HOME` names an
+/// existing directory, so a 0.15.1 install under it still reaches the relocation.
+fn global_detected(kiro_home: Option<PathBuf>, home: Option<PathBuf>, exists: impl Fn(&Path) -> bool) -> bool {
+    let ignored = kiro_home
+        .clone()
+        .and_then(|k| pre_override_root(k.clone(), home.clone()).filter(|p| *p == k));
+    kiro_root(kiro_home, home).is_some_and(|p| exists(&p)) || ignored.is_some_and(|p| exists(&p))
+}
+
+/// Whether `value` is a usable `KIRO_HOME` override. As in the Kiro CLI
+/// (kiro.dev/docs/reference/settings.md), a filesystem root, `$HOME` or an
+/// ancestor of `$HOME` falls back to `~/.kiro`. Compared lexically by path
+/// components: no canonicalize, no filesystem access.
+fn usable_kiro_home(value: &Path, home: Option<&Path>) -> bool {
+    // Kiro also ignores a relative value, but grim keeps following it: the
+    // settings kind's documented `settings-root-relative` refusal rests on it.
+    if !value.is_absolute() {
+        return true;
+    }
+    if !value.components().any(|c| matches!(c, std::path::Component::Normal(_))) {
+        tracing::debug!(value = %value.display(), "ignoring $KIRO_HOME: a filesystem root");
+        return false;
+    }
+    if let Some(home) = home
+        && home.starts_with(value)
+    {
+        tracing::debug!(value = %value.display(), "ignoring $KIRO_HOME: the home directory or an ancestor of it");
+        return false;
+    }
+    true
 }
 
 /// `settings/cli.json` under the resolved `root`: `None` at project scope,
@@ -392,6 +436,38 @@ mod tests {
     }
 
     #[test]
+    fn kiro_root_falls_back_to_the_home_default_when_the_override_is_unusable() {
+        // Upstream (kiro.dev/docs/reference/settings.md): a filesystem root,
+        // the home directory or an ancestor of it falls back to `~/.kiro`.
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            kiro_root(Some(PathBuf::from("relative/kiro")), home.clone()),
+            Some(PathBuf::from("relative/kiro")),
+            "relative stays honored: the settings kind refuses it by name"
+        );
+        assert_eq!(
+            kiro_root(Some(PathBuf::from("/")), home.clone()),
+            Some(PathBuf::from("/home/u/.kiro")),
+            "filesystem root ⇒ fallback"
+        );
+        assert_eq!(
+            kiro_root(Some(PathBuf::from("/home/u")), home.clone()),
+            Some(PathBuf::from("/home/u/.kiro")),
+            "equals $HOME ⇒ fallback"
+        );
+        assert_eq!(
+            kiro_root(Some(PathBuf::from("/home")), home.clone()),
+            Some(PathBuf::from("/home/u/.kiro")),
+            "ancestor of $HOME ⇒ fallback"
+        );
+        assert_eq!(
+            kiro_root(Some(PathBuf::from("/home/u/kiro")), home),
+            Some(PathBuf::from("/home/u/kiro")),
+            "child of $HOME ⇒ honored"
+        );
+    }
+
+    #[test]
     fn kiro_home_does_not_relocate_project_scope() {
         // `KIRO_HOME` relocates the global root only. The global half — that
         // skills, steering, and settings all follow the relocated root — is
@@ -411,6 +487,25 @@ mod tests {
             KiroVendor.mcp_config_path(ws, ConfigScope::Project),
             Some(ws.join(".kiro").join("settings").join("mcp.json"))
         );
+    }
+
+    #[test]
+    fn global_detection_counts_an_ignored_kiro_home_that_exists() {
+        let home = Some(PathBuf::from("/home/u"));
+        let only = |dir: &'static str| move |p: &Path| p == Path::new(dir);
+        let kh = |v: &str| Some(PathBuf::from(v));
+        // Ignored value + existing directory: detected without `~/.kiro`.
+        assert!(global_detected(kh("/home/u"), home.clone(), only("/home/u")));
+        // Ignored value + missing directory: falls to the `~/.kiro` check.
+        assert!(!global_detected(kh("/home/u"), home.clone(), |_| false));
+        assert!(global_detected(kh("/home/u"), home.clone(), only("/home/u/.kiro")));
+        // Usable value: only that root counts, `~/.kiro` does not.
+        assert!(global_detected(kh("/k"), home.clone(), only("/k")));
+        assert!(!global_detected(kh("/k"), home.clone(), only("/home/u/.kiro")));
+        assert!(!global_detected(kh("/k"), home.clone(), only("/home/u")));
+        // Unset: `~/.kiro` only.
+        assert!(global_detected(None, home.clone(), only("/home/u/.kiro")));
+        assert!(!global_detected(None, home, only("/home/u")));
     }
 
     #[test]
