@@ -256,6 +256,14 @@ A refused run exits 65 and names the first refused artifact. One stderr warning
 names every other refused file artifact, so one `--force` rerun covers them all.
 See [troubleshooting.md](troubleshooting.md) for the integrity gates.
 
+The install record is a cache of the disk, not a promise. After a `git pull`
+or checkout that brought committed outputs and a new lock, `grim install`
+renders the locked pin and compares it with the files. A match re-pins the
+record, writes no client file and exits 0 with every row `unchanged`; 0.15.1
+exited 65. One artifact at two versions reads `outdated`, and install rolls it
+forward. A file that differs from the render is still a local edit and still
+refuses. A symbolic link is never proven this way.
+
 Install also refuses when the lock is stale. If `grimoire.lock`'s
 `declaration_hash` no longer matches `grimoire.toml`, it exits 65 and
 tells you to run `grim lock` first. This check runs before the two gates
@@ -450,6 +458,16 @@ exits 81 and writes nothing. Confirm the exact selector grammar and flags with
 `grim update --help`.
 
 ## Inspecting
+
+`grim status` is not read-only. It writes the install records it proves from
+the files on disk. Online it may fetch a pin the store lacks, within fixed
+bounds. It adds no JSON key. One stderr line says what it adopted, so a row
+that read `modified` after a pull reads `installed`. `--offline` sends no
+request. Under `--check` the proof reads the store only, but the catalog and
+tag requests still go out. `grim_status` over MCP writes only under
+`--allow-writes`. `grim update` and `grim uninstall` run the same proof before
+they relock or delete, and never delete a file they cannot prove. Confirm the
+details in the [status section][status-adoption].
 
 `grim status` reports each declared artifact's state: `installed`,
 `outdated`, `modified`, `missing`, or `stale`. A hook row adds three more:
@@ -1072,6 +1090,7 @@ Confirm the flags with `grim install --help` and `grim hook allow --help`.
 [claims]: https://grimoire.rs/artifacts.html#what-the-tag-claims
 [config-toml]: https://grimoire.rs/configuration.html
 [json-interface]: https://grimoire.rs/json-interface.html
+[status-adoption]: https://grimoire.rs/commands.html#status-adoption
 [artifact-states]: https://grimoire.rs/commands.html#artifact-states
 [hooks-remove]: https://grimoire.rs/hooks.html#remove-stays-armed
 [hooks-flag-off]: https://grimoire.rs/hooks.html#flag-off-retention
