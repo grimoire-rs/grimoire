@@ -190,6 +190,12 @@ pub const CLAUDE_AGENT_FIELDS: &[KnownField] = &[
         ty: FieldType::String,
     },
     KnownField {
+        // CLI v2.1.296+; the CLI documents 100000 to 1000000 and ignores a value outside it.
+        field: "auto-compact-window",
+        native: "autoCompactWindow",
+        ty: FieldType::Integer,
+    },
+    KnownField {
         // CLI v2.1.271+; an older CLI ignores the unknown key.
         field: "omit-claude-md",
         native: "omitClaudeMd",
@@ -1063,6 +1069,15 @@ mod tests {
         let out = ClaudeVendor.agent_index(&parsed_agent(doc), "p").unwrap().unwrap();
         assert!(out.document.contains("omitClaudeMd: true"), "{}", out.document);
         let bad = "---\nname: code-reviewer\ndescription: d\nmetadata:\n  claude.omit-claude-md: sometimes\n---\n";
+        assert!(ClaudeVendor.agent_index(&parsed_agent(bad), "p").is_err());
+    }
+
+    #[test]
+    fn agent_index_lifts_auto_compact_window_and_rejects_non_integer() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  claude.auto-compact-window: \"200000\"\n---\nbody\n";
+        let out = ClaudeVendor.agent_index(&parsed_agent(doc), "p").unwrap().unwrap();
+        assert!(out.document.contains("autoCompactWindow: 200000"), "{}", out.document);
+        let bad = "---\nname: a\ndescription: d\nmetadata:\n  claude.auto-compact-window: 200k\n---\n";
         assert!(ClaudeVendor.agent_index(&parsed_agent(bad), "p").is_err());
     }
 

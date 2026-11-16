@@ -247,6 +247,7 @@ mapping from the `CLAUDE_AGENT_FIELDS` constant in
 | `claude.color` | `color` | enum | Accepted values: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` |
 | `claude.initial-prompt` | `initialPrompt` | string | |
 | `claude.omit-claude-md` | `omitClaudeMd` | bool | `"true"` or `"false"`. Starts the subagent without the user, project and local `CLAUDE.md` files, in Claude Code 2.1.271 and later |
+| `claude.auto-compact-window` | `autoCompactWindow` | integer | Sets a token count for when this subagent compacts, from `100000` to `1000000`, in Claude Code 2.1.296 and later. Write a plain integer such as `200000` |
 
 `mcpServers` and `hooks` are not in this registry — both are object-valued
 fields that cannot be expressed as a single string metadata value. This
@@ -280,7 +281,7 @@ not in this registry.
 
 ## The copilot.* agent registry {#copilot-agent-registry}
 
-[GitHub Copilot CLI][copilot-agents-docs] custom agents recognize five
+[GitHub Copilot CLI][copilot-agents-docs] custom agents recognize nine
 projectable vendor keys, mapped from `COPILOT_AGENT_FIELDS` in
 `src/install/vendor_copilot.rs`.
 
@@ -291,12 +292,13 @@ projectable vendor keys, mapped from `COPILOT_AGENT_FIELDS` in
 | `copilot.disable-model-invocation` | `disable-model-invocation` | bool | Stops Copilot's cloud agent from auto-selecting this agent by task context; supersedes the retired `infer: false` |
 | `copilot.user-invocable` | `user-invocable` | bool | `false` hides the agent from manual selection — programmatic access only; supersedes the retired `infer` |
 | `copilot.target` | `target` | enum | `vscode` or `github-copilot`; unset targets both environments |
+| `copilot.include-custom-instructions` | `include-custom-instructions` | bool | `"true"` lets the agent read the repository instruction files when it runs as a subagent; the default is `false` |
+| `copilot.reasoning-effort` | `reasoningEffort` | string | Default reasoning effort for the agent, such as `low`, `medium` or `high`; passed through as written |
+| `copilot.models` | `models` | comma list | Models in priority order; Copilot uses the first one the plan can access and it overrides `model` |
+| `copilot.model-policy` | `modelPolicy` | enum | `preferred` (default) or `required`; `required` locks dispatch to the authored models |
 
 `infer` (retired upstream in favor of `disable-model-invocation` and
-`user-invocable`) is not in this registry. Two changelog-only capabilities
-with no documented frontmatter spelling — a reasoning-effort control and an
-instruction-inclusion toggle — are also absent pending a documented key
-name. The object-valued `skills`, `metadata` and `mcp-servers` fields are
+`user-invocable`) is not in this registry. The object-valued `skills`, `metadata` and `mcp-servers` fields are
 gated on `adr_structured_vendor_metadata.md` acceptance (`FieldType::Json`)
 — `mcp-servers` for the same reason as Claude's `mcpServers` above, see
 [MCP Server Artifacts](./mcp-servers.md).
