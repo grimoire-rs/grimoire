@@ -74,7 +74,7 @@ config, written only where a client carries **every** field it sets
 (lossless-or-skip): Claude all but `authorization_server_issuer`, OpenCode
 `client_id`, `scopes` and `callback_port` (`callback_port = 0` skips, since OpenCode
 takes 1-65535), Zed a literal `client_id` alone (Zed expands no `${VAR}`,
-so a referenced id skips), Copilot a literal `client_id` plus `scopes` (not in `.vscode/mcp.json`), Droid `client_id` plus `authorization_server_issuer`. Anywhere else the server is skipped with a
+so a referenced id skips), Copilot a literal `client_id` plus `scopes` (not in `.vscode/mcp.json`), Droid `client_id` plus an optional `authorization_server_issuer` (a client id without the issuer is written with a warning). Anywhere else the server is skipped with a
 warning naming the uncarried fields:
 
 | Field | Type | Notes |
@@ -133,8 +133,8 @@ no MCP config surface, so a descriptor writes nothing for them. What matters whi
   transport projects for **Claude only**; the `[server.oauth]` block for
   OpenCode, Zed, Copilot, and Droid, and only when the client carries every
   field set. Every other client skips such a descriptor with a warning. Set
-  just a literal `client_id` to reach all four (Copilot and Droid accept
-  only a literal `client_id`); a `${VAR}` id, or
+  just a literal `client_id` to reach all four (Copilot also takes `scopes`,
+  Droid also the issuer); a `${VAR}` id, or
   `scopes`, drops Zed; `auth_server_metadata_url` or
   `callback_port = 0` drops OpenCode too.
 - **Shape differences are grim's problem, not yours.** OpenCode receives

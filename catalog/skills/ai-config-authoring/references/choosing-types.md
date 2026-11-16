@@ -100,7 +100,7 @@ until its own docs say otherwise:
 |---|---|---|---|
 | Skill | [Claude Code][cc], [OpenCode][oc-home], [Copilot][cop-home], [Codex][cx-home], [Cursor][cur], [Kiro][kiro], [Junie][junie], [Gemini CLI][gem], [Zed][zed], [Amp][amp] | — | — |
 | Always-on file | all ten, under different filenames | — | — |
-| Glob-scoped rule | — | Claude Code, Copilot, Cursor, Kiro (real scoping); OpenCode, Junie (per-file, no scoping) | Codex, Gemini CLI, Zed, Amp — always-on file only; Amp files that `AGENTS.md` mentions can scope themselves with `globs` front matter, but grim installs no rule there |
+| Glob-scoped rule | — | Claude Code, Copilot, Cursor, Kiro (real scoping, but inert at global scope and on Kiro CLI V1 and V2); OpenCode, Junie (per-file, no scoping) | Codex, Gemini CLI, Zed, Amp — always-on file only; Amp files that `AGENTS.md` mentions can scope themselves with `globs` front matter, but grim installs no rule there |
 | Subagent | — | Claude Code, OpenCode, Copilot, Codex, Cursor, Gemini CLI, Junie | Zed, Amp — no installable format; Kiro has two incompatible ones (CLI `.json`, IDE `.md`) in one directory, so authoring for both is not yet possible |
 | Hook | — | Claude Code, OpenCode, Copilot, Codex | unsurveyed for the other six |
 
