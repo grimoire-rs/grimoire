@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_lock_pin_followups
-- **Active phase:** 3 — Perf
-- **Step:** /hex-execute → Implement
-- **Last update:** 2026-11-16 (after cf837e79: refactor(resolve): move edge_origin beside EdgeOrigin)
+- **Active phase:** 4 — Review and PR
+- **Step:** awaiting /finalize
+- **Last update:** 2026-11-16 (after the perf commit: read moved pins only for a tagless warning)
 
 ---
 
@@ -102,7 +102,7 @@ Threshold (ruling R2):
 
 | # | Item | Verdict | Action |
 |---|---|---|---|
-| 1 | Part pick over a 0.15.1 part reads every bundle | Accept | Deliberate conflict guard (`resolver.rs` ~187; tests `a_pick_over_an_old_part_reads_every_bundle_that_lists_a_row_it_takes` and siblings). One-time: the pick stamps the digests. Reason recorded in the PR body. |
+| 1 | Part pick over a 0.15.1 part reads every bundle | Accept | Deliberate conflict guard (`resolver.rs` ~187; tests `a_pick_over_an_old_part_reads_every_bundle_that_lists_a_row_it_takes` and siblings). Not confirmed one-time: by code reading a pick stamps no digest for an unselected or nested bundle. Reason recorded in the PR body. |
 | 2 | `warn_relock` always calls `moved_pins` | Fix | Guard in `warn_relock` (`resolver.rs` ~768): skip `moved_pins` when `target.tagless_resolved` is empty. `moved_pins` is pure and its only consumer here, `tagless_warning`, returns before reading it. ≤ 5 lines, no test edit. Before/after numbers in the commit. |
 | 3 | `StoreView::reach` shared visited set | Accept | The issue's fix is unsafe: the visited set is also the per-walk cap counter, and each dependent returns its own keys and `whole`. Sharing shrinks later dependents' keys and changes the `Unwalked` stderr note. Blob reads are already memoized per view and pinned at ≤ 5N by `an_edit_reads_a_chain_of_requesters_a_linear_number_of_times`. Record the measured time. |
 | 4 | `KeepRule` nested scans | Measure, then decide | If it shows: precompute edge-target → parent rows once in `KeepRule::new`, as a `Vec` in lock order (first match feeds note text; never a sorted set). Own `perf(lock):` commit with numbers. |
