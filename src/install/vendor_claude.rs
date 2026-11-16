@@ -453,7 +453,7 @@ impl Vendor for ClaudeVendor {
 
     fn mcp_entry(
         &self,
-        _scope: ConfigScope,
+        scope: ConfigScope,
         name: &str,
         descriptor: &crate::oci::mcp::McpDescriptor,
     ) -> Option<(String, serde_json::Value)> {
@@ -493,6 +493,13 @@ impl Vendor for ClaudeVendor {
             entry.insert("headersHelper".into(), serde_json::json!(helper));
         }
         if let Some(oauth) = &s.oauth {
+            // Claude has no issuer key; dropping it could change which authorization server is trusted.
+            if oauth.authorization_server_issuer.is_some() {
+                tracing::warn!(
+                    "mcp server '{name}' skipped for claude ({scope}): oauth authorization_server_issuer has no Claude mapping"
+                );
+                return None;
+            }
             let mut o = serde_json::Map::new();
             if let Some(client_id) = &oauth.client_id {
                 o.insert("clientId".into(), serde_json::json!(client_id));
@@ -982,6 +989,15 @@ mod tests {
             value["oauth"]["authServerMetadataUrl"],
             "https://auth/.well-known/oauth-authorization-server"
         );
+    }
+
+    #[test]
+    fn mcp_entry_skips_oauth_issuer_claude_cannot_express() {
+        let d = crate::oci::mcp::McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"cid\"\nauthorization_server_issuer = \"https://auth.example\"",
+        )
+        .unwrap();
+        assert!(ClaudeVendor.mcp_entry(ConfigScope::Project, "m", &d).is_none());
     }
 
     #[test]

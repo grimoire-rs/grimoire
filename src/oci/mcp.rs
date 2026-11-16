@@ -85,6 +85,10 @@ pub struct McpOAuth {
     /// Authorization-server metadata URL (RFC 8414); https-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_server_metadata_url: Option<String>,
+    /// Authorization-server issuer URL; https-only. Droid requires it
+    /// beside a client id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_server_issuer: Option<String>,
 }
 
 /// One [`McpOAuth`] field, as a vendor's oauth projection declares it can
@@ -95,6 +99,7 @@ pub enum OAuthField {
     Scopes,
     CallbackPort,
     AuthServerMetadataUrl,
+    AuthorizationServerIssuer,
 }
 
 impl McpOAuth {
@@ -112,6 +117,11 @@ impl McpOAuth {
                 OAuthField::AuthServerMetadataUrl,
                 "auth_server_metadata_url",
                 self.auth_server_metadata_url.is_some(),
+            ),
+            (
+                OAuthField::AuthorizationServerIssuer,
+                "authorization_server_issuer",
+                self.authorization_server_issuer.is_some(),
             ),
         ]
         .into_iter()
@@ -244,6 +254,9 @@ pub enum McpError {
     /// An `oauth.auth_server_metadata_url` that is not an https URL.
     #[error("invalid oauth auth_server_metadata_url '{0}': expected an https:// URL")]
     OAuthMetadataUrl(String),
+    /// An `oauth.authorization_server_issuer` that is not an https URL.
+    #[error("invalid oauth authorization_server_issuer '{0}': expected an https:// URL")]
+    OAuthIssuer(String),
     /// A refinement field authored on a transport that cannot use it.
     #[error("field '{field}' is not valid for {transport} transport")]
     RefinementShape {
@@ -400,6 +413,11 @@ impl McpDescriptor {
             {
                 return Err(McpError::OAuthMetadataUrl(url.clone()));
             }
+            if let Some(url) = &oauth.authorization_server_issuer
+                && !url.starts_with("https://")
+            {
+                return Err(McpError::OAuthIssuer(url.clone()));
+            }
         }
         for key in s.env.keys() {
             if !is_env_name(key) {
@@ -435,6 +453,7 @@ impl McpDescriptor {
                     .into_iter()
                     .chain(o.scopes.iter().map(String::as_str))
                     .chain(o.auth_server_metadata_url.as_deref())
+                    .chain(o.authorization_server_issuer.as_deref())
             }))
     }
 }
@@ -497,30 +516,49 @@ mod tests {
             scopes: vec!["read".into()],
             callback_port: Some(8080),
             auth_server_metadata_url: Some("https://auth.example/.well-known".into()),
+            authorization_server_issuer: Some("https://issuer.example".into()),
         };
         let only_client = McpOAuth {
             client_id: Some("id".into()),
             scopes: Vec::new(),
             callback_port: None,
             auth_server_metadata_url: None,
+            authorization_server_issuer: None,
         };
         let empty = McpOAuth {
             client_id: None,
             scopes: Vec::new(),
             callback_port: None,
             auth_server_metadata_url: None,
+            authorization_server_issuer: None,
         };
-        let all_names = vec!["client_id", "scopes", "callback_port", "auth_server_metadata_url"];
+        let all_names = vec![
+            "client_id",
+            "scopes",
+            "callback_port",
+            "auth_server_metadata_url",
+            "authorization_server_issuer",
+        ];
         let cases: [(&McpOAuth, &[OAuthField], Vec<&str>); 7] = [
-            // Claude: everything maps.
-            (&full, &[ClientId, Scopes, CallbackPort, AuthServerMetadataUrl], vec![]),
+            // Every field supported.
+            (
+                &full,
+                &[
+                    ClientId,
+                    Scopes,
+                    CallbackPort,
+                    AuthServerMetadataUrl,
+                    AuthorizationServerIssuer,
+                ],
+                vec![],
+            ),
             // Nothing supported: every set field, declaration order.
             (&full, &[], all_names.clone()),
             // OpenCode: metadata URL is the only gap.
             (
                 &full,
                 &[ClientId, Scopes, CallbackPort],
-                vec!["auth_server_metadata_url"],
+                vec!["auth_server_metadata_url", "authorization_server_issuer"],
             ),
             // Copilot / Zed / Droid: client id only.
             (&full, &[ClientId], all_names[1..].to_vec()),
@@ -756,6 +794,22 @@ auth_server_metadata_url = "https://auth.example.com/.well-known/oauth-authoriza
                 .contains("oauth")
         );
 
+        // An issuer must be https and round-trips.
+        assert!(matches!(
+            McpDescriptor::from_toml_str(
+                "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nauthorization_server_issuer = \"http://auth\""
+            )
+            .unwrap_err(),
+            McpError::OAuthIssuer(_)
+        ));
+        let with_issuer = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"\nauthorization_server_issuer = \"https://auth.example\"",
+        )
+        .unwrap();
+        assert_eq!(
+            with_issuer.server.oauth.unwrap().authorization_server_issuer.as_deref(),
+            Some("https://auth.example")
+        );
         // Stdio (and ws) reject oauth.
         let err = McpDescriptor::from_toml_str(
             "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"x\"\n[server.oauth]\nclient_id = \"c\"",

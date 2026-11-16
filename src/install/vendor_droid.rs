@@ -52,7 +52,8 @@
 //!   or `url` — so grim writes a reference verbatim where Droid expands it and
 //!   skips the server where it would reach Droid as a literal. Oauth is
 //!   lossless-or-skip (`adr_mcp_oauth_projection.md`): `client_id` →
-//!   `oauth.clientId`, anything else set skips the server. Toggling a
+//!   `oauth.clientId`, `authorization_server_issuer` →
+//!   `oauth.authorizationServerIssuer`, anything else set skips the server. Toggling a
 //!   *project* server in Droid's UI "writes a copy to your user config", so
 //!   the same name then sits in `~/.factory/mcp.json` untracked by grim and a
 //!   later global install of it refuses with exit 65 (`--force` replaces it).
@@ -299,7 +300,7 @@ impl Vendor for DroidVendor {
         if let Some(oauth) = &s.oauth {
             // Lossless or skip: a dropped scope or metadata URL could widen
             // what the client is granted (`adr_mcp_oauth_projection.md`).
-            let unmapped = oauth.unmapped(&[OAuthField::ClientId]);
+            let unmapped = oauth.unmapped(&[OAuthField::ClientId, OAuthField::AuthorizationServerIssuer]);
             if !unmapped.is_empty() {
                 tracing::warn!(
                     "mcp server '{name}' skipped for droid ({scope}): oauth {} has no Droid mapping",
@@ -307,8 +308,22 @@ impl Vendor for DroidVendor {
                 );
                 return None;
             }
+            let mut o = serde_json::Map::new();
             if let Some(client_id) = &oauth.client_id {
-                entry.insert("oauth".into(), serde_json::json!({ "clientId": client_id }));
+                o.insert("clientId".into(), serde_json::json!(client_id));
+                // Droid documents clientId as requiring the issuer; write what grim has and warn.
+                if oauth.authorization_server_issuer.is_none() {
+                    tracing::warn!(
+                        "mcp server '{name}' for droid ({scope}): oauth client_id without authorization_server_issuer; \
+                         Droid requires the issuer with a client id, so the server may refuse the block"
+                    );
+                }
+            }
+            if let Some(issuer) = &oauth.authorization_server_issuer {
+                o.insert("authorizationServerIssuer".into(), serde_json::json!(issuer));
+            }
+            if !o.is_empty() {
+                entry.insert("oauth".into(), serde_json::Value::Object(o));
             }
         }
         // Refinement fields (`timeout`, `always_load`, `headers_helper`, `cwd`)
@@ -637,6 +652,25 @@ mod tests {
                 "{extra}"
             );
         }
+    }
+
+    #[test]
+    fn mcp_entry_oauth_issuer_is_written_and_client_id_only_is_unchanged() {
+        let both = mcp(
+            "[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"\nauthorization_server_issuer = \"https://auth.example\"",
+        );
+        let (_, value) = DroidVendor.mcp_entry(ConfigScope::Project, "m", &both).unwrap();
+        assert_eq!(
+            value["oauth"],
+            serde_json::json!({"clientId": "c", "authorizationServerIssuer": "https://auth.example"})
+        );
+        // A client id alone renders exactly as before the issuer existed.
+        let only = mcp("[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nclient_id = \"c\"");
+        let (_, value) = DroidVendor.mcp_entry(ConfigScope::Project, "m", &only).unwrap();
+        assert_eq!(
+            serde_json::to_string(&value).unwrap(),
+            r#"{"oauth":{"clientId":"c"},"type":"http","url":"https://x"}"#
+        );
     }
 
     #[test]

@@ -590,13 +590,19 @@ fn oauth_client_id<'a>(
     surface: &str,
     name: &str,
     descriptor: &'a crate::oci::mcp::McpDescriptor,
+    scopes_mapped: bool,
 ) -> Option<Option<&'a str>> {
     use crate::oci::mcp::OAuthField;
 
     let Some(oauth) = &descriptor.server.oauth else {
         return Some(None);
     };
-    let unmapped = oauth.unmapped(&[OAuthField::ClientId]);
+    // Copilot CLI's `oauthScopes` requires `oauthClientId`; scopes alone stay unmapped.
+    let mut supported = vec![OAuthField::ClientId];
+    if scopes_mapped && oauth.client_id.is_some() {
+        supported.push(OAuthField::Scopes);
+    }
+    let unmapped = oauth.unmapped(&supported);
     if !unmapped.is_empty() {
         tracing::warn!(
             "mcp server '{name}' skipped for copilot ({surface}): oauth field(s) {} have no Copilot target",
@@ -624,7 +630,7 @@ fn vscode_entry(name: &str, descriptor: &crate::oci::mcp::McpDescriptor) -> Opti
     // have no documented Copilot target — dropped (pure refinements,
     // nothing auth-critical is lost).
     let s = &descriptor.server;
-    let client_id = oauth_client_id("project", name, descriptor)?;
+    let client_id = oauth_client_id("project", name, descriptor, false)?;
     let mut entry = serde_json::Map::new();
     match s.transport {
         McpTransport::Stdio => {
@@ -675,7 +681,7 @@ fn cli_entry(
     use crate::oci::mcp::McpTransport;
 
     let s = &descriptor.server;
-    let client_id = oauth_client_id(surface, name, descriptor)?;
+    let client_id = oauth_client_id(surface, name, descriptor, true)?;
     let mut entry = serde_json::Map::new();
     match s.transport {
         McpTransport::Stdio => {
@@ -718,6 +724,9 @@ fn cli_entry(
             }
             if let Some(id) = client_id {
                 entry.insert("oauthClientId".into(), serde_json::json!(id));
+                if let Some(o) = s.oauth.as_ref().filter(|o| !o.scopes.is_empty()) {
+                    entry.insert("oauthScopes".into(), serde_json::json!(o.scopes));
+                }
             }
         }
     }
@@ -1055,6 +1064,13 @@ mod tests {
         assert!(err.to_string().contains("copilot.target"), "{err}");
     }
 
+    fn cli_without_scopes_key(d: &crate::oci::mcp::McpDescriptor, github: &Path) -> bool {
+        let (_, cli) = CopilotVendor
+            .mcp_entry_for(ConfigScope::Project, github, "m", d)
+            .unwrap();
+        cli.get("oauthScopes").is_none()
+    }
+
     fn oauth_descriptor(oauth: &str) -> crate::oci::mcp::McpDescriptor {
         crate::oci::mcp::McpDescriptor::from_toml_str(&format!(
             "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\n{oauth}"
@@ -1081,8 +1097,20 @@ mod tests {
         let (_, global) = CopilotVendor.mcp_entry(ConfigScope::Global, "m", &client_only).unwrap();
         assert_eq!(global["oauthClientId"], "cid");
 
+        // Scopes with a client id reach the CLI files as `oauthScopes`; VS Code has no target.
+        let scoped = oauth_descriptor("client_id = \"cid\"\nscopes = [\"read\", \"write\"]");
+        let (_, cli) = CopilotVendor
+            .mcp_entry_for(ConfigScope::Project, &github, "m", &scoped)
+            .unwrap();
+        assert_eq!(cli["oauthScopes"], serde_json::json!(["read", "write"]));
+        let (_, global) = CopilotVendor.mcp_entry(ConfigScope::Global, "m", &scoped).unwrap();
+        assert_eq!(global["oauthScopes"], serde_json::json!(["read", "write"]));
+        assert!(CopilotVendor.mcp_entry(ConfigScope::Project, "m", &scoped).is_none());
+        assert!(cli_without_scopes_key(&client_only, &github));
+
         for lossy in [
-            "client_id = \"cid\"\nscopes = [\"read\"]",
+            "scopes = [\"read\"]",
+            "client_id = \"cid\"\nauthorization_server_issuer = \"https://a.example\"",
             "client_id = \"cid\"\ncallback_port = 8080",
             "auth_server_metadata_url = \"https://a/.well-known\"",
             // Copilot documents no expansion inside its oauth client id.

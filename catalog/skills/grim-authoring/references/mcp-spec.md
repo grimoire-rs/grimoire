@@ -62,7 +62,7 @@ client drops it silently, nothing auth-critical lost:
 
 | Field | Projects for | Notes |
 |---|---|---|
-| `timeout` | Claude (`timeout`), OpenCode (`timeout`), Qoder (`timeout`), Codex (`startup_timeout_ms`) | Startup/tool-fetch timeout, milliseconds. Gemini drops it with a warning: its `timeout` bounds every tool call too |
+| `timeout` | Claude (`timeout`), OpenCode (`timeout`), Qoder (`timeout`), Codex (`startup_timeout_ms`), Junie (`timeout`, 1000 to 3600000 ms only, else warned) | Startup/tool-fetch timeout, milliseconds. Gemini drops it with a warning: its `timeout` bounds every tool call too |
 | `always_load` | Claude (`alwaysLoad`) only | Load the server eagerly at client startup |
 | `headers_helper` | Claude (`headersHelper`) only | Executable that produces fresh auth headers |
 | `cwd` | OpenCode (`cwd`), Gemini (`cwd`), Qoder (`cwd`), Warp (`working_directory`) | Working directory for the launched process (stdio only) |
@@ -71,10 +71,10 @@ client drops it silently, nothing auth-critical lost:
 
 `http`/`sse` only, every field optional — a structured OAuth client
 config, written only where a client carries **every** field it sets
-(lossless-or-skip): Claude all four, OpenCode all but
-`auth_server_metadata_url` (and `callback_port = 0` skips, since OpenCode
+(lossless-or-skip): Claude all but `authorization_server_issuer`, OpenCode
+`client_id`, `scopes` and `callback_port` (`callback_port = 0` skips, since OpenCode
 takes 1-65535), Zed a literal `client_id` alone (Zed expands no `${VAR}`,
-so a referenced id skips). Anywhere else the server is skipped with a
+so a referenced id skips), Copilot a literal `client_id` plus `scopes` (not in `.vscode/mcp.json`), Droid `client_id` plus `authorization_server_issuer`. Anywhere else the server is skipped with a
 warning naming the uncarried fields:
 
 | Field | Type | Notes |
@@ -83,6 +83,7 @@ warning naming the uncarried fields:
 | `scopes` | string list | Values may reference `${VAR}` |
 | `callback_port` | integer | Fixed localhost callback port for the auth redirect |
 | `auth_server_metadata_url` | string | RFC 8414 metadata URL; https-only; may reference `${VAR}` |
+| `authorization_server_issuer` | string | Authorization-server issuer URL; https-only. Droid requires it beside a client id |
 
 Deliberately **no `client_secret` field** — same rationale as `${VAR}`
 env references: a secret has no safe home in a published artifact.
@@ -134,7 +135,7 @@ no MCP config surface, so a descriptor writes nothing for them. What matters whi
   field set. Every other client skips such a descriptor with a warning. Set
   just a literal `client_id` to reach all four (Copilot and Droid accept
   only a literal `client_id`); a `${VAR}` id, or
-  `scopes`, drops Zed and Copilot; `auth_server_metadata_url` or
+  `scopes`, drops Zed; `auth_server_metadata_url` or
   `callback_port = 0` drops OpenCode too.
 - **Shape differences are grim's problem, not yours.** OpenCode receives
   `command` as ONE array (`["grim", "mcp"]`), Codex a
@@ -204,7 +205,7 @@ env = { GRIM_HOME = "${GRIM_HOME}" }
 - `description` missing or whitespace-only → 65.
 - `url` on a stdio server, or `command`/`args`/`env` on a remote one → 65.
 - `oauth` on `stdio`/`ws`, `cwd` on a remote, `headers_helper` on stdio,
-  or a non-https `auth_server_metadata_url` → 65.
+  or a non-https `auth_server_metadata_url` or `authorization_server_issuer` → 65.
 - `${VAR:-fallback}`, `${1BAD}`, `${UNCLOSED` anywhere in a string value → 65.
 
 The required `description` field is the descriptor's prose and becomes the

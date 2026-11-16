@@ -201,8 +201,19 @@ impl Vendor for JunieVendor {
                 }
             }
         }
-        // Refinement fields (`timeout`, `always_load`, `headers_helper`, `cwd`) have
-        // no Junie `mcpServers` equivalent — dropped (sibling drop convention).
+        // Junie's `timeout` is milliseconds like grim's, accepted only in 1000..=3600000;
+        // it ignores other values, so an out-of-range one is not written.
+        if let Some(timeout) = s.timeout {
+            if (1000..=3_600_000).contains(&timeout) {
+                entry.insert("timeout".into(), serde_json::json!(timeout));
+            } else {
+                tracing::warn!(
+                    "mcp server '{name}' for junie ({scope}): timeout {timeout} ms is outside Junie's 1000..=3600000 \
+                     range and is not written"
+                );
+            }
+        }
+        // `always_load`, `headers_helper` and `cwd` have no Junie equivalent — dropped (sibling drop convention).
         Some((format!("/mcpServers/{name}"), serde_json::Value::Object(entry)))
     }
 
@@ -633,9 +644,34 @@ mod tests {
         )
         .unwrap();
         let (_, value) = JunieVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap();
-        for key in ["timeout", "cwd", "always_load", "alwaysLoad", "headersHelper"] {
+        for key in ["cwd", "always_load", "alwaysLoad", "headersHelper"] {
             assert!(value.get(key).is_none(), "no Junie target for '{key}': {value}");
         }
+    }
+
+    #[test]
+    fn mcp_entry_writes_timeout_in_range_only() {
+        let entry = |ms: u64| {
+            let d = McpDescriptor::from_toml_str(&format!(
+                "description = \"d\"\n[server]\ntransport = \"stdio\"\ncommand = \"grim\"\ntimeout = {ms}\n"
+            ))
+            .unwrap();
+            JunieVendor.mcp_entry(ConfigScope::Project, "m", &d).unwrap().1
+        };
+        assert_eq!(entry(7000)["timeout"], 7000);
+        assert_eq!(entry(1000)["timeout"], 1000);
+        assert_eq!(entry(3_600_000)["timeout"], 3_600_000);
+        assert!(entry(999).get("timeout").is_none());
+        assert!(entry(3_600_001).get("timeout").is_none());
+    }
+
+    #[test]
+    fn mcp_entry_declines_oauth_issuer() {
+        let d = McpDescriptor::from_toml_str(
+            "description = \"d\"\n[server]\ntransport = \"http\"\nurl = \"https://x\"\n[server.oauth]\nauthorization_server_issuer = \"https://auth.example\"",
+        )
+        .unwrap();
+        assert!(JunieVendor.mcp_entry(ConfigScope::Project, "m", &d).is_none());
     }
 
     #[test]

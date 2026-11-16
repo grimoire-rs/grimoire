@@ -96,7 +96,7 @@ validation error, not a silent merge:
 | `url` | `http`/`sse`/`ws` | `http://` or `https://` for `http`/`sse`; `ws://` or `wss://` for `ws` |
 | `headers` | `http`/`sse`/`ws`, optional | String→string map, same `${VAR}` referencing as `env` |
 | `oauth` | `http`/`sse`, optional | OAuth client block, see [below](#server-oauth) — not valid for `ws` ([Claude documents no OAuth over WebSocket][claude-code-mcp-docs]) or `stdio` |
-| `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`), [OpenCode][opencode-mcp-docs] (`timeout`), [Qoder][qoder-mcp-docs] (`timeout`), and [Codex][codex-mcp-docs] (`startup_timeout_ms`); dropped for clients without a native key. Also dropped for [Gemini CLI][gemini-docs], with a warning: Gemini applies its `timeout` to every tool call as well as startup, so a startup value would cut long tool calls short. Gemini's 10-minute default applies instead |
+| `timeout` | any transport, optional | Startup/tool-fetch timeout in milliseconds — projected for [Claude Code][claude-code-mcp-docs] (`timeout`), [OpenCode][opencode-mcp-docs] (`timeout`), [Qoder][qoder-mcp-docs] (`timeout`), and [Codex][codex-mcp-docs] (`startup_timeout_ms`), and [Junie][junie-docs] (`timeout`, written only from 1000 to 3600000 ms, with a warning outside it); dropped for clients without a native key. Also dropped for [Gemini CLI][gemini-docs], with a warning: Gemini applies its `timeout` to every tool call as well as startup, so a startup value would cut long tool calls short. Gemini's 10-minute default applies instead |
 | `always_load` | any transport, optional | Load the server eagerly at client startup — projected for [Claude Code][claude-code-mcp-docs] (`alwaysLoad`) only |
 | `headers_helper` | `http`/`sse`/`ws`, optional | Executable that produces fresh auth headers — projected for [Claude Code][claude-code-mcp-docs] (`headersHelper`) only |
 | `cwd` | `stdio`, optional | Working directory for the launched process — projected for [OpenCode][opencode-mcp-docs] (`cwd`), [Gemini CLI][gemini-docs] (`cwd`), [Qoder][qoder-mcp-docs] (`cwd`), and [Warp][warp-mcp-docs] (`working_directory`) |
@@ -151,6 +151,7 @@ auth_server_metadata_url = "https://auth.acme.internal/.well-known/oauth-authori
 | `scopes` | string list | Requested scopes; `${VAR}` references allowed |
 | `callback_port` | integer | Fixed localhost callback port for the authorization redirect |
 | `auth_server_metadata_url` | string | Authorization-server metadata URL (RFC 8414); **https-only** |
+| `authorization_server_issuer` | string | Authorization-server issuer URL; **https-only**. Droid requires it beside a client id |
 
 There is deliberately **no `client_secret` field**: a secret has no safe
 home in a published artifact — the same principle behind [`${VAR}`
@@ -164,11 +165,11 @@ never writes a partial block:
 
 | Client | Fields it carries | Written as |
 |---|---|---|
-| [Claude Code][claude-code-mcp-docs] | all four | `oauth.clientId`, `oauth.scopes`, `oauth.callbackPort`, `oauth.authServerMetadataUrl` |
+| [Claude Code][claude-code-mcp-docs] | all but `authorization_server_issuer` | `oauth.clientId`, `oauth.scopes`, `oauth.callbackPort`, `oauth.authServerMetadataUrl` |
 | [OpenCode][opencode-mcp-docs] | `client_id`, `scopes`, `callback_port` | `oauth.clientId`, `oauth.scope` (the scopes joined by spaces), `oauth.callbackPort` |
 | [Zed][zed-docs] | `client_id` | `oauth.client_id` |
-| [Droid][droid-mcp-docs] | `client_id` (a `${VAR}` id is written as is; Droid expands it) | `oauth.clientId` |
-| [Copilot][copilot-mcp-docs] | `client_id`, a literal value only (a `${VAR}` id skips) | `oauthClientId` in `.github/mcp.json` and `mcp-config.json`; `oauth.clientId` in `.vscode/mcp.json` |
+| [Droid][droid-mcp-docs] | `client_id` (a `${VAR}` id is written as is; Droid expands it), `authorization_server_issuer` | `oauth.clientId`, `oauth.authorizationServerIssuer` |
+| [Copilot][copilot-mcp-docs] | `client_id`, a literal value only (a `${VAR}` id skips); `scopes` beside a `client_id`, not in `.vscode/mcp.json` | `oauthClientId` and `oauthScopes` (a list) in `.github/mcp.json` and `mcp-config.json`; `oauth.clientId` in `.vscode/mcp.json` |
 
 Every other client [skips a descriptor that carries the block](#limitations).
 A block that sets no fields writes nothing and never causes a skip.
@@ -188,7 +189,7 @@ before it ever reaches a registry. Every violation below exits with code
 | an `env` key outside `[A-Za-z_][A-Za-z0-9_]*` | rejected |
 | a malformed `${…}` reference — unclosed, an invalid variable name, or a `${VAR:-default}` fallback | rejected |
 | `headers_helper` on `stdio`, or `cwd` on a remote transport | rejected |
-| `oauth` on `stdio` or `ws`, or a non-`https://` `auth_server_metadata_url` | rejected |
+| `oauth` on `stdio` or `ws`, or a non-`https://` `auth_server_metadata_url` or `authorization_server_issuer` | rejected |
 | a non-`https://` `repository` | rejected (same gate as [every other kind](./publishing.md#metadata-repository)) |
 | any field not in the [common](#common-fields) or [server](#server-table) tables | rejected |
 
@@ -216,12 +217,12 @@ minor release (see [stability][stability-unstable]).
 | [OpenCode][opencode-mcp-docs] | global | `$OPENCODE_CONFIG` else the XDG default `opencode.json` (or `.jsonc` when present) | `mcp` | same as project | `{env:VAR}` |
 | [VS Code][vscode-mcp-docs] (Copilot Chat) | project | `<workspace>/.vscode/mcp.json` | `servers` | `type: "stdio"` + `command`/`args`/`env`; `type: "http"\|"sse"` + `url`/`headers`; oauth: `oauth: {clientId}` | `${env:VAR}` |
 | [Copilot CLI][copilot-mcp-docs] | project | `<workspace>/.github/mcp.json` — written beside the VS Code file, which the CLI does not read | `mcpServers` | same as global | `${VAR}` (identity — Copilot CLI expands it) |
-| [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools`; oauth: `oauthClientId` | `${VAR}` (identity — Copilot CLI expands it) |
+| [Copilot CLI][copilot-mcp-docs] | global | `$COPILOT_HOME`\|`~/.copilot`/`mcp-config.json` | `mcpServers` | `type: "local"` + `command`/`args`/`env` + `tools: ["*"]`; `type: "http"\|"sse"` + `url`/`headers` + `tools`; oauth: `oauthClientId`, `oauthScopes` | `${VAR}` (identity — Copilot CLI expands it) |
 | [Codex][codex-mcp-docs] | project | `<workspace>/.codex/config.toml` | `mcp_servers` | `stdio`: `command`/`args`/`env`; remote: `url` + headers mapped onto `http_headers` (static) / `env_http_headers` (whole-value `${VAR}`) / `bearer_token_env_var` (`Authorization: Bearer ${VAR}`) — see [Limitations](#limitations) for the residual skip; refinement: `timeout` → `startup_timeout_ms` | `${VAR}` (literal passthrough, not substituted by grim) |
 | [Codex][codex-mcp-docs] | global | `$CODEX_HOME`\|`~/.codex`/`config.toml` | `mcp_servers` | same as project | same as project |
 | [Cursor][cursor-docs] | project / global | `.cursor/mcp.json` / `~/.cursor/mcp.json` | `mcpServers` | `stdio`: `type: "stdio"` + `command`/`args`/`env`; remote: `url` + `headers`; oauth skipped | `${env:VAR}` (grim translates `${VAR}`) |
 | [Kiro][kiro-docs] | project / global | `.kiro/settings/mcp.json` / `$KIRO_HOME`\|`~/.kiro`/`settings/mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env` (no `type`); oauth skipped | `${VAR}` (native passthrough) |
-| [Junie][junie-docs] | project / global | `.junie/mcp/mcp.json` / `~/.junie/mcp/mcp.json` (`$JUNIE_HOME/mcp/mcp.json` when set) | `mcpServers` | `stdio`: `command`/`args`/`env`; oauth skipped | undocumented — ref-bearing descriptors skipped |
+| [Junie][junie-docs] | project / global | `.junie/mcp/mcp.json` / `~/.junie/mcp/mcp.json` (`$JUNIE_HOME/mcp/mcp.json` when set) | `mcpServers` | `stdio`: `command`/`args`/`env`; `timeout` (ms, 1000 to 3600000); oauth skipped | undocumented — ref-bearing descriptors skipped |
 | [Gemini CLI][gemini-docs] | project / global | `<workspace>/.gemini/settings.json` / `$GEMINI_CLI_HOME`\|`$HOME` + `/.gemini/settings.json` — the `.gemini` segment is appended either way | `mcpServers` | `stdio`: `command`/`args`/`env`/`cwd`; `sse`: `url`; `http`: `httpUrl`; `timeout` dropped with a warning; oauth skipped | `${VAR}` (native passthrough) |
 | [Zed][zed-docs] | project / global | `.zed/settings.json` / the platform-resolved Zed config root + `/settings.json` (JSONC) — `$XDG_CONFIG_HOME`\|`~/.config`/`zed` on Linux and FreeBSD, a hardcoded `~/.config/zed` on macOS, `%APPDATA%\Zed` on Windows | `context_servers` | flat `command`/`args`/`env` (no `type`); remote: `url` + `headers`, [`oauth`](#server-oauth) `client_id` only | none upstream — ref-bearing descriptors skipped |
 | [Amp][amp-docs] | project / global | `.amp/settings.json` / `~/.config/amp/settings.json` | `amp.mcpServers` (literal dotted key) | `stdio`: `command`/`args`/`env`; oauth skipped | `${VAR_NAME}` (native passthrough) |
@@ -229,7 +230,7 @@ minor release (see [stability][stability-unstable]).
 | [Warp][warp-mcp-docs] | project / global | `.warp/.mcp.json` / `~/.warp/.mcp.json` | `mcpServers` | `stdio`: `command`/`args`/`env`/`working_directory` (from `cwd`); remote (`sse`, `http`): `url` + `headers`; ws and any oauth field skipped | undocumented — ref-bearing descriptors skipped |
 | [Qoder][qoder-mcp-docs] | project / global | `.qoder/settings.json` / `$QODER_CONFIG_DIR`\|`~/.qoder`/`settings.json` — never the shared `.mcp.json` Qoder also reads, which grim manages for Claude Code | `mcpServers` | `stdio`: `command`/`args`/`env`/`cwd` (no `type`); remote (`sse`, `http`): `type` + `url` + `headers`; `timeout` (ms); ws + oauth skipped | undocumented — ref-bearing descriptors skipped |
 | [Cline][cline-mcp-docs] | global only — no project file | `$CLINE_MCP_SETTINGS_PATH`, else `$CLINE_DATA_DIR/settings/cline_mcp_settings.json`, else `$CLINE_DIR`\|`~/.cline` + `/data/settings/cline_mcp_settings.json` — shared by the Cline CLI and VS Code extension, edited under Cline's own lock | `mcpServers` | flat `type: "stdio"` + `command`/`args`/`cwd`/`env`; `type: "streamableHttp"\|"sse"` + `url`/`headers`; ws + oauth skipped | `${env:VAR}` (the extension expands it, the CLI does not) |
-| [Droid][droid-mcp-docs] | project / global | `.factory/mcp.json` / `~/.factory/mcp.json` | `mcpServers` | `type: "stdio"` + `command`/`args`/`env`; `type: "http"\|"sse"` + `url` + `headers`; oauth: `{clientId}` when `client_id` is the only field set, else skipped; ws skipped | `${VAR}` (native) in `env`, `headers` and `oauth.clientId` only — a reference in `command`, `args` or `url` skips the server |
+| [Droid][droid-mcp-docs] | project / global | `.factory/mcp.json` / `~/.factory/mcp.json` | `mcpServers` | `type: "stdio"` + `command`/`args`/`env`; `type: "http"\|"sse"` + `url` + `headers`; oauth: `{clientId, authorizationServerIssuer}`, any other field skips the server; ws skipped | `${VAR}` (native) in `env`, `headers` and `oauth.clientId` only — a reference in `command`, `args` or `url` skips the server |
 
 Some clients are absent from the table because grim writes no MCP config for
 them at all — they decline the kind, so grim warns, skips, and writes nothing.
@@ -509,8 +510,8 @@ The full tool table lives at [`grim mcp`](./commands.md#mcp).
   support is additive to add later while removal would be breaking — so it
   is declined there as well, pending confirmation.
 - **The `[server.oauth]` block reaches few clients.** Claude Code carries
-  every field, OpenCode all but `auth_server_metadata_url`, and Zed,
-  [Copilot][copilot-mcp-docs] and [Droid][droid-mcp-docs] only `client_id` ([the table above](#server-oauth)).
+  every field but `authorization_server_issuer`, OpenCode only `client_id`, `scopes` and `callback_port`, and Zed only `client_id`.
+  [Copilot][copilot-mcp-docs] adds `scopes` and [Droid][droid-mcp-docs] adds the issuer ([the table above](#server-oauth)).
   Any other client, or a field the client cannot carry, skips the server
   with a warning naming the fields: OAuth is auth-critical, so grim never
   writes a block that differs from the authored one. To reach Zed,
