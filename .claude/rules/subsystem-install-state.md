@@ -40,12 +40,23 @@ named volume) at `<workspace>/.grimoire` if you need state to be shared.
 is rejected at store time with `UnknownAnchor`. All anchor roots must be
 representable as UTF-8.
 
-**Reap window**: between the read-only `load()` in a first post-upgrade
-`status` call and the mutating `save()` in the next mutating command, the
-old legacy state file (`$GRIM_HOME/state/projects/<sha>.json`) still
-exists. A concurrent observer looking at the legacy path during this window
-may see the old file even though the in-memory view is already migrated.
-This is transient; the next mutating command reaps the legacy file.
+**Reap window**: between the in-memory migration in a first post-upgrade
+`status` call and the next write that commits records, the old legacy state
+file (`$GRIM_HOME/state/projects/<sha>.json`) still exists. A concurrent
+observer looking at the legacy path may see the old file even though the
+in-memory view is already migrated. This is transient. `status`, the TUI's
+background adoption and an MCP `grim_status` under `--allow-writes` write
+proven records through `InstallState::commit_proven` under the state-file
+lock, and a commit that wrote at least one record reaps the legacy file unless
+the migration was lossy. A run that writes nothing reaps nothing, so the next
+mutating command still reaps it.
+
+**Records are a cache of the disk**: a record is proven by comparing a render
+of the lock's pin with the files, never trusted alone. Proofs live in
+`src/install/adoption.rs`; `commit_proven` re-checks each pin against the lock
+read under the state lock and writes nothing for a pin that moved. A write
+that cannot happen (held lock, read-only or linked state directory) leaves the
+report and exit code unchanged.
 
 **Nesting constraint**: `GRIM_HOME` must not be nested inside a workspace
 directory. If it is, `from_target` may match `GrimHome` as the anchor for
