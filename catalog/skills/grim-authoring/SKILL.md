@@ -114,8 +114,8 @@ the summary below is a planning aid that the next client can age:
   and Qoder. Only Claude accepts the `ws`
   transport. The `[server.oauth]` block reaches OpenCode (no
   `auth_server_metadata_url`, no `callback_port = 0`), Zed, Copilot, and
-  Droid (Copilot and Droid: a
-  literal `client_id` only — a `${VAR}` id skips); every other
+  Droid (a literal `client_id`, a `${VAR}` id skips; Copilot also takes
+  `scopes`, Droid also takes `authorization_server_issuer`); every other
   client, or a field it cannot carry, skips the descriptor with a warning.
 - **Hooks** are the narrowest kind by far. Only four clients name a hook
   registration surface at all — Claude, Codex, Copilot, and Qoder — and of

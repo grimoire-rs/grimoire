@@ -348,7 +348,9 @@ descriptor with a `${VAR}` reference. The next `grim install` adds it, and
 [Claude Code][claude-code-mcp-docs] reads a fixed set of well-known
 credential variables as empty in a remote server's `url` and `headers`.
 Examples are `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK` and
-`NPM_TOKEN`. The server then usually fails with a 401. Name the variable
+`NPM_TOKEN`. A covered name reads as empty whether or not you set the
+variable, and a `:-default` fallback on it is ignored. The server then usually
+fails with a 401. Name the variable
 after the server instead, such as `${ACME_MCP_TOKEN}`. grim does not
 rename it for you: it writes the reference exactly as authored.
 

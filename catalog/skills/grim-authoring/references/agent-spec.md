@@ -79,7 +79,7 @@ whether your audience is in that set:
 | Droid | `droid.*` | Markdown frontmatter at `.factory/droids/`; `tools` emitted as a YAML list of tool ids, `model` verbatim (`inherit` included), `droid.reasoning-effort` → `reasoningEffort`. A name containing `.` is skipped for Droid with a warning; a dotted frontmatter `name` under an accepted binding is written as the binding name. A lone `tools` category still renders as a list, which Droid reads as a tool id |
 | Antigravity | *(none yet)* | Markdown frontmatter; `tools` emitted as a YAML list (upstream types it `string[]`). The namespace is reserved but its agent registry is empty, so an `antigravity.*` key warns and drops |
 | Goose | *(none)* | Markdown frontmatter at `.goose/agents/`; `name`, `description` and `model` only, `tools` dropped with a warning |
-| Kilo | `kilo.*` | OpenCode's shape: drops `name` (the filename is its identity) and drops `tools` with a warning; `kilo.mode`, `kilo.temperature`, `kilo.steps` and friends lift |
+| Kilo | `kilo.*` | OpenCode's shape: drops `name` (the filename is its identity) and drops `tools` with a warning; `kilo.mode`, `kilo.temperature`, `kilo.steps` and friends lift. At global scope an agent whose body holds `{env:` or `{file:` is skipped for Kilo with a warning, since Kilo expands them there; project scope writes the body as published |
 | Qoder | *(none yet)* | Claude's shape — a plain agent installs byte-identical, no provenance comment. The namespace is reserved but its agent registry is empty, so a `qoder.*` key warns and drops |
 
 Every emit but Claude's carries a provenance comment. **Every other

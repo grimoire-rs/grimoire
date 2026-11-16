@@ -982,10 +982,11 @@ Some harnesses change or ignore a delivered value on their own:
   sandbox, the harness ignores `sandbox.filesystem.allowWrite` entries in a
   project's local file. It also ignores an `allowRead` entry there under a
   path that managed, `--settings` or user settings deny reading. Its
-  [sandboxing docs][claude-sandboxing] list both cases. A relative path
-  resolves against the project root in a project file. In the user file it
-  resolves against `~/.claude`, so one entry names a different path at each
-  scope.
+  [sandboxing docs][claude-sandboxing] list both cases. Repository entries
+  also drop out of `allowWrite` while
+  `permissions.blockReadsOutsideWorkingDirectories` is on. A relative path
+  resolves against the project root in a project file, and against `~/.claude`
+  in the user file.
 - [Antigravity][antigravity]: its pages disagree on whether project rules
   combine with the global `permissions` lists or take precedence. Treat a
   global list as one a project rule can override.

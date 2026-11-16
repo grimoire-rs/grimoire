@@ -142,8 +142,9 @@ A valid name matches `[a-z0-9]+([.-][a-z0-9]+)*`:
 - is 1–64 characters.
 
 Periods are a deliberate superset of the
-[Agent Skills standard][agentskills-spec], which allows only `[a-z0-9-]`.
-A dotted name such as `socket.io` publishes and installs fine with grim,
+[Agent Skills standard][agentskills-spec], which allows only lowercase
+alphanumeric characters and hyphens. The standard counts unicode letters as
+alphanumeric, and grim accepts ASCII only. A dotted name such as `socket.io` publishes and installs fine with grim,
 but tooling that enforces the strict standard may reject it — prefer
 hyphens when portability across vendors matters.
 
