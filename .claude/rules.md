@@ -199,7 +199,7 @@ Nine rules under `.claude/rules/` come from upstream bundles: their prose is **n
 | Planning a feature (multi-agent) | `/hex-plan` (hex bundle) |
 | Executing a feature (multi-agent) | `/hex-execute` (hex bundle) |
 | Adversarial review | `/hex-review` (hex bundle; cross-model adversary configured in `.agents/memory/hex.md`) |
-| Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
+| Preparing a release (change inventory, catalog and docs drift, bump, site changelog) | `prepare-release` — ceremony in [workflow-release.md](./rules/workflow-release.md) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `finalize` |
