@@ -84,12 +84,12 @@ use super::vendor::{SettingsField, Vendor, home_dir, provenance};
 pub struct AntigravityVendor;
 
 /// The Antigravity CLI's settings keys, from
-/// `research_upstream_antigravity_settings_20261105.md`. `/agentMode` leaves
-/// out `""`: it is the default, and the CLI deletes a default-valued key.
+/// `research_upstream_antigravity_settings_20261105.md`. `/agentMode` keeps
+/// `""` (the CLI's Default mode): since CLI 1.5.7 it saves `""` instead of deleting the key.
 const ANTIGRAVITY_SETTINGS_FIELDS: &[SettingsField] = &[
     SettingsField::new(
         "/agentMode",
-        Ty::Enum(&["accept-edits", "auto", "plan"]),
+        Ty::Enum(&["", "accept-edits", "auto", "plan"]),
         Scalar,
         GlobalOnly,
     ),
@@ -902,7 +902,7 @@ mod tests {
             vec![
                 (
                     "/agentMode",
-                    Ty::Enum(&["accept-edits", "auto", "plan"]),
+                    Ty::Enum(&["", "accept-edits", "auto", "plan"]),
                     Scalar,
                     GlobalOnly
                 ),
@@ -982,10 +982,9 @@ mod tests {
         }
     }
 
-    /// The CLI writes a default-valued key out of the file, so `""` (the
-    /// `/agentMode` default) would never stay put.
+    /// Since CLI 1.5.7 Default mode is saved as `""`, so the row takes it.
     #[test]
-    fn settings_agent_mode_leaves_out_the_default_literal() {
+    fn settings_agent_mode_takes_the_default_literal() {
         let row = AntigravityVendor
             .settings_fields()
             .iter()
@@ -994,11 +993,30 @@ mod tests {
         let crate::install::vendor::SettingsValueType::Enum(values) = row.ty else {
             panic!("agentMode is an enum: {:?}", row.ty);
         };
-        assert!(!values.contains(&""), "{values:?}");
+        assert!(values.contains(&""), "{values:?}");
     }
 
-    /// One value per value type is taken, and the CLI's default-mode `""`
-    /// is refused: a wrong value opens the CLI's blocking error screen.
+    /// An empty string is a value here, never an absent key: it is accepted
+    /// and spliced into the file as `""`.
+    #[test]
+    fn settings_agent_mode_empty_string_is_written_as_empty_string() {
+        use crate::install::json_splice::{Splice, split_pointer_path, upsert_member_at};
+        use crate::oci::settings::SettingsDocument;
+
+        let text = "description = \"d\"\n[antigravity]\nagentMode = \"\"\n";
+        let (document, _) = SettingsDocument::from_toml_str_with_requires(text).unwrap();
+        let value = document.vendors["antigravity"]["agentMode"].clone();
+        assert_eq!(value, serde_json::json!(""));
+        let path = split_pointer_path("/agentMode").unwrap();
+        let Splice::Changed(written) = upsert_member_at("{}\n", &path, &value).unwrap() else {
+            panic!("an empty object gains the member");
+        };
+        let doc: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(doc, serde_json::json!({"agentMode": ""}));
+    }
+
+    /// One value per value type is taken and a wrong one is refused: a wrong
+    /// value opens the CLI's blocking error screen.
     #[test]
     fn settings_document_checks_each_value_type() {
         use crate::oci::settings::SettingsDocument;
@@ -1015,7 +1033,7 @@ mod tests {
             serde_json::json!(["bash(rm)"])
         );
         for bad in [
-            "agentMode = \"\"",
+            "agentMode = \"bogus\"",
             "colorScheme = \"tokyo\"",
             "notifications = \"no\"",
             "model = 1",

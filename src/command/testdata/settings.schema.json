@@ -43,6 +43,7 @@
       "properties": {
         "agentMode": {
           "enum": [
+            "",
             "accept-edits",
             "auto",
             "plan"
@@ -514,6 +515,7 @@
               "enum": [
                 "auto",
                 "osc9",
+                "osc777",
                 "bel"
               ],
               "type": "string"
@@ -653,10 +655,13 @@
         },
         "effortLevel": {
           "enum": [
+            "none",
+            "minimal",
             "low",
             "medium",
             "high",
-            "xhigh"
+            "xhigh",
+            "max"
           ],
           "type": "string"
         },
@@ -931,6 +936,15 @@
         },
         "maxMode": {
           "type": "boolean"
+        },
+        "network": {
+          "additionalProperties": false,
+          "properties": {
+            "useHttp1ForAgent": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
         },
         "notifications": {
           "type": "boolean"
@@ -1459,6 +1473,9 @@
         "hide_prompt_training_models": {
           "type": "boolean"
         },
+        "memory_model": {
+          "type": "string"
+        },
         "model": {
           "type": "string"
         },
@@ -1603,7 +1620,19 @@
           "type": "string"
         },
         "chat.showThinking": {
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "expanded",
+                "collapsed",
+                "off"
+              ],
+              "type": "string"
+            }
+          ]
         },
         "chat.terminalTitle": {
           "type": "boolean"

@@ -111,7 +111,13 @@ const KIRO_SETTINGS_FIELDS: &[SettingsField] = &[
     SettingsField::new("/chat.allowIcons", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/chat.preserveScrollback", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/chat.terminalTitle", Ty::Bool, Scalar, GlobalOnly),
-    SettingsField::new("/chat.showThinking", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new(
+        "/chat.showThinking",
+        // Kiro CLI 2.5.0 added the string forms; the booleans still mean collapsed and off.
+        Ty::OneOf(&[Ty::Bool, Ty::Enum(&["expanded", "collapsed", "off"])]),
+        Scalar,
+        GlobalOnly,
+    ),
     SettingsField::new("/chat.enableKnowledge", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/chat.enableCodeIntelligence", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/chat.enableThinking", Ty::Bool, Scalar, GlobalOnly),
@@ -667,7 +673,12 @@ mod tests {
                 bool_row("/chat.allowIcons"),
                 bool_row("/chat.preserveScrollback"),
                 bool_row("/chat.terminalTitle"),
-                bool_row("/chat.showThinking"),
+                (
+                    "/chat.showThinking",
+                    Ty::OneOf(&[Ty::Bool, Ty::Enum(&["expanded", "collapsed", "off"])]),
+                    Scalar,
+                    GlobalOnly
+                ),
                 bool_row("/chat.enableKnowledge"),
                 bool_row("/chat.enableCodeIntelligence"),
                 bool_row("/chat.enableThinking"),
@@ -746,6 +757,24 @@ mod tests {
             "mcpServers = {}",
         ] {
             let text = format!("description = \"d\"\n[kiro]\n{bad}\n");
+            assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
+        }
+    }
+
+    /// `/chat.showThinking` takes a boolean or one of three strings, and a
+    /// boolean value is stored as the boolean it was.
+    #[test]
+    fn settings_show_thinking_takes_boolean_or_named_mode() {
+        use crate::oci::settings::SettingsDocument;
+
+        for good in ["true", "false", "\"expanded\"", "\"collapsed\"", "\"off\""] {
+            let text = format!("description = \"d\"\n[kiro]\n\"chat.showThinking\" = {good}\n");
+            let (document, _) = SettingsDocument::from_toml_str_with_requires(&text).unwrap();
+            let expected: serde_json::Value = serde_json::from_str(good).unwrap();
+            assert_eq!(document.vendors["kiro"]["chat.showThinking"], expected, "{good}");
+        }
+        for bad in ["\"on\"", "\"\"", "1"] {
+            let text = format!("description = \"d\"\n[kiro]\n\"chat.showThinking\" = {bad}\n");
             assert!(SettingsDocument::from_toml_str_with_requires(&text).is_err(), "{bad}");
         }
     }

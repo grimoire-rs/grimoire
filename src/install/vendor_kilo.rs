@@ -178,6 +178,7 @@ const KILO_SETTINGS_FIELDS: &[SettingsField] = &[
     SettingsField::new("/web_search", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/hide_prompt_training_models", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/privacy_mode", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/memory_model", Ty::String, Scalar, GlobalOnly),
 ];
 
 impl Vendor for KiloVendor {
@@ -593,6 +594,7 @@ mod tests {
                 ("/web_search", Ty::Bool, Scalar, GlobalOnly),
                 ("/hide_prompt_training_models", Ty::Bool, Scalar, GlobalOnly),
                 ("/privacy_mode", Ty::Bool, Scalar, GlobalOnly),
+                ("/memory_model", Ty::String, Scalar, GlobalOnly),
             ]
         );
     }

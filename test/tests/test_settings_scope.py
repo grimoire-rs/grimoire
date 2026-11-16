@@ -212,6 +212,21 @@ def test_project_default_mode_declines(grim_at, project_dir: Path, tmp_path: Pat
     assert _file(target) == {"model": "sonnet", "permissions": {"defaultMode": "plan"}}
 
 
+@pytest.mark.parametrize("mode", ["dontAsk", "manual"])
+def test_project_default_mode_takes_dont_ask_and_manual(
+    grim_at, project_dir: Path, tmp_path: Path, unique_repo: str, mode: str
+) -> None:
+    tables = {"claude": {"permissions": {"defaultMode": mode}}}
+    team = _package(unique_repo, "team", tables)
+    runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team}, options=CLAUDE_ONLY)
+
+    result = runner.run("install", TRUST)
+
+    assert result.returncode == 0, result.stderr
+    assert "does not take this value in a project" not in result.stderr
+    assert _file(project_dir / LOCAL) == {"permissions": {"defaultMode": mode}}
+
+
 def test_add_then_uninstall_leaves_no_empty_containers(
     grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
 ) -> None:
