@@ -374,17 +374,18 @@ def test_s001_every_profile_key_reaches_the_files_its_harness_defines(
     entry = claude["plugins"][0]
     assert list(entry) == [
         "name", "source", "version", "description", "author", "homepage", "repository", "license",
-        "keywords", "tags", "category", "documentationUrl", "supportUrl",
+        "keywords", "tags", "category",
     ]  # fmt: skip
     assert entry["author"] == author
-    assert (entry["documentationUrl"], entry["supportUrl"]) == (
+    tree = _tree_manifest(work, "claude", "alpha")
+    assert list(tree) == [
+        "name", "version", "description", "author", "homepage", "repository", "license", "keywords",
+        "documentationUrl", "supportUrl",
+    ]  # fmt: skip
+    assert (tree["documentationUrl"], tree["supportUrl"]) == (
         "https://acme.example/docs",
         "https://github.com/acme/alpha/issues",
     )
-    tree = _tree_manifest(work, "claude", "alpha")
-    assert list(tree) == [
-        "name", "version", "description", "author", "homepage", "repository", "license", "keywords"
-    ]  # fmt: skip
     for key in ("author", "homepage", "repository", "license", "keywords"):
         assert entry[key] == tree[key], key
 

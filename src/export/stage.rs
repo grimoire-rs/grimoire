@@ -1598,7 +1598,12 @@ pub(crate) fn write_manifest(
     logo: Option<&str>,
     profile: &PluginProfile,
 ) -> Result<(), ExportError> {
-    let profile = family::manifest_profile(client, profile);
+    let mut profile = family::manifest_profile(client, profile);
+    // Only Claude's plugin.json defines the directory-listing links.
+    if client != ClientTarget::Claude {
+        profile.documentation = None;
+        profile.support = None;
+    }
     let bytes = match family {
         Family::Claude => family::claude_plugin_json(name, version, description, &profile),
         Family::AgentPlugins => family::agent_plugins_plugin_json(name, version, description, logo, &profile),
