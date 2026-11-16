@@ -2,9 +2,20 @@
 
 The prompt template for the sonnet researcher spawned per target — one
 researcher per harness or domain row, all spawned at once (no tier
-ordering, no concurrency cap). Fill the `<…>` slots from the ledger row and [domains.md](domains.md); pass the
+ordering). The host caps concurrent subagents (20 by default): spawn up to
+the cap, then one more per completion. Fill the `<…>` slots from the ledger row and [domains.md](domains.md); pass the
 whole block as the spawn prompt, with `model: sonnet` and a
 `Model rationale:` line.
+
+On a full run the driver does not type 23 claim lists. Write the run's
+shared rules once to `<scratchpad>/run-brief.md` and point each spawn prompt
+at it: the researcher builds its own "Claims to re-verify" list (every
+watchlist row naming the target, each `//! verified` stamp and
+`settings_fields()` row in its vendor file, each upstream-backed docs
+statement), writes the full table to its claims file, and replies with a
+short summary only (feed cursor, changed rows with a class, counts, security
+lines). Rows it did not reach go under `Not reached:`, apart from
+`Unsourced:`.
 
 ## Template
 
