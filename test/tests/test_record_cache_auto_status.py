@@ -715,9 +715,11 @@ def test_a_status_write_reaps_the_legacy_state_and_keeps_settings_records(
     move_tag(f"{unique_repo}/moving", _moving("v2"), tag="rolling", kind="skill")
     assert runner.run("update", check=False).returncode == 0
     # The pre-relocation file: sha256 of the canonical config path under `state/projects/`.
-    sha = hashlib.sha256(
-        str((project_dir / "grimoire.toml").resolve()).encode()
-    ).hexdigest()
+    canonical = str((project_dir / "grimoire.toml").resolve())
+    if os.name == "nt":
+        # `std::fs::canonicalize` returns the verbatim `\\?\` form on Windows.
+        canonical = "\\\\?\\" + canonical
+    sha = hashlib.sha256(canonical.encode()).hexdigest()
     legacy = runner.grim_home / "state" / "projects" / f"{sha}.json"
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_bytes(saved)
