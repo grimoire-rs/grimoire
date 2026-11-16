@@ -289,6 +289,11 @@ grim never silently overwrites or deletes work you did locally:
   applies the gate only inside the closure of its names, so an edit outside
   it neither fails the run nor gets overwritten. Its `--force` reaches that
   closure and what the run prunes.
+- A render that a pull or checkout left behind is not an edit. `grim install`
+  and `grim status` prove it against the locked pin and re-pin the record, so
+  the install exits 0 where 0.15.1 exited 65. A CRLF checkout and a link on a
+  parent directory are not proven and still refuse. `grim update` keeps and
+  names a file it cannot prove, `--force` included.
 - `grim install` also **refuses** to overwrite a destination it has no
   record of (a hand-authored same-named skill dir, rule file, or MCP
   config entry) — `--force` overwrites and records it. Identical
@@ -314,7 +319,7 @@ grim never silently overwrites or deletes work you did locally:
   value it replaces. Two packages that want different values for one key
   exit 78, and no `--force` overrides that conflict.
 
-`grim status` shows which artifacts are `locally modified`. If a managed
+`grim status` shows which artifacts are `modified`. If a managed
 file needs permanent local changes, copy it out of the managed location
 instead of fighting the gate — managed files are owned by the lock.
 
@@ -591,6 +596,10 @@ Exit 80 is the registry rejecting your credential. Things to know:
   request while offline: 81). A skipped verification (store-only mode,
   offline) surfaces a wrong password on the next pull or push instead.
   Re-login with a fresh token; confirm flags with `grim login --help`.
+- A stored credential is not sent to a host that only a project
+  `grimoire.toml` marks `insecure = true`. The pull runs anonymously, a stderr
+  warning names the cause, and a registry that needs a credential exits 80.
+  Declare the host in `GRIM_INSECURE_REGISTRIES` or the global config to send it.
 - Credentials are read from `$DOCKER_CONFIG/config.json` — a plain
   `docker login` works too; the store is shared.
 - A configured credential helper that is not on `PATH` is exit 78, not

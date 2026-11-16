@@ -98,6 +98,8 @@ a reference file has accreted one, delete it and link instead.
   (env vars, precedence)
 - [Publishing][publishing] — publish.md
 - [Authentication][auth] — publish.md, troubleshooting.md
+- [Records that follow the disk][status-adoption] — consume.md,
+  troubleshooting.md (status writes, install after a pull)
 - [JSON interface][json-interface] — consume.md (report shapes),
   troubleshooting.md (error document, hook arming causes)
 - [Use a plugin marketplace][use-a-marketplace] — marketplaces.md
@@ -123,6 +125,7 @@ a reference file has accreted one, delete it and link instead.
 [config]: https://grimoire.rs/configuration.html
 [publishing]: https://grimoire.rs/publishing.html
 [auth]: https://grimoire.rs/authentication.html
+[status-adoption]: https://grimoire.rs/commands.html#status-adoption
 [json-interface]: https://grimoire.rs/json-interface.html
 [use-a-marketplace]: https://grimoire.rs/guides/use-a-marketplace.html
 [hosting-a-marketplace]: https://grimoire.rs/guides/hosting-a-marketplace.html
