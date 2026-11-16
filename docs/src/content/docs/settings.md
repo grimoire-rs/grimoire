@@ -522,8 +522,8 @@ repository to the fence. In both cases grim follows the variables as they are
 set.
 
 In a project, the [Claude Code][claude] field `/permissions/defaultMode`
-takes only `default`, `acceptEdits` and `plan`, since the harness ignores the
-other modes there. Any other value is skipped with the warning
+takes every mode except `auto` and `bypassPermissions`, which the harness
+ignores there. Any other value is skipped with the warning
 `settings package '<package>': claude /permissions/defaultMode does not take this value in a project; skipped`.
 
 ### The project local file {#local-file}
@@ -588,7 +588,7 @@ Each row is one field grim takes. `both` means project and global scope.
 | claude | `/permissions/allow` | list of strings | set | both |
 | claude | `/permissions/deny` | list of strings | set | both |
 | claude | `/permissions/ask` | list of strings | set | both |
-| claude | `/permissions/defaultMode` | `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`, `manual`. A project takes the first three. | scalar | both |
+| claude | `/permissions/defaultMode` | `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`, `manual`. A project takes all but `auto` and `bypassPermissions`. | scalar | both |
 | claude | `/sandbox/enabled` | boolean | scalar | both |
 | claude | `/extraKnownMarketplaces/<name>` | table with `source` | map | both |
 | claude | `/theme` | `auto`, `dark`, `light`, `dark-daltonized`, `light-daltonized`, `dark-ansi`, `light-ansi` | scalar | both |
@@ -620,11 +620,11 @@ Each row is one field grim takes. `both` means project and global scope.
 | codex | `/marketplaces/<name>` | table with `source`, `source_type`, `ref`, `sparse_paths` | map | global |
 | codex | `rules` | list of tables with `pattern`, `decision`, `justification` | own file | global |
 | codex | `/file_opener` | `vscode`, `vscode-insiders`, `windsurf`, `cursor`, `none` | scalar | global |
-| codex | `/tui/notification_method` | `auto`, `osc9`, `bel` | scalar | global |
+| codex | `/tui/notification_method` | `auto`, `osc9`, `osc777`, `bel` | scalar | global |
 | codex | `/tui/notification_condition` | `unfocused`, `always` | scalar | global |
 | codex | `/web_search` | `disabled`, `cached`, `indexed`, `live` | scalar | global |
 | copilot | `/model` | string | scalar | global |
-| copilot | `/effortLevel` | `low`, `medium`, `high`, `xhigh` | scalar | global |
+| copilot | `/effortLevel` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | scalar | global |
 | copilot | `/theme` | `default`, `github`, `dim`, `high-contrast`, `colorblind` | scalar | global |
 | copilot | `/defaultMode` | `interactive`, `plan`, `autopilot` | scalar | global |
 | copilot | `/defaultPermissionMode` | `manual`, `assisted`, `allow-all` | scalar | global |
@@ -700,6 +700,7 @@ Each row is one field grim takes. `both` means project and global scope.
 | cursor | `/display/showStatusLineRunningTime` | boolean | scalar | global |
 | cursor | `/attribution/attributeCommitsToAgent` | boolean | scalar | global |
 | cursor | `/attribution/attributePRsToAgent` | boolean | scalar | global |
+| cursor | `/network/useHttp1ForAgent` | boolean | scalar | global |
 | opencode | `/model` | string | scalar | global |
 | opencode | `/small_model` | string | scalar | global |
 | opencode | `/default_agent` | string | scalar | global |
@@ -726,7 +727,7 @@ Each row is one field grim takes. `both` means project and global scope.
 | qoder | `/permissions/deny` | list of strings | set | global |
 | qoder | `/security/disableYoloMode` | boolean | scalar | global |
 | qoder | `/model/reasoningEffort` | `disabled`, `off`, `none`, `low`, `medium`, `high`, `xhigh`, `max` | scalar | global |
-| antigravity | `/agentMode` | `accept-edits`, `auto`, `plan` | scalar | global |
+| antigravity | `/agentMode` | `""`, `accept-edits`, `auto`, `plan` | scalar | global |
 | antigravity | `/toolPermission` | `request-review`, `proceed-in-sandbox`, `always-proceed`, `strict` | scalar | global |
 | antigravity | `/artifactReviewPolicy` | `asks-for-review`, `agent-decides`, `always-proceed` | scalar | global |
 | antigravity | `/allowNonWorkspaceAccess` | boolean | scalar | global |
@@ -798,6 +799,7 @@ Each row is one field grim takes. `both` means project and global scope.
 | kilo | `/web_search` | boolean | scalar | global |
 | kilo | `/hide_prompt_training_models` | boolean | scalar | global |
 | kilo | `/privacy_mode` | boolean | scalar | global |
+| kilo | `/memory_model` | string | scalar | global |
 | kiro | `/chat.defaultModel` | string | scalar | global |
 | kiro | `/chat.defaultAgent` | string | scalar | global |
 | kiro | `/chat.outputStyle` | string | scalar | global |
@@ -821,7 +823,7 @@ Each row is one field grim takes. `both` means project and global scope.
 | kiro | `/chat.allowIcons` | boolean | scalar | global |
 | kiro | `/chat.preserveScrollback` | boolean | scalar | global |
 | kiro | `/chat.terminalTitle` | boolean | scalar | global |
-| kiro | `/chat.showThinking` | boolean | scalar | global |
+| kiro | `/chat.showThinking` | boolean or `expanded`, `collapsed`, `off` | scalar | global |
 | kiro | `/chat.enableKnowledge` | boolean | scalar | global |
 | kiro | `/chat.enableCodeIntelligence` | boolean | scalar | global |
 | kiro | `/chat.enableThinking` | boolean | scalar | global |

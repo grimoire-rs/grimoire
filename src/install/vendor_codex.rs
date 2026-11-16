@@ -196,7 +196,7 @@ const CODEX_SETTINGS_FIELDS: &[SettingsField] = &[
     ),
     SettingsField::new(
         "/tui/notification_method",
-        Ty::Enum(&["auto", "osc9", "bel"]),
+        Ty::Enum(&["auto", "osc9", "osc777", "bel"]),
         Scalar,
         GlobalOnly,
     ),
@@ -802,7 +802,7 @@ mod tests {
                 ),
                 (
                     "/tui/notification_method",
-                    Ty::Enum(&["auto", "osc9", "bel"]),
+                    Ty::Enum(&["auto", "osc9", "osc777", "bel"]),
                     GlobalOnly
                 ),
                 (

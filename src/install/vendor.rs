@@ -2005,6 +2005,7 @@ mod tests {
         ("cursor", "/display/showStatusLineRunningTime", MergeClass::Scalar),
         ("cursor", "/attribution/attributeCommitsToAgent", MergeClass::Scalar),
         ("cursor", "/attribution/attributePRsToAgent", MergeClass::Scalar),
+        ("cursor", "/network/useHttp1ForAgent", MergeClass::Scalar),
         ("opencode", "/model", MergeClass::Scalar),
         ("opencode", "/small_model", MergeClass::Scalar),
         ("opencode", "/default_agent", MergeClass::Scalar),
@@ -2103,6 +2104,7 @@ mod tests {
         ("kilo", "/web_search", MergeClass::Scalar),
         ("kilo", "/hide_prompt_training_models", MergeClass::Scalar),
         ("kilo", "/privacy_mode", MergeClass::Scalar),
+        ("kilo", "/memory_model", MergeClass::Scalar),
         ("kiro", "/chat.defaultModel", MergeClass::Scalar),
         ("kiro", "/chat.defaultAgent", MergeClass::Scalar),
         ("kiro", "/chat.outputStyle", MergeClass::Scalar),
@@ -2312,10 +2314,10 @@ mod tests {
     }
 
     #[test]
-    fn the_thirteen_tables_hold_316_rows() {
+    fn the_thirteen_tables_hold_318_rows() {
         let total: usize = SETTINGS_HOSTS.iter().map(|n| settings_rows_of(n).len()).sum();
-        assert_eq!(total, 316);
-        assert_eq!(SETTINGS_GOLDEN.len(), 316);
+        assert_eq!(total, 318);
+        assert_eq!(SETTINGS_GOLDEN.len(), 318);
     }
 
     /// The per-harness field table on `settings.md` lists exactly the
@@ -2360,7 +2362,7 @@ mod tests {
         );
         assert_eq!(
             documented.len(),
-            316,
+            318,
             "settings.md field table holds one row per registry key"
         );
     }

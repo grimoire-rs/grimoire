@@ -94,7 +94,7 @@ const COPILOT_SETTINGS_FIELDS: &[SettingsField] = &[
     SettingsField::new("/model", Ty::String, Scalar, GlobalOnly),
     SettingsField::new(
         "/effortLevel",
-        Ty::Enum(&["low", "medium", "high", "xhigh"]),
+        Ty::Enum(&["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
         Scalar,
         GlobalOnly,
     ),
@@ -1328,7 +1328,7 @@ mod tests {
                 ("/model", Ty::String, GlobalOnly),
                 (
                     "/effortLevel",
-                    Ty::Enum(&["low", "medium", "high", "xhigh"]),
+                    Ty::Enum(&["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
                     GlobalOnly
                 ),
                 (

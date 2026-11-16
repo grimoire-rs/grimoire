@@ -106,6 +106,7 @@ const CURSOR_SETTINGS_FIELDS: &[SettingsField] = &[
     SettingsField::new("/display/showStatusLineRunningTime", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/attribution/attributeCommitsToAgent", Ty::Bool, Scalar, GlobalOnly),
     SettingsField::new("/attribution/attributePRsToAgent", Ty::Bool, Scalar, GlobalOnly),
+    SettingsField::new("/network/useHttp1ForAgent", Ty::Bool, Scalar, GlobalOnly),
 ];
 
 impl Vendor for CursorVendor {
@@ -828,6 +829,7 @@ mod tests {
                 ("/display/showStatusLineRunningTime", Ty::Bool, GlobalOnly),
                 ("/attribution/attributeCommitsToAgent", Ty::Bool, GlobalOnly),
                 ("/attribution/attributePRsToAgent", Ty::Bool, GlobalOnly),
+                ("/network/useHttp1ForAgent", Ty::Bool, GlobalOnly),
             ]
         );
     }

@@ -218,8 +218,8 @@ const CLAUDE_SETTINGS_FIELDS: &[SettingsField] = &[
     SettingsField::new("/permissions/deny", Ty::StringList, Set, Both),
     SettingsField::new("/permissions/ask", Ty::StringList, Set, Both),
     SettingsField {
-        // Claude ignores the other modes from a local file.
-        project_values: Some(&["default", "acceptEdits", "plan"]),
+        // Claude ignores `auto` and `bypassPermissions` from a local file.
+        project_values: Some(&["default", "acceptEdits", "plan", "dontAsk", "manual"]),
         ..SettingsField::new(
             "/permissions/defaultMode",
             Ty::Enum(&[
@@ -1230,10 +1230,10 @@ mod tests {
         }
     }
 
-    /// Claude ignores any other mode from a local file, so the row says which
-    /// three apply there.
+    /// Claude ignores `auto` and `bypassPermissions` from a local file, so the
+    /// row says which five apply there.
     #[test]
-    fn settings_default_mode_narrows_to_three_values_at_project_scope() {
+    fn settings_default_mode_narrows_to_five_values_at_project_scope() {
         let narrowed: Vec<_> = ClaudeVendor
             .settings_fields()
             .iter()
@@ -1243,7 +1243,7 @@ mod tests {
             narrowed,
             vec![(
                 "/permissions/defaultMode",
-                ["default", "acceptEdits", "plan"].as_slice()
+                ["default", "acceptEdits", "plan", "dontAsk", "manual"].as_slice()
             )]
         );
     }
