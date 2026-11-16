@@ -1170,21 +1170,7 @@ struct Graph<'a> {
     /// records its sources. A claim from a parent out of line never teaches, so this
     /// is all that names the version a pin moved for once that version is dropped.
     releasing: BTreeMap<NodeKey, BTreeSet<(NodeKey, Digest, String)>>,
-    /// Direct keys whose pin the edges onto them keep and stamp with the declared
-    /// reference, as `grim lock` before the line was typed would: from the next pass
-    /// on, the declaration reads the pin.
-    attested: BTreeSet<NodeKey>,
-    /// Direct keys whose edges showed no pin answering their line, at once or after
-    /// attesting it. They resolve their line and never attest again, so the passes end.
-    unattested: BTreeSet<NodeKey>,
-    /// Direct keys attested because the edges the carry does not answer resolved onto
-    /// the pin, as `grim lock` settles them (`Graph::confirmable`). Only these count a
-    /// resolve as an answer in `Graph::stamps_declared`.
-    confirmed: BTreeSet<NodeKey>,
-    /// Direct keys whose held pin the store lacked offline when the attesting read
-    /// asked for its version. A store miss never releases a held pin, so where its
-    /// tag shows nothing either the lock's word answers its line (`Graph::vouched_range`).
-    missed_offline: BTreeSet<NodeKey>,
+    attestation: Attestation,
     memo: RegistryMemo,
     /// The last pass's manifest reads; a pass takes one back for a job at the
     /// same id and digest instead of reading the store again.
@@ -1226,6 +1212,27 @@ struct Graph<'a> {
     work: usize,
     /// Passes the run started, the one under way included.
     passes: usize,
+}
+
+/// How attestation left each direct key's held pin: attested, unattested,
+/// confirmed by a resolve, or unread offline.
+#[derive(Default)]
+struct Attestation {
+    /// Direct keys whose pin the edges onto them keep and stamp with the declared
+    /// reference, as `grim lock` before the line was typed would: from the next pass
+    /// on, the declaration reads the pin.
+    attested: BTreeSet<NodeKey>,
+    /// Direct keys whose edges showed no pin answering their line, at once or after
+    /// attesting it. They resolve their line and never attest again, so the passes end.
+    unattested: BTreeSet<NodeKey>,
+    /// Direct keys attested because the edges the carry does not answer resolved onto
+    /// the pin, as `grim lock` settles them (`Graph::confirmable`). Only these count a
+    /// resolve as an answer in `Graph::stamps_declared`.
+    confirmed: BTreeSet<NodeKey>,
+    /// Direct keys whose held pin the store lacked offline when the attesting read
+    /// asked for its version. A store miss never releases a held pin, so where its
+    /// tag shows nothing either the lock's word answers its line (`Graph::vouched_range`).
+    missed_offline: BTreeSet<NodeKey>,
 }
 
 /// The registry reads this run memoizes across passes: tag resolves and misses,
@@ -1511,7 +1518,8 @@ impl Graph<'_> {
         if self.released.contains(key) {
             return None;
         }
-        let attested = matches!(claim, NodeClaim::Direct(_) | NodeClaim::Any(_)) && self.attested.contains(key);
+        let attested =
+            matches!(claim, NodeClaim::Direct(_) | NodeClaim::Any(_)) && self.attestation.attested.contains(key);
         match self.carry.answer_reading(key, claim, &self.memo.evidence) {
             None if attested || self.vouched_range(key, claim) => {
                 self.carry.pins.get(key).map(|carried| carried.pin.digest())
@@ -1528,7 +1536,7 @@ impl Graph<'_> {
         let (NodeClaim::Range(id), Some(held)) = (claim, self.carry.pins.get(key)) else {
             return false;
         };
-        self.missed_offline.contains(key)
+        self.attestation.missed_offline.contains(key)
             && held.pin.registry_repository() == id.registry_repository()
             && self.held_shows(key, &held.pin, evidence(None, &held.pin)) == Evidence::Unknown
     }
@@ -1541,7 +1549,7 @@ impl Graph<'_> {
         let (Some(node), Some(carried)) = (self.nodes.get(key), self.carry.pins.get(key)) else {
             return false;
         };
-        let resolved = self.confirmed.contains(key);
+        let resolved = self.attestation.confirmed.contains(key);
         let answered = |c: &Claim| {
             let lands = || self.memo.digests.get(&c.id) == Some(&carried.pin.digest());
             self.carried(key, c.claim()).is_some() || (resolved && lands())
@@ -1552,7 +1560,7 @@ impl Graph<'_> {
     /// Whether the edges onto `key` may yet show that its pin answers the line `id`, as
     /// [`Self::stamps_declared`] decides once the walk has met them.
     fn may_attest(&self, key: &NodeKey, id: &Identifier) -> bool {
-        !self.unattested.contains(key) && self.may_take_stamp(key, id)
+        !self.attestation.unattested.contains(key) && self.may_take_stamp(key, id)
     }
 
     /// Whether the line `id` on `key` could read a pin its edges stamp: a tagless pin in
@@ -1597,13 +1605,16 @@ impl Graph<'_> {
                 return false;
             };
             let pin = carried.pin.digest();
-            self.unattested.contains(key) && self.may_take_stamp(key, id) && self.memo.digests.contains_key(id) && {
-                // The stamp the kept walk takes rests on the edges it meets too.
-                let met = self.walked_without(key);
-                let reached = |c: &Claim| met.contains(&c.parent);
-                self.kept_reference_among(key, &carried.pin, reached) == *id
-                    && node.claims.iter().filter(|c| reached(c)).all(|c| lands(key, &pin, c))
-            }
+            self.attestation.unattested.contains(key)
+                && self.may_take_stamp(key, id)
+                && self.memo.digests.contains_key(id)
+                && {
+                    // The stamp the kept walk takes rests on the edges it meets too.
+                    let met = self.walked_without(key);
+                    let reached = |c: &Claim| met.contains(&c.parent);
+                    self.kept_reference_among(key, &carried.pin, reached) == *id
+                        && node.claims.iter().filter(|c| reached(c)).all(|c| lands(key, &pin, c))
+                }
         };
         let keys = self.nodes.iter().filter(|(key, node)| confirms(key, node));
         keys.map(|(key, _)| key.clone()).collect()
@@ -1635,7 +1646,7 @@ impl Graph<'_> {
     /// a tag that is gone would refuse a line `grim lock` keeps
     /// (`a_typed_line_its_edges_stamp_needs_no_tag`).
     fn awaits_attestation(&self, key: &NodeKey, id: &Identifier) -> bool {
-        !self.attested.contains(key) && self.may_attest(key, id)
+        !self.attestation.attested.contains(key) && self.may_attest(key, id)
     }
 
     /// Settle each direct key [`Self::may_attest`]: attest it when
@@ -1657,10 +1668,10 @@ impl Graph<'_> {
         let mut grew = false;
         for (key, shows) in shown {
             if shows {
-                grew |= self.attested.insert(key);
+                grew |= self.attestation.attested.insert(key);
             } else {
-                self.attested.remove(&key);
-                grew |= self.unattested.insert(key);
+                self.attestation.attested.remove(&key);
+                grew |= self.attestation.unattested.insert(key);
             }
         }
         grew
@@ -3056,7 +3067,7 @@ impl Graph<'_> {
                     && self.candidate_evidence(key, pin) == Evidence::Vouched
             })
             .map(|(key, pin)| unchecked(pin, &self.line_of(key)));
-        let typed = self.attested.iter().filter_map(|key| {
+        let typed = self.attestation.attested.iter().filter_map(|key| {
             let (node, held) = (self.nodes.get(key)?, &self.carry.pins.get(key)?.pin);
             let read_at_pin = node.read.as_ref()?.digest.as_ref() == Some(&held.digest());
             let vouched = node.claims.iter().filter(|c| self.vouched_range(key, c.claim()));
@@ -3889,8 +3900,8 @@ async fn expand_counting_passes(
     // so its result can move a pin the line's walk keeps
     // (`a_kept_pin_its_walk_stops_attesting_leaves_the_lines_walk`). The verdict above may
     // rest on a pass half walked, so this check is what keeps a pin, not that verdict.
-    let held = kept.confirmed.is_subset(&kept.attested);
-    let refused = resolved.is_err().then(|| kept.confirmed.clone());
+    let held = kept.attestation.confirmed.is_subset(&kept.attestation.attested);
+    let refused = resolved.is_err().then(|| kept.attestation.confirmed.clone());
     let kept_unchecked = kept.unchecked_holds();
     let kept_result = match walked {
         Ok(()) => kept.finish(access, options).await,
@@ -3927,10 +3938,7 @@ impl<'a> Graph<'a> {
             released: BTreeSet::new(),
             conflict_released: BTreeSet::new(),
             releasing: BTreeMap::new(),
-            attested: BTreeSet::new(),
-            unattested: BTreeSet::new(),
-            confirmed: BTreeSet::new(),
-            missed_offline: BTreeSet::new(),
+            attestation: Attestation::default(),
             memo: RegistryMemo::default(),
             reads: Reads::default(),
             transitive: 0,
@@ -3964,8 +3972,8 @@ impl<'a> Graph<'a> {
         kept.work = self.work;
         kept.passes = self.passes;
         kept.memo.listing_bytes = self.memo.listing_bytes;
-        kept.attested.clone_from(&confirmable);
-        kept.confirmed = confirmable;
+        kept.attestation.attested.clone_from(&confirmable);
+        kept.attestation.confirmed = confirmable;
         kept
     }
 
@@ -4035,7 +4043,7 @@ impl<'a> Graph<'a> {
         for (key, pin) in unread {
             match self.memo.evidence_of(&key, &pin, access, options).await {
                 Err(err) if is_offline_miss(&err) => {
-                    self.missed_offline.insert(key);
+                    self.attestation.missed_offline.insert(key);
                 }
                 Err(err) => return Err(err),
                 Ok(_) => {}
@@ -7375,7 +7383,7 @@ mod tests {
 
         // `p:1` claims `^1` of `x`, which the tagless pin shows no version for: the
         // pass settles the line by letting it resolve.
-        assert!(graph.unattested.contains(&k(Skill, "x")));
+        assert!(graph.attestation.unattested.contains(&k(Skill, "x")));
         assert!(graph.released.is_empty(), "{:?}", graph.released);
         assert!(graph.release_conflicts(), "a release was ready in that pass");
         assert!(graph.released.contains(&k(Skill, "c")));
@@ -8724,7 +8732,7 @@ mod tests {
         assert!(!graph.learned.is_empty() && kept.learned.is_empty());
         assert!(kept.nodes.is_empty());
         assert_eq!(
-            (kept.attested.clone(), kept.confirmed.clone()),
+            (kept.attestation.attested.clone(), kept.attestation.confirmed.clone()),
             (confirmable.clone(), confirmable)
         );
     }
