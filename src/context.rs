@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::cli::options::GlobalOptions;
 use crate::env;
 use crate::oci::access::cached_access::CachedAccess;
-use crate::oci::access::registry_client::RegistryClient;
+use crate::oci::access::registry_client::{PlainHttpHosts, RegistryClient};
 use crate::oci::access::{AccessMode, OciAccess};
 use crate::oci::tag_cache::TagCache;
 use crate::store::{BlobStore, GrimPaths};
@@ -25,7 +25,7 @@ use crate::telemetry::Telemetry;
 /// list. The [`std::time::Instant`] is the entry's build time, against which
 /// [`Context::ACCESS_MEMO_BOUND`] is checked. See [`Context::clients`].
 type AccessMemo =
-    std::sync::Mutex<std::collections::HashMap<(AccessMode, Vec<String>), (std::time::Instant, Arc<dyn OciAccess>)>>;
+    std::sync::Mutex<std::collections::HashMap<(AccessMode, PlainHttpHosts), (std::time::Instant, Arc<dyn OciAccess>)>>;
 
 /// Resolved configuration for a single `grim` invocation.
 ///
@@ -68,7 +68,7 @@ pub struct Context {
     /// one invocation. Filled by `command::plain_http_hosts`, which is the
     /// only writer. A **scoped** resolve (the MCP per-call scope) bypasses
     /// this deliberately — its answer is not the launch scope's.
-    plain_http: std::sync::OnceLock<Vec<String>>,
+    plain_http: std::sync::OnceLock<PlainHttpHosts>,
     /// Per-invocation memo of the loaded global config, so the readers of a
     /// one-shot run share one file read, one parse and one warning. Filled by
     /// `command::load_global_config`, the only writer, and only on success:
@@ -119,7 +119,7 @@ pub struct Context {
     /// green, because every test asserted on the *list builder* and none on
     /// what the client was actually built with.
     #[cfg(test)]
-    plain_http_seen: std::sync::Mutex<Vec<Vec<String>>>,
+    plain_http_seen: std::sync::Mutex<Vec<PlainHttpHosts>>,
 }
 
 impl std::fmt::Debug for Context {
@@ -285,7 +285,7 @@ impl Context {
     /// config layer, which `Context` deliberately does not reach into (env
     /// reads only — see the type docs). `command` owns the computation and
     /// this owns the lifetime.
-    pub fn plain_http_memo(&self) -> &std::sync::OnceLock<Vec<String>> {
+    pub fn plain_http_memo(&self) -> &std::sync::OnceLock<PlainHttpHosts> {
         &self.plain_http
     }
 
@@ -329,16 +329,16 @@ impl Context {
     /// directly — no filesystem layout or real registry client is created.
     ///
     /// `plain_http` is the complete plain-HTTP exception list for this
-    /// invocation. `Context` holds no config (env reads only, see the type
-    /// docs), so the config-derived half is resolved by the caller —
-    /// `command::plain_http_hosts`, reached through `command::access_seam`.
+    /// invocation, with the hosts no stored credential may reach. `Context`
+    /// holds no config (env reads only, see the type docs), so the
+    /// config-derived half is resolved by the caller, `command::access_seam`.
     ///
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
     /// created. Callers route it through the install-tier `TargetIo` error
     /// so it classifies as an I/O exit code, not the generic fall-through.
-    pub fn access(&self, plain_http: Vec<String>) -> std::io::Result<Arc<dyn OciAccess>> {
+    pub fn access(&self, plain_http: PlainHttpHosts) -> std::io::Result<Arc<dyn OciAccess>> {
         #[cfg(test)]
         self.plain_http_seen
             .lock()
@@ -357,7 +357,12 @@ impl Context {
     ///
     /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
     /// created.
-    pub fn access_with_mode(&self, mode: AccessMode, plain_http: Vec<String>) -> std::io::Result<Arc<dyn OciAccess>> {
+    pub fn access_with_mode(
+        &self,
+        mode: AccessMode,
+        plain_http: impl Into<PlainHttpHosts>,
+    ) -> std::io::Result<Arc<dyn OciAccess>> {
+        let plain_http = plain_http.into();
         // Reuse an identically-configured seam if this invocation already
         // built one. The saving is the registry bearer token: `oci-client`
         // caches it on the `Client`, so a fresh client re-runs the full
@@ -482,7 +487,7 @@ impl Context {
     /// Every plain-HTTP exception list [`Self::access`] was handed, in call
     /// order. The observable that makes the config→transport wiring
     /// testable — see the field docs.
-    pub fn plain_http_seen(&self) -> Vec<Vec<String>> {
+    pub fn plain_http_seen(&self) -> Vec<PlainHttpHosts> {
         self.plain_http_seen
             .lock()
             .expect("plain-HTTP record mutex poisoned by a panicking test")
@@ -682,7 +687,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let hosts = vec!["registry.internal:5050".to_string()];
-        let key = (AccessMode::Online, hosts.clone());
+        let key = (AccessMode::Online, PlainHttpHosts::from(hosts.clone()));
 
         // Fresh hit still reuses the seam — the bound must not regress the
         // existing token-cache-preserving behaviour (the pre-existing

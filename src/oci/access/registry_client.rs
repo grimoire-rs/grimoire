@@ -50,8 +50,60 @@ const TAGS_PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 /// Real OCI registry access backed by `oci-client`.
 pub struct RegistryClient {
     client: Client,
+    /// The plain-HTTP hosts, and which of them may receive a stored credential.
+    plain_http: PlainHttpHosts,
+    /// Hosts whose withheld credential was already warned about.
+    withheld: std::sync::Mutex<HashSet<String>>,
     /// Deadline for one `tags/list` page.
     page_timeout: std::time::Duration,
+}
+
+/// The exact `host[:port]` forms one client contacts over plain HTTP, split
+/// by who declared them.
+///
+/// A host only a project file declared is reached over plain HTTP but never
+/// receives a stored credential: a cloned repository delivers that file, so
+/// its `insecure = true` must not move the user's secret into cleartext.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlainHttpHosts {
+    hosts: Vec<String>,
+    credential_free: Vec<String>,
+}
+
+impl PlainHttpHosts {
+    /// `user` are the hosts the user's own config declared plain HTTP, and
+    /// `project` the hosts a project file declared. The loopback forms and
+    /// `GRIM_INSECURE_REGISTRIES` join as the user's.
+    pub fn new(user: &[String], project: &[String]) -> Self {
+        let mut hosts = plain_http_hosts_with(user);
+        let mut credential_free = Vec::new();
+        for host in project {
+            if !hosts.contains(host) {
+                hosts.push(host.clone());
+                credential_free.push(host.clone());
+            }
+        }
+        Self { hosts, credential_free }
+    }
+
+    /// Every host contacted over plain HTTP.
+    pub fn hosts(&self) -> &[String] {
+        &self.hosts
+    }
+
+    /// Whether a stored credential may be attached to a request for `host`,
+    /// the exact `host[:port]` the request goes to.
+    pub fn allows_credential(&self, host: &str) -> bool {
+        !self.credential_free.iter().any(|h| h == host)
+    }
+}
+
+impl From<Vec<String>> for PlainHttpHosts {
+    /// A host list with no declaring file: each host outside the loopback
+    /// forms and `GRIM_INSECURE_REGISTRIES` is treated as a project's.
+    fn from(hosts: Vec<String>) -> Self {
+        Self::new(&[], &hosts)
+    }
 }
 
 impl RegistryClient {
@@ -63,20 +115,48 @@ impl RegistryClient {
     /// [`Self::with_plain_http_hosts`] instead, so a `[[registries]]` entry's
     /// `insecure = true` is honored.
     pub fn new() -> Self {
-        Self::with_plain_http_hosts(plain_http_hosts())
+        Self::with_plain_http_hosts(plain_http_hosts().into())
     }
 
-    /// Construct a client whose plain-HTTP exception list is `hosts`, each
-    /// an exact `host[:port]`.
-    ///
-    /// The list is the *complete* set, not an addition to the implicit
-    /// one — build it with [`plain_http_hosts_with`] so the loopback forms
-    /// and `GRIM_INSECURE_REGISTRIES` are folded in.
-    pub fn with_plain_http_hosts(hosts: Vec<String>) -> Self {
+    /// Construct a client that reaches `plain_http`'s hosts over plain HTTP
+    /// and sends a stored credential only where it allows one.
+    pub fn with_plain_http_hosts(plain_http: PlainHttpHosts) -> Self {
         Self {
-            client: Client::new(registry_config(hosts)),
+            client: Client::new(registry_config(plain_http.hosts.clone())),
+            plain_http,
+            withheld: std::sync::Mutex::default(),
             page_timeout: TAGS_PAGE_TIMEOUT,
         }
+    }
+
+    /// The credential for `reference`'s registry, or anonymous where the
+    /// host is plain HTTP only because a project file declared it.
+    ///
+    /// Decided against [`Reference::resolve_registry`], the host the
+    /// transport picks its scheme for, so an alias (`docker.io`) cannot
+    /// slip past the check.
+    fn auth_for(&self, reference: &Reference) -> RegistryAuth {
+        self.screen(reference, Self::stored_credential)
+    }
+
+    /// [`Self::auth_for`]'s decision. `lookup` reads the credential store
+    /// and runs only for a host that may receive a credential, so no helper
+    /// runs for a host a repository names.
+    fn screen(&self, reference: &Reference, lookup: impl FnOnce(&str) -> RegistryAuth) -> RegistryAuth {
+        let host = reference.resolve_registry();
+        if self.plain_http.allows_credential(host) {
+            return lookup(reference.registry());
+        }
+        let mut warned = self.withheld.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if warned.insert(host.to_string()) {
+            tracing::warn!(
+                "registry '{host}' is plain HTTP only because a project file declares it insecure, so no \
+                 stored credential is sent to it; to send one, list it in GRIM_INSECURE_REGISTRIES, \
+                 set `insecure = true` on a [[registries]] entry in the global config, or run \
+                 `grim config registry set <alias> --insecure --global`"
+            );
+        }
+        RegistryAuth::Anonymous
     }
 
     /// Resolve credentials for `registry`: anonymous unless Docker
@@ -89,7 +169,7 @@ impl RegistryClient {
     /// degrade to anonymous with a warning. A registry that actually
     /// requires auth then fails the request itself with a classified
     /// authentication error pointing at `grim login`.
-    fn auth_for(registry: &str) -> RegistryAuth {
+    fn stored_credential(registry: &str) -> RegistryAuth {
         use docker_credential::{CredentialRetrievalError, DockerCredential};
 
         // Canonicalize the lookup key so a credential written by
@@ -392,7 +472,7 @@ impl OciAccess for RegistryClient {
             return Ok(None);
         }
         let reference = reference_for(id);
-        let auth = Self::auth_for(id.registry());
+        let auth = self.auth_for(&reference);
 
         match self.client.fetch_manifest_digest(&reference, &auth).await {
             Ok(digest_str) => {
@@ -414,7 +494,7 @@ impl OciAccess for RegistryClient {
     async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
         let identifier = id.as_identifier().clone();
         let reference = reference_for(&identifier);
-        let auth = Self::auth_for(identifier.registry());
+        let auth = self.auth_for(&reference);
 
         let (manifest, _digest) = match self.client.pull_manifest(&reference, &auth).await {
             Ok(pair) => pair,
@@ -434,7 +514,7 @@ impl OciAccess for RegistryClient {
     async fn fetch_manifest_bytes(&self, id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
         let identifier = id.as_identifier().clone();
         let reference = reference_for(&identifier);
-        let auth = Self::auth_for(identifier.registry());
+        let auth = self.auth_for(&reference);
 
         match self
             .client
@@ -456,7 +536,7 @@ impl OciAccess for RegistryClient {
         max_bytes: u64,
     ) -> Result<Option<Vec<u8>>, AccessError> {
         let reference = reference_for(repo);
-        let auth = Self::auth_for(repo.registry());
+        let auth = self.auth_for(&reference);
         // Ensure auth is primed before the (internally-authenticated)
         // blob pull, matching OCX's NativeTransport ordering.
         self.client
@@ -523,7 +603,7 @@ impl OciAccess for RegistryClient {
 
     async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
         let reference = reference_for(repo);
-        let auth = Self::auth_for(repo.registry());
+        let auth = self.auth_for(&reference);
         self.client
             .store_auth_if_needed(reference.resolve_registry(), &auth)
             .await;
@@ -540,8 +620,8 @@ impl OciAccess for RegistryClient {
     }
 
     async fn push_manifest(&self, repo: &Identifier, manifest: &OciManifest) -> Result<Digest, AccessError> {
-        let auth = Self::auth_for(repo.registry());
         let registry_ref = reference_for(repo);
+        let auth = self.auth_for(&registry_ref);
         self.client
             .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
             .await;
@@ -589,8 +669,8 @@ impl OciAccess for RegistryClient {
     }
 
     async fn put_tag(&self, repo: &Identifier, tag: &str, manifest_digest: &Digest) -> Result<(), AccessError> {
-        let auth = Self::auth_for(repo.registry());
         let registry_ref = reference_for(repo);
+        let auth = self.auth_for(&registry_ref);
         self.client
             .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
             .await;
@@ -664,10 +744,7 @@ impl RegistryClient {
     /// exception list only knows the conventional loopback `:5000` forms,
     /// but a mock binds a random port, so add it explicitly.
     fn with_plain_http(registry: &str) -> Self {
-        Self {
-            client: Client::new(registry_config(vec![registry.to_string()])),
-            page_timeout: TAGS_PAGE_TIMEOUT,
-        }
+        Self::with_plain_http_hosts(PlainHttpHosts::new(&[registry.to_string()], &[]))
     }
 }
 
@@ -681,7 +758,7 @@ impl RegistryClient {
     /// marked incomplete.
     async fn walk_tags(&self, id: &Identifier, byte_limit: usize) -> Result<Option<TagListing>, AccessError> {
         let reference = reference_for(id);
-        let auth = Self::auth_for(id.registry());
+        let auth = self.auth_for(&reference);
         let endpoint = format!("/v2/{}/tags/list", reference.repository());
 
         let mut query = Vec::new();
@@ -765,8 +842,8 @@ impl RegistryClient {
         // `repository:…:pull` token scope, and the token a registry mints
         // carries the caller's read access, which covers `_catalog`.
         let host = registry_host(registry);
-        let auth = Self::auth_for(host);
         let reference = Reference::with_tag(host.to_string(), "_catalog".to_string(), "latest".to_string());
+        let auth = self.auth_for(&reference);
         let first_page = || vec![("n".to_string(), PAGE_SIZE.to_string())];
 
         let mut query = first_page();
@@ -1062,8 +1139,99 @@ mod tests {
     #[test]
     fn auth_for_unknown_registry_is_anonymous() {
         // No Docker config for a bogus host ⇒ anonymous, not an error.
-        let auth = RegistryClient::auth_for("nonexistent.invalid");
+        let auth = RegistryClient::stored_credential("nonexistent.invalid");
         assert!(matches!(auth, RegistryAuth::Anonymous));
+    }
+
+    fn dummy_basic() -> RegistryAuth {
+        RegistryAuth::Basic("dummy-user".to_string(), "dummy-secret".to_string())
+    }
+
+    fn on(host: &str) -> Reference {
+        Reference::with_tag(host.to_string(), "acme/tool".to_string(), "1".to_string())
+    }
+
+    /// A host only a project file made plain HTTP gets no stored credential,
+    /// of any kind; the same host also named by the user keeps it.
+    #[test]
+    fn a_host_only_a_project_declares_plain_http_gets_no_stored_credential() {
+        let project = vec!["registry.internal:5050".to_string()];
+        let client = RegistryClient::with_plain_http_hosts(PlainHttpHosts::new(&[], &project));
+        for auth in [dummy_basic(), RegistryAuth::Bearer("dummy-identity-token".to_string())] {
+            assert!(matches!(
+                client.screen(&on("registry.internal:5050"), |_| auth),
+                RegistryAuth::Anonymous
+            ));
+        }
+
+        let both = RegistryClient::with_plain_http_hosts(PlainHttpHosts::new(&project, &project));
+        assert!(matches!(
+            both.screen(&on("registry.internal:5050"), |_| dummy_basic()),
+            RegistryAuth::Basic(..)
+        ));
+    }
+
+    /// The credential store, and so any helper, is never asked about a
+    /// withheld host; a host that may receive a credential asks it once.
+    #[test]
+    fn a_withheld_host_never_reaches_the_credential_store() {
+        let project = vec!["registry.internal:5050".to_string()];
+        let client = RegistryClient::with_plain_http_hosts(PlainHttpHosts::new(&[], &project));
+        let asked = std::cell::Cell::new(0);
+        let lookup = |_: &str| {
+            asked.set(asked.get() + 1);
+            dummy_basic()
+        };
+        assert!(matches!(
+            client.screen(&on("registry.internal:5050"), lookup),
+            RegistryAuth::Anonymous
+        ));
+        assert_eq!(asked.get(), 0, "no lookup for a host a repository names");
+        assert!(matches!(client.screen(&on("ghcr.io"), lookup), RegistryAuth::Basic(..)));
+        assert_eq!(asked.get(), 1);
+    }
+
+    /// The user's own plain-HTTP hosts, the loopback forms and every HTTPS
+    /// host keep today's behaviour.
+    #[test]
+    fn user_declared_loopback_and_https_hosts_keep_their_credential() {
+        let user = vec!["global.internal:5050".to_string()];
+        let project = vec!["registry.internal:5050".to_string()];
+        let client = RegistryClient::with_plain_http_hosts(PlainHttpHosts::new(&user, &project));
+        for host in ["global.internal:5050", "localhost:5000", "127.0.0.1", "ghcr.io"] {
+            assert!(
+                matches!(client.screen(&on(host), |_| dummy_basic()), RegistryAuth::Basic(..)),
+                "{host} keeps its credential"
+            );
+        }
+        assert!(
+            client
+                .plain_http
+                .hosts()
+                .contains(&"registry.internal:5050".to_string())
+        );
+    }
+
+    /// The decision reads the host the transport resolves, so an aliased
+    /// registry name cannot carry a credential to a plain-HTTP host.
+    #[test]
+    fn the_credential_decision_follows_the_resolved_registry_alias() {
+        let project = vec!["index.docker.io".to_string()];
+        let client = RegistryClient::with_plain_http_hosts(PlainHttpHosts::new(&[], &project));
+        assert!(matches!(
+            client.screen(&on("docker.io"), |_| dummy_basic()),
+            RegistryAuth::Anonymous
+        ));
+    }
+
+    /// A bare host list has no declaring file, so only the loopback forms
+    /// count as the user's.
+    #[test]
+    fn a_bare_host_list_trusts_only_the_loopback_forms() {
+        let hosts = PlainHttpHosts::from(vec!["registry.internal:5050".to_string(), "localhost".to_string()]);
+        assert!(!hosts.allows_credential("registry.internal:5050"));
+        assert!(hosts.allows_credential("localhost"));
+        assert!(hosts.allows_credential("ghcr.io"));
     }
 
     // ── token-gated catalog listing ──────────────────────────────────
