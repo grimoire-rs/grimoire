@@ -71,7 +71,7 @@ whether your audience is in that set:
 |---|---|---|
 | Claude Code | `claude.*` (richest) | The canonical format itself — a plain agent installs byte-identical, no provenance comment |
 | OpenCode | `opencode.*` | Drops `name` (the filename is its identity) and drops `tools` with a warning (deprecated upstream in favor of `permission`) |
-| Copilot | `copilot.*` | Emits `name`, `description`, `model`, and `tools` as a YAML list; `copilot.disable-model-invocation`/`copilot.user-invocable` (bool) and `copilot.target` (`vscode` \| `github-copilot`) project straight through |
+| Copilot | `copilot.*` | Emits `name`, `description`, `model`, and `tools` as a YAML list; `copilot.disable-model-invocation`/`copilot.user-invocable` (bool) and `copilot.target` (`vscode` \| `github-copilot`), `copilot.include-custom-instructions` (bool), `copilot.reasoning-effort`, `copilot.models` (comma list) and `copilot.model-policy` (`preferred` \| `required`) project straight through |
 | Codex | `codex.*` | **TOML** (see below) |
 | Cursor | `cursor.*` | Markdown frontmatter; the common `tools` has no equivalent and is dropped with a warning |
 | Gemini CLI | `gemini.*` | Markdown frontmatter; Gemini loads agents only when its `experimental.enableAgents` setting is on (the default) |

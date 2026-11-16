@@ -79,6 +79,27 @@ pub const COPILOT_AGENT_FIELDS: &[KnownField] = &[
         native: "target",
         ty: FieldType::Enum(&["vscode", "github-copilot"]),
     },
+    KnownField {
+        field: "include-custom-instructions",
+        native: "include-custom-instructions",
+        ty: FieldType::Bool,
+    },
+    KnownField {
+        // The page gives examples, not a closed set: pass through.
+        field: "reasoning-effort",
+        native: "reasoningEffort",
+        ty: FieldType::String,
+    },
+    KnownField {
+        field: "models",
+        native: "models",
+        ty: FieldType::CommaList,
+    },
+    KnownField {
+        field: "model-policy",
+        native: "modelPolicy",
+        ty: FieldType::Enum(&["preferred", "required"]),
+    },
 ];
 
 /// The common agent fields a lifted `copilot.*` key may silently override.
@@ -1055,6 +1076,35 @@ mod tests {
         assert!(out.document.contains("user-invocable: false"), "{}", out.document);
         assert!(out.document.contains("target: vscode"), "{}", out.document);
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn agent_index_lifts_model_and_instruction_keys() {
+        let doc = "---\nname: code-reviewer\ndescription: d\nmetadata:\n  copilot.include-custom-instructions: \"true\"\n  copilot.reasoning-effort: high\n  copilot.models: \"a, b\"\n  copilot.model-policy: required\n---\nbody\n";
+        let out = CopilotVendor.agent_index(&parsed_agent(doc), "p").unwrap().unwrap();
+        for want in [
+            "include-custom-instructions: true",
+            "reasoningEffort: high",
+            "models:\n- a\n- b",
+            "modelPolicy: required",
+        ] {
+            assert!(out.document.contains(want), "{want}: {}", out.document);
+        }
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        let bad = "---\nname: c\ndescription: d\nmetadata:\n  copilot.model-policy: always\n---\nb\n";
+        assert!(CopilotVendor.agent_index(&parsed_agent(bad), "p").is_err());
+    }
+
+    #[test]
+    fn agent_index_without_new_keys_is_unchanged() {
+        let doc = "---\nname: code-reviewer\ndescription: d\n---\nbody\n";
+        let out = CopilotVendor.agent_index(&parsed_agent(doc), "p").unwrap().unwrap();
+        assert!(
+            out.document
+                .starts_with("---\nname: code-reviewer\ndescription: d\n---\n"),
+            "{}",
+            out.document
+        );
     }
 
     #[test]
