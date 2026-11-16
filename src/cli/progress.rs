@@ -114,7 +114,7 @@ fn emit_line(line: &str) {
 /// `--progress` match lives.
 ///
 /// `auto_bar` is what `Auto` means for the calling command: `grim install`
-/// passes `true` (tty-gated stderr bar — the pre-flag behavior); `update`
+/// and `status` (its adoption proofs) pass `true` (tty-gated stderr bar); `update`
 /// and `add` pass `false` (they were always silent; `Auto` must not change
 /// behavior).
 pub fn select_progress(mode: crate::cli::options::ProgressMode, auto_bar: bool) -> Box<dyn InstallProgress> {

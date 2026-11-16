@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::cli::options::GlobalOptions;
 use crate::env;
+use crate::oci::access::bounded_access::BoundedAccess;
 use crate::oci::access::cached_access::CachedAccess;
 use crate::oci::access::registry_client::{PlainHttpHosts, RegistryClient};
 use crate::oci::access::{AccessMode, OciAccess};
@@ -411,6 +412,33 @@ impl Context {
         memo.insert(key, (std::time::Instant::now(), Arc::clone(&access)));
         drop(memo);
         Ok(access)
+    }
+
+    /// The store-first seam of one bounded run: the local store, then the
+    /// registry through a [`BoundedAccess`] whose run ends `run_deadline` from
+    /// now. Never memoized, so every run gets its own budget; the returned
+    /// reader shares that run and reports its failed hosts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
+    /// created.
+    pub fn bounded_access(
+        &self,
+        plain_http: PlainHttpHosts,
+        run_deadline: std::time::Duration,
+    ) -> std::io::Result<(Arc<dyn OciAccess>, BoundedAccess<RegistryClient>)> {
+        let paths = self.paths();
+        paths.ensure_layout()?;
+        // shortcut: the 4 MiB manifest cap runs after the oci-client fork read the body; cap the read in the fork.
+        let bounded = BoundedAccess::new(RegistryClient::with_plain_http_hosts(plain_http), run_deadline);
+        let cached = CachedAccess::new(
+            bounded.clone(),
+            TagCache::new(paths.tags_dir()),
+            BlobStore::new(paths.blobs_dir()),
+            AccessMode::Online,
+        );
+        Ok((Arc::new(cached), bounded))
     }
 }
 

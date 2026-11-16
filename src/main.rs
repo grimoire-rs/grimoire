@@ -203,6 +203,7 @@ fn main() -> std::process::ExitCode {
     };
 
     let outcome = runtime.block_on(app::run(cli));
+    shut_down(runtime);
     let exit = crate::error::outcome_exit(&outcome);
     match outcome {
         Ok(_) => exit.exit.into(),
@@ -233,6 +234,14 @@ fn main() -> std::process::ExitCode {
             exit.exit.into()
         }
     }
+}
+
+/// Shuts `runtime` down without waiting on a blocking thread that never
+/// returns, such as a resolver stuck in `getaddrinfo`, so a run ends inside
+/// its deadline. A thread still running is abandoned when the process exits.
+fn shut_down(runtime: tokio::runtime::Runtime) {
+    // 1 s lets an atomic write in flight sync and rename; one cut short leaves a temp file, never a torn target.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
 }
 
 /// Parse argv into a [`Cli`], applying the resolved color choice and the
@@ -463,6 +472,18 @@ mod build_embed;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutting_down_does_not_wait_on_a_blocked_thread() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _blocked = runtime.spawn_blocking(|| std::thread::sleep(std::time::Duration::from_secs(5)));
+        let started = std::time::Instant::now();
+
+        shut_down(runtime);
+
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
 
     /// (filter, rejected flag, env notice)
     fn filter_of(flag: Option<&str>, env: Option<&str>) -> (String, Option<String>, Option<String>) {

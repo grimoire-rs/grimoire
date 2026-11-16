@@ -44,7 +44,7 @@ use crate::command::command_error::CommandError;
 use crate::config::scope::Invocation;
 use crate::context::Context;
 use crate::hook::policy::HookPolicy;
-use crate::install::install_state::SettingsStore;
+use crate::install::install_state::{Exempt, SettingsStore};
 use crate::install::installer::{ForceScope, InstallIntent, SettingsRun, install_and_persist};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::settings_phase::{self, SettingsInput};
@@ -410,6 +410,9 @@ async fn write_config_and_relock(
         );
         let brought = added.newly.iter().map(|(kind, name)| (*kind, name.as_str()));
         reject_dev_install_collision(scope, brought)?;
+        if let Some(previous) = &previous {
+            super::remove::prove_dropped(ctx, scope, previous, &target.lock).await;
+        }
         super::grim(lock_io::save(&scope.lock_path, &target.lock, previous.as_ref()))?;
         anyhow::Ok(target)
     }
@@ -500,7 +503,8 @@ pub(super) async fn refuse_settings_conflict_for(
     ))?
     .with_settings_policy(policy);
     let state =
-        super::grim(scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
+        super::grim(scope_resolution::read_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?
+            .exempt(Exempt::SettingsPreflight);
     // A refused store applies nothing, so nothing it would apply can conflict.
     if *state.settings_store() == SettingsStore::Refused {
         return Ok(());
@@ -597,9 +601,10 @@ fn reject_dev_install_collision<'a>(
     // (`.ok()`) would skip the guard and re-open the very declaration-loss path
     // it exists to prevent. A missing state file is `Ok(empty)` (a fresh
     // project still declares fine); only a genuine read/parse failure aborts —
-    // mirroring the mutating commands' `load_state` path.
+    // mirroring the mutating commands' `read_state` path.
     let state =
-        super::grim(scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?;
+        super::grim(scope_resolution::read_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)))?
+            .exempt(Exempt::DevRecords);
     let collision = declared
         .into_iter()
         .find(|(kind, name)| state.get(*kind, name).is_some_and(|record| record.dev));
@@ -1320,8 +1325,9 @@ async fn install_added(
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
     let mut state = super::grim(
-        super::scope_resolution::load_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)),
-    )?;
+        super::scope_resolution::read_state(scope).map_err(|e| super::install::state_io(&scope.state_path, e)),
+    )?
+    .exempt(Exempt::InstallGate);
     let materializer = DefaultMaterializer;
     let force = if args.force {
         ForceScope::Only(added.force.clone())

@@ -20,8 +20,9 @@ use crate::context::Context;
 /// `grim mcp` arguments.
 #[derive(Debug, Args)]
 pub struct McpArgs {
-    /// Enable mutating tools (currently `grim_render`). Off by default: the
-    /// server is read-only unless this is set. Launch-pinned deliberately —
+    /// Enable mutating tools (currently `grim_render`) and let `grim_status`
+    /// write the install records it proves. Off by default: the server is
+    /// read-only unless this is set. Launch-pinned deliberately —
     /// enabling writes is a trust decision of whoever wires the server into
     /// a harness, never of the model calling the tools.
     #[arg(long)]

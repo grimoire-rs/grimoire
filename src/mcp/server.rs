@@ -24,7 +24,9 @@ use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router
 
 use crate::cli::exit_code::ExitCode;
 use crate::command::mcp::McpArgs;
+use crate::command::status::{ProofMemo, StatusMode};
 use crate::context::Context;
+use crate::install::adoption::ContentMode;
 use crate::mcp::state::McpState;
 use crate::mcp::tool_args::{DescribeToolArgs, FetchToolArgs, RenderToolArgs, SearchToolArgs, StatusToolArgs};
 
@@ -50,6 +52,16 @@ fn build_router(allow_writes: bool) -> ToolRouter<GrimMcpServer> {
         router.disable_route("grim_render");
     }
     router
+}
+
+/// How `grim_status` adopts: from the local store only, written only under
+/// `--allow-writes`, and remembered for the server's lifetime.
+fn status_mode(allow_writes: bool, proofs: &ProofMemo) -> StatusMode<'_> {
+    StatusMode {
+        content: ContentMode::StoreOnly,
+        commit: allow_writes,
+        memo: Some(proofs),
+    }
 }
 
 #[tool_router]
@@ -91,7 +103,7 @@ impl GrimMcpServer {
     /// Report the install status of every declared artifact in the requested
     /// scope. Returns the same JSON payload as `grim status --format json`.
     #[tool(
-        description = "Show the install status of every artifact declared in a Grimoire scope (installed / outdated / modified / not-installed). Scope is per call: `global`, `config`, or `workspace` (default: project discovered from the server's working directory). Set `check: true` to re-check the live catalog for deprecation/replacement and re-resolve update availability (optional network read, same as CLI `grim status --check`; the report's `checked` field says whether it actually ran). Returns a JSON object with an `items` array."
+        description = "Show the install status of every artifact declared in a Grimoire scope (installed / outdated / modified / not-installed). Scope is per call: `global`, `config`, or `workspace` (default: project discovered from the server's working directory). Files the install record does not cover read as installed when they match what the lock pins; that check reads the local content store only and never contacts a registry. The tool writes such records to the install state only when the server was started with --allow-writes; without it, it writes nothing. Set `check: true` to re-check the live catalog for deprecation/replacement and re-resolve update availability (optional network read, same as CLI `grim status --check`; the report's `checked` field says whether it actually ran). Returns a JSON object with an `items` array."
     )]
     async fn grim_status(&self, Parameters(args): Parameters<StatusToolArgs>) -> Result<String, ErrorData> {
         let status_args = crate::command::status::StatusArgs {
@@ -103,7 +115,10 @@ impl GrimMcpServer {
             check: args.check,
             workspace: args.scope.workspace,
         };
-        match crate::command::status::run(&self.inner.ctx, &status_args).await {
+        // No running line: an agent reads the result, not the server's stderr.
+        let progress = crate::install::progress::SilentProgress;
+        let mode = status_mode(self.inner.allow_writes, &self.inner.proofs);
+        match crate::command::status::run_with(&self.inner.ctx, &status_args, mode, &progress).await {
             Ok((report, _)) => to_json(&report),
             Err(e) => Err(tool_error("status", &e)),
         }
@@ -194,6 +209,7 @@ pub async fn serve(ctx: &Context, args: &McpArgs) -> anyhow::Result<ExitCode> {
     let state = McpState {
         ctx,
         allow_writes: args.allow_writes,
+        proofs: Default::default(),
     };
     let server = GrimMcpServer {
         inner: Arc::new(state),
@@ -227,6 +243,36 @@ mod tests {
                     "{tool} must be routed (allow_writes={allow_writes})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn grim_status_writes_records_only_under_allow_writes_and_reads_the_store_only() {
+        let proofs = ProofMemo::default();
+        for allow_writes in [false, true] {
+            let mode = status_mode(allow_writes, &proofs);
+            assert_eq!(mode.commit, allow_writes);
+            assert_eq!(mode.content, ContentMode::StoreOnly);
+            assert!(mode.memo.is_some_and(|memo| std::ptr::eq(memo, &proofs)));
+            assert!(build_router(allow_writes).has_route("grim_status"));
+        }
+    }
+
+    /// An agent learns the write gate from the tool schema alone.
+    #[test]
+    fn grim_status_description_states_the_write_gate() {
+        let router = build_router(false);
+        let description = router
+            .get("grim_status")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("grim_status must be routed with a description");
+        for token in [
+            "--allow-writes",
+            "local content store",
+            "never contacts a registry",
+            "writes nothing",
+        ] {
+            assert!(description.contains(token), "must say {token:?}: {description:?}");
         }
     }
 

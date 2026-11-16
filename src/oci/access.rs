@@ -15,10 +15,12 @@
 //! caller decides how to treat. `Err` is reserved for transport, auth, or
 //! data/integrity failures — never a benign absence.
 
+pub mod bounded_access;
 pub mod cached_access;
 pub mod error;
 #[cfg(test)]
 pub mod memory_registry;
+pub mod miss_memo;
 pub mod registry_client;
 
 use async_trait::async_trait;

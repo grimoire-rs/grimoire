@@ -10,6 +10,8 @@
 //! `remove` only affects the declaration and the lock so the change is
 //! reversible.
 
+use std::collections::BTreeSet;
+
 use clap::Args;
 
 use crate::api::add_report::{PinnedNode, dropped_note, moved_note};
@@ -18,11 +20,16 @@ use crate::cli::exit_code::ExitCode;
 use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::config::scope::Invocation;
 use crate::context::Context;
+use crate::install::adoption::{self, ContentMode, PrepassReport, Row, Unproven, UnprovenNode, UnprovenOutput};
+use crate::install::install_state::InstallState;
+use crate::install::path_anchor::AnchorRoots;
+use crate::install::target::InstallTarget;
 use crate::lock::effective_set::NodeKey;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::oci::ArtifactKind;
+use crate::oci::access::{AccessMode, OciAccess};
 use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 use crate::resolve::resolve_options::Downgrade;
@@ -118,6 +125,36 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         }
         _ => None,
     };
+    // In place: drop what no other declaration holds, keep shared entries,
+    // and restamp the hash only if the lock states a fact.
+    let in_place = match (&previous, &relocked) {
+        (Some(previous), None) => {
+            let target = super::uninstall::EditTarget {
+                config_path: &scope.config_path,
+                lock_path: &scope.lock_path,
+                grim: &scope.invocation,
+                store: ctx.paths(),
+            };
+            let stored = target.stored_members(&set, previous);
+            Some(crate::lock::edit::drop_from_lock(
+                previous,
+                kind,
+                &args.name,
+                &set_before,
+                &set,
+                &scope.invocation,
+                &stored,
+            ))
+        }
+        _ => None,
+    };
+    let edited = relocked
+        .as_ref()
+        .map(|r| &r.lock)
+        .or(in_place.as_ref().map(|o| &o.lock));
+    if let (Some(previous), Some(edited)) = (&previous, edited) {
+        prove_dropped(ctx, &scope, previous, edited).await;
+    }
 
     let edit = ConfigEdit::write(
         &scope.config_path,
@@ -127,37 +164,19 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         &scope.invocation,
     )?;
 
-    match (previous, relocked) {
-        (Some(previous), Some(relocked)) => {
+    match (previous, relocked, in_place) {
+        (Some(previous), Some(relocked), _) => {
             edit.save_lock(&scope.lock_path, &relocked.lock, &previous)?;
             super::lock::warn_moved_bundle_pins(Some(&previous), &relocked.lock);
             warn_pin_changes(&scope.invocation, &relocked, |(k, n)| *k == kind && *n == args.name);
         }
-        // In place: drop what no other declaration holds, keep shared entries,
-        // and restamp the hash only if the lock states a fact.
-        (Some(previous), None) => {
-            let target = super::uninstall::EditTarget {
-                config_path: &scope.config_path,
-                lock_path: &scope.lock_path,
-                grim: &scope.invocation,
-                store: ctx.paths(),
-            };
-            let stored = target.stored_members(&set, &previous);
-            let outcome = crate::lock::edit::drop_from_lock(
-                &previous,
-                kind,
-                &args.name,
-                &set_before,
-                &set,
-                &scope.invocation,
-                &stored,
-            );
+        (Some(previous), None, Some(outcome)) => {
             edit.save_lock(&scope.lock_path, &outcome.lock, &previous)?;
             for note in &outcome.notes {
                 tracing::warn!("{note}");
             }
         }
-        (None, _) => {}
+        _ => {}
     }
 
     // C-155: `remove` is not a converging seam (it loads no install state), so
@@ -273,6 +292,173 @@ pub(crate) fn load_for_edit(path: &std::path::Path) -> Option<GrimoireLock> {
         }
         None
     })
+}
+
+/// Proves the nodes `previous` holds and `edited` no longer does from the local
+/// store alone, and persists what proved, so a later bare `grim update` prunes
+/// their files. Names each node left on disk with nothing recording it, the
+/// proven ones too when their records cannot be saved. Deletes nothing, and
+/// every failure only warns: the edit goes on.
+pub(crate) async fn prove_dropped(
+    ctx: &Context,
+    scope: &scope_resolution::ResolvedScope,
+    previous: &GrimoireLock,
+    edited: &GrimoireLock,
+) {
+    let kept: BTreeSet<NodeKey> = edited.node_keys().collect();
+    let dropped: BTreeSet<NodeKey> = previous.node_keys().filter(|key| !kept.contains(key)).collect();
+    if dropped.is_empty() {
+        return;
+    }
+    let mut state = match scope_resolution::read_state(scope) {
+        Ok(read) => read.adopt(),
+        Err(e) => {
+            let path = scope.state_path.display();
+            tracing::warn!("{path} was not read, so no file the edit drops was proven: {e}");
+            return;
+        }
+    };
+    let before = state.clone();
+    let Some(report) = prove_from_store(ctx, scope, &mut state, previous, &dropped).await else {
+        return;
+    };
+    persist_or_name(report, state, before, &scope.roots, |state| {
+        state
+            .persist(
+                scope.scope,
+                &scope.workspace,
+                &scope.roots.grim_home,
+                &scope.config_path,
+            )
+            .map_err(anyhow::Error::from)
+    });
+}
+
+/// The tail of a proof of dropped nodes: persists `state`, which holds what
+/// `report` proved, through `persist`, then warns once per node left on disk
+/// with nothing recording it. A failed persist warns, restores `before`, the
+/// state ahead of the proof, and names every proven node with its lost record.
+/// Every failure only warns.
+pub(crate) fn persist_or_name(
+    mut report: PrepassReport,
+    mut state: InstallState,
+    before: InstallState,
+    roots: &AnchorRoots,
+    persist: impl FnOnce(&InstallState) -> anyhow::Result<()>,
+) {
+    if !report.proven.is_empty()
+        && let Err(e) = persist(&state)
+    {
+        tracing::warn!("{:#}", e.context("the proven records were not saved"));
+        // Nothing on disk records them, so they are named as if no proof had held.
+        state = before;
+        report = unsaved(report, roots);
+    }
+    for line in left_on_disk(&report, &state, |_| false) {
+        tracing::warn!("{line}");
+    }
+}
+
+/// `report` with each proven node named unproven, every output it proved
+/// included: a proof whose record was not saved leaves the files unrecorded.
+fn unsaved(mut report: PrepassReport, roots: &AnchorRoots) -> PrepassReport {
+    for node in std::mem::take(&mut report.proven) {
+        let outputs = node
+            .outputs
+            .iter()
+            .filter_map(|out| out.target.lexical(roots))
+            .map(|path| UnprovenOutput {
+                path,
+                reason: Unproven::NotRecorded,
+            })
+            .chain(node.unproven)
+            .collect();
+        report.unproven.push(UnprovenNode {
+            key: node.key,
+            reason: Unproven::NotRecorded,
+            outputs,
+        });
+    }
+    report
+}
+
+/// Classifies `nodes` against `evidence` and proves the row 4 and row 5
+/// candidates from the local store, re-recording each proof in `state`; the
+/// caller persists. `None` when no node is a candidate, or when the client set
+/// or the store cannot be read, which leaves every node as it was. Sends no request.
+pub(crate) async fn prove_from_store(
+    ctx: &Context,
+    scope: &scope_resolution::ResolvedScope,
+    state: &mut InstallState,
+    evidence: &GrimoireLock,
+    nodes: &BTreeSet<NodeKey>,
+) -> Option<PrepassReport> {
+    let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
+    let target = match super::install::install_target(scope, &[], &global) {
+        Ok(target) => target,
+        Err(e) => {
+            tracing::warn!("the client set was not read, so no file was proven: {e:#}");
+            return None;
+        }
+    };
+    let store = || ctx.access_with_mode(AccessMode::Offline, Vec::new());
+    prove_in_store(state, evidence, nodes, &target, &scope.roots, scope.config_dir(), store).await
+}
+
+/// [`prove_from_store`] over `target`, reading content only from what `store`
+/// opens, which no request may leave. It is opened only for a candidate.
+pub(crate) async fn prove_in_store(
+    state: &mut InstallState,
+    evidence: &GrimoireLock,
+    nodes: &BTreeSet<NodeKey>,
+    target: &InstallTarget,
+    roots: &AnchorRoots,
+    source_dir: &std::path::Path,
+    store: impl FnOnce() -> std::io::Result<std::sync::Arc<dyn OciAccess>>,
+) -> Option<PrepassReport> {
+    let candidates: BTreeSet<NodeKey> = nodes
+        .iter()
+        .filter(|key| {
+            let entry = evidence.iter_artifacts().find(|a| a.kind == key.0 && a.name == key.1);
+            let row = adoption::classify(key, state.get(key.0, &key.1), entry, target, roots);
+            matches!(row, Row::Row4Candidate | Row::Row5Candidate)
+        })
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    // Opened only here: opening the store creates its directories under `$GRIM_HOME`.
+    let store = match store() {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!("the local store was not read, so no file was proven: {e}");
+            return None;
+        }
+    };
+    let mode = ContentMode::StoreOnly;
+    Some(adoption::prepass(state, evidence, &candidates, mode, target, roots, source_dir, &store).await)
+}
+
+/// One warning line per node `report` leaves on disk with no record in `state`:
+/// an unproven node with none, and the destinations a new record left out. A
+/// node `quiet` names already gets a warning of its own.
+pub(crate) fn left_on_disk(
+    report: &PrepassReport,
+    state: &InstallState,
+    quiet: impl Fn(&NodeKey) -> bool,
+) -> Vec<String> {
+    let unrecorded = report
+        .unproven
+        .iter()
+        .filter(|node| state.get(node.key.0, &node.key.1).is_none())
+        .map(|node| (&node.key, &node.outputs));
+    let partial = report.proven.iter().map(|node| (&node.key, &node.unproven));
+    let mut left: Vec<_> = unrecorded.chain(partial).filter(|(key, _)| !quiet(key)).collect();
+    left.sort_by_key(|(key, _)| *key);
+    left.into_iter()
+        .filter_map(|(key, outputs)| super::update::unproven_line(key, outputs))
+        .collect()
 }
 
 /// A declaration edit on disk, undone if the lock it goes with cannot be saved:
@@ -718,5 +904,59 @@ mod tests {
                 .unwrap_or_else(|| panic!("the `remove` parser accepts '{accepted}' but no kind parses it"));
             assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");
         }
+    }
+
+    /// A node a record still names is not left behind by the edit: the next
+    /// `grim update` prunes it or warns of it. A node with none is named once,
+    /// and so is a new record's destination that did not prove, unless `quiet`.
+    #[test]
+    fn only_unrecorded_files_are_named_left_on_disk() {
+        use crate::install::adoption::{ProvenNode, Unproven, UnprovenNode, UnprovenOutput};
+        use crate::install::install_state::InstallRecord;
+        let key = |name: &str| (ArtifactKind::Skill, name.to_string());
+        let outputs = |name: &str| {
+            vec![UnprovenOutput {
+                path: std::path::PathBuf::from(format!("/w/.claude/skills/{name}")),
+                reason: Unproven::NotInStore,
+            }]
+        };
+        let unproven = |name: &str| UnprovenNode {
+            key: key(name),
+            reason: Unproven::NotInStore,
+            outputs: outputs(name),
+        };
+        let report = PrepassReport {
+            proven: vec![ProvenNode {
+                key: key("half"),
+                source: locked("half").source,
+                outputs: vec![],
+                unproven: outputs("half"),
+            }],
+            unproven: vec![unproven("recorded"), unproven("bare")],
+            mixed: vec![],
+            settled: vec![],
+        };
+        let mut state = InstallState::empty(std::path::Path::new("/w/.grimoire/state.json"));
+        state.record(InstallRecord {
+            kind: ArtifactKind::Skill,
+            name: "recorded".to_string(),
+            source: locked("recorded").source,
+            dev: false,
+            outputs: vec![],
+        });
+
+        let lines = left_on_disk(&report, &state, |_| false);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("skill 'bare' left /w/.claude/skills/bare on disk"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("skill 'half' left /w/.claude/skills/half on disk"),
+            "{lines:?}"
+        );
+
+        let quiet = left_on_disk(&report, &state, |node| node.1 == "half");
+        assert_eq!(quiet.len(), 1, "{quiet:?}");
     }
 }

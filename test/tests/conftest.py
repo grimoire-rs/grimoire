@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -25,6 +26,12 @@ from src.index_fixture import (
 )
 from src.otlp_fixture import serve_collector
 from src.runner import GrimRunner
+
+if TYPE_CHECKING:
+    # Imported lazily in the fixtures: both import src.registry, whose host is
+    # frozen at import time and set only in pytest_configure.
+    from src.oci_proxy import OciProxy
+    from src.scenarios import Team
 
 
 @pytest.fixture()
@@ -263,3 +270,40 @@ def launcher(
     from src.hook_launcher import install_launcher
 
     return install_launcher(grim_at(project_dir), unique_repo)
+
+
+@pytest.fixture()
+def oci_proxy() -> Iterator[Callable[..., OciProxy]]:
+    """Factory: an ``OciProxy`` in front of the session registry (``src/oci_proxy.py``).
+
+    ``oci_proxy(mode="count")``; every proxy it made is closed at teardown.
+    """
+    from src.oci_proxy import OciProxy
+
+    made: list[OciProxy] = []
+
+    def _make(mode: str = "count") -> OciProxy:
+        proxy = OciProxy(mode=mode)
+        made.append(proxy)
+        return proxy
+
+    yield _make
+    for proxy in made:
+        proxy.close()
+
+
+@pytest.fixture()
+def team(tmp_path: Path) -> Callable[[str], Team]:
+    """Factory: ``team("CO" | "GO")``, a bare origin with Alice's and Bob's clones."""
+    from src.scenarios import git_team
+
+    count = 0
+
+    def _make(model: str) -> Team:
+        nonlocal count
+        count += 1
+        root = tmp_path / f"team{count}"
+        root.mkdir()
+        return git_team(root, model)
+
+    return _make

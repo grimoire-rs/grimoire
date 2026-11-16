@@ -174,8 +174,17 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     let mut abandoned_entries = Vec::new();
     let mut settings_changes = Vec::new();
     let mut unregistered = Unregistered::default();
+    let mut left = Vec::new();
     if !keep_target || !orphans.is_empty() {
-        let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
+        let mut state =
+            super::grim(scope_resolution::read_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?.adopt();
+        // `delete_nodes` reports the first node as the target, so a kept target is left out.
+        let target = (!keep_target).then(|| key.clone());
+        let nodes: Vec<_> = target.into_iter().chain(orphans.iter().cloned()).collect();
+        // Proven ahead of the delete, which removes only what a record names.
+        if let Some(evidence) = &lock {
+            left = prove_deletions(ctx, &scope, &mut state, evidence, &nodes, args.force).await?;
+        }
         // The policy is resolved **without** the consent prompt reachable —
         // `grim uninstall` takes no `--trust-hooks` and must never ask a
         // question in order to *remove* something. Survivors are checked against
@@ -218,9 +227,6 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             // Judged only to word a remedy: the delete above already took the fail-closed route.
             Err(_) => hook_policy.clone(),
         };
-        // `delete_nodes` reports the first node as the target, so a kept target is left out.
-        let target = (!keep_target).then(|| key.clone());
-        let nodes: Vec<_> = target.into_iter().chain(orphans.iter().cloned()).collect();
         let (roots, workspace, config_path) = (scope.roots.clone(), scope.workspace.clone(), scope.config_path.clone());
         let (config_scope, force, grim) = (scope.scope, ForceScope::from(args.force), scope.invocation.clone());
         // Deleting reads, writes and removes files, so it runs on the blocking pool.
@@ -249,10 +255,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             deletion.unregistered.warn(&scope.invocation, &[]);
             let error = match failure {
                 DeleteFailure::Uninstall { error, .. } => uninstall_error(&scope.workspace, error),
-                DeleteFailure::Persist(
-                    crate::install::install_state::PersistError::EnsureDir { path, source }
-                    | crate::install::install_state::PersistError::Save { path, source },
-                ) => crate::error::Error::from(state_io(&path, source)),
+                DeleteFailure::Persist(e) => persist_failure(e),
             };
             return Err(keep_changes(error, deletion.settings_changes).into());
         }
@@ -308,6 +311,9 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             .unwrap_or_default();
         tracing::warn!("{}", kept_by_bundle_note(&key, &bundles, &scope.invocation));
     }
+    for line in left {
+        tracing::warn!("{line}");
+    }
     let status = if file_removed || declared {
         UninstallStatus::Uninstalled
     } else if held_by_bundle {
@@ -326,6 +332,61 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             .with_settings_changes(settings_changes),
         ExitCode::Success,
     ))
+}
+
+/// Proves `nodes` against `evidence`, the lock as found, from the local store,
+/// and persists what proved, so the delete that follows removes a proven
+/// node's files by its new record. Returns the warning lines for the files the
+/// delete leaves on disk; a kept adopted MCP entry has a warning of its own.
+///
+/// # Errors
+///
+/// Persisting the proven records (74).
+async fn prove_deletions(
+    ctx: &Context,
+    scope: &scope_resolution::ResolvedScope,
+    state: &mut crate::install::install_state::InstallState,
+    evidence: &crate::lock::grimoire_lock::GrimoireLock,
+    nodes: &[NodeKey],
+    force: bool,
+) -> Result<Vec<String>, crate::error::Error> {
+    let nodes = nodes.iter().cloned().collect();
+    let Some(report) = super::remove::prove_from_store(ctx, scope, state, evidence, &nodes).await else {
+        return Ok(Vec::new());
+    };
+    if !report.proven.is_empty() {
+        state
+            .persist(
+                scope.scope,
+                &scope.workspace,
+                &scope.roots.grim_home,
+                &scope.config_path,
+            )
+            .map_err(persist_failure)?;
+    }
+    Ok(left_by_delete(&report, state, |_| force))
+}
+
+/// The lines naming what a delete of `report`'s nodes leaves on disk. A proven
+/// MCP node `forced` does not name keeps its adopted entry, which warns on its own.
+pub(crate) fn left_by_delete(
+    report: &crate::install::adoption::PrepassReport,
+    state: &crate::install::install_state::InstallState,
+    forced: impl Fn(&NodeKey) -> bool,
+) -> Vec<String> {
+    let proven = |key: &NodeKey| report.proven.iter().any(|node| node.key == *key);
+    let kept_entry = |key: &NodeKey| !forced(key) && key.0 == ArtifactKind::Mcp && proven(key);
+    super::remove::left_on_disk(report, state, kept_entry)
+}
+
+/// An install-state write that failed, as the install-tier `TargetIo` (74).
+fn persist_failure(error: crate::install::install_state::PersistError) -> crate::error::Error {
+    match error {
+        crate::install::install_state::PersistError::EnsureDir { path, source }
+        | crate::install::install_state::PersistError::Save { path, source } => {
+            crate::error::Error::from(state_io(&path, source))
+        }
+    }
 }
 
 /// Relock `previous` without `name`'s direct declaration, as `grim lock` would:

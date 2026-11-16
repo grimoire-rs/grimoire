@@ -61,6 +61,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::hook_dispatch::{self, RootScope};
 use crate::install::hook_registrar::root_scope_for;
+use crate::install::install_state::Exempt;
 use crate::install::launcher;
 use crate::install::target::{InstallTarget, active_clients};
 use crate::lock::lock_io;
@@ -148,8 +149,9 @@ pub async fn run(ctx: &Context, _args: &ListArgs) -> anyhow::Result<(HookListRep
     }
 
     let state = super::super::grim(
-        scope_resolution::load_state(&scope).map_err(|e| super::super::install::state_io(&scope.state_path, e)),
-    )?;
+        scope_resolution::read_state(&scope).map_err(|e| super::super::install::state_io(&scope.state_path, e)),
+    )?
+    .exempt(Exempt::HookRecords);
     let global_clients = super::super::global_clients(ctx, scope.scope, &scope.options.clients);
     let target = super::super::grim(InstallTarget::parse_with_global(
         &scope.workspace,

@@ -52,7 +52,7 @@ use crate::catalog::{BadgeContext, CatalogEntry, CatalogGroup, CatalogRow, Searc
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::install::install_state::InstallState;
+use crate::install::install_state::{Exempt, InstallState};
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::status_badge::StatusBadge;
 use crate::install::target::{InstallTarget, active_clients};
@@ -690,7 +690,9 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
     };
     let registries = super::registries_for_scope(ctx, &scope)?;
     let lock = lock_io::load(&scope.lock_path).ok();
-    let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
+    let state = scope_resolution::read_state(&scope)
+        .map(|read| read.exempt(Exempt::Browse))
+        .unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let active = active_clients(&scope.workspace, scope.scope, &global_clients);
     let target = install_target_best_effort(&scope, &global_clients);
@@ -755,7 +757,9 @@ fn load_badges_best_effort(
         }
     };
     let lock = lock_io::load(&scope.lock_path).ok();
-    let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
+    let state = scope_resolution::read_state(&scope)
+        .map(|read| read.exempt(Exempt::Browse))
+        .unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let active = active_clients(&scope.workspace, scope.scope, &global_clients);
     let target = install_target_best_effort(&scope, &global_clients);
