@@ -1,0 +1,5 @@
+# Read by cocogitto in the pull-request commit check (verify-basic.yml).
+# `release` is the release-ceremony commit type (`release: vX.Y.Z`); git-cliff
+# builds CHANGELOG.md and skips it, so cocogitto only has to accept it.
+[commit_types]
+release = { changelog_title = "", omit_from_changelog = true }
