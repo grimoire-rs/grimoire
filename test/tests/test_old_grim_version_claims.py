@@ -42,6 +42,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 _PINNED = re.compile(r"[^@:/]+(?::\d+)?/[^@]+:[^@:/]+@sha256:[0-9a-f]{64}")
+_GENERATED_BY = re.compile(rb'^generated_by = "[^"\n]*"$', re.MULTILINE)
+
+
+def _without_writer(lock: bytes) -> bytes:
+    """Mask `generated_by`: a relock stamps the grim that wrote it (`p9_diff.VOLATILE`)."""
+    return _GENERATED_BY.sub(b'generated_by = "<masked>"', lock)
 
 
 def _files(name: str, body: str | None = None) -> dict[str, str]:
@@ -107,7 +113,8 @@ def test_an_old_lock_with_a_numeric_member_tag_installs_and_relocks_unchanged(
 
     `m:2`'s manifest is annotated 3.1.0. A member's tag claims no range, so the
     annotation does not count against it: the current grim installs the lock as
-    it stands, and its relock changes no byte but the advisory tags it records.
+    it stands, and its relock changes no byte but the advisory tags it records
+    and the `generated_by` stamp.
     """
     d = publish_release(f"{unique_repo}/d", "2.4.0", _files("d"))
     m = publish_lie(f"{unique_repo}/m", "2", "3.1.0", _files("m"))
@@ -134,7 +141,9 @@ def test_an_old_lock_with_a_numeric_member_tag_installs_and_relocks_unchanged(
         "unchanged"
     }
     relocked = (project_dir / "grimoire.lock").read_bytes()
-    assert strip_pinned_tags(relocked) == written["grimoire.lock"]
+    assert _without_writer(strip_pinned_tags(relocked)) == _without_writer(
+        written["grimoire.lock"]
+    )
     assert _pins(project_dir) == {
         "d": f"{_ref(d.repo, '2')}@{d.digest}",
         "m": f"{_ref(m.repo, '2')}@{m.digest}",
