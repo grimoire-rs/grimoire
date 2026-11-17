@@ -285,7 +285,7 @@ scripts/                           # (optional) build/validation tooling
 |---|---|---|---|
 | `schema` | integer | yes | Metadata schema version. This document specifies `1`. Consumers MUST skip entries with an unknown `schema` (forward compatibility). |
 | `name` | string | yes | Package name. MUST equal the directory name containing the file. |
-| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)), `settings` (experimental since grim 0.16.0, see [Settings][settings-kind]). |
+| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)), `settings` (experimental since grim 0.16.0, see [Settings][settings-kind]; index operators: indexer 0.7.0 or newer). |
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
 | `summary` | string | no | Short single-line blurb, matched by `grim search` alongside `description` (distinct from it — usually shorter). |
@@ -706,6 +706,10 @@ $ grim config registry add acme --index https://acme.github.io/index
 what lands on disk, deploying to either forge, accepting contributions,
 branding, and running one privately. The two lower-level shapes below
 stay valid — nothing in grim requires the toolchain.
+
+The indexer that validates entries must be 0.7.0 or newer to accept the
+`settings` kind. With an older indexer, the index pull request that
+`grim publish --announce` opens for a settings package fails validation.
 
 An index repository can also host a plugin marketplace: commit a
 `marketplace.toml` beside the package pointers and deploy the export to a
