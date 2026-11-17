@@ -840,3 +840,37 @@ def test_search_kind_flag_rejects_unknown_kind(grim_at, project_dir: Path) -> No
     runner = grim_at(project_dir)
     result = runner.run("search", "--kind", "bogus", check=False)
     assert result.returncode == 64, (result.returncode, result.stderr)
+
+
+def test_search_unquoted_words_equal_one_quoted_argument(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Several positional words search exactly as the same words in one
+    quoted argument; every older invocation keeps its meaning."""
+    for name, kind, files in (
+        ("code-review", "skill", {"code-review/SKILL.md": "---\nname: code-review\n---\n# c\n"}),
+        ("rust-review", "rule", {"rust-review.md": "---\npaths: ['**/*.rs']\n---\n# r\n"}),
+        ("vscode-settings", "skill", {"vscode-settings/SKILL.md": "---\nname: vscode-settings\n---\n# s\n"}),
+    ):
+        make_artifact(f"{unique_repo}/{name}", kind, files, tag="latest")
+    runner = grim_at(project_dir)
+    scoped = ["--registry", f"{REGISTRY_HOST}/{unique_repo}"]
+    runner.json("search", unique_repo, *scoped, "--refresh")
+
+    def leaves(*argv: str) -> list[str]:
+        return [r["repo"].split("/")[-1] for r in runner.json("--offline", "search", *argv)["items"]]
+
+    assert sorted(leaves("review", *scoped)) == ["code-review", "rust-review"]  # one word, unchanged
+    quoted = leaves("skill review", *scoped)
+    assert quoted == ["code-review"], quoted  # bare kind keyword first filters by kind
+    assert leaves("skill", "review", *scoped) == quoted
+    assert leaves(*scoped, "skill", "review") == quoted  # flags before the words
+    assert leaves("skill", *scoped, "review") == quoted  # flags between the words
+    both = leaves(unique_repo, "review", *scoped)
+    assert sorted(both) == ["code-review", "rust-review"], both
+    assert leaves(f"{unique_repo} review", *scoped) == both
+    kinded = leaves("--kind", "skill", "settings", *scoped)
+    assert kinded == ["vscode-settings"], kinded
+    assert leaves("--kind=skill", "settings", *scoped) == kinded
+    assert sorted(leaves(*scoped)) == sorted(leaves("", *scoped))  # empty query lists everything
+    assert len(leaves(*scoped)) == 3
