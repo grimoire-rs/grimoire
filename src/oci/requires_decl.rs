@@ -48,6 +48,10 @@ pub enum RequiresDeclError {
     #[error("requires entry '{key}' must be {expected}")]
     WrongType { key: String, expected: &'static str },
 
+    /// A `grim.requires.*` key appears twice in the frontmatter `metadata` map.
+    #[error("requires key '{key}' is declared more than once in the frontmatter metadata")]
+    RepeatedKey { key: String },
+
     /// One `(kind, name)` is declared twice.
     #[error("requires entry '{key}' declares {kind} '{name}' more than once")]
     Duplicate {
@@ -92,6 +96,67 @@ fn finish(mut members: Vec<(String, BundleMember)>) -> Result<Vec<BundleMember>,
         });
     }
     Ok(members.into_iter().map(|(_, m)| m).collect())
+}
+
+/// Refuse a `grim.requires.*` key repeated in the frontmatter `metadata` map.
+///
+/// The parsed `metadata` map has already collapsed a repeat (last wins), so
+/// this re-reads the raw YAML. Build-time only, and only for `grim.requires.*`:
+/// a repeated key of any other kind stays accepted, since older packages may
+/// carry one. YAML that does not parse is left to the real parse to report.
+///
+/// # Errors
+///
+/// [`RequiresDeclError::RepeatedKey`] naming the first repeated key.
+pub fn refuse_repeated_keys(yaml: &str) -> Result<(), RequiresDeclError> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+
+    struct Keys(Option<String>);
+    impl<'de> Visitor<'de> for &mut Keys {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a mapping")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<IgnoredAny>()?;
+                if self.0.is_none() && key.starts_with(REQUIRES_KEY_PREFIX) && !seen.insert(key.clone()) {
+                    self.0 = Some(key);
+                }
+            }
+            Ok(())
+        }
+    }
+    struct Doc<'a>(&'a mut Keys);
+    impl<'de> Visitor<'de> for Doc<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a mapping")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "metadata" {
+                    map.next_value_seed(MetaSeed(self.0))?;
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(())
+        }
+    }
+    struct MetaSeed<'a>(&'a mut Keys);
+    impl<'de> serde::de::DeserializeSeed<'de> for MetaSeed<'_> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_map(self.0)
+        }
+    }
+
+    let mut keys = Keys(None);
+    // shortcut: a parse failure is ignored here, the typed parse already reported it.
+    let _ = serde_yaml::Deserializer::from_str(yaml).deserialize_map(Doc(&mut keys));
+    keys.0.map_or(Ok(()), |key| Err(RequiresDeclError::RepeatedKey { key }))
 }
 
 /// Read the `grim.requires.<table>.<name>` keys of a `metadata` map.
@@ -298,6 +363,24 @@ mod tests {
         ];
         for src in cases {
             assert!(from_toml_tables(&toml_of(src)).is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn repeated_requires_key_is_refused_but_other_repeats_are_not() {
+        let dup = "name: a\nmetadata:\n  grim.requires.skills.x: \"./x:1\"\n  grim.requires.skills.x: \"./y:1\"\n";
+        let err = refuse_repeated_keys(dup).unwrap_err();
+        assert!(
+            matches!(&err, RequiresDeclError::RepeatedKey { key } if key == "grim.requires.skills.x"),
+            "{err:?}"
+        );
+        for ok in [
+            "metadata:\n  keywords: a\n  keywords: b\n",
+            "metadata:\n  grim.requires.skills.x: \"./x:1\"\n  grim.requires.skills.y: \"./y:1\"\n",
+            "name: a\n",
+            "metadata: [unclosed",
+        ] {
+            assert!(refuse_repeated_keys(ok).is_ok(), "{ok}");
         }
     }
 

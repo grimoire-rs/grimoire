@@ -259,3 +259,38 @@ def test_bundle_source_lists_a_nested_bundle(grim_at, project_dir: Path) -> None
     assert nested["kind"] == "bundle"
     assert nested["annotation_count"] == flat["annotation_count"] + 1, (flat, nested)
     assert nested["layer_digest"] != flat["layer_digest"]
+
+
+DUP_REQ = SKILL_REQ + '  grim.requires.skills.gws-shared: "./other:1"\n'
+
+
+def test_repeated_requires_key_refuses_65_for_markdown_kinds(grim_at, project_dir: Path) -> None:
+    runner = grim_at(project_dir)
+    results = [
+        runner.run("build", str(_skill(project_dir / "s", DUP_REQ)), check=False),
+        runner.run("build", str(_rule(project_dir, DUP_REQ)), check=False),
+        runner.run("build", "--kind", "agent", str(_agent(project_dir, DUP_REQ)), check=False),
+    ]
+    for result in results:
+        assert result.returncode == 65, result.stderr
+        assert "grim.requires.skills.gws-shared" in result.stderr, result.stderr
+
+
+def test_repeated_non_requires_metadata_key_still_builds(grim_at, project_dir: Path) -> None:
+    runner = grim_at(project_dir)
+    dup = '  keywords: a\n  keywords: b\n' + SKILL_REQ
+    assert runner.run("build", str(_skill(project_dir / "s", dup)), check=False).returncode == 0
+
+
+def test_repeated_requires_key_in_toml_sources_is_a_parse_error(grim_at, project_dir: Path) -> None:
+    """TOML already refuses a repeated key at parse time (nonzero exit, not always 65)."""
+    runner = grim_at(project_dir)
+    dup = '[requires.skills]\nx = "./a:1"\nx = "./b:1"\n'
+    bundle = _bundle(project_dir / "b", '[bundles]\ninner = "ghcr.io/acme/b/inner:1"\ninner = "ghcr.io/acme/b/inner:2"\n')
+    for result in (
+        runner.run("build", "--kind", "mcp", str(_mcp(project_dir / "m", dup)), check=False),
+        runner.run("build", str(_hook(project_dir / "h", dup)), check=False),
+        runner.run("build", str(bundle), check=False),
+    ):
+        assert result.returncode != 0, result.stderr
+        assert "duplicate key" in result.stderr, result.stderr

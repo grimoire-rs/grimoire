@@ -295,6 +295,7 @@ pub fn validate_and_pack(
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             validate_replaced_by(path, fm.metadata.get("replaced-by").map(String::as_str))?;
+            refuse_repeated_requires_key(&path.join("SKILL.md"))?;
             validate_requires(
                 path,
                 kind,
@@ -343,6 +344,7 @@ pub fn validate_and_pack(
                 path,
                 crate::oci::annotations::string_from_extra(&fm, "replaced-by").as_deref(),
             )?;
+            refuse_repeated_requires_key(path)?;
             validate_requires(
                 path,
                 kind,
@@ -368,6 +370,7 @@ pub fn validate_and_pack(
             }
             validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             validate_replaced_by(path, fm.metadata.get("replaced-by").map(String::as_str))?;
+            refuse_repeated_requires_key(path)?;
             validate_requires(
                 path,
                 kind,
@@ -441,6 +444,18 @@ pub fn refuse_self_reference(
 
 /// Offline gate for a parsed `requires` declaration: the grammar, then
 /// [`refuse_self_reference`]. Both refuse 65.
+/// Refuse a repeated `grim.requires.*` key in the frontmatter of `file` (65).
+/// Build-time only, so installing an older package that repeats one still works.
+fn refuse_repeated_requires_key(file: &Path) -> anyhow::Result<()> {
+    let Ok(doc) = std::fs::read_to_string(file) else {
+        return Ok(());
+    };
+    let Ok((yaml, _body)) = crate::skill::SkillFrontmatter::split(&doc, file) else {
+        return Ok(());
+    };
+    super::grim(crate::oci::requires_decl::refuse_repeated_keys(&yaml).map_err(metadata_invalid(file)))
+}
+
 fn validate_requires<E>(
     path: &Path,
     kind: ArtifactKind,
