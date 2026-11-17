@@ -36,3 +36,8 @@ cargo-auditable = true
 cargo-cyclonedx = true
 # Publish GitHub build provenance attestations for the release archives
 github-attestations = true
+
+# GitHub retired the `macos-14` image dist 0.33.0 picks for Apple Silicon; the
+# job is cancelled before it starts and the release never reaches `host`.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
