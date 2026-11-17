@@ -1283,9 +1283,11 @@ fn build_carry(prior: &Prior<'_>, set: &DesiredSet, refresh: &Refresh, stamps: O
         let in_a_stamp = part_stamps.is_some_and(|stamps| stamps.rows.contains_key(&key));
         let mut evidence = pin_rule::stamped_edge_evidence(record, proof, recorded, in_a_stamp);
         evidence.ranges = ranges.remove(&key).unwrap_or_default();
+        let declared = direct.and_then(DeclaredSource::identifier).cloned();
+        evidence.declared.clone_from(&declared);
         let carried = CarriedPin {
             pin: pin.clone(),
-            declared: direct.and_then(DeclaredSource::identifier).cloned(),
+            declared,
             snapshot: snapshot.cloned(),
             evidence,
         };

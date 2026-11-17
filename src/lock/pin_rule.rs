@@ -165,6 +165,10 @@ pub struct EdgeEvidence {
     /// their line and show its caret range: see [`recorded_evidence`]. Empty, every
     /// recorded edge shows its tag's shape.
     pub ranges: BTreeSet<Identifier>,
+    /// The reference the proof's direct declaration held a tagless pin at. The proof
+    /// shows that request resolved the pin, so the same request from an edge is
+    /// answered once the declaration itself has left.
+    pub declared: Option<Identifier>,
 }
 
 /// Keys `lock` lists more than once, as a keep-both merge leaves them. Nothing
@@ -495,7 +499,9 @@ pub fn answers_direct(record: PinRecord<'_>, declared: Option<&Identifier>, id: 
 /// not record needs the pin's record, which is bound to the pin's repository, so
 /// a pin is never carried into a new one.
 pub fn answers_edge(record: PinRecord<'_>, evidence: &EdgeEvidence, id: &Identifier) -> bool {
-    evidence.requests.contains(id) || record.names(id)
+    evidence.requests.contains(id)
+        || record.names(id)
+        || (record.pin.tag().is_none() && same_repository(record.pin, id) && evidence.declared.as_ref() == Some(id))
 }
 
 /// Whether the pin answers a `requires` claim `id` whose tag claims the versions of
@@ -753,6 +759,30 @@ mod tests {
             lo: Version::new(lo.0, lo.1, 0),
             hi: Version::new(hi.0, hi.1, 0),
         }
+    }
+
+    #[test]
+    fn a_tagless_pin_answers_an_edge_at_the_reference_its_proof_declared_only() {
+        let tagless = pin("ghcr.io/acme/x", "x");
+        let tagged = pin("ghcr.io/acme/x:1", "x");
+        let evidence = EdgeEvidence {
+            declared: Some(id("ghcr.io/acme/x:1")),
+            ..EdgeEvidence::default()
+        };
+
+        assert!(answers_edge(record(&tagless), &evidence, &id("ghcr.io/acme/x:1")));
+        assert!(
+            !answers_edge(record(&tagless), &evidence, &id("ghcr.io/acme/x:2")),
+            "another tag"
+        );
+        assert!(
+            !answers_edge(record(&tagless), &evidence, &id("quay.io/acme/x:1")),
+            "another repository"
+        );
+        assert!(
+            !answers_edge(record(&tagged), &evidence, &id("ghcr.io/acme/x:2")),
+            "a tagged pin is unchanged"
+        );
     }
 
     #[test]
