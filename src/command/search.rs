@@ -79,7 +79,7 @@ pub struct SearchArgs {
     /// is given. Empty ⇒ list the whole catalog, unranked, in registry order.
     /// Results are narrowed further by each source's `include`/`exclude`
     /// browse filter — `grim context` shows the active patterns.
-    pub query: Option<String>,
+    pub query: Vec<String>,
 
     /// Show only these kinds (repeat the flag or separate with commas). With
     /// `--kind`, every query word matches as text, so `grim search --kind skill
@@ -160,7 +160,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     let access = super::access_seam(ctx)?;
     // Parse the raw query once for the truncation hint (the service applies
     // the same matcher per registry).
-    let parsed = SearchQuery::parse_with_kinds(args.query.as_deref().unwrap_or(""), &args.kind);
+    let parsed = SearchQuery::parse_with_kinds(&args.query.join(" "), &args.kind);
 
     // Resolve the scope's registry set + the best-effort badge inputs once,
     // then browse every configured registry through the shared catalog
@@ -773,7 +773,7 @@ mod tests {
 
     fn args() -> SearchArgs {
         SearchArgs {
-            query: None,
+            query: Vec::new(),
             kind: Vec::new(),
             sort: None,
             limit: None,
