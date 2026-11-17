@@ -294,6 +294,28 @@ fn stray_stem_files(file: &Path) -> Result<Vec<String>, SkillError> {
     Ok(files)
 }
 
+/// Refuse a rule or agent whose stem directory holds a file other than
+/// [`COMPANION_FILES`]. Shared by the pack functions and `grim publish`, which
+/// runs it for every entry before the first push.
+///
+/// # Errors
+///
+/// [`SkillErrorKind::RuleSupportDir`] for a rule, [`SkillErrorKind::AgentStrayFiles`]
+/// for an agent; [`SkillErrorKind::Io`] for a walk failure.
+pub fn refuse_stray_stem_files(file: &Path, kind: crate::oci::ArtifactKind) -> Result<(), SkillError> {
+    let files = stray_stem_files(file)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+    let dir = file.with_extension("");
+    let kind = if kind == crate::oci::ArtifactKind::Agent {
+        SkillErrorKind::AgentStrayFiles { dir, files }
+    } else {
+        SkillErrorKind::RuleSupportDir { dir, files }
+    };
+    Err(SkillError::new(file, kind))
+}
+
 /// Pack the single `<name>.md` index of a rule into an uncompressed tar.
 ///
 /// The stem directory (`<parent>/<name>/`) may hold only [`COMPANION_FILES`],
@@ -305,16 +327,7 @@ fn stray_stem_files(file: &Path) -> Result<Vec<String>, SkillError> {
 /// file; [`SkillErrorKind::Io`] for a read/walk failure.
 pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     let name = rule_name(file)?;
-    let stray = stray_stem_files(file)?;
-    if !stray.is_empty() {
-        return Err(SkillError::new(
-            file,
-            SkillErrorKind::RuleSupportDir {
-                dir: file.with_extension(""),
-                files: stray,
-            },
-        ));
-    }
+    refuse_stray_stem_files(file, crate::oci::ArtifactKind::Rule)?;
     pack_index_only(file, &name)
 }
 
@@ -329,16 +342,7 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
 /// [`SkillErrorKind::NameInvalid`] for a stem-less path.
 pub fn pack_agent_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     let name = rule_name(file)?;
-    let stray = stray_stem_files(file)?;
-    if !stray.is_empty() {
-        return Err(SkillError::new(
-            file,
-            SkillErrorKind::AgentStrayFiles {
-                dir: file.with_extension(""),
-                files: stray,
-            },
-        ));
-    }
+    refuse_stray_stem_files(file, crate::oci::ArtifactKind::Agent)?;
     pack_index_only(file, &name)
 }
 

@@ -1165,6 +1165,17 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         validate_announce_names(&entries, &args.manifest)?;
     }
 
+    // A rule or agent with a stray stem-directory file is refused (65) at pack
+    // time; check it here so no earlier entry is pushed before the refusal.
+    for planned in &entries {
+        if matches!(planned.kind, ArtifactKind::Rule | ArtifactKind::Agent) {
+            super::grim(crate::skill::skill_package::refuse_stray_stem_files(
+                &planned.path,
+                planned.kind,
+            ))?;
+        }
+    }
+
     // Resolve the description companions before any push: an explicit companion
     // path that does not exist is a data error (65) surfaced here, not partway
     // through the batch. Conventional-probe misses stay silent.

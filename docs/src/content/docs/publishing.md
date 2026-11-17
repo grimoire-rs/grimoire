@@ -1528,7 +1528,8 @@ published keep their bytes, and only a bumped version packs gzip.
 [inheritance and prefix stripping](#batch-publish-version). Every source path
 must exist. `pin = true` is accepted on every kind: it freezes a bundle's
 members or another artifact's declared dependencies, and does nothing for an
-entry with neither. Only after the full manifest passes does the first network call happen.
+entry with neither. A rule or agent that ships a support file, which exits 65, is part of that
+check, so a batch with one such entry pushes nothing. Only after the full manifest passes does the first network call happen.
 
 One check runs **before** every shape check below and exits **64** (usage),
 not 65. A `--version` channel value in grim's reserved namespace, `__grimoire`
@@ -1560,7 +1561,8 @@ Several additional conditions exit 65 at validation time:
   reaches the registry. A slash-bearing CI ref like `feature/foo` is one
   example.
 
-During the release run the command is fail-fast, so the first failing entry
+Once validation has passed, a failure during the release run (a registry
+error, say) is fail-fast, so the first failing entry
 stops the batch. The report still renders. Completed entries show their
 status (`pushed`, `skipped`, or `dry-run`), the failed entry shows `failed`,
 and remaining entries are unreported. Because skip-existing is the default,

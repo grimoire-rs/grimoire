@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from src.registry import REGISTRY_BASE, REGISTRY_HOST, fetch_manifest, tag_digest
+from src.registry import REGISTRY_BASE, REGISTRY_HOST, fetch_manifest, list_tags, tag_digest
 
 
 # ---------------------------------------------------------------------------
@@ -1826,3 +1826,29 @@ def test_publish_dry_run_backport_plans_kept_floats_and_moves_nothing(
     for tag in ("2.3.7", "2.3"):
         with pytest.raises(urllib.error.HTTPError):
             tag_digest(repo_path, tag)
+
+
+@pytest.mark.parametrize("kind", ["rules", "agents"])
+def test_publish_refused_support_files_push_nothing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str, kind: str
+) -> None:
+    """A rule or agent that ships a support file is refused (65) before the
+    first push: the good skill listed ahead of it is never pushed."""
+    prefix = unique_repo.split("/")[-1]
+    skill = f"{prefix}-skill"
+    bad = f"{prefix}-bad"
+    _make_skill_source(project_dir, skill)
+    (_make_rule_source if kind == "rules" else _make_agent_source)(project_dir, bad)
+    _write(project_dir / kind / bad / "extra.md", "support\n")
+    manifest = project_dir / "publish.toml"
+    manifest.write_text(
+        f'registry = "{registry}"\nversion = "1.0.0"\n[skills.{skill}]\n[{kind}.{bad}]\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    result = grim_at(project_dir).run("publish", "--manifest", str(manifest), check=False)
+
+    assert result.returncode == 65, f"got {result.returncode}; stderr: {result.stderr.strip()}"
+    with pytest.raises(urllib.error.HTTPError):
+        list_tags(f"skills/{skill}")
