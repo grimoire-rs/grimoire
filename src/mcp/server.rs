@@ -74,7 +74,7 @@ impl GrimMcpServer {
     )]
     async fn grim_search(&self, Parameters(args): Parameters<SearchToolArgs>) -> Result<String, ErrorData> {
         let search_args = crate::command::search::SearchArgs {
-            query: args.query,
+            query: args.query.into_iter().collect(),
             kind: args.kind.unwrap_or_default(),
             // No tool param: the MCP browse is ranked by relevance (and cut
             // by the scope's `options.search_min_relevance`) like an unsorted
@@ -171,6 +171,9 @@ impl ServerHandler for GrimMcpServer {
         // struct-literal'd from outside rmcp); start from the default and set
         // the fields we own.
         let mut info = rmcp::model::ServerConfig::default();
+        // The server answers `tools/list` and `tools/call`; the spec requires
+        // declaring that. Nothing else (resources, prompts) is served.
+        info.capabilities = rmcp::model::ServerCapabilities::builder().enable_tools().build();
         info.server_info.name = "grim".to_string();
         info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
         info.instructions = Some(

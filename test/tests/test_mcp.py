@@ -907,3 +907,16 @@ def test_mcp_search_kind_argument_filters(
     rows = json.loads(call["content"][0]["text"])["items"]
     assert rows, "the agent must be returned"
     assert all(r["kind"] == "agent" for r in rows), rows
+
+
+def test_mcp_initialize_declares_the_tools_capability(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path
+) -> None:
+    (project_dir / "grimoire.toml").write_text("[skills]\n", encoding="utf-8", newline="\n")
+    runner = grim_at(project_dir)
+
+    responses = _drive(runner, project_dir, [_initialize(1)])
+
+    capabilities = responses[1]["result"]["capabilities"]
+    assert "tools" in capabilities, capabilities
+    assert not (capabilities.keys() - {"tools"}), capabilities
