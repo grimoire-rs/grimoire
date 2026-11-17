@@ -5,6 +5,115 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-11-17
+
+### Added
+
+- Declare and resolve dependencies between artifacts
+- Raise the fetch layer gate from 8 MiB to 32 MiB *(fetch)*
+- Add harness settings as an experimental artifact kind *(settings)*
+- Add the global client list to a project's detected clients *(install)*
+- Publish each package's own README as its description *(publish)*
+- Say when a declaration holds back a dependency's request *(lock)*
+- Theme module with a terminal-following default and built-in themes *(tui)*
+- Kind filter for search, TUI and MCP *(search)*
+- Grim-only collector settings through GRIM_CONFIG files *(telemetry)*
+- Read a dependency tag as a version claim *(resolve)*
+- Relock in the same run so the lock never goes stale *(remove)*
+- Add --locked to refuse an out-of-sync lock *(cli)*
+- Warn when a lock first records dependencies *(lock)*
+- Refuse a rule or agent that ships support files *(rule)* **BREAKING**
+- **Migration:** a rule can no longer ship a support directory, and an agent no longer packs README.md, logo.png or logo.svg. Move support files into a skill and require it from the rule with grim.requires.skills.<name>. See upgrading.md#rule-support-dir.
+- Look up each package's own README and logo *(publish)*
+- Prefer an SVG logo over a PNG *(publish)* **BREAKING**
+- **Migration:** a repository that holds both logo.png and logo.svg in the same place now publishes the SVG as its catalog logo. Remove the file you do not want, or name one with `logo` in [description].
+- Treat install records as a cache of the disk *(install)*
+- Accept the values upstream added and add two rows *(settings)*
+- Write the Droid issuer, Copilot scopes and Junie timeout *(mcp)*
+- Lift the new Copilot and Claude agent frontmatter keys *(vendor)*
+
+### Changed
+
+- Drop the dead below-pick switch and tighten three tests *(resolve)*
+- Load the global config once per run *(config)*
+- Extract the registry memo from Graph *(resolve)*
+- Extract the held-pin attestation state from Graph *(resolve)*
+- Move edge_origin beside EdgeOrigin *(resolve)*
+- Read moved pins only for a tagless warning *(resolve)*
+
+### Documentation
+
+- Document declared artifact dependencies
+- Add the declared dependencies guide
+- Add the settings reference page *(settings)*
+- Add a guide to sharing harness settings *(settings)*
+- Cover the settings kind across the reference and guide pages
+- Re-record the registries cast with today's kind list
+- Drift-review the first-party skills for the settings kind *(catalog)*
+- State that only grim update moves a pin
+- Describe the issue-sweep changes and their upgrade notes
+- Describe the rule support directory removal and the catalog lookup
+- Teach the support-skill pattern in the first-party skills *(catalog)*
+- Split long sentences on the lock and pick pages
+- State the retyped-line case of reached_rows *(lock)*
+- Describe record adoption and the plain-HTTP credential rule
+- Teach record adoption in the grim-usage skill *(catalog)*
+- Repoint the moved Droid and Cline documentation links
+- Describe the adopted upstream changes
+- Drift-review the first-party skills for 0.16.0 *(catalog)*
+- Add the upgrade notes the 0.16.0 inventory found missing
+- Name the indexer an index needs for the settings kind *(index)*
+
+### Fixed
+
+- Bound the direct resolve fan-out *(resolve)*
+- Never replace a stored blob *(store)*
+- Install a skill once when a pool reader meets a pool writer
+- Write the exclude rule to the common git directory *(install)*
+- Keep an adopted MCP entry when its client drops *(install)*
+- Drop state outputs their kind may not address *(install)*
+- Keep JSONC parseable when a removal sits beside a comment *(install)*
+- Re-read kindless cached rows once after an upgrade *(catalog)*
+- Name --global in the flag-off remedy at global scope *(hook)*
+- Move rmcp to 3.9.0 to clear three RUSTSEC advisories *(deps)*
+- Keep existing pins on every relock and edit path *(lock)*
+- Judge a path not created yet where its spelling lands *(install)*
+- Keep a dropped client's output when its config cannot be read *(install)*
+- Report an unparseable TOML config as an error *(install)*
+- Bind the other JSON spelling only for clients that pick it *(install)*
+- Report entries the relocated-root reap left behind *(install)*
+- Print a vendor's MCP decline once per run *(install)*
+- Keep an emptied container that holds a comment *(install)*
+- Read Claude settings past a byte-order mark *(install)*
+- Name a miss without a kind or the reserved tag *(fetch)*
+- Apply --log-level *(cli)*
+- Judge every binding a nested list names one bundle under *(resolve)*
+- Match a held bundle edge under another binding name *(resolve)*
+- Judge the rows a held bundle requirement lists *(resolve)*
+- Refuse when a held tag was republished onto the moved digest *(resolve)*
+- Say what the whole-plugin update moves *(resolve)*
+- Find an entry README when the source path is spelled through a link *(publish)*
+- Say when a GRIM_LOG value is not usable *(cli)*
+- Report an edited file the relocated-root reap kept *(install)*
+- Stop opening announcements for a new commit date alone *(announce)*
+- Refuse a dev-install that collides with a bundle member or dependency *(install)*
+- Selected row keeps the status column readable *(tui)*
+- Refuse a state, config or client file that is not a regular file *(store)*
+- Held-delete remedy stays readable offline at 80 columns *(tui)*
+- Move a float found on a prerelease *(release)*
+- Relock a stale part that a marketplace run did not pick *(export)*
+- Lock a plugin that has no part in the marketplace lock *(export)*
+- Word the refused kept-pin note for a version conflict *(add)*
+- Keep stored credentials off project-declared plain-HTTP hosts *(oci)*
+- Move Claude doc and support links into plugin.json *(export)*
+- Fall back to ~/.kiro for an unusable KIRO_HOME *(kiro)*
+- Decline a global agent whose body holds an expansion token *(kilo)*
+- Keep a bundle member's pin when its direct declaration is removed *(lock)*
+- Refuse a rule or agent with support files before any push *(publish)*
+- Refuse a repeated grim.requires key in frontmatter metadata *(build)*
+- Accept several unquoted query words *(search)*
+- Declare the tools capability in the initialize answer *(mcp)*
+
 ## [0.15.1] - 2026-10-28
 
 ### Added
@@ -999,6 +1108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.16.0]: https://github.com/grimoire-rs/grimoire/compare/v0.15.1..v0.16.0
 [0.15.1]: https://github.com/grimoire-rs/grimoire/compare/v0.15.0..v0.15.1
 [0.15.0]: https://github.com/grimoire-rs/grimoire/compare/v0.14.3..v0.15.0
 [0.14.3]: https://github.com/grimoire-rs/grimoire/compare/v0.14.2..v0.14.3

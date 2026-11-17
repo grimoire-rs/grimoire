@@ -12,6 +12,336 @@ new client, or a behavior worth knowing about. It links to the page that
 shows how. [`CHANGELOG.md`][changelog] has every change at commit
 granularity, including the refactors and internal work this page leaves out.
 
+## 0.16 — dependencies, harness settings, and a lock that holds still {#v0-16}
+
+0.16 lets an artifact [declare the artifacts it needs](#v0-16-0-dependencies),
+and lets you ask [why something is installed](#v0-16-0-dependencies). It adds
+[harness settings](#v0-16-0-settings) as an experimental kind. A lock now
+[keeps its pins](#v0-16-0-pins) until you run `grim update`. Two changes need
+action from publishers: [rules lose their support
+directory](#v0-16-0-rule-support-dir) and [an SVG logo beats a
+PNG](#v0-16-0-svg-logo).
+
+### 0.16.0 — 2026-11-17 {#v0-16-0}
+
+0.16.0 adds [artifact dependencies and `grim why`](#v0-16-0-dependencies),
+[version claims on a requirement](#v0-16-0-version-claims) and the
+experimental [`settings` kind](#v0-16-0-settings). Relocks [keep your
+pins](#v0-16-0-pins), `--locked` [refuses a stale lock](#v0-16-0-locked), and
+[install records follow the disk](#v0-16-0-records).
+
+Two publisher changes are breaking: [a rule's support
+directory](#v0-16-0-rule-support-dir) and [SVG logo
+precedence](#v0-16-0-svg-logo). The release also brings [per-package READMEs
+and logos](#v0-16-0-package-readme), [kind filters in
+search](#v0-16-0-search-kind), [TUI themes](#v0-16-0-tui-themes) and
+[telemetry config files](#v0-16-0-telemetry-config). Read [behaviour changes
+to check](#v0-16-0-behaviour), [smaller improvements](#v0-16-0-more) and
+[fixes](#v0-16-0-fixes) too.
+
+#### Declare what an artifact needs, and ask why it is installed {#v0-16-0-dependencies}
+
+A rule that points at a lookup skill, or an agent that breaks without an MCP
+server, used to rely on you installing both. Now any artifact can name what
+it requires. In a skill, rule or agent that is a `grim.requires.<table>.<name>`
+key in the frontmatter `metadata` map:
+
+```yaml
+metadata:
+  grim.requires.skills.gws-shared: "ghcr.io/acme/skills/gws-shared:1"
+```
+
+`grim publish` records the requirement in a second layer. [`grim add`][add]
+installs the dependency too and reports what it pulled in. Bundles may nest
+bundles. [`grim remove`][remove] and [`grim uninstall`][uninstall] take the
+dependencies only the removed artifact needed, and report one another
+artifact still needs as `kept-by-dependency`. [`grim status`][status] rows
+gain `direct` and `required_by`.
+
+When a dependency is a surprise, ask:
+
+```sh
+grim why skill gws-shared
+```
+
+`grim why` prints every chain from something you declared to that artifact.
+It reads the lock and never contacts a registry. If your own declaration
+pins a dependency below what another artifact requested, `add`, `update` and
+`lock` now warn and name `grim update` as the remedy
+([held-back pins][lock-held-back]).
+
+See [Dependencies between artifacts][guide-dependencies], the
+[`requires` reference][requires], and [`grim why`][why]. A lock that records
+dependencies cannot be read by grim 0.15.1, and the first write prints one
+warning ([upgrade note][up-dependencies]).
+
+#### A tag on a requirement claims a version range {#v0-16-0-version-claims}
+
+Two artifacts that require one package at `:2.1` and `:2.4` could not share
+it. Now a tag on a `requires` edge is a Cargo-style claim. `2.1` means
+at least 2.1.0 and below 3.0.0, and `0.2` means at least 0.2.0 and below
+0.3.0. Both dependents share one release, the newest in the claimed major.
+Claims on two different majors still exit `78`.
+
+A claim that would move a pin to a lower major refuses with exit `78` and
+`reason: major-downgrade`. Pass `--allow-downgrade` to `grim add`,
+`grim update` or `grim lock` to accept it:
+
+```sh
+grim update --allow-downgrade
+```
+
+See [what the tag claims][tag-claims] and the [upgrade note][up-dependencies].
+
+#### Share harness settings as an experimental artifact kind {#v0-16-0-settings}
+
+A team's permission rules or default model live in each harness's own config
+file, copied by hand. A `settings/<name>.toml` package now carries those
+typed values. You build, publish, lock, bundle and search it like any other
+kind, and grim writes each value into the file the harness reads.
+
+`settings` is **experimental** and off by default. At project scope it also
+needs the workspace's consent. A value grim did not write is never replaced
+without `--force`.
+
+```sh
+grim config set options.experimental.settings true
+grim schema --kind settings
+```
+
+Thirteen harnesses take settings at global scope. At project scope only
+Claude does, through `.claude/settings.local.json`. [Settings][settings]
+covers the format, the merge rules and the fields of each harness.
+[Share harness settings][share-settings] walks through a package, and the
+[client matrix][gap-settings] lists the limits. The kind is [unstable until
+1.0][stability-unstable].
+
+#### A relock keeps your pins; only `grim update` moves them {#v0-16-0-pins}
+
+`grim lock`, `grim add`, a relock after `grim remove`, and the TUI actions
+used to move a pin whose tag had moved. Now each keeps the existing pin. Only
+[`grim update`][update] moves one. Every pin records the tag it resolved
+from, and older locks migrate on read. Grim 0.15.1 still reads them.
+
+[`grim remove`][remove], [`grim uninstall`][uninstall] and the TUI delete now
+relock in the same run, so they no longer exit `0` with a stale lock. If the
+relock fails, nothing changes. `--no-relock` restores the old in-place edit.
+On a lock written by grim 0.15 or older, removing a directly declared artifact
+that a bundle still provides no longer moves its pin. See [how `grim lock` keeps pins][lock-pins] and the
+[upgrade note][up-lock-pins].
+
+#### Refuse an out-of-sync lock with `--locked` {#v0-16-0-locked}
+
+CI wants to know that `grimoire.lock` matches `grimoire.toml`, without a run
+quietly fixing it. With `--locked`, or `GRIM_LOCKED=1`, a command that writes
+a lock first checks it. A stale lock exits `65` with `reason: stale-lock`. A
+missing project lock exits `79`. Nothing is written.
+
+```sh
+GRIM_LOCKED=1 grim lock
+```
+
+The command's own edit still updates the lock, which differs from Cargo's
+`--locked`. See [`--locked`][locked] and [Team CI][team-ci].
+
+#### Install records follow the files on disk {#v0-16-0-records}
+
+After a `git pull`, a branch checkout or a second worktree, the install
+record could lag the files, and `grim install` refused with exit `65`. Now
+grim renders the locked pin and compares it with what is on disk. Matching
+files are adopted and read `unchanged`. A real local edit still refuses with
+`65`.
+
+[`grim status`][status] and the TUI write the records they prove. An
+unreadable state file exits `74` before the lock or config changes. See
+[status adoption][status-adoption] and the [upgrade note][up-records].
+
+#### A rule can no longer ship a support directory (breaking) {#v0-16-0-rule-support-dir}
+
+A rule is one `.md` file. Clients that read `rules/` recursively loaded every
+file in a support directory as a rule, so grim no longer packs one. The
+directory sharing the rule's stem may hold only `README.md`, `logo.png` and
+`logo.svg`. None of them is packed. Any other file makes `grim build`,
+`grim release` and `grim publish` exit `65`.
+
+A batch `grim publish` checks every rule and agent before its first push, so a
+refused entry leaves nothing published ([validation][publish-validation]).
+
+An agent changed the same way. It packs its `.md` file alone, so its README
+and logo are no longer package files. `grim fetch <ref> --path
+<name>/README.md` now exits `1`.
+
+Move the files into a skill, and require that skill from the rule:
+
+```yaml
+metadata:
+  grim.requires.skills.architecture-guide: "ghcr.io/acme/skills/architecture-guide:1"
+```
+
+Rules already published keep installing, and grim warns once per such rule.
+Republishing unchanged from such a tree gives a new digest. See [the upgrade
+note for rules][up-rule-support-dir] and [for agents][up-agent-companions],
+and [support files in publishing][rule-support-dir].
+
+#### An SVG logo now wins over a PNG (breaking) {#v0-16-0-svg-logo}
+
+Logo lookup used to take a PNG first. Now `grim publish` tries `logo.svg`
+before `logo.png` at every level: inside the package directory, beside the
+source, and at the top level. A repository that holds both in one place
+publishes the SVG on its next run.
+
+Delete the file you do not want, or name one explicitly:
+
+```toml
+[description]
+logo = "logo.png"
+```
+
+See the [lookup order][description-probe] and the [upgrade
+note][up-package-readme].
+
+#### Publish each package's own README and logo {#v0-16-0-package-readme}
+
+A repository with one README and logo per package published the root ones for
+every entry. Now `grim publish` looks per entry. It checks the package
+directory, then a sibling file such as `<name>.README.md`, then the top
+level. README and logo fall back independently. Set `entry_readme = false`
+under `[description]` to turn the README lookup off.
+
+A repository with package READMEs publishes a different companion on its next
+run, even at an unchanged version. Lookup also works when `path` is spelled
+through a symlink. See [each package's own README and logo][entry-readme] and
+the [upgrade note][up-package-readme].
+
+#### Filter search by kind {#v0-16-0-search-kind}
+
+A query for `settings` could not tell a skill named `vscode-settings` from
+the kind. `--kind` narrows results to skill, rule, agent, bundle, mcp, hook or
+settings, and then every query word matches as text:
+
+```sh
+grim search --kind skill,rule review
+```
+
+Repeat the flag or separate kinds with commas. An unknown kind exits `64`.
+The MCP `grim_search` tool takes a `kind` array, and `f` cycles kinds in the
+[TUI][tui]. See [`grim search`][search].
+
+#### Pick a TUI theme {#v0-16-0-tui-themes}
+
+`grim tui` was hard to read on a light terminal. The default theme,
+`terminal`, now uses your terminal's own colours. Thirteen fixed themes
+include `light`, `nord`, `dracula` and the Catppuccin, Gruvbox, Solarized and
+Tokyo Night families:
+
+```sh
+grim tui --theme nord
+grim config set options.tui.theme nord
+```
+
+The flag wins over the config key. See [Choose a theme][themes].
+
+#### Point telemetry at your collector with a config file {#v0-16-0-telemetry-config}
+
+Telemetry used to read only `OTEL_*` variables from the shell. A file named by
+`GRIM_CONFIG` can now carry a `[telemetry]` table with `enabled`, `endpoint`,
+`timeout`, `headers` and more, so a fleet sets one destination for grim alone:
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "https://collector.example"
+```
+
+With a file endpoint, grim reads no ambient `OTEL_EXPORTER_OTLP_*`.
+`GRIM_TELEMETRY_OTLP_HEADERS` adds a token from the environment. A bad file
+warns once and disables telemetry for that run, and `DO_NOT_TRACK` and offline
+mode still disarm it. See [the config file][telemetry-config-file] and its
+[keys][telemetry-config-keys]. The surface is [unstable until
+1.0][stability-unstable].
+
+#### Behaviour changes to check {#v0-16-0-behaviour}
+
+Each of these changes what an existing setup does. None needs a migration
+step, but each has an upgrade note.
+
+- A project install now adds your global `options.clients` to the detected
+  clients. Set a project `[options].clients` or pass `--client` to opt out
+  ([upgrade note][up-global-clients]).
+- A stored credential is no longer sent to a host that only a project file
+  marks `insecure`. Declare it in `GRIM_INSECURE_REGISTRIES` or the global
+  config too ([upgrade note][up-credential]).
+- A dev-install that collides with a bundle member or dependency now exits
+  `64` instead of silently replacing files. `grim install --force` replaces
+  the dev copy ([upgrade note][up-dev-install]).
+- A pool-reading client such as OpenCode joins the shared skills pool beside
+  a pool writer such as Codex, so a skill installs once. Set
+  `options.vendors.<name>.shared_skills` to `false` for its own directory
+  ([shared pool][gap-shared-pool], [upgrade note][up-shared-pool]).
+- `grim release` and `grim publish` never move `X.Y`, `X` or `latest` to a
+  lower version. Kept tags are named in `floats_kept`
+  ([upgrade note][up-release-floats]).
+- A named pipe at a path grim derives is refused with exit `74` instead of
+  hanging every command ([upgrade note][up-non-regular]).
+
+#### Smaller improvements {#v0-16-0-more}
+
+- `grim fetch` and the MCP `grim_fetch` accept layers up to 32 MiB, up from 8
+  MiB ([`grim fetch`][fetch]).
+- `--log-level` is now applied and wins over `GRIM_LOG`. A value that is not a
+  level prints one stderr line, and the run continues
+  ([upgrade note][up-smaller]).
+- Copilot agents take `copilot.include-custom-instructions`,
+  `copilot.reasoning-effort`, `copilot.models` and `copilot.model-policy`.
+  Claude agents take `claude.auto-compact-window` ([Claude agent
+  keys][vendor-claude-agent], [Copilot agent keys][vendor-copilot-agent]).
+- An MCP server's `[server.oauth]` takes an optional
+  `authorization_server_issuer`, grim writes Copilot `oauthScopes`, and
+  Junie receives `timeout` ([upgrade note][up-smaller]).
+- A global agent whose body holds a Kilo `{env:NAME}` or `{file:path}` token
+  is skipped with a warning. A `KIRO_HOME` naming a filesystem root, your home
+  or an ancestor falls back to `~/.kiro`. Claude marketplace entries move
+  their documentation and support links into `plugin.json`
+  ([upgrade note][up-smaller]).
+- `grim search` and `grim tui` start faster because the global config loads
+  once per run.
+- At global scope the hook flag-off warning names `--global` in its remedy.
+
+#### Fixes {#v0-16-0-fixes}
+
+- An MCP entry you wrote and grim only adopted is no longer removed when its
+  client drops out of the list. `--force` removes it.
+- JSONC edits keep a file parseable when a removal sits beside a comment.
+  A client config that starts with a byte-order mark is read and edited.
+- In a linked worktree, grim writes the ignore line to the shared
+  `info/exclude`, where git reads it.
+- A client file grim cannot read, or unparseable TOML, no longer reads as
+  absent or silently drops the record.
+- `grim update --global` lists the MCP entries and edited files a relocated
+  vendor root kept.
+- A vendor's MCP decline line prints once per run.
+- A settings package cached kindless by 0.15.1 is read again once, so
+  `--kind` finds it.
+- `grim publish --announce` no longer opens a new pull request when only the
+  commit date changed.
+- A `grim fetch` miss names the right kind, and a miss on the reserved
+  companion tag says no description is published.
+- A state file from `git clone` can no longer make grim act on a hostile
+  output. Grim drops it with one warning.
+- Marketplace runs relock a stale or missing part they did not pick, and
+  Claude plugin links pass `claude plugin validate`.
+- TUI: the held-delete remedy fits 80 columns offline, and the selected row
+  keeps its status readable.
+- A stored blob is never replaced, which fixes concurrent runs failing with
+  "Access is denied" on Windows.
+- `rmcp` moved to 3.9.0 to clear three RUSTSEC advisories.
+- [`grim build`][build] exits `65` for a `grim.requires.*` key written twice
+  in frontmatter. It used to keep the last value and exit `0`.
+- [`grim search`][search] takes several unquoted words, so `grim search skill
+  review` works.
+- The [MCP server][mcp] declares the `tools` capability when a client sends
+  `initialize`.
+
 ## 0.15 — marketplaces, hooks, and catalogs of any size {#v0-15}
 
 0.15 turns a `marketplace.toml` into [a git repository your team adds as a
@@ -650,3 +980,45 @@ the full commit-level record back to the first tagged release.
 [launcher-exit]: ./hooks.md#launcher-exit
 [handler-exit]: ./hooks.md#handler-exit
 [codex-retrust]: ./hooks-troubleshooting.md#codex-retrust
+
+<!-- 0.16 -->
+
+[why]: ./commands.md#why
+[remove]: ./commands.md#remove
+[update]: ./commands.md#update
+[lock-pins]: ./commands.md#lock-pins
+[lock-held-back]: ./commands.md#lock-held-back
+[locked]: ./commands.md#locked
+[status-adoption]: ./commands.md#status-adoption
+[fetch]: ./commands.md#fetch
+[requires]: ./artifacts.md#requires
+[tag-claims]: ./artifacts.md#what-the-tag-claims
+[guide-dependencies]: ./guides/dependencies.md
+[settings]: ./settings.md
+[share-settings]: ./guides/share-settings.md
+[gap-settings]: ./clients.md#gap-settings
+[team-ci]: ./guides/team-ci.md
+[rule-support-dir]: ./publishing.md#rule-support-dir
+[description-probe]: ./publishing.md#description-probe
+[entry-readme]: ./publishing.md#description-entry-readme
+[themes]: ./browse.md#themes
+[telemetry-config-file]: ./telemetry.md#config-file
+[telemetry-config-keys]: ./telemetry.md#config-file-keys
+[vendor-claude-agent]: ./vendor-metadata.md#claude-agent-registry
+[vendor-copilot-agent]: ./vendor-metadata.md#copilot-agent-registry
+[up-dependencies]: ./upgrading.md#dependencies-need-new-grim
+[up-lock-pins]: ./upgrading.md#lock-keeps-pins
+[up-records]: ./upgrading.md#records-follow-disk
+[up-rule-support-dir]: ./upgrading.md#rule-support-dir
+[up-agent-companions]: ./upgrading.md#agent-companions
+[up-package-readme]: ./upgrading.md#package-readme-companion
+[up-global-clients]: ./upgrading.md#global-clients-join
+[up-credential]: ./upgrading.md#credential-project-insecure
+[up-dev-install]: ./upgrading.md#dev-install-collision
+[up-shared-pool]: ./upgrading.md#shared-pool-auto-join
+[up-release-floats]: ./upgrading.md#release-floats
+[up-non-regular]: ./upgrading.md#non-regular-file
+[up-smaller]: ./upgrading.md#smaller-notes
+[build]: ./commands.md#build
+[mcp]: ./commands.md#mcp
+[publish-validation]: ./publishing.md#batch-publish-validation
