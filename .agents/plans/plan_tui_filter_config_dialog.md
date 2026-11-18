@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_tui_filter_config_dialog
-- **Active phase:** 1 — Phase A: filter & sort popup
+- **Active phase:** 2 — Phase B: config dialog
 - **Step:** /hex-execute → Implement
-- **Last update:** 2026-11-18 (after 517b4a98: feat(tui): open a filter and sort popup with F)
+- **Last update:** 2026-11-18 (after 2304fddf: chore: note the filter and sort popup in the command index)
 
 ---
 
