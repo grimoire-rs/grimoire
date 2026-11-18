@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.helpers import make_artifact, write_config
+from src.helpers import make_artifact, make_bundle, write_config
 from src.registry import REGISTRY_HOST
 
 
@@ -281,6 +281,30 @@ def test_search_status_flips_to_installed_after_install(
         r for r in rows if r["repo"].endswith(f"{unique_repo}/installable")
     ]
     assert match, f"expected the installed repo in results, got {rows}"
+    assert match[0]["status"] == "installed", match[0]
+
+
+def test_search_status_of_an_installed_bundle_is_installed(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    member = make_artifact(
+        f"{unique_repo}/member",
+        "skill",
+        {"member/SKILL.md": "---\nname: member\n---\n# m\n"},
+        tag="1",
+    )
+    suite = make_bundle(f"{unique_repo}/suite", [("skill", "member", member.fq)], tag="1")
+    write_config(project_dir, bundles={"suite": suite.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", f"{REGISTRY_HOST}/{unique_repo}", "--refresh"
+    )["items"]
+
+    match = [r for r in rows if r["repo"].endswith(f"{unique_repo}/suite")]
+    assert match, f"expected the bundle in results, got {rows}"
     assert match[0]["status"] == "installed", match[0]
 
 

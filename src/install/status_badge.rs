@@ -21,6 +21,9 @@ use crate::install::settings_phase::report_fence;
 use crate::install::target::InstallTarget;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
+use crate::lock::locked_bundle::LockedBundle;
+use crate::oci::ArtifactKind;
+use std::collections::BTreeSet;
 
 /// The install status of a catalog repository relative to the scope.
 ///
@@ -91,9 +94,28 @@ pub fn derive_badge(
     active: &[ClientTarget],
     target: Option<&InstallTarget>,
 ) -> StatusBadge {
-    let Some(locked) = lock.and_then(|l| find_by_repo(l, registry, repository)) else {
+    let Some(lock) = lock else {
         return StatusBadge::NotInstalled;
     };
+    let Some(locked) = find_by_repo(lock, registry, repository) else {
+        return find_bundle_by_repo(lock, registry, repository).map_or(StatusBadge::NotInstalled, |row| {
+            let mut visited = BTreeSet::from([row.name.as_str()]);
+            bundle_badge(lock, row, state, roots, active, target, &mut visited)
+        });
+    };
+    artifact_badge(locked, registry, repository, state, roots, active, target)
+}
+
+/// The badge of one locked artifact: the ladder [`derive_badge`] documents.
+fn artifact_badge(
+    locked: &LockedArtifact,
+    registry: &str,
+    repository: &str,
+    state: &InstallState,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    target: Option<&InstallTarget>,
+) -> StatusBadge {
     let Some(record) = state.iter_records().find(|r| {
         r.source
             .pinned()
@@ -148,6 +170,67 @@ pub fn derive_badge(
     }
 }
 
+/// A bundle has no install record: its badge is its members', through nested
+/// bundle rows. Any `modified` member wins, then `outdated`, then a member an
+/// install would still write (`not-installed` or `pending`) gives `pending`.
+/// `visited` ends a malformed cyclic lock.
+fn bundle_badge<'a>(
+    lock: &'a GrimoireLock,
+    row: &'a LockedBundle,
+    state: &InstallState,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    target: Option<&InstallTarget>,
+    visited: &mut BTreeSet<&'a str>,
+) -> StatusBadge {
+    let (mut modified, mut outdated, mut pending) = (false, false, false);
+    for member in &row.members {
+        let badge = if member.kind == ArtifactKind::Bundle {
+            match lock.bundles.iter().find(|b| b.name == member.name) {
+                Some(nested) if visited.insert(nested.name.as_str()) => {
+                    bundle_badge(lock, nested, state, roots, active, target, visited)
+                }
+                Some(_) => continue,
+                None => StatusBadge::NotInstalled,
+            }
+        } else {
+            match lock
+                .iter_artifacts()
+                .find(|a| a.kind == member.kind && a.name == member.name)
+            {
+                Some(artifact) => match artifact.source.pinned() {
+                    Some(p) => artifact_badge(artifact, p.registry(), p.repository(), state, roots, active, target),
+                    None => continue,
+                },
+                None => StatusBadge::NotInstalled,
+            }
+        };
+        match badge {
+            StatusBadge::Modified => modified = true,
+            StatusBadge::Outdated => outdated = true,
+            StatusBadge::NotInstalled | StatusBadge::Pending => pending = true,
+            StatusBadge::Installed => {}
+        }
+    }
+    if modified {
+        StatusBadge::Modified
+    } else if outdated {
+        StatusBadge::Outdated
+    } else if pending {
+        StatusBadge::Pending
+    } else {
+        StatusBadge::Installed
+    }
+}
+
+/// The `[[bundle]]` row whose pin is in `registry/repository`, declared or nested.
+fn find_bundle_by_repo<'a>(lock: &'a GrimoireLock, registry: &str, repository: &str) -> Option<&'a LockedBundle> {
+    lock.bundles.iter().find(|b| {
+        b.pinned()
+            .is_some_and(|p| p.registry() == registry && p.repository() == repository)
+    })
+}
+
 /// Find the locked artifact whose pin is in `registry/repository`.
 ///
 /// Iterates **every** kind through [`GrimoireLock::iter_artifacts`] rather
@@ -178,6 +261,8 @@ mod tests {
     use crate::install::install_state::{ClientOutput, InstallRecord};
     use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::lock::grimoire_lock::LockMetadata;
+    use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+    use crate::oci::bundle::BundleMember;
     use crate::lock::lock_version::LockVersion;
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier};
@@ -237,8 +322,8 @@ mod tests {
     #[test]
     fn every_locked_kind_is_findable_by_repo() {
         for kind in crate::oci::ArtifactKind::ALL {
-            // Bundles never enter the lock as artifacts — they expand into
-            // members — so there is nothing to find and nothing to assert.
+            // A bundle is a `[[bundle]]` row, not a locked artifact, so
+            // `find_by_repo` has nothing to find; `find_bundle_by_repo` does.
             if kind == crate::oci::ArtifactKind::Bundle {
                 continue;
             }
@@ -261,6 +346,86 @@ mod tests {
                  badges every installed artifact of that kind as NotInstalled"
             );
         }
+    }
+
+    fn bundle_row(name: &str, repo: &str, members: &[(ArtifactKind, &str)], transitive: bool) -> LockedBundle {
+        LockedBundle {
+            name: name.to_string(),
+            source: LockedBundleSource::Registry {
+                repo: format!("localhost:5000/{repo}"),
+                tag: "1".to_string(),
+                pinned: pinned(repo, 'c'),
+            },
+            members: members
+                .iter()
+                .map(|(kind, member)| BundleMember {
+                    kind: *kind,
+                    name: (*member).to_string(),
+                    id: format!("localhost:5000/acme/{member}:1"),
+                })
+                .collect(),
+            transitive,
+        }
+    }
+
+    fn bundle_badge(lock: &GrimoireLock, st: &InstallState, ws: &std::path::Path, repo: &str) -> StatusBadge {
+        derive_badge(
+            "localhost:5000",
+            repo,
+            Some(lock),
+            st,
+            &roots(ws),
+            &[ClientTarget::Claude],
+            None,
+        )
+    }
+
+    /// A bundle has a `[[bundle]]` row and no install record: its badge is its
+    /// members', so a declared bundle whose members are installed reads
+    /// `installed`, and one member missing from the install state reads
+    /// `pending`.
+    #[test]
+    fn a_declared_bundle_takes_its_members_badge() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("x.md"), b"canonical\n").unwrap();
+        let st = state_with("acme/x", 'a', ws, "x.md");
+        let mut lock = lock_with("acme/x", 'a');
+        lock.bundles
+            .push(bundle_row("suite", "acme/suite", &[(ArtifactKind::Skill, "x")], false));
+
+        assert_eq!(bundle_badge(&lock, &st, ws, "acme/suite"), StatusBadge::Installed);
+
+        let empty = InstallState::empty(std::path::Path::new("/tmp/s.json"));
+        assert_eq!(bundle_badge(&lock, &empty, ws, "acme/suite"), StatusBadge::Pending);
+
+        std::fs::write(ws.join("x.md"), b"hand edited\n").unwrap();
+        assert_eq!(bundle_badge(&lock, &st, ws, "acme/suite"), StatusBadge::Modified);
+    }
+
+    /// A nested bundle row (`transitive`) answers through its own members, and
+    /// a cyclic lock ends.
+    #[test]
+    fn a_nested_bundle_answers_through_its_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("x.md"), b"canonical\n").unwrap();
+        let st = state_with("acme/x", 'a', ws, "x.md");
+        let mut lock = lock_with("acme/x", 'a');
+        lock.bundles.push(bundle_row(
+            "suite",
+            "acme/suite",
+            &[(ArtifactKind::Bundle, "mid"), (ArtifactKind::Bundle, "suite")],
+            false,
+        ));
+        lock.bundles
+            .push(bundle_row("mid", "acme/mid", &[(ArtifactKind::Skill, "x")], true));
+
+        assert_eq!(bundle_badge(&lock, &st, ws, "acme/suite"), StatusBadge::Installed);
+        assert_eq!(bundle_badge(&lock, &st, ws, "acme/mid"), StatusBadge::Installed);
+
+        std::fs::write(ws.join("x.md"), b"hand edited\n").unwrap();
+        assert_eq!(bundle_badge(&lock, &st, ws, "acme/suite"), StatusBadge::Modified);
     }
 
     /// `client`'s recorded settings value `m` at `pointer` in `relative`.
