@@ -118,6 +118,10 @@ pub struct HookPolicy {
     /// record through [`Self::with_consented`] or [`Self::adopt_consent`], so a
     /// policy built without one arms nothing on consent.
     consented: BTreeSet<String>,
+    /// The consent keys of this kind the invocation declares, which [`Self::consent`]
+    /// was judged against. Read by `grim add`'s gesture to tell whether its record
+    /// covers every one; empty when the builder had no declaration.
+    declared: BTreeSet<String>,
     /// Binding names of the hooks the lock declares, when the builder read one.
     /// `grim remove` keeps the install record and the payload, so a record
     /// outside this set must not arm under any grant, `--trust-workspace` included.
@@ -179,6 +183,7 @@ impl HookPolicy {
             plain_http_hosts: plain_http_hosts_with(&declared),
             consent,
             consented: BTreeSet::new(),
+            declared: BTreeSet::new(),
             locked: None,
             granted_now: false,
             declined_now: false,
@@ -195,6 +200,18 @@ impl HookPolicy {
     pub fn with_consented(mut self, consented: BTreeSet<String>) -> Self {
         self.consented = consented;
         self
+    }
+
+    /// Attach the consent keys this policy's consent answer was judged against.
+    #[must_use]
+    pub fn with_declared(mut self, declared: BTreeSet<String>) -> Self {
+        self.declared = declared;
+        self
+    }
+
+    /// The consent keys this invocation declares, see [`Self::with_declared`].
+    pub fn declared(&self) -> &BTreeSet<String> {
+        &self.declared
     }
 
     /// Add hook binding names the lock declares; only these may arm. Unions,
@@ -508,11 +525,13 @@ impl ConsentPolicies {
             inputs.registries,
             consent::evaluate(record, inputs.workspace, &hook_keys),
         )
-        .with_consented(record.map(|r| r.hooks.clone()).unwrap_or_default());
+        .with_consented(record.map(|r| r.hooks.clone()).unwrap_or_default())
+        .with_declared(hook_keys);
         let settings = HookPolicy {
             feature_enabled: inputs.flags.settings_enabled(),
             kind: ArtifactKind::Settings,
             consent: consent::evaluate(record, inputs.workspace, &settings_keys),
+            declared: settings_keys,
             ..hooks.clone()
         };
         Self { hooks, settings }

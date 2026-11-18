@@ -661,7 +661,9 @@ def test_add_does_not_consent_preexisting_hook(
     record = _record_for(runner, project_dir)
     assert record is not None, "positive control: the newly reached hook is consented"
     assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"]
-    assert _hook_names(_rows(runner)) == {"fresh"}
+    # `planted` is still declared and unconsented, which is drift: nothing arms,
+    # exactly as the `grim install` after this add would decide.
+    assert _hook_names(_rows(runner)) == set()
     assert "consent-drifted" in {a["cause"] for a in _hook_state(runner, "planted")["arming"]}
 
 
@@ -714,7 +716,8 @@ def test_add_bundle_does_not_consent_preexisting_member(
     record = _record_for(runner, project_dir)
     assert record is not None, "positive control: the bundle's new hook is consented"
     assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"], record
-    assert _hook_names(_rows(runner)) == {"fresh"}
+    # `planted` (declared through `old`) is unconsented drift, so nothing arms.
+    assert _hook_names(_rows(runner)) == set()
 
 
 def test_install_writes_no_consent_for_dependency(
@@ -1547,3 +1550,62 @@ pinned = "{reference}@{old.digest}"
     runner.run("add", "--kind", "hook", reference)
     assert _consented(runner, project_dir) == {f"h@{REGISTRY_HOST}/{good}/h"}
     assert _armed_in(runner, project_dir) == {"h"}
+
+
+def _arming_files(runner, workspace: Path) -> dict[str, bytes | None]:
+    """The bytes `grim add` and `grim install` must agree on: the dispatch table,
+    the client's settings file, and the consent record."""
+    files = {
+        "dispatch": Path(runner.grim_home) / "hooks" / "dispatch.json",
+        "settings": workspace / ".claude" / "settings.local.json",
+    }
+    snapshot = {name: path.read_bytes() if path.is_file() else None for name, path in files.items()}
+    record = _record_for(runner, workspace)
+    snapshot["record"] = json.dumps(record, sort_keys=True).encode() if record else None
+    return snapshot
+
+
+def test_add_beside_an_unconsented_declared_hook_decides_as_install_does(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """One declared hook the record lacks disarms every hook of the workspace.
+
+    `grim add` used to adopt the record it had just extended and arm the covered
+    hooks, which the plain `grim install` after it disarmed again: two commands
+    disagreeing about the same files.
+    """
+    a = _publish_hook(unique_repo, name="a")
+    x = _publish_hook(unique_repo, name="x")
+    b = _publish_hook(unique_repo, name="b")
+    write_config(project_dir, hooks={"a": a.fq})
+    runner = grim_at(project_dir)
+    _enabled(runner)
+    runner.run("lock")
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _hook_names(_rows(runner)) == {"a"}, "positive control: consented and armed"
+
+    write_config(project_dir, hooks={"a": a.fq, "x": x.fq})  # a hand edit nobody consented to
+    _enabled(runner)
+    runner.run("lock")
+    runner.run("install")
+    assert _rows(runner) == [], "the drift of x disarms a"
+
+    added = runner.run("add", "--kind", "hook", b.fq)
+
+    assert _rows(runner) == [], "add must not arm what install would leave disarmed"
+    assert not (project_dir / ".claude" / "settings.local.json").is_file() or "hooks" not in json.loads(
+        (project_dir / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+    )
+    assert _consented(runner, project_dir) == {_key(a), _key(b)}, "what the add brought is still recorded"
+    warning = [line for line in added.stderr.splitlines() if "'x'" in line and "grim hook allow" in line]
+    assert warning, added.stderr
+    after_add = _arming_files(runner, project_dir)
+
+    runner.run("install")
+
+    assert _arming_files(runner, project_dir) == after_add, "install changes nothing add left"
+
+    runner.run("hook", "allow")
+    runner.run("install")
+    assert _hook_names(_rows(runner)) == {"a", "x", "b"}, "positive control: the review arms all three"

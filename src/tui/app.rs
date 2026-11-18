@@ -19991,10 +19991,10 @@ mod tests {
         }
 
         /// A hook the workspace already declared is not this Install's to
-        /// consent to: it stays gated, the guard keeps arming, and the status
+        /// consent to: it stays gated and, as drift, arms no hook; the status
         /// line names the gated hook rather than reading `skipped`.
         #[tokio::test]
-        async fn a_tui_install_leaves_a_hook_the_workspace_held_gated_and_names_it() {
+        async fn a_tui_install_leaves_a_hook_the_workspace_held_gated_and_arms_nothing() {
             let (_ws, _home, ctx) = consented_guard(OLD_DECL).await;
             perform(
                 &ctx,
@@ -20018,16 +20018,17 @@ mod tests {
             .await
             .expect("bundle install succeeds");
 
-            assert_eq!(armed_hooks(&ctx), names(&["guard"]), "{summary:?}");
+            assert_eq!(armed_hooks(&ctx), names(&[]), "{summary:?}");
             assert_eq!(consented(&ctx), names(&["guard"]));
             assert!(summary.hooks.lead().starts_with("hook 'g' not armed: "), "{summary:?}");
             assert_eq!(summary.label, "installed", "a gated hook is not the action's label");
         }
 
         /// TUI Update is `grim update <binding>`: it writes no record, and the
-        /// hook its bundle brings gates without disarming the guard.
+        /// hook its bundle brings gates; a declared hook without consent is
+        /// drift, and drift arms no hook, as under `grim install`.
         #[tokio::test]
-        async fn a_tui_update_writes_no_record_and_keeps_the_guard_armed() {
+        async fn a_tui_update_writes_no_record_and_arms_nothing_while_a_hook_lacks_consent() {
             let (_ws, _home, ctx) = consented_guard(STARTER_DECL).await;
 
             let summary = perform(
@@ -20041,15 +20042,16 @@ mod tests {
             .await
             .expect("bundle update succeeds");
 
-            assert_eq!(armed_hooks(&ctx), names(&["guard"]), "{summary:?}");
+            assert_eq!(armed_hooks(&ctx), names(&[]), "{summary:?}");
             assert_eq!(consented(&ctx), names(&["guard"]));
             assert!(summary.hooks.lead().starts_with("hook 'g' not armed: "), "{summary:?}");
         }
 
         /// An Install on a row the declaration holds declares nothing, so it is
-        /// `grim install`'s TUI form: it writes no record and disarms nothing.
+        /// `grim install`'s TUI form: it writes no record, and a declared hook
+        /// without consent is drift, which arms no hook.
         #[tokio::test]
-        async fn a_held_tui_install_writes_no_record_and_keeps_the_guard_armed() {
+        async fn a_held_tui_install_writes_no_record_and_arms_nothing_while_a_hook_lacks_consent() {
             let (_ws, _home, ctx) = consented_guard(STARTER_DECL).await;
 
             let summary = perform(
@@ -20063,7 +20065,7 @@ mod tests {
             .await
             .expect("held install succeeds");
 
-            assert_eq!(armed_hooks(&ctx), names(&["guard"]), "{summary:?}");
+            assert_eq!(armed_hooks(&ctx), names(&[]), "{summary:?}");
             assert_eq!(consented(&ctx), names(&["guard"]));
         }
 
@@ -20152,11 +20154,11 @@ mod tests {
             assert_eq!(armed_hooks(&ctx), names(&["g", "guard"]));
         }
 
-        /// A dev record is never a hook, but convergence re-arms every hook the
-        /// on-disk lock declares, so a hook the record lacks must not read as
-        /// drift here either.
+        /// A dev record is never a hook, but convergence judges every hook the
+        /// on-disk lock declares: a hook the record lacks is drift, and drift
+        /// arms no hook, as under `grim install`.
         #[tokio::test]
-        async fn a_dev_refresh_keeps_the_guard_armed_past_a_hook_the_record_lacks() {
+        async fn a_dev_refresh_arms_nothing_while_a_hook_lacks_consent() {
             let (_ws, _home, ctx) = consented_guard(G_DECL).await;
             perform(
                 &ctx,
@@ -20168,7 +20170,7 @@ mod tests {
             )
             .await
             .expect("the relock writes a lock holding both hooks");
-            assert_eq!(armed_hooks(&ctx), names(&["guard"]), "precondition");
+            assert_eq!(armed_hooks(&ctx), names(&[]), "precondition");
             let skill = ctx.workspace.join("dev-skill");
             std::fs::create_dir_all(&skill).unwrap();
             std::fs::write(skill.join("SKILL.md"), "---\nname: dev-skill\ndescription: d\n---\n").unwrap();
@@ -20191,7 +20193,7 @@ mod tests {
                 .await
                 .expect("the dev record re-materializes");
 
-            assert_eq!(armed_hooks(&ctx), names(&["guard"]));
+            assert_eq!(armed_hooks(&ctx), names(&[]));
             assert_eq!(consented(&ctx), names(&["guard"]));
         }
 
