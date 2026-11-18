@@ -1021,7 +1021,9 @@ and `lock_version` stays `1`.
 the dependencies in the pinned manifest, which is verified by digest, and
 refuses any difference with exit `65` and the reason `stale-lock` before it
 writes anything. That catches a lock written by an older grim, a hand-edited
-one, and one carried forward offline. Run [`grim lock`](./commands.md#lock) to
+one, and one carried forward offline. The check covers entries that are already
+installed too, and reads them from the local store alone, so it sends no request.
+A store that lacks the manifest skips that entry. Run [`grim lock`](./commands.md#lock) to
 repair it.
 
 ### Local path sources {#lock-path-sources}

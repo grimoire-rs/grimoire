@@ -213,7 +213,7 @@ attention. Each state name is defined once at
 | Badge | Means |
 |---|---|
 | `✓` | Installed |
-| `◆` | Via bundle |
+| `◆` | Via bundle, or via dependency: present only because a bundle lists it or an installed artifact requires it |
 | `·` | Not installed |
 | `↑` | Outdated |
 | `✱` | Modified |

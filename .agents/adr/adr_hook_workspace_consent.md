@@ -311,6 +311,12 @@ digest in either form (**T2**). An agent that can drive a terminal can already r
 leads with each hook the action consented to, also when the install fails, which
 is the same after-the-fact disclosure `grim add` gives on stderr.
 
+2026-11-18 (goal-loop, awaiting the owner): the add gesture adopts the record
+it leaves only when that record covers every declared hook. Otherwise the policy
+stays drifted as `grim install` judges it, and one warning names the uncovered
+hooks. This replaces "arms on the record as it stands" above for `grim add` and
+the TUI forms that share it.
+
 **5. The plain-HTTP control survives, relocated to the transport layer.**
 `trust::decide` condition 5 withheld an implicit grant from any entry reached
 over plain HTTP, because *the first resolution that produces the digest pin is

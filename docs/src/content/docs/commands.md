@@ -507,7 +507,8 @@ typed. A dependency that is already locked but missing on disk is installed too.
 Plain output adds one stderr line, `pulled in N dependencies: <kind>/<name>, …`,
 naming the dependencies this add brought into the workspace, and
 `--format json` carries the same list in
-[`pulled_in`](./json-interface.md#shapes-single).
+[`pulled_in`](./json-interface.md#shapes-single). A bundle the target
+nests or requires is listed there too, with kind `bundle`.
 
 `add` keeps every other pin, even after a tag moved, and re-packs every
 [local path source](#add-path). It can still move a pin it shares. When a new
@@ -583,14 +584,19 @@ parent lists it. An edge below a local path you added counts too, since this run
 re-packed it. A hook behind an edge your store cannot confirm needs
 [`grim hook allow`](#hook).
 
-Unless you pass `--no-trust-workspace`, an add never withdraws consent from a
-hook the record covers, so those hooks stay armed. A hook the add brings but
-does not consent to stays gated. It is [drift](./hooks.md#consent) until
-[`grim hook allow`](#hook) covers it.
+Unless you pass `--no-trust-workspace`, an add arms hooks on the record it
+leaves behind only when that record covers every hook the workspace declares.
+Otherwise it arms none, as `grim install` would. A declared hook the record
+lacks is [drift](./hooks.md#consent), and drift gates every hook until
+[`grim hook allow`](#hook) covers it. The add still records consent for what it
+brings. It then prints one warning that names the uncovered hooks and tells you
+to re-run [`grim hook allow`](#hook) to review them. The warning starts
+`hook 'x' not consented`. Global scope keeps no record, so this
+does not apply there.
 
 An `add` whose install fails keeps its declaration, its lock and that consent.
 Once you clear the failure, `grim install` or a retried `add` arms the hook with
-no `grim hook allow`, and no hook the record covers disarms in between. A relock
+no `grim hook allow`, as long as the record covers every declared hook. A relock
 that fails rolls the declaration back and records nothing. `--no-install`
 records the same hook consent, since it declares and locks the same way. It
 records no settings package, which the next `grim install` asks about.
@@ -664,6 +670,7 @@ A bundle has no local-path form via `add`: `grim add --kind bundle
 | Success | `0` |
 | A reference naming another repository for an existing binding, an invalid binding name, or a local-path bundle | `64` |
 | A local modification or an untracked destination, or a dependency [cycle](./concepts.md#dependency-cycles) or [limit](./concepts.md#dependency-limits), including the node-admission and tag-listing limits | `65` |
+| A repository declared as one kind whose manifest names another (`declared as a skill but published as a rule`); a manifest that names no kind is still accepted | `65` |
 | With [`--locked`](#locked), a stale lock (reason `stale-lock`) | `65` |
 | An install state file that cannot be read, before the lock is saved | `74` |
 | Concurrent write on the config file's lock | `75` |
@@ -841,6 +848,7 @@ case from an earlier run is not repeated here:
 |-----------|------|
 | Success | `0` |
 | A dependency [cycle](./concepts.md#dependency-cycles), a graph past the [limits](./concepts.md#dependency-limits) (including 32,768 node admissions and 32 MiB of tag listings), or an artifact that requires a feature this grim does not know (reason `unsupported-artifact-feature`) | `65` |
+| A repository declared as one kind whose manifest names another (`declared as a skill but published as a rule`); a manifest that names no kind is still accepted | `65` |
 | With [`--locked`](#locked), a stale lock (reason `stale-lock`) | `65` |
 | Concurrent write on the config file's lock | `75` |
 | With [`--locked`](#locked), no lock file (reason `no-lock`) | `79` |
@@ -1338,6 +1346,7 @@ nothing.
 | A locally modified artifact, refused with `refused: true` on its row; the report still prints and the pin has already moved | `65` |
 | A named run on a stale lock (`stale-lock`), or any run on a stale lock with [`--locked`](#locked) | `65` |
 | A dependency [cycle](./concepts.md#dependency-cycles), a [limit](./concepts.md#dependency-limits) (including 32,768 node admissions and 32 MiB of tag listings), or `unsupported-artifact-feature` | `65` |
+| A repository declared as one kind whose manifest names another (`declared as a skill but published as a rule`); a manifest that names no kind is still accepted | `65` |
 | A state file that cannot be read, or a proven record that cannot be saved, before the lock is saved (the lock stays unchanged) | `74` |
 | Concurrent write on the config file's lock | `75` |
 | Sources claiming different versions of one artifact, which a moved tag [can cause](./concepts.md#bundle-conflicts), or claims in two majors | `78` |
@@ -1603,8 +1612,9 @@ claude (global), opencode (detected)`. It names the clients the report covers
 and what selected each, in the words of [`grim install`](#install). Stdout and
 `--format json` do not carry it.
 
-A directly declared artifact may also be required by another artifact at the
-same digest, with no artifact asking for another version of it. Plain output
+A directly declared artifact, or a declared bundle, may also be required by
+another artifact at the same digest. No artifact then asks for another version
+of it. Plain output
 then prints a note on stderr that the declaration can be removed. It stays safe to keep: a direct declaration with a tag wins over a dependency, and a bare one follows the version claims on its repository.
 
 `--format json` output carries an `outputs` array per artifact: the
@@ -1808,7 +1818,9 @@ offline run or a lock with no recorded edges prints none. The note leaves once
 A nested bundle has no row, and `update_available` stays each row's own answer.
 A row that reaches a moved nested bundle lists it in
 [`moved_nested_bundles`](./json-interface.md#status-check-nullability), and stderr
-names it. `grim update -- <listed name>` moves it and can change its members.
+names it. `grim update -- <listed name>` moves it and can change its members, or
+says why it cannot. The note for a row with an update reads the same way: the
+command moves its pin, or says why it cannot.
 The note carries the same scope, stale-lock and multi-reference qualifiers as a
 row's note.
 `grim update -- <row>` leaves the listing, because that row's own pin held.
@@ -1852,9 +1864,9 @@ grim status --check --format json
 ## Artifact states {#artifact-states}
 
 One artifact, three renderers, three word lists. [`grim status`](#status)
-reports five states for every non-hook kind, the [TUI](#tui) seven, and
+reports five states for every non-hook kind, the [TUI](#tui) eight, and
 [`grim search`](#search)'s install badge five again. The badge's five are a
-strict subset of the TUI's seven. `grim status` is the one that stands
+strict subset of the TUI's eight. `grim status` is the one that stands
 apart: it shares only `installed`, `outdated` and `modified` with the
 other two, and its `missing` and `stale` appear in neither. This section
 is where every one of those words is defined.
@@ -1896,12 +1908,13 @@ individual artifact's footprint. It is the same condition
 still exits `0`.
 
 The [TUI](#tui) carries no `stale` — that one describes the scope, not a
-row — and adds four words of its own:
+row — and adds five words of its own:
 
 | State | What it adds |
 |---|---|
 | `not-installed` | Not declared, locked, or recorded in this scope. The TUI shows catalog rows `grim status` never lists, so it needs a word for them. |
-| `via-bundle` | A [bundle](./concepts.md#bundles) member that is present and intact but not also declared standalone. `modified`, `outdated` and `integrity-missing` outrank it. |
+| `via-bundle` | A [bundle](./concepts.md#bundles) member, nested bundles included, that is present and intact but not also declared standalone. `modified`, `outdated` and `integrity-missing` outrank it. |
+| `via-dependency` | An artifact reached only through another artifact's [`requires`](./concepts.md#dependencies), present and intact. The same outranking applies. |
 | `pending` | Present and intact at the locked pin, but an install would still write an output the record never covered — a client that appeared since the install, or a render-layout move. [`grim install`](#install) clears it. |
 | `integrity-missing` | An install record exists, but one or more client outputs are missing or unreadable, so the integrity record cannot be honoured. |
 
@@ -1942,13 +1955,17 @@ integrity-missing > modified > outdated > pending > installed
 
 Declaration is the gate there — a bundle absent from `[bundles]` reads
 `not-installed` whatever its members look like — so no member can drag
-the row back across the line declaration owns.
+the row back across the line declaration owns. A declared bundle that nests
+another reads `installed`, and the nested bundle reads `via-bundle`.
 
 [`grim search`](#search)'s install badge is the TUI's list minus two —
 `installed`, `not-installed`, `outdated`, `modified`, `pending` — carrying
-neither `integrity-missing` nor `via-bundle` (and no `stale` either, for
+neither `integrity-missing`, `via-bundle` nor `via-dependency` (and no `stale` either, for
 the reason above), because a catalog row is
-asked one question only: would installing this change anything here. That
+asked one question only: would installing this change anything here.
+A bundle's badge comes from its members, nested bundles included, with
+`modified` over `outdated` over `pending` over `installed`. The same holds for the
+MCP `grim_search` tool. That
 leaves one crossing worth naming. An artifact whose output you deleted
 reads `not-installed` on the search badge and `missing` under
 [`grim status`](#status): the badge answers *is there work to do*, the
@@ -2121,6 +2138,10 @@ every node the relock drops, before it saves the lock. It warns on stderr
 about files left on disk that it could not prove. It never deletes a file.
 A state file it cannot read produces a warning, and the edit and its exit code
 stand.
+
+A hook the edit drops from the lock stays armed until `grim install` or
+`grim uninstall` runs, whatever kind you removed. `remove` prints one warning for
+each such hook.
 
 If that relock fails, `remove` changes nothing and exits with the relock's own
 code, for example `78`, `69` or `79`. Registry unreachable, a manifest the store
@@ -2319,9 +2340,13 @@ the managed entry has drifted — you edited it in place after install —
 `uninstall` refuses the whole operation with exit 65 (`reason:
 "modified"`, `forceable: true`) and changes nothing, so nothing is
 half-removed. `grim uninstall --force <kind> <name>` removes it anyway.
+The same gate covers a drifted entry of a [dependency](./concepts.md#dependencies)
+removed with the target: the run refuses before its first delete.
 An entry that is already gone, or sits in a config file grim cannot
 parse, is not gated: there is nothing left to preserve. Materialized
 files are deleted either way — `--force` affects config entries only.
+A locally edited file of a dependency, or of a bundle member, is deleted with
+its parent too. One warning on stderr names it.
 
 An entry grim *adopted* rather than wrote — it was already there and
 already identical, so the install recorded it without touching a byte —
@@ -2367,7 +2392,9 @@ on the target's entry. With neither, the target's files go, and
 
 For the two `kept-by-*` rows, remove the bundle or the requiring artifact to
 remove the artifact. A `kept-by-bundle` run prints a line naming each bundle that
-keeps it on its own, with the commands that remove it. So does a run that drops a
+keeps it on its own, with the commands that remove it. The line also names a
+requiring artifact that holds it, and a declared bundle that reaches it through a
+nested bundle. So does a run that drops a
 direct declaration a bundle also provides, though its status stays `uninstalled`. When no one bundle keeps
 it on its own, the line names no bundle and gives only the `uninstall` command.
 
@@ -3982,12 +4009,12 @@ A bad path has an empty, `.` or `..` segment, a character outside
 | `Enter` on a group | Fold or unfold the group (same as `→`/`←` toggle). On a leaf entry it rewinds the detail pane and fetches its companion immediately rather than waiting for the selection to settle — and it is the only way to retry a companion whose fetch failed. |
 | `tab` / `shift-tab` | Cycle the detail pane's [panels](#tui-detail-tabs) forward / backward. Works on every catalog row; a panel with nothing published behind it reads `not available`. |
 | `space` on a group | Mark every descendant leaf in the subtree. The group's mark glyph turns filled (`▣`) when all descendants are marked. |
-| `i` / `u` / `d` on a group | Install, update, or uninstall the subtree's descendant leaves whose current state permits the action (when no other rows are individually marked) — `i` acts on `not installed`, `pending` and `integrity-missing` leaves; `u`/`d` act on `installed`, `via bundle`, `outdated`, `modified`, `pending` and `integrity-missing` ones. `pending` is in both sets: the artifact is installed, so update and uninstall apply, *and* an install still has outputs to write for it. Leaves the action does not apply to are left untouched; if none qualify, the key press is a no-op with a status message. Batch behavior follows the same selection precedence as the flat view. |
+| `i` / `u` / `d` on a group | Install, update, or uninstall the subtree's descendant leaves whose current state permits the action (when no other rows are individually marked) — `i` acts on `not installed`, `pending` and `integrity-missing` leaves; `u`/`d` act on `installed`, `via bundle`, `via dependency`, `outdated`, `modified`, `pending` and `integrity-missing` ones. `pending` is in both sets: the artifact is installed, so update and uninstall apply, *and* an install still has outputs to write for it. Leaves the action does not apply to are left untouched; if none qualify, the key press is a no-op with a status message. Batch behavior follows the same selection precedence as the flat view. |
 
 Each group row shows a rollup glyph reflecting the worst install state of
 its descendants — `↑` when any descendant is outdated, `✱` when any is
 locally modified, and so on — so a collapsed tree still surfaces what needs
-attention.
+attention. The group's detail pane also counts its `pending` rows.
 
 **Compact namespaces** — a run of namespace segments that never branches
 collapses into one row whose label is the joined path, the same idea as [VS
@@ -4000,7 +4027,11 @@ and `fmt` leaves. A registry root always keeps its own row.
 
 **Bundle member expansion** — when the selected row is a bundle leaf, pressing
 `→` (or `Enter`) reveals its members as indented child rows badged
-`(via bundle)`. Member rows are read-only: they reflect what a bundle
+`(via bundle)`. A row expanded under an artifact that requires it reads
+`via-dependency`. Its detail pane labels that parent `Required by:`, where a
+bundle member says `Via bundle:`. A catalog row with no kind takes its kind from
+the lock or the install record. Member Install also works with a namespaced
+`[[registries]]` entry. Member rows are read-only: they reflect what a bundle
 declares, derived from the registry (or the lock snapshot when offline).
 Bundle members cannot be individually marked, installed, or uninstalled from
 the tree — use the parent bundle row for batch operations.
@@ -4169,9 +4200,11 @@ An Install that declares a row is `grim add`'s [hook consent](#add) in TUI form.
 It records the hooks that row newly brings before it installs them. The status
 line reports `hook '<name>' consented`, also when the install then fails.
 
-Every other Install, and every Update, writes no record. Each one arms on the
-record as it stands, so a hook the record covers stays armed. For a hook the
-record lacks, the line reports `hook '<name>' not armed` and the reason.
+Every other Install, and every Update, writes no record. Each one judges the
+record as `grim install` does, so a declared hook the record lacks is drift and
+arms no hook. The line then reports `hook '<name>' not armed` and the reason.
+A declaring Install arms hooks only when its record covers every declared hook.
+
 
 After an Install or Update, the status line names every pin the action moved or
 dropped, the row's own included, as `(moved …; dropped …)`. It does so even if

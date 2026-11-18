@@ -148,7 +148,8 @@ With the flag back on, the next `grim install` arms the same hooks with no new
 | `grim uninstall hook <name>` | removed | removed | removed |
 
 `grim remove` touches nothing on disk for any kind, and a hook is no
-exception. It warns that the hook stays armed. The next `grim install`
+exception. It warns that the hook stays armed, for every hook the edit drops
+from the lock, not only when the removed target is a hook. The next `grim install`
 converges the hooks to what is declared, and disarms it.
 
 ## Handler contract {#handler-contract}

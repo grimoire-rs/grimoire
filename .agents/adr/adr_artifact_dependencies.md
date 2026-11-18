@@ -725,6 +725,9 @@ This one check catches:
 The pinned manifest is digest-verified, so the comparison is against
 publisher bytes, not lock bytes.
 
+Update 2026-11-18: the check also covers entries already installed at their
+pin, read from the local store only; a store miss skips the entry.
+
 **Path-source freshness.** A path entry's freshness check re-reads the
 source and compares its edges with the recorded `requires`. A mismatch is
 65 `stale-lock`. For MCP the declaration is not packed into the content
@@ -760,6 +763,9 @@ Mutations act on `E_before \ E_after`:
   - dependency-only: nothing changes, and the uninstall reports
     **`kept-by-dependency`**;
   - held by a bundle: keeps `kept-by-bundle`.
+- Update 2026-11-18: a drifted managed entry of a dependency removed with the
+  target refuses the run before the first delete, as for the target; a locally
+  edited dependency file is still deleted, with one stderr warning.
 - The id-mismatch rule of `adr_effective_set_mutations.md` is unchanged.
 
 **Incomputable closure: never destructive.** When `effective_set` returns
@@ -958,7 +964,8 @@ budget sets `truncated: true` and keeps the paths found so far, sorted.
 **`grim add`**'s report gains `pulled_in`, always present:
 
 - `[{kind, name, pinned}]` = `E_after \ E_before`, minus the target, sorted;
-  `[]` when none.
+  `[]` when none. Update 2026-11-18: bundles the target nests or requires are
+  listed too, with kind `bundle`.
 - When `E_before` is incomputable, it lists only nodes of `E_after` absent
   from both the pre-add config and the previous lock, minus the target. This
   is the same conservative set the consent fallback uses.
