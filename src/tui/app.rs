@@ -921,14 +921,14 @@ fn build_row_check(config: &DesiredSet, lock: &GrimoireLock, row: &TuiRow) -> Op
     if registry.is_empty() || repository.is_empty() {
         return None;
     }
-    let locked = lock.iter_artifacts().find(|a| {
-        a.source
-            .pinned()
-            .is_some_and(|p| p.registry() == registry && p.repository() == repository)
-    })?;
+    // Whole locations: a pin splits a namespaced registry at the host, the row at the namespace.
+    let location = format!("{registry}/{repository}");
+    let locked = lock
+        .iter_artifacts()
+        .find(|a| a.source.pinned().is_some_and(|p| p.registry_repository() == location))?;
     Some(RowCheck {
         repo: row.repo.clone(),
-        id: declared_identifier(config, lock, registry, repository)?,
+        id: declared_identifier(config, lock, &location)?,
         locked_digest: locked.source.pinned()?.digest(),
     })
 }
@@ -949,13 +949,8 @@ fn build_row_check(config: &DesiredSet, lock: &GrimoireLock, row: &TuiRow) -> Op
 /// `↑ outdated` while `grim update` left it exactly where it was. The declared
 /// tag is also immune to the stale-cached-catalog-tag problem (issue #21) that
 /// motivated the discovery in the first place — the config is not the cache.
-fn declared_identifier(
-    config: &DesiredSet,
-    lock: &GrimoireLock,
-    registry: &str,
-    repository: &str,
-) -> Option<Identifier> {
-    let matches = |id: &Identifier| id.registry() == registry && id.repository() == repository;
+fn declared_identifier(config: &DesiredSet, lock: &GrimoireLock, location: &str) -> Option<Identifier> {
+    let matches = |id: &Identifier| id.registry_repository() == location;
     let direct = [&config.skills, &config.rules, &config.agents, &config.mcp]
         .into_iter()
         .flat_map(|table| table.values())
@@ -3882,7 +3877,11 @@ async fn perform(
         .clone()
         .or_else(|| Some(row.latest_tag.clone()).filter(|t| !t.is_empty()))
         .unwrap_or_else(|| "latest".to_string());
-    let id = Identifier::new_registry(repository.clone(), registry).clone_with_tag(tag.clone());
+    // Parsed whole: a namespaced registry (`host/ns`) keeps its namespace in the
+    // repository, so every request goes to the host.
+    let id = Identifier::parse(&format!("{registry}/{repository}"))
+        .map_err(|e| anyhow::anyhow!("malformed catalog repo: {}: {e}", row.repo))?
+        .clone_with_tag(tag.clone());
     let location = id.registry_repository();
     let row_at = RowAt {
         kind,
@@ -10674,6 +10673,137 @@ mod tests {
         assert_eq!(std::fs::read(&ctx.config_path).unwrap(), config);
         assert_eq!(pin_of(&ctx, "m"), pin);
         assert_eq!(badge_of(&ctx, "m"), ArtifactState::ViaBundle);
+    }
+
+    /// [`crate::oci::access::memory_registry::MemoryRegistry`] keyed as a real
+    /// client is: every identifier whose registry holds a path, which such a
+    /// client sends to the wrong host, is recorded.
+    struct HostOnly {
+        inner: crate::oci::access::memory_registry::MemoryRegistry,
+        misrouted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl HostOnly {
+        fn reach(&self, id: &Identifier) -> &crate::oci::access::memory_registry::MemoryRegistry {
+            if id.registry().contains('/') {
+                self.misrouted.lock().unwrap().push(id.to_string());
+            }
+            &self.inner
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for HostOnly {
+        async fn resolve_digest(
+            &self,
+            id: &Identifier,
+            op: crate::oci::access::Operation,
+        ) -> Result<Option<crate::oci::Digest>, crate::oci::access::error::AccessError> {
+            self.reach(id).resolve_digest(id, op).await
+        }
+        async fn fetch_manifest(
+            &self,
+            id: &crate::oci::PinnedIdentifier,
+        ) -> Result<Option<crate::oci::manifest::OciManifest>, crate::oci::access::error::AccessError> {
+            self.reach(id.as_identifier()).fetch_manifest(id).await
+        }
+        async fn fetch_blob(
+            &self,
+            repo: &Identifier,
+            digest: &crate::oci::Digest,
+            cap: u64,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            self.reach(repo).fetch_blob(repo, digest, cap).await
+        }
+        async fn list_tags(
+            &self,
+            id: &Identifier,
+        ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
+            self.reach(id).list_tags(id).await
+        }
+        async fn list_catalog(
+            &self,
+            registry: &str,
+        ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
+            self.inner.list_catalog(registry).await
+        }
+        async fn push_blob(
+            &self,
+            repo: &Identifier,
+            bytes: &[u8],
+        ) -> Result<crate::oci::Digest, crate::oci::access::error::AccessError> {
+            self.reach(repo).push_blob(repo, bytes).await
+        }
+        async fn push_manifest(
+            &self,
+            repo: &Identifier,
+            manifest: &crate::oci::manifest::OciManifest,
+        ) -> Result<crate::oci::Digest, crate::oci::access::error::AccessError> {
+            self.reach(repo).push_manifest(repo, manifest).await
+        }
+        async fn put_tag(
+            &self,
+            repo: &Identifier,
+            tag: &str,
+            digest: &crate::oci::Digest,
+        ) -> Result<(), crate::oci::access::error::AccessError> {
+            self.reach(repo).put_tag(repo, tag, digest).await
+        }
+    }
+
+    /// The parent's registry holds a namespace; the member resolves at the host.
+    #[tokio::test]
+    async fn tui_member_install_of_a_namespaced_registry_resolves_at_the_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        publish_skill(&reg, "a", "first").await;
+        let access = Arc::new(HostOnly {
+            inner: reg,
+            misrouted: std::sync::Mutex::default(),
+        });
+        let ctx = test_ctx(tmp.path(), access.clone());
+
+        perform_member(
+            &ctx,
+            BatchOp::Install,
+            "localhost:5050/acme/a".to_string(),
+            ArtifactKind::Skill,
+            "1".to_string(),
+            "a".to_string(),
+            "localhost:5050/acme",
+            &mut SettingsLedger::default(),
+        )
+        .await
+        .expect("the member installs");
+
+        assert_eq!(
+            *access.misrouted.lock().unwrap(),
+            Vec::<String>::new(),
+            "requests sent to a namespace"
+        );
+        let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
+        let pin = lock
+            .skills
+            .iter()
+            .find(|s| s.name == "a")
+            .and_then(|s| s.source.pinned())
+            .expect("a is pinned");
+        assert_eq!((pin.registry(), pin.repository()), ("localhost:5050", "acme/a"));
+        assert!(
+            ctx.workspace.join(".claude/skills/a/SKILL.md").is_file(),
+            "the action reaches the install seam"
+        );
+
+        let mut row = skill_row("a");
+        row.registry = "localhost:5050/acme".to_string();
+        row.repository = "a".to_string();
+        let (_lock, _state, config, ..) = load_scope_for_badges(&ctx);
+        let check = build_row_check(&config, &lock, &row).expect("the row's update check finds its pin");
+        assert_eq!(
+            (check.id.registry(), check.id.repository()),
+            ("localhost:5050", "acme/a")
+        );
     }
 
     #[tokio::test]
