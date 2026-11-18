@@ -4,12 +4,12 @@
 //! A small bordered list popup with check and radio marks, anchored to a pane.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr as _;
 
-use super::confirm::{HINT_INSET, PAD, PAD_ROWS, wrap};
+use super::confirm::{HINT_INSET, PAD, PAD_ROWS, button_label, wrap};
 use super::render::ColorKey;
 use super::theme;
 
@@ -66,6 +66,10 @@ pub struct ListPopupView {
     /// `Some((width, height))` centers the popup on the screen; `None`
     /// anchors it to a pane.
     pub centered: Option<(u16, u16)>,
+    /// Button labels in one centered row under the message.
+    pub buttons: Vec<String>,
+    /// The chosen button; while it is set the list highlights no row.
+    pub button_cursor: Option<usize>,
 }
 
 /// A `width` × `height` rectangle in `anchor`'s top-right corner, one row
@@ -132,13 +136,15 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ListPopupView) {
     let msg_h = u16::try_from(msg_lines.len())
         .unwrap_or(u16::MAX)
         .min(inner.height.saturating_sub(note_h + 1));
+    let button_h = u16::from(!view.buttons.is_empty()).min(inner.height.saturating_sub(note_h + msg_h + 1));
     let parts = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(note_h),
         Constraint::Length(msg_h),
+        Constraint::Length(button_h),
     ])
     .split(inner);
-    let (list_area, notes_area, msg_area) = (parts[0], parts[1], parts[2]);
+    let (list_area, notes_area, msg_area, button_area) = (parts[0], parts[1], parts[2], parts[3]);
     let width = usize::from(list_area.width);
     let items: Vec<ListItem> = view
         .rows
@@ -155,7 +161,11 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ListPopupView) {
         })
         .collect();
     let mut state = ListState::default();
-    state.select(view.cursor.filter(|&i| view.rows.get(i).is_some_and(|r| !r.header)));
+    let on_button = view.button_cursor.is_some();
+    state.select(
+        view.cursor
+            .filter(|&i| !on_button && view.rows.get(i).is_some_and(|r| !r.header)),
+    );
     f.render_stateful_widget(List::new(items).highlight_style(t.selection), list_area, &mut state);
     if note_h > 0 {
         let lines: Vec<Line> = view
@@ -176,6 +186,22 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ListPopupView) {
             .map(|l| Line::from(Span::styled(l, style)))
             .collect();
         f.render_widget(Paragraph::new(lines), msg_area);
+    }
+    if button_h > 0 {
+        let spans: Vec<Span> = view
+            .buttons
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let chosen = view.button_cursor == Some(i);
+                let style = if chosen { t.button_selected } else { t.button };
+                Span::styled(button_label(label, chosen), style)
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+            button_area,
+        );
     }
     let hint_w = area.width.saturating_sub(2 * HINT_INSET);
     if view.hint.width() <= usize::from(hint_w) {
@@ -205,6 +231,8 @@ mod tests {
             notes: Vec::new(),
             message: Some(("alpha beta gamma delta epsilon zeta eta theta".to_string(), true)),
             centered: None,
+            buttons: Vec::new(),
+            button_cursor: None,
         };
         let mut term = Terminal::new(TestBackend::new(30, 10)).unwrap();
         term.draw(|f| draw(f, f.area(), &view)).unwrap();
