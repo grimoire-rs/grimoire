@@ -917,6 +917,10 @@ struct Added {
     projection: Option<GrimoireLock>,
     /// Reached nodes the pre-add workspace did not provide, target excluded.
     newly: BTreeSet<NodeKey>,
+    /// Nested bundles the target reaches that the pre-add lock did not hold.
+    /// Report-only: a bundle is never a consent key, so [`Self::newly`] stays
+    /// artifacts.
+    newly_bundles: Vec<PinnedNode>,
     /// [`resolved_reach`] of the target.
     reach: Reach,
     /// The relock kept the target's pin, so no resolve answered its digest.
@@ -978,6 +982,7 @@ impl Added {
             .map(|a| (a.kind, a.name.clone()))
             .filter(|node| *node != target && !before.contains(node))
             .collect();
+        let newly_bundles = nested_bundles_added(previous, new_lock, &target);
         let reach = resolved_reach(previous, new_lock, declared, &target);
         let target_carried = carried(previous, new_lock, &target);
         let force = force_nodes(new_lock, &target);
@@ -985,6 +990,7 @@ impl Added {
             target,
             projection,
             newly,
+            newly_bundles,
             reach,
             target_carried,
             over_refusal: false,
@@ -1005,7 +1011,8 @@ impl Added {
         let Some(projection) = &self.projection else {
             return Vec::new();
         };
-        self.newly
+        let mut rows: Vec<PinnedNode> = self
+            .newly
             .iter()
             .filter_map(|(kind, name)| {
                 let entry = projection
@@ -1017,8 +1024,31 @@ impl Added {
                     pinned: entry.source.provenance(),
                 })
             })
-            .collect()
+            .collect();
+        rows.extend(self.newly_bundles.iter().cloned());
+        rows.sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+        rows
     }
+}
+
+/// The `[[bundle]]` rows `lock` holds that `previous` did not, target excluded:
+/// whatever the add pulled in, by membership or by a `requires` edge.
+fn nested_bundles_added(previous: Option<&GrimoireLock>, lock: &GrimoireLock, target: &NodeKey) -> Vec<PinnedNode> {
+    lock.bundles
+        .iter()
+        .filter(|b| (ArtifactKind::Bundle, b.name.clone()) != *target)
+        .filter(|b| !previous.is_some_and(|p| p.bundles.iter().any(|old| old.name == b.name)))
+        .map(|b| PinnedNode {
+            kind: ArtifactKind::Bundle,
+            name: b.name.clone(),
+            pinned: match &b.source {
+                crate::lock::locked_bundle::LockedBundleSource::Registry { pinned, .. } => {
+                    pinned.strip_advisory().to_string()
+                }
+                crate::lock::locked_bundle::LockedBundleSource::Path { path, hash } => format!("{path}@{hash}"),
+            },
+        })
+        .collect()
 }
 
 /// What `target` reaches over `lock` by edges this relock resolved: the set a
@@ -3037,6 +3067,7 @@ mod tests {
                 target: hook("typed"),
                 projection: None,
                 newly: BTreeSet::from([hook("fresh"), hook("carried")]),
+                newly_bundles: Vec::new(),
                 reach: Reach {
                     target: hook("typed"),
                     edges: Vec::new(),
