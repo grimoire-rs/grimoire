@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_artifact, make_settings, settings_sandbox, write_config
+from src.helpers import make_artifact, make_dependent, make_hook, make_settings, settings_sandbox, write_config
 from src.hook_launcher import run_launcher
 
 # Only the tests that actually arm and inspect the launcher/registration are
@@ -314,6 +314,36 @@ def test_s120_remove_of_an_armed_hook_warns_and_defers_the_disarm(
     runner.run("install")
     assert not _claude_marked(project_dir), "the next install must reap the registration"
     assert _rows(runner) == []
+
+
+@_POSIX_ONLY
+def test_remove_of_a_dependent_skill_warns_of_the_hook_it_dropped(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The skill's `requires` edge armed `hk`. Removing the skill drops `hk`
+    from the lock, and the disarm waits for the next install, as for a direct
+    `remove hook`. While another declaration still requires `hk`, nothing drops
+    and nothing is said."""
+    make_hook(f"{unique_repo}/hk", "hk", tag="1")
+
+    def skill(name: str) -> dict[str, str]:
+        return {f"{name}/SKILL.md": f"---\nname: {name}\ndescription: d\n---\n# {name}\n"}
+
+    hs = make_dependent(f"{unique_repo}/hs", "1", "skill", skill("hs"), [("hook", "hk", "./hk:1")])
+    other = make_dependent(f"{unique_repo}/other", "1", "skill", skill("other"), [("hook", "hk", "./hk:1")])
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("config", "set", "options.experimental.hooks", "true")
+    runner.run("add", "--trust-hooks", hs.fq)
+    runner.run("add", "--trust-hooks", other.fq)
+
+    kept = runner.run("remove", "skill", "hs")
+    assert "stays armed" not in kept.stderr, kept.stderr
+
+    dropped = runner.run("remove", "skill", "other")
+    assert "hook 'hk' was undeclared but stays armed until `grim install` or `grim uninstall` runs" in dropped.stderr, (
+        dropped.stderr
+    )
 
 
 # ---------------------------------------------------------------------------

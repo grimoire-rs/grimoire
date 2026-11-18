@@ -152,8 +152,15 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         .as_ref()
         .map(|r| &r.lock)
         .or(in_place.as_ref().map(|o| &o.lock));
+    let mut stays_armed: Vec<String> = Vec::new();
     if let (Some(previous), Some(edited)) = (&previous, edited) {
         prove_dropped(ctx, &scope, previous, edited).await;
+        let kept: BTreeSet<NodeKey> = edited.node_keys().collect();
+        stays_armed = previous
+            .node_keys()
+            .filter(|key| key.0 == ArtifactKind::Hook && !kept.contains(key))
+            .map(|(_, name)| name)
+            .collect();
     }
 
     let edit = ConfigEdit::write(
@@ -181,11 +188,14 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
 
     // C-155: `remove` is not a converging seam (it loads no install state), so
     // an armed hook keeps firing until the next converging command. Say so
-    // rather than let the undeclare look like a disarm.
-    if kind == ArtifactKind::Hook {
+    // rather than let the undeclare look like a disarm. A hook the edit
+    // dropped from the lock stays armed the same way.
+    if kind == ArtifactKind::Hook && !stays_armed.contains(&args.name) {
+        stays_armed.push(args.name.clone());
+    }
+    for name in &stays_armed {
         tracing::warn!(
-            "hook '{}' was undeclared but stays armed until `{grim} install` or `{grim} uninstall` runs",
-            args.name,
+            "hook '{name}' was undeclared but stays armed until `{grim} install` or `{grim} uninstall` runs",
             grim = scope.invocation
         );
     }
