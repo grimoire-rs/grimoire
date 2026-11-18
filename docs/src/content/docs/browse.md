@@ -30,7 +30,7 @@ pane for the row you are on.
    setup instead. Press `g` and confirm to create the project config.
 
 2. Press `/` and type part of a name to narrow the list.
-3. Press `f` to show one kind at a time.
+3. Press `f` to show one kind at a time, or `F` to pick several kinds in the [filter and sort popup](#filter-sort).
 4. Move to the row you want with the arrow keys.
 5. Press `i` to install it.
 
@@ -103,7 +103,8 @@ app. The website and the VS Code extension have no key map.
 | `g` | Toggle scope between project and global. With no project config yet, it offers to create one |
 | `s` | Cycle the sort order: default, name, updated, rating, downloads. The Catalog title names the active one, and the cursor returns to the top |
 | `S` | Flip the active order between ascending and descending |
-| `f` | Cycle a kind filter through the kinds in the catalog. The Catalog title names it, and the cursor returns to the top |
+| `f` | Cycle a kind filter through the kinds in the catalog, one kind at a time. A wider selection from the popup collapses to the next single kind. The Catalog title names it, and the cursor returns to the top |
+| `F` | Open the [filter and sort popup](#filter-sort). In a `/` search, `F` is query text |
 | `t` | Toggle tree and flat view |
 | `→` / `←` | Expand and collapse a group, in tree view. On a collapsed group or a leaf, `←` jumps to the parent |
 | `z` | Fold the whole tree, in tree view. Expands everything, or collapses back to the [`expand_levels`](./configuration.md#options-tui) depth |
@@ -115,6 +116,22 @@ app. The website and the VS Code extension have no key map.
 | `esc` | Quit, on the first press outside a search |
 | `?` | Open this help |
 | `q` | Quit |
+
+## Filter and sort popup {#filter-sort}
+
+Press `F` to open the **Filter & sort** popup. It holds seven kind
+checkboxes, five sort rows (default, name, updated, rating, downloads), an
+`order: asc|desc` row and a `hide deprecated` checkbox. Check two or more
+kinds to see, for example, skills and rules together.
+
+Move with `↑` and `↓`, `j` and `k`, `Home` and `End`. Press `space` or
+`enter` to apply the row at once; the catalog behind the popup updates live.
+`esc` or `F` closes the popup and keeps your changes. `q` quits.
+
+The `s`, `S`, `f` and `h` keys act on the same state outside the popup. With
+several kinds checked, the Catalog title names up to three (`kind: skill,
+rule`) and counts more (`kind: 4 kinds`). The choice is not saved, and no
+command-line flag sets it.
 
 ## Badge legend
 
