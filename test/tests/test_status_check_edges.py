@@ -236,7 +236,7 @@ def test_status_check_answers_a_bare_declaration_by_the_claim_it_yields_to(
     shipped = publish_release(repo, "2.7.0", files)
     answer, stderr = _x_answer(runner, unique_repo)
     assert answer is True, stderr
-    assert "update available: skill 'x': `grim update -- x` moves its pin" in stderr, stderr
+    assert "update available: skill 'x': `grim update -- x` moves its pin, or says why it cannot" in stderr, stderr
     runner.run("update", "--", "x")
     assert shipped.digest in lock.read_text(encoding="utf-8")
 
@@ -277,7 +277,7 @@ def test_status_check_answers_a_bare_declaration_by_its_claim_beside_a_literal(
     shipped = publish_release(repo, "2.7.0", files)
     answer, stderr = _x_answer(runner, unique_repo)
     assert answer is True, stderr
-    assert "update available: skill 'x': `grim update -- x` moves its pin" in stderr, stderr
+    assert "update available: skill 'x': `grim update -- x` moves its pin, or says why it cannot" in stderr, stderr
     runner.run("update", "--", "x")
     assert shipped.digest in lock.read_text(encoding="utf-8")
 

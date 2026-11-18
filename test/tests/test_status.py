@@ -695,7 +695,7 @@ def test_a_global_check_note_names_the_global_flag(
     )
 
     assert plain.returncode == 0, plain.stderr
-    assert "`grim --global update -- x` moves its pin" in plain.stderr, plain.stderr
+    assert "`grim --global update -- x` moves its pin, or says why it cannot" in plain.stderr, plain.stderr
 
 
 def test_status_json_lists_new_vendor_client_name_additively(
