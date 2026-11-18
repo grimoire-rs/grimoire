@@ -185,6 +185,25 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         if let Some(evidence) = &lock {
             left = prove_deletions(ctx, &scope, &mut state, evidence, &nodes, args.force).await?;
         }
+        // Judged before the first delete, so a refusal leaves nothing half-removed, and after
+        // the proof above: a record that lags the files would read as an edit.
+        let refusals = {
+            let (state, nodes, roots) = (state.clone(), nodes.clone(), scope.roots.clone());
+            let force = ForceScope::from(args.force);
+            tokio::task::spawn_blocking(move || delete_refusals(&state, &nodes, &roots, &force)).await
+        };
+        match refusals {
+            Ok(refusals) => {
+                if let Some((_, error)) = refusals.into_iter().next() {
+                    return Err(uninstall_error(&scope.workspace, error).into());
+                }
+            }
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => {
+                let stopped = state_io(&scope.state_path, std::io::Error::other(join));
+                return Err(crate::error::Error::from(stopped).into());
+            }
+        }
         // The policy is resolved **without** the consent prompt reachable —
         // `grim uninstall` takes no `--trust-hooks` and must never ask a
         // question in order to *remove* something. Survivors are checked against
