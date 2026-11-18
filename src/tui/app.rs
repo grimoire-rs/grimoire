@@ -1812,7 +1812,7 @@ fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeCon
 ///
 /// **Installed-vs-not never depends on member health.** Installing member
 /// skills standalone must not flip an *undeclared* bundle to "installed", and
-/// an undeclared bundle stays `NotInstalled` however healthy its members look.
+/// an unreached one stays `NotInstalled` however healthy its members look.
 /// That rule is what this function was originally written to protect.
 ///
 /// Within a **declared** bundle, though, the row folds in the worst member
@@ -1829,20 +1829,60 @@ fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeCon
 /// precisely what pending means, and mapping it to `NotInstalled` would drag
 /// the row back across the very line this function protects.
 ///
-/// Members are read from the lock's `[[bundle]]` snapshot. No snapshot (a
-/// pre-cache lock, or a bundle not yet locked) ⇒ plain `Installed`: the
-/// declaration is all we know, which is exactly the old behaviour. Nested
-/// bundles cannot occur — `BundleMember::kind` rejects them at expansion.
+/// Members are read from the lock's `[[bundle]]` snapshot, a nested bundle's
+/// from its own ([`bundle_rollup`]). No snapshot ⇒ plain `Installed`: the
+/// declaration is all we know. A nested bundle nothing declares reads
+/// `ViaBundle` while a declared bundle reaches it, else `NotInstalled`.
 fn derive_bundle_state(bundle_repo: &str, ctx: &BadgeContext) -> ArtifactState {
-    if !ctx.declared_bundle_repos.contains(bundle_repo) {
+    let declared = ctx.declared_bundle_repos.contains(bundle_repo);
+    let nested = ctx
+        .snapshot_repos
+        .contains(&(ArtifactKind::Bundle, bundle_repo.to_string()));
+    if !declared && !nested {
         return ArtifactState::NotInstalled;
     }
-    let Some(locked) = ctx
-        .lock
-        .and_then(|l| l.bundles.iter().find(|b| b.repo() == Some(bundle_repo)))
-    else {
-        return ArtifactState::Installed;
-    };
+    let state = bundle_rollup(
+        bundle_repo,
+        ctx.lock,
+        ctx.state,
+        ctx.roots,
+        ctx.active,
+        ctx.direct_repos,
+        ctx.snapshot_repos,
+        ctx.target,
+        ctx.settings,
+        &mut std::collections::BTreeSet::new(),
+    )
+    .unwrap_or(ArtifactState::Installed);
+    if !declared && state == ArtifactState::Installed {
+        ArtifactState::ViaBundle
+    } else {
+        state
+    }
+}
+
+/// The worst health among the members of the bundle at `bundle_repo`, read from
+/// its lock snapshot and, for a nested bundle, from that bundle's own snapshot.
+/// `None` when the lock holds no snapshot for `bundle_repo`.
+#[allow(clippy::too_many_arguments)]
+fn bundle_rollup(
+    bundle_repo: &str,
+    lock: Option<&GrimoireLock>,
+    state: &InstallState,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+    direct_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+    snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+    target: Option<&InstallTarget>,
+    settings: SettingsCheck<'_>,
+    visited: &mut std::collections::BTreeSet<String>,
+) -> Option<ArtifactState> {
+    let members = super::bundle_members::locked_children(lock?, bundle_repo)?;
+    // A hand-edited lock can nest a bundle in itself: a second visit adds nothing,
+    // where recursing again would never return.
+    if !visited.insert(bundle_repo.to_string()) {
+        return Some(ArtifactState::Installed);
+    }
 
     // Worst-of, in the same precedence the tree rollup uses:
     // IntegrityMissing > Modified > Outdated > Pending > Installed.
@@ -1851,40 +1891,53 @@ fn derive_bundle_state(bundle_repo: &str, ctx: &BadgeContext) -> ArtifactState {
         ArtifactState::Modified => 3,
         ArtifactState::Outdated => 2,
         // A declared bundle's un-materialized member is pending work, not a
-        // not-installed bundle (see the doc comment above).
+        // not-installed bundle (see [`derive_bundle_state`]).
         ArtifactState::Pending | ArtifactState::NotInstalled | ArtifactState::Stale => 1,
         // A held-back package is no work an install could do, so `i` stays honest.
         ArtifactState::Installed | ArtifactState::ViaBundle | ArtifactState::Gated | ArtifactState::NotArmed => 0,
     };
-    let worst = locked
-        .members
+    let worst = members
         .iter()
         .filter_map(|m| crate::oci::Identifier::parse(&m.id).ok().map(|id| (m.kind, id)))
-        .map(|(kind, id)| {
-            derive_artifact_state(
+        .map(|(kind, id)| match kind {
+            // A nested bundle the lock holds no snapshot for is work an install would do.
+            ArtifactKind::Bundle => bundle_rollup(
+                &id.registry_repository(),
+                lock,
+                state,
+                roots,
+                active,
+                direct_repos,
+                snapshot_repos,
+                target,
+                settings,
+                visited,
+            )
+            .unwrap_or(ArtifactState::NotInstalled),
+            _ => derive_artifact_state(
                 kind,
                 id.registry(),
                 id.repository(),
-                ctx.lock,
-                ctx.state,
-                ctx.roots,
-                ctx.active,
-                ctx.direct_repos,
-                ctx.snapshot_repos,
-                ctx.target,
-                ctx.settings,
-            )
+                lock,
+                state,
+                roots,
+                active,
+                direct_repos,
+                snapshot_repos,
+                target,
+                settings,
+            ),
         })
         .max_by_key(|s| rank(*s));
 
-    match worst.map(rank) {
+    Some(match worst.map(rank) {
         Some(4) => ArtifactState::IntegrityMissing,
         Some(3) => ArtifactState::Modified,
         Some(2) => ArtifactState::Outdated,
         Some(1) => ArtifactState::Pending,
         // No members, or every member present and intact.
         _ => ArtifactState::Installed,
-    }
+    })
 }
 
 /// Derive the richer TUI [`ArtifactState`] for `(kind, registry, repository)`.
@@ -2208,7 +2261,7 @@ fn refresh_member_states(
 }
 
 /// The set of `(kind, registry/repository)` an active scope declares **directly**
-/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`) — the key by which the via-bundle badge
+/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`/`[bundles]`) — the key by which the via-bundle badge
 /// decides whether a present member is also a standalone install.
 fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(ArtifactKind, String)> {
     let mut out = std::collections::BTreeSet::new();
@@ -2219,6 +2272,7 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
         (ArtifactKind::Mcp, &set.mcp),
         (ArtifactKind::Hook, &set.hooks),
         (ArtifactKind::Settings, &set.settings),
+        (ArtifactKind::Bundle, &set.bundles),
     ] {
         for source in map.values() {
             if let Some(id) = source.identifier() {
@@ -2250,25 +2304,43 @@ fn member_display_state(
     target: Option<&InstallTarget>,
     settings: SettingsCheck<'_>,
 ) -> ArtifactState {
-    let derived = derive_artifact_state(
-        kind,
-        registry,
-        repository,
-        lock,
-        state,
-        roots,
-        active,
-        direct_repos,
-        snapshot_repos,
-        target,
-        settings,
-    );
+    let derived = if kind == ArtifactKind::Bundle {
+        // A bundle has no lock entry or record of its own: its members say whether it is here.
+        bundle_rollup(
+            &format!("{registry}/{repository}"),
+            lock,
+            state,
+            roots,
+            active,
+            direct_repos,
+            snapshot_repos,
+            target,
+            settings,
+            &mut std::collections::BTreeSet::new(),
+        )
+        .unwrap_or(ArtifactState::NotInstalled)
+    } else {
+        derive_artifact_state(
+            kind,
+            registry,
+            repository,
+            lock,
+            state,
+            roots,
+            active,
+            direct_repos,
+            snapshot_repos,
+            target,
+            settings,
+        )
+    };
     // `Pending` is a flavour of present-and-intact, so it takes the ViaBundle
     // promotion on the same terms — a bundle-provided member with an
     // uncovered client is still "here only because the bundle provides it".
-    if matches!(derived, ArtifactState::Installed | ArtifactState::Pending)
-        && !direct_repos.contains(&(kind, format!("{registry}/{repository}")))
-    {
+    // A bundle's `Pending` may fold a member never materialized, so it stays.
+    let present =
+        derived == ArtifactState::Installed || (derived == ArtifactState::Pending && kind != ArtifactKind::Bundle);
+    if present && !direct_repos.contains(&(kind, format!("{registry}/{repository}"))) {
         ArtifactState::ViaBundle
     } else {
         derived
@@ -10599,8 +10671,8 @@ mod tests {
     }
 
     /// `outer` includes `inner` at tag 1, nothing declares `inner`, and its publisher
-    /// has moved on to a tag 2 with another member. The row reads as not installed,
-    /// so `i` reaches it.
+    /// has moved on to a tag 2 with another member. The row reads via-bundle, and
+    /// not installed once a hand edit leaves the lock stale, so `i` reaches it then.
     async fn nested_bundle_with_a_new_tag(
         workspace: &std::path::Path,
     ) -> (crate::oci::access::memory_registry::MemoryRegistry, TuiContext) {
@@ -10787,7 +10859,7 @@ mod tests {
         assert_eq!(std::fs::read(&ctx.config_path).unwrap(), config);
     }
 
-    /// A nested bundle's row always reads not installed, so `i` reaches it with
+    /// A nested bundle's row on a stale lock reads not installed, so `i` reaches it with
     /// nothing lost; each hand edit leaves the lock stale.
     #[tokio::test]
     async fn tui_install_keeps_a_nested_bundle_pin_on_a_stale_lock() {
@@ -17207,6 +17279,99 @@ mod tests {
             ArtifactState::Installed,
             "once declared standalone the row is plain installed"
         );
+    }
+
+    /// Only `suite` is declared: it nests `pack` (member `alpha`) and lists
+    /// `gamma`, which requires `beta`. Everything is installed.
+    async fn project_with_a_nested_bundle(workspace: &std::path::Path) -> TuiContext {
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        for name in ["alpha", "beta"] {
+            publish_skill(&reg, name, "first").await;
+        }
+        let edge = (ArtifactKind::Skill, "beta", "localhost:5050/acme/beta:1");
+        publish_skill_requiring(&reg, "gamma", "gamma", "1", "first", &[edge]).await;
+        let alpha = (ArtifactKind::Skill, "alpha", "localhost:5050/acme/alpha:1");
+        publish_bundle_at(&reg, "pack", "1", &[alpha]).await;
+        let members = [
+            (ArtifactKind::Bundle, "pack", "localhost:5050/acme/pack:1"),
+            (ArtifactKind::Skill, "gamma", "localhost:5050/acme/gamma:1"),
+        ];
+        publish_bundle_at(&reg, "suite", "1", &members).await;
+        let ctx = test_ctx(workspace, Arc::new(reg));
+        perform(
+            &ctx,
+            &bundle_row("suite"),
+            None,
+            BatchOp::Install,
+            &SilentProgress,
+            false,
+        )
+        .await
+        .expect("the bundle installs");
+        ctx
+    }
+
+    /// Bundle `acme/<repository>`'s badge as a catalog row and as a member node.
+    fn bundle_badges(ctx: &TuiContext, repository: &str) -> (ArtifactState, ArtifactState) {
+        let (lock, state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
+            load_scope_for_badges(ctx);
+        let repository = format!("acme/{repository}");
+        let badge = BadgeContext {
+            lock: lock.as_ref(),
+            state: &state,
+            roots: &ctx.roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &declared_bundle_repos,
+            direct_repos: &direct_repos,
+            snapshot_repos: &snapshot_repos,
+            target: None,
+            settings: SettingsCheck::default(),
+        };
+        let row = derive_row_state("bundle", "localhost:5050", &repository, &badge);
+        let node = member_display_state(
+            ArtifactKind::Bundle,
+            "localhost:5050",
+            &repository,
+            lock.as_ref(),
+            &state,
+            &ctx.roots,
+            &ClientTarget::ALL,
+            &direct_repos,
+            &snapshot_repos,
+            None,
+            SettingsCheck::default(),
+        );
+        (row, node)
+    }
+
+    #[tokio::test]
+    async fn nested_bundle_reads_its_own_members_on_both_surfaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = project_with_a_nested_bundle(tmp.path()).await;
+
+        assert_eq!(
+            bundle_badges(&ctx, "suite").0,
+            ArtifactState::Installed,
+            "the declared parent"
+        );
+        let via = (ArtifactState::ViaBundle, ArtifactState::ViaBundle);
+        assert_eq!(bundle_badges(&ctx, "pack"), via, "the nested bundle, row and node");
+
+        let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+        let declared = config.replacen("[bundles]\n", "[bundles]\npack = \"localhost:5050/acme/pack:1\"\n", 1);
+        assert_ne!(declared, config, "the fixture declares pack");
+        std::fs::write(&ctx.config_path, declared).unwrap();
+        let installed = (ArtifactState::Installed, ArtifactState::Installed);
+        assert_eq!(bundle_badges(&ctx, "pack"), installed, "a nested bundle declared too");
+
+        std::fs::write(ctx.workspace.join(".claude/skills/alpha/SKILL.md"), b"tampered\n").unwrap();
+        assert_eq!(
+            bundle_badges(&ctx, "suite").0,
+            ArtifactState::Modified,
+            "a nested member's edit"
+        );
+        assert_eq!(bundle_badges(&ctx, "pack").1, ArtifactState::Modified);
     }
 
     #[tokio::test]
