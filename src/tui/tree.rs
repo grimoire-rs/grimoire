@@ -101,8 +101,9 @@ impl Rollup {
         self.total += 1;
         match state {
             // A leaf present only because a bundle provides it, a nested bundle
-            // included, is present and intact: count it as installed.
-            ArtifactState::Installed | ArtifactState::ViaBundle => self.installed += 1,
+            // included, or because an artifact requires it, is present and
+            // intact: count it as installed.
+            ArtifactState::Installed | ArtifactState::ViaBundle | ArtifactState::ViaDependency => self.installed += 1,
             // Held back or refused: nothing of the package is applied.
             ArtifactState::NotInstalled | ArtifactState::Gated | ArtifactState::NotArmed => self.not_installed += 1,
             ArtifactState::Pending => self.pending += 1,

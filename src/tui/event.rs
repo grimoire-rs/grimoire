@@ -536,6 +536,7 @@ fn op_allows(op: BatchOp, state: ArtifactState) -> bool {
             state,
             ArtifactState::Installed
                 | ArtifactState::ViaBundle
+                | ArtifactState::ViaDependency
                 | ArtifactState::Outdated
                 | ArtifactState::Modified
                 | ArtifactState::Pending
@@ -695,6 +696,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                         }
                         ArtifactState::Installed
                         | ArtifactState::ViaBundle
+                        | ArtifactState::ViaDependency
                         | ArtifactState::Outdated
                         | ArtifactState::Modified => {
                             state.set_status("already installed");
@@ -726,6 +728,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     match member_state {
                         ArtifactState::Installed
                         | ArtifactState::ViaBundle
+                        | ArtifactState::ViaDependency
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
                         | ArtifactState::Pending
@@ -767,6 +770,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                     match member_state {
                         ArtifactState::Installed
                         | ArtifactState::ViaBundle
+                        | ArtifactState::ViaDependency
                         | ArtifactState::Outdated
                         | ArtifactState::Modified
                         | ArtifactState::Pending
@@ -1012,6 +1016,7 @@ mod tests {
             ArtifactState::NotInstalled,
             ArtifactState::Installed,
             ArtifactState::ViaBundle,
+            ArtifactState::ViaDependency,
             ArtifactState::Outdated,
             ArtifactState::Modified,
             ArtifactState::Pending,

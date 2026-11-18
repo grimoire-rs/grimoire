@@ -1855,7 +1855,7 @@ fn derive_bundle_state(bundle_repo: &str, ctx: &BadgeContext) -> ArtifactState {
     )
     .unwrap_or(ArtifactState::Installed);
     if !declared && state == ArtifactState::Installed {
-        ArtifactState::ViaBundle
+        provided_state(ctx.lock, ArtifactKind::Bundle, bundle_repo)
     } else {
         state
     }
@@ -1894,7 +1894,11 @@ fn bundle_rollup(
         // not-installed bundle (see [`derive_bundle_state`]).
         ArtifactState::Pending | ArtifactState::NotInstalled | ArtifactState::Stale => 1,
         // A held-back package is no work an install could do, so `i` stays honest.
-        ArtifactState::Installed | ArtifactState::ViaBundle | ArtifactState::Gated | ArtifactState::NotArmed => 0,
+        ArtifactState::Installed
+        | ArtifactState::ViaBundle
+        | ArtifactState::ViaDependency
+        | ArtifactState::Gated
+        | ArtifactState::NotArmed => 0,
     };
     let worst = members
         .iter()
@@ -2288,7 +2292,8 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
 /// The install reality from [`derive_artifact_state`], except a present-and-intact
 /// member that is **not** also declared standalone is shown as
 /// [`ArtifactState::ViaBundle`] — it is installed only because the bundle provides
-/// it. `Modified` / `Outdated` / `IntegrityMissing` keep precedence (they are not
+/// it — or as [`ArtifactState::ViaDependency`] ([`provided_state`]).
+/// `Modified` / `Outdated` / `IntegrityMissing` keep precedence (they are not
 /// the plain `Installed` state, so they are returned unchanged).
 #[allow(clippy::too_many_arguments)]
 fn member_display_state(
@@ -2340,10 +2345,39 @@ fn member_display_state(
     // A bundle's `Pending` may fold a member never materialized, so it stays.
     let present =
         derived == ArtifactState::Installed || (derived == ArtifactState::Pending && kind != ArtifactKind::Bundle);
-    if present && !direct_repos.contains(&(kind, format!("{registry}/{repository}"))) {
-        ArtifactState::ViaBundle
+    let location = format!("{registry}/{repository}");
+    if present && !direct_repos.contains(&(kind, location.clone())) {
+        provided_state(lock, kind, &location)
     } else {
         derived
+    }
+}
+
+/// How a present artifact nothing declares directly reached the scope, from the
+/// lock's edges: a `[[bundle]]` listing it reads `ViaBundle` and wins over a
+/// `requires` edge onto it, which reads `ViaDependency`. A lock recording
+/// neither (one written before edges were recorded) keeps `ViaBundle`.
+fn provided_state(lock: Option<&GrimoireLock>, kind: ArtifactKind, location: &str) -> ArtifactState {
+    use super::bundle_members::absolute_member;
+    use crate::oci::PinnedIdentifier;
+    use crate::oci::bundle::BundleMember;
+
+    let Some(lock) = lock else {
+        return ArtifactState::ViaBundle;
+    };
+    let lists = |members: &[BundleMember], parent: Option<&PinnedIdentifier>| {
+        members.iter().any(|m| {
+            m.kind == kind
+                && crate::oci::Identifier::parse(&absolute_member(m, parent.map(PinnedIdentifier::as_identifier)).id)
+                    .is_ok_and(|id| id.registry_repository() == location)
+        })
+    };
+    if lock.bundles.iter().any(|b| lists(&b.members, b.pinned())) {
+        ArtifactState::ViaBundle
+    } else if lock.iter_artifacts().any(|a| lists(&a.requires, a.source.pinned())) {
+        ArtifactState::ViaDependency
+    } else {
+        ArtifactState::ViaBundle
     }
 }
 
@@ -17314,6 +17348,11 @@ mod tests {
 
     /// Bundle `acme/<repository>`'s badge as a catalog row and as a member node.
     fn bundle_badges(ctx: &TuiContext, repository: &str) -> (ArtifactState, ArtifactState) {
+        badges(ctx, ArtifactKind::Bundle, repository)
+    }
+
+    /// `acme/<repository>`'s badge as a catalog row of `kind` and as a member node.
+    fn badges(ctx: &TuiContext, kind: ArtifactKind, repository: &str) -> (ArtifactState, ArtifactState) {
         let (lock, state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
             load_scope_for_badges(ctx);
         let repository = format!("acme/{repository}");
@@ -17328,9 +17367,9 @@ mod tests {
             target: None,
             settings: SettingsCheck::default(),
         };
-        let row = derive_row_state("bundle", "localhost:5050", &repository, &badge);
+        let row = derive_row_state(&kind.to_string(), "localhost:5050", &repository, &badge);
         let node = member_display_state(
-            ArtifactKind::Bundle,
+            kind,
             "localhost:5050",
             &repository,
             lock.as_ref(),
@@ -17372,6 +17411,37 @@ mod tests {
             "a nested member's edit"
         );
         assert_eq!(bundle_badges(&ctx, "pack").1, ArtifactState::Modified);
+    }
+
+    #[tokio::test]
+    async fn dependency_only_artifact_reads_via_dependency_on_both_surfaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = project_with_a_nested_bundle(tmp.path()).await;
+
+        let via_dependency = (ArtifactState::ViaDependency, ArtifactState::ViaDependency);
+        assert_eq!(
+            badges(&ctx, ArtifactKind::Skill, "beta"),
+            via_dependency,
+            "required by gamma, listed by no bundle"
+        );
+        let via_bundle = (ArtifactState::ViaBundle, ArtifactState::ViaBundle);
+        assert_eq!(
+            badges(&ctx, ArtifactKind::Skill, "alpha"),
+            via_bundle,
+            "the nested bundle's member"
+        );
+        assert_eq!(badges(&ctx, ArtifactKind::Skill, "gamma"), via_bundle, "suite's member");
+
+        let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+        let declared = config.replacen("[skills]\n", "[skills]\nbeta = \"localhost:5050/acme/beta:1\"\n", 1);
+        assert_ne!(declared, config, "the fixture declares beta");
+        std::fs::write(&ctx.config_path, declared).unwrap();
+        let installed = (ArtifactState::Installed, ArtifactState::Installed);
+        assert_eq!(
+            badges(&ctx, ArtifactKind::Skill, "beta"),
+            installed,
+            "declared directly too"
+        );
     }
 
     #[tokio::test]

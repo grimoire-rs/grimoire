@@ -404,6 +404,7 @@ fn settings_hint(state: ArtifactState, grim: &Invocation) -> Option<String> {
         ArtifactState::NotInstalled
         | ArtifactState::Installed
         | ArtifactState::ViaBundle
+        | ArtifactState::ViaDependency
         | ArtifactState::Outdated
         | ArtifactState::Modified
         | ArtifactState::Pending
@@ -1138,6 +1139,7 @@ mod tests {
             ArtifactState::Modified,
             ArtifactState::Outdated,
             ArtifactState::ViaBundle,
+            ArtifactState::ViaDependency,
         ] {
             let mut row = tui_row(None);
             row.state = state;
