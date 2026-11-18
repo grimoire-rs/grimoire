@@ -3123,7 +3123,7 @@ fn member_declared_id(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Op
 /// edges reach: the tag its pin carries while an edge names it, else the
 /// smallest edge, the one the resolver settles on. `None` when the lock records
 /// neither, so the row reports no update availability.
-fn dependency_reference(
+pub(crate) fn dependency_reference(
     lock: &GrimoireLock,
     kind: ArtifactKind,
     name: &str,

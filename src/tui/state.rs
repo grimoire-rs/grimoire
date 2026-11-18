@@ -1214,7 +1214,8 @@ impl TuiState {
     }
 
     /// Flip **every** row whose `repo` matches to [`ArtifactState::Outdated`],
-    /// but only those currently [`ArtifactState::Installed`].
+    /// but only those currently present (`Installed`, `ViaBundle`,
+    /// `ViaDependency`), and every cached bundle member node at that repo.
     ///
     /// This is the single merge primitive the background update-check feeds
     /// its registry-aware "a newer pin exists" result through. The guard is
@@ -1236,11 +1237,29 @@ impl TuiState {
     /// [`Self::outdated_count`], which tallies rows. One network check per
     /// artifact stays right; the fan-out belongs here, on application.
     pub fn mark_outdated_if_installed(&mut self, repo: &str) -> bool {
+        let present = |s: ArtifactState| {
+            matches!(
+                s,
+                ArtifactState::Installed | ArtifactState::ViaBundle | ArtifactState::ViaDependency
+            )
+        };
         let mut flipped = false;
         for row in &mut self.rows {
-            if row.repo == repo && row.state == ArtifactState::Installed {
+            if row.repo == repo && present(row.state) {
                 row.state = ArtifactState::Outdated;
                 flipped = true;
+            }
+        }
+        // Member nodes carry their own state copy, so the tree would keep the
+        // stale icon under an expanded bundle.
+        for cache in self.bundle_members.values_mut() {
+            if let BundleMemberCache::Ready(nodes) = cache {
+                for node in nodes {
+                    if node.member_repo.as_deref() == Some(repo) && present(node.state) {
+                        node.state = ArtifactState::Outdated;
+                        flipped = true;
+                    }
+                }
             }
         }
         flipped
@@ -3660,22 +3679,46 @@ mod tests {
     }
 
     #[test]
-    fn mark_outdated_if_installed_flips_only_installed() {
+    fn mark_outdated_flips_only_present_rows_and_their_members() {
         let mut s = TuiState::new();
         s.set_rows(vec![
             row("r/installed", "d", &[], ArtifactState::Installed),
+            row("r/via-bundle", "d", &[], ArtifactState::ViaBundle),
+            row("r/via-dependency", "d", &[], ArtifactState::ViaDependency),
             row("r/modified", "d", &[], ArtifactState::Modified),
             row("r/integrity", "d", &[], ArtifactState::IntegrityMissing),
             row("r/notinstalled", "d", &[], ArtifactState::NotInstalled),
             row("r/already", "d", &[], ArtifactState::Outdated),
         ]);
-
-        // Installed flips to Outdated, and the call reports the flip.
-        assert!(s.mark_outdated_if_installed("r/installed"));
-        assert_eq!(
-            s.rows.iter().find(|r| r.repo == "r/installed").unwrap().state,
-            ArtifactState::Outdated
+        let member = |repo: &str, state| super::super::bundle_members::MemberNode {
+            kind: crate::oci::ArtifactKind::Skill,
+            label: repo.to_string(),
+            member_repo: Some(repo.to_string()),
+            state,
+            related: true,
+        };
+        s.bundle_members.insert(
+            (s.scope_label.clone(), "r/pack".to_string()),
+            BundleMemberCache::Ready(vec![
+                member("r/via-bundle", ArtifactState::ViaBundle),
+                member("r/modified", ArtifactState::Modified),
+            ]),
         );
+
+        // A present row flips to Outdated, and the call reports the flip.
+        for repo in ["r/installed", "r/via-bundle", "r/via-dependency"] {
+            assert!(s.mark_outdated_if_installed(repo), "{repo} flips");
+            assert_eq!(
+                s.rows.iter().find(|r| r.repo == repo).unwrap().state,
+                ArtifactState::Outdated
+            );
+        }
+        // A member node of the same repository flips with its row.
+        let members = |s: &TuiState| match s.bundle_members.values().next() {
+            Some(BundleMemberCache::Ready(nodes)) => nodes.iter().map(|n| n.state).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(members(&s), [ArtifactState::Outdated, ArtifactState::Modified]);
 
         // Stronger on-disk states are never downgraded.
         for (repo, expected) in [

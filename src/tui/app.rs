@@ -926,10 +926,15 @@ fn build_row_check(config: &DesiredSet, lock: &GrimoireLock, row: &TuiRow) -> Op
     let locked = lock
         .iter_artifacts()
         .find(|a| a.source.pinned().is_some_and(|p| p.registry_repository() == location))?;
+    let pinned = locked.source.pinned()?;
+    // A row only a `requires` edge reaches has no declaration; `grim status`
+    // re-resolves the edge's reference, so the background check does too.
+    let id = declared_identifier(config, lock, &location)
+        .or_else(|| crate::command::status::dependency_reference(lock, locked.kind, &locked.name, pinned))?;
     Some(RowCheck {
         repo: row.repo.clone(),
-        id: declared_identifier(config, lock, &location)?,
-        locked_digest: locked.source.pinned()?.digest(),
+        id,
+        locked_digest: pinned.digest(),
     })
 }
 
@@ -8102,6 +8107,36 @@ mod tests {
         let check = build_row_check(&config, &lock, &installed_row(MEMBER_REPO)).expect("a declared, locked row");
 
         assert_eq!(check.id.tag(), Some("0.12.0"));
+    }
+
+    #[test]
+    fn build_row_check_falls_back_to_the_requires_edge_reference() {
+        let digest = |name: &str, byte| {
+            let id = Identifier::new_registry(format!("acme/{name}"), "ghcr.io")
+                .clone_with_digest(crate::oci::Digest::Sha256(sha(byte)));
+            crate::oci::PinnedIdentifier::try_from(id).unwrap()
+        };
+        let mut parent = crate::lock::locked_artifact::LockedArtifact::direct(
+            "g".to_string(),
+            ArtifactKind::Skill,
+            digest("g", '2'),
+        );
+        parent.requires = vec![crate::oci::bundle::BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "dep".to_string(),
+            id: "ghcr.io/acme/dep:1".to_string(),
+        }];
+        let dep = crate::lock::locked_artifact::LockedArtifact::direct(
+            "dep".to_string(),
+            ArtifactKind::Skill,
+            digest("dep", '1'),
+        );
+        let lock = lock_fixture(vec![parent, dep], Vec::new());
+
+        let check = build_row_check(&DesiredSet::default(), &lock, &installed_row("ghcr.io/acme/dep"))
+            .expect("a dependency-only, locked row");
+
+        assert_eq!(check.id.to_string(), "ghcr.io/acme/dep:1");
     }
 
     #[test]
