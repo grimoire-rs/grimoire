@@ -100,9 +100,8 @@ impl Rollup {
     pub fn add(&mut self, state: ArtifactState) {
         self.total += 1;
         match state {
-            // Catalog-row leaves never derive `ViaBundle` (it is set on bundle
-            // member nodes only), but the match must stay total — count it as
-            // installed (it is present and intact).
+            // A leaf present only because a bundle provides it, a nested bundle
+            // included, is present and intact: count it as installed.
             ArtifactState::Installed | ArtifactState::ViaBundle => self.installed += 1,
             // Held back or refused: nothing of the package is applied.
             ArtifactState::NotInstalled | ArtifactState::Gated | ArtifactState::NotArmed => self.not_installed += 1,
