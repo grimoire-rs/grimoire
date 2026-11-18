@@ -12,6 +12,8 @@
 //! [`Context`] and passed to `scope_resolution::resolve` — the same
 //! pattern every scope-aware command (`lock`, `install`) follows.
 
+use std::path::Path;
+
 use clap::{Args, Subcommand};
 
 use crate::api::config_report::{
@@ -20,7 +22,7 @@ use crate::api::config_report::{
     RegistryRow, RegistryShowReport, WriteAction,
 };
 use crate::cli::exit_code::ExitCode;
-use crate::config::declaration::{ConfigOptions, DefaultView, RegistryConfig};
+use crate::config::declaration::{ConfigOptions, DefaultView, DesiredSet, RegistryConfig};
 use crate::config::plugin_meta::{self, PluginMeta};
 use crate::config::project_config::validate_registries;
 use crate::config::scope::{ConfigScope, Invocation};
@@ -300,8 +302,8 @@ fn flag_pair(on: bool, off: bool) -> Option<bool> {
 
 /// A parsed dotted config key.
 #[derive(Debug, PartialEq, Eq)]
-enum ParsedKey {
-    /// One of the 10 fixed `options.*` keys — see [`ConfigKey`].
+pub(crate) enum ParsedKey {
+    /// One of the fixed `options.*` keys — see [`ConfigKey`].
     Fixed(ConfigKey),
     /// `registry.<alias>` — valid only for `unset` (removes the whole entry).
     RegistryAlias { alias: String },
@@ -311,7 +313,7 @@ enum ParsedKey {
     VendorField { vendor: String },
 }
 
-fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
+pub(crate) fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
     if let Some(k) = ConfigKey::parse(key) {
         return Ok(ParsedKey::Fixed(k));
     }
@@ -726,15 +728,22 @@ fn has_bare_comma(pattern: &str) -> bool {
 /// editor: giving it authority to converge would hand a config command the
 /// installer's privileges, which is a larger change than the problem needs.
 fn warn_config_write_does_not_disarm(attempted: &str, grim: &Invocation) {
-    tracing::warn!(
+    tracing::warn!("{}", disarm_note(attempted, grim));
+}
+
+/// The text of [`warn_config_write_does_not_disarm`], for a caller that shows
+/// it somewhere other than the log. The caller decides whether the write
+/// cleared the flag; this only words it.
+pub(crate) fn disarm_note(attempted: &str, grim: &Invocation) -> String {
+    format!(
         "`{grim} config {attempted}` cleared the feature flag, but hooks already armed stay armed \
          until convergence runs — run `{grim} install` to disarm them"
-    );
+    )
 }
 
 // ── Value setters ─────────────────────────────────────────────────────────────
 
-fn apply_set(
+pub(crate) fn apply_set(
     parsed: &ParsedKey,
     value_str: &str,
     options: &mut ConfigOptions,
@@ -970,7 +979,7 @@ fn no_such_registry_for_unset(alias: &str) -> anyhow::Error {
     ))
 }
 
-fn apply_unset(
+pub(crate) fn apply_unset(
     parsed: &ParsedKey,
     options: &mut ConfigOptions,
     registries: &mut Vec<RegistryConfig>,
@@ -1110,7 +1119,7 @@ fn entry(key: String, value: Option<String>, spec: &'static KeySpec) -> ConfigEn
 /// include supported-but-unset keys (fixed keys always unset-eligible;
 /// registry `oci`/`index` locator rows only for existing aliased entries);
 /// it never changes the row shape (see `ConfigEntry`).
-fn collect_entries(all: bool, options: &ConfigOptions, registries: &[RegistryConfig]) -> Vec<ConfigEntry> {
+pub(crate) fn collect_entries(all: bool, options: &ConfigOptions, registries: &[RegistryConfig]) -> Vec<ConfigEntry> {
     let mut entries = Vec::new();
     for k in ConfigKey::ALL {
         let value = fixed_value(k, options);
@@ -1395,18 +1404,14 @@ fn acquire_config_lock(scope: &scope_resolution::ResolvedScope) -> anyhow::Resul
 
 /// Validate then atomically write the config for the given scope. Callers
 /// must hold the lock returned by [`acquire_config_lock`] for the duration.
-fn commit_config(
-    scope: &scope_resolution::ResolvedScope,
+pub(crate) fn commit_config(
+    config_path: &Path,
+    set: &DesiredSet,
     options: &ConfigOptions,
     registries: &[RegistryConfig],
 ) -> anyhow::Result<()> {
-    super::grim(validate_registries(registries, &scope.config_path))?;
-    super::grim(crate::command::add::write_config(
-        &scope.config_path,
-        options,
-        registries,
-        &scope.set,
-    ))
+    super::grim(validate_registries(registries, config_path))?;
+    super::grim(crate::command::add::write_config(config_path, options, registries, set))
 }
 
 // ── Plugin keys ───────────────────────────────────────────────────────────────
@@ -1463,7 +1468,11 @@ fn store_plugin_field(meta: &mut PluginMeta, field: PluginField, value: String) 
 /// Validate `value` with the load-time `[plugin]` rules (exit 65 on
 /// rejection) and store it; returns the stored value. The version is stored
 /// normalized (leading `v` dropped), matching what load hands to export.
-fn apply_plugin_set(field: PluginField, value: &str, plugin: &mut Option<PluginMeta>) -> anyhow::Result<String> {
+pub(crate) fn apply_plugin_set(
+    field: PluginField,
+    value: &str,
+    plugin: &mut Option<PluginMeta>,
+) -> anyhow::Result<String> {
     let key = field.spec().key;
     reject_control_chars(value, key)?;
     // The shared validators quote the raw value; escape it in place so a
@@ -1500,7 +1509,7 @@ fn apply_plugin_set(field: PluginField, value: &str, plugin: &mut Option<PluginM
 
 /// Clear one `[plugin]` field, dropping the whole table once nothing is left
 /// in it (a `[plugin.rename]` rule keeps it alive).
-fn apply_plugin_unset(field: PluginField, plugin: &mut Option<PluginMeta>) {
+pub(crate) fn apply_plugin_unset(field: PluginField, plugin: &mut Option<PluginMeta>) {
     let Some(meta) = plugin else { return };
     match field {
         PluginField::Name => meta.name = None,
@@ -1521,7 +1530,7 @@ fn apply_plugin_unset(field: PluginField, plugin: &mut Option<PluginMeta>) {
 
 /// The `plugin.*` rows of a project-scope `grim config list`, appended after
 /// every other row so no existing position moves.
-fn plugin_entries(all: bool, plugin: Option<&PluginMeta>) -> Vec<ConfigEntry> {
+pub(crate) fn plugin_entries(all: bool, plugin: Option<&PluginMeta>) -> Vec<ConfigEntry> {
     PluginField::ALL
         .into_iter()
         .filter_map(|field| {
@@ -1645,7 +1654,7 @@ fn run_set(ctx: &Context, key: &str, value: &str, dry_run: bool) -> anyhow::Resu
         // The validate half of `commit_config`, without the write.
         super::grim(validate_registries(&registries, &scope.config_path))?;
     } else {
-        commit_config(&scope, &options, &registries)?;
+        commit_config(&scope.config_path, &scope.set, &options, &registries)?;
     }
 
     Ok((
@@ -1682,7 +1691,7 @@ fn run_unset(ctx: &Context, key: &str) -> anyhow::Result<(ConfigReport, ExitCode
     let mut options = scope.options.clone();
     let mut registries = scope.registries.clone();
     apply_unset(&parsed, &mut options, &mut registries, &scope.invocation)?;
-    commit_config(&scope, &options, &registries)?;
+    commit_config(&scope.config_path, &scope.set, &options, &registries)?;
 
     Ok((
         ConfigReport::Write(ConfigWriteReport {
@@ -1721,91 +1730,37 @@ fn run_registry_add(
     exclude: &[String],
     insecure: bool,
 ) -> anyhow::Result<(ConfigReport, ExitCode)> {
-    // FIX 1: pre-validate alias at the CLI boundary (exit 64) so a bad alias
-    // exits UsageError rather than ConfigError after write → validate_registries.
-    validate_alias_format(alias)?;
-
-    // Exactly one source locator (clap already rejects both via
-    // `conflicts_with`; neither is checked here).
+    // Alias format outranks the locator usage error, as it always has.
     let (locator, is_index) = match (oci, index) {
         (Some(u), None) => (u, false),
         (None, Some(i)) => (i, true),
         _ => {
+            validate_alias_format(alias)?;
+            // clap already rejects both via `conflicts_with`; neither is checked here.
             return Err(super::config_usage(
                 "exactly one of --oci / --index must be given".to_string(),
             ));
         }
     };
-    reject_control_chars(locator, if is_index { "registry.index" } else { "registry.oci" })?;
-    // Add-time twin of the load-time `index '{locator}' must not set insecure`
-    // rejection (65 here, 78 there).
-    if is_index && insecure {
-        return Err(super::config_value(
-            "--insecure does not apply to --index; an index locator already carries its own \
-             http(s):// scheme"
-                .to_string(),
-        ));
-    }
-    if is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
-        // Escaped like its `apply_set` twin above: the control-char guard on
-        // the line before does not match the bidi and zero-width format
-        // characters, which reach this message intact.
-        return Err(super::config_value(format!(
-            "invalid index locator '{}': must be an http(s):// base or a \
-             git repository (git+…, ssh://, git@…, or ending in .git)",
-            locator.escape_debug()
-        )));
-    }
+    let draft = RegistryDraft {
+        alias: alias.to_string(),
+        locator: locator.to_string(),
+        is_index,
+        default: make_default,
+        insecure,
+        include: include.to_vec(),
+        exclude: exclude.to_vec(),
+    };
+    check_draft(&draft)?;
     let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
     let origin = scope_to_origin(scope.scope);
 
-    // Before the pattern loop, so C-013's "duplicate alias → 64" holds
-    // unconditionally: `registry add <existing> --include '<malformed>'` is a
-    // usage error about the alias, not a value error about a pattern that
-    // could never have been written anyway.
-    if scope.registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
-        // Set-time twin of the load-time `duplicate alias '{shown}'` message.
-        // `validate_alias_format` above does not stop U+202E — nothing rejects
-        // a format character in an alias — so it reaches this message intact.
-        let shown = alias.escape_debug();
-        // The filter clause is not decoration: this message is where a user
-        // adding a second `--include` to an existing entry lands, and
-        // without it they read "use `config set` instead" — which replaces
-        // the whole list rather than appending to it (B-2). `registry set`
-        // takes the same repeated flags this invocation already carries, so
-        // naming it turns the error into a one-word edit.
-        let grim = &scope.invocation;
-        return Err(super::config_usage(format!(
-            "registry '{shown}' already exists; edit it in place with `{grim} config registry set \
-             {shown}`, which takes these same --oci/--index/--include/--exclude/--default flags, \
-             or remove it with `{grim} config registry rm {shown}`. To change its browse filter use \
-             that verb's repeated --include/--exclude flags, not `{grim} config set \
-             registry.{shown}.include`, which writes ONE pattern and replaces the whole list"
-        )));
-    }
-
-    check_filter_flags(alias, include, exclude)?;
+    let mut registries = scope.registries.clone();
+    add_registry(&mut registries, draft, &scope.invocation)?;
 
     let _guard = acquire_config_lock(&scope)?;
 
-    let mut registries = scope.registries.clone();
-
-    if make_default {
-        clear_all_defaults(&mut registries);
-    }
-    registries.push(RegistryConfig {
-        alias: Some(alias.to_string()),
-        oci: (!is_index).then(|| locator.to_string()),
-        index: is_index.then(|| locator.to_string()),
-        // `registry add` with neither flag declares an unfiltered entry
-        // (plan C-013).
-        include: include.to_vec(),
-        exclude: exclude.to_vec(),
-        default: make_default,
-        insecure,
-    });
-
-    commit_config(&scope, &scope.options, &registries)?;
+    commit_config(&scope.config_path, &scope.set, &scope.options, &registries)?;
 
     Ok((
         ConfigReport::Write(ConfigWriteReport {
@@ -1818,6 +1773,114 @@ fn run_registry_add(
         }),
         ExitCode::Success,
     ))
+}
+
+/// A new `[[registries]]` entry as a front end collects it, before any scope
+/// is resolved.
+pub(crate) struct RegistryDraft {
+    pub alias: String,
+    pub locator: String,
+    pub is_index: bool,
+    pub default: bool,
+    pub insecure: bool,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+/// The scope-free checks `registry add` runs before it reads any config.
+pub(crate) fn check_draft(draft: &RegistryDraft) -> anyhow::Result<()> {
+    let RegistryDraft {
+        alias,
+        locator,
+        is_index,
+        insecure,
+        ..
+    } = draft;
+    // FIX 1: pre-validate alias at the CLI boundary (exit 64) so a bad alias
+    // exits UsageError rather than ConfigError after write → validate_registries.
+    validate_alias_format(alias)?;
+    reject_control_chars(locator, if *is_index { "registry.index" } else { "registry.oci" })?;
+    // Add-time twin of the load-time `index '{locator}' must not set insecure`
+    // rejection (65 here, 78 there).
+    if *is_index && *insecure {
+        return Err(super::config_value(
+            "--insecure does not apply to --index; an index locator already carries its own \
+             http(s):// scheme"
+                .to_string(),
+        ));
+    }
+    if *is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
+        // Escaped like its `apply_set` twin above: the control-char guard on
+        // the line before does not match the bidi and zero-width format
+        // characters, which reach this message intact.
+        return Err(super::config_value(format!(
+            "invalid index locator '{}': must be an http(s):// base or a \
+             git repository (git+…, ssh://, git@…, or ending in .git)",
+            locator.escape_debug()
+        )));
+    }
+    Ok(())
+}
+
+/// Add a checked draft to the in-memory registry list: duplicate alias,
+/// filter patterns, then the default flag and the push.
+pub(crate) fn add_registry(
+    registries: &mut Vec<RegistryConfig>,
+    draft: RegistryDraft,
+    grim: &Invocation,
+) -> anyhow::Result<()> {
+    let RegistryDraft {
+        alias,
+        locator,
+        is_index,
+        default,
+        insecure,
+        include,
+        exclude,
+    } = draft;
+    let alias = alias.as_str();
+
+    // Before the pattern loop, so C-013's "duplicate alias → 64" holds
+    // unconditionally: `registry add <existing> --include '<malformed>'` is a
+    // usage error about the alias, not a value error about a pattern that
+    // could never have been written anyway.
+    if registries.iter().any(|r| r.alias.as_deref() == Some(alias)) {
+        // Set-time twin of the load-time `duplicate alias '{shown}'` message.
+        // `validate_alias_format` above does not stop U+202E — nothing rejects
+        // a format character in an alias — so it reaches this message intact.
+        let shown = alias.escape_debug();
+        // The filter clause is not decoration: this message is where a user
+        // adding a second `--include` to an existing entry lands, and
+        // without it they read "use `config set` instead" — which replaces
+        // the whole list rather than appending to it (B-2). `registry set`
+        // takes the same repeated flags this invocation already carries, so
+        // naming it turns the error into a one-word edit.
+        return Err(super::config_usage(format!(
+            "registry '{shown}' already exists; edit it in place with `{grim} config registry set \
+             {shown}`, which takes these same --oci/--index/--include/--exclude/--default flags, \
+             or remove it with `{grim} config registry rm {shown}`. To change its browse filter use \
+             that verb's repeated --include/--exclude flags, not `{grim} config set \
+             registry.{shown}.include`, which writes ONE pattern and replaces the whole list"
+        )));
+    }
+
+    check_filter_flags(alias, &include, &exclude)?;
+
+    if default {
+        clear_all_defaults(registries);
+    }
+    registries.push(RegistryConfig {
+        alias: Some(alias.to_string()),
+        oci: (!is_index).then(|| locator.clone()),
+        index: is_index.then_some(locator),
+        // `registry add` with neither flag declares an unfiltered entry
+        // (plan C-013).
+        include,
+        exclude,
+        default,
+        insecure,
+    });
+    Ok(())
 }
 
 /// Edit an existing registry entry **in place**, leaving unnamed fields alone.
@@ -1899,24 +1962,96 @@ fn run_registry_set(
         _ => None,
     };
 
+    let edit = RegistryEdit {
+        locator: locator.map(|(l, is_index)| (l.to_string(), is_index)),
+        default: make_default,
+        // Neither list may be touched on an empty slice with no clear flag —
+        // that is the surviving mutant C-020 row 1 exists to kill, and it
+        // silently destroys a committed filter on every unrelated edit.
+        //
+        // Patterns win over the clear flag: clap's `conflicts_with` rules the
+        // pair out, but only at the ONE production call site (`run`'s dispatch
+        // arm); the unit tests call this function directly and bypass clap
+        // entirely, so this is a call-site guarantee, not a proof about the
+        // parameters. On a direct both-given call the patterns simply win,
+        // which is the sane reading and needs no assertion.
+        include: if !include.is_empty() {
+            Some(include.to_vec())
+        } else {
+            clear_include.then(Vec::new)
+        },
+        exclude: if !exclude.is_empty() {
+            Some(exclude.to_vec())
+        } else {
+            clear_exclude.then(Vec::new)
+        },
+        insecure,
+    };
+    // From the flags alone: resolving the scope first would turn the
+    // nothing-to-change 64 into a discovery failure outside a project.
+    let flag_grim = if ctx.global() {
+        Invocation::GLOBAL
+    } else {
+        ctx.config().map_or(Invocation::WALKED, Invocation::config)
+    };
+    check_edit(alias, &edit, &flag_grim)?;
+
+    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
+    let origin = scope_to_origin(scope.scope);
+
+    let mut registries = scope.registries.clone();
+    let existing = edit_registry(&mut registries, alias, &edit, &scope.invocation)?;
+
+    let _guard = acquire_config_lock(&scope)?;
+
+    commit_config(&scope.config_path, &scope.set, &scope.options, &registries)?;
+
+    Ok((
+        ConfigReport::Write(ConfigWriteReport {
+            action: WriteAction::RegistrySet,
+            key: format!("registry.{alias}"),
+            // The locator is the only single-valued field a caller can have
+            // changed; a filter-only edit has no one value to report.
+            value: locator.map(|(l, _)| l.to_string()),
+            scope: origin,
+            dry_run: false,
+            fields: registry_set_fields(
+                locator,
+                &existing,
+                make_default,
+                include,
+                clear_include,
+                exclude,
+                clear_exclude,
+                insecure,
+            ),
+        }),
+        ExitCode::Success,
+    ))
+}
+
+/// The fields a `registry set` writes. `None` leaves a field alone;
+/// `Some(vec![])` on a list empties it.
+pub(crate) struct RegistryEdit {
+    /// `(locator, is_index)`; swapping the kind clears the other side.
+    pub locator: Option<(String, bool)>,
+    pub default: bool,
+    pub include: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
+    pub insecure: Option<bool>,
+}
+
+/// The scope-free checks `registry set` runs before it reads any config.
+pub(crate) fn check_edit(alias: &str, edit: &RegistryEdit, grim: &Invocation) -> anyhow::Result<()> {
     // A `set` naming no field would take the lock, rewrite the file and report
     // a change that never happened. Exit 64 instead — the same class as a
     // missing alias, and the one thing clap cannot express as an arg rule.
-    if locator.is_none()
-        && !make_default
-        && include.is_empty()
-        && exclude.is_empty()
-        && !clear_include
-        && !clear_exclude
-        && insecure.is_none()
+    if edit.locator.is_none()
+        && !edit.default
+        && edit.include.is_none()
+        && edit.exclude.is_none()
+        && edit.insecure.is_none()
     {
-        // From the flags alone: resolving the scope first would turn this 64
-        // into a discovery failure outside a project.
-        let grim = if ctx.global() {
-            Invocation::GLOBAL
-        } else {
-            ctx.config().map_or(Invocation::WALKED, Invocation::config)
-        };
         return Err(super::config_usage(format!(
             "nothing to change for registry '{}'; name at least one of \
              --oci/--index, --include, --exclude, --clear-include, \
@@ -1928,9 +2063,9 @@ fn run_registry_set(
         )));
     }
 
-    if let Some((locator, is_index)) = locator {
-        reject_control_chars(locator, if is_index { "registry.index" } else { "registry.oci" })?;
-        if is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
+    if let Some((locator, is_index)) = &edit.locator {
+        reject_control_chars(locator, if *is_index { "registry.index" } else { "registry.oci" })?;
+        if *is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
             // Escaped like its `add` and `apply_set` twins: the control-char
             // guard on the line before does not match bidi and zero-width
             // format characters, which reach this message intact.
@@ -1941,20 +2076,29 @@ fn run_registry_set(
             )));
         }
     }
+    Ok(())
+}
 
-    let scope = super::grim(scope_resolution::resolve(ctx, ctx.global(), ctx.config()))?;
-    let origin = scope_to_origin(scope.scope);
-
+/// Apply a checked edit to the in-memory list and return the entry as it
+/// stood before. Fails on a missing alias, a bad pattern or an index entry
+/// that would carry `insecure`.
+pub(crate) fn edit_registry(
+    registries: &mut [RegistryConfig],
+    alias: &str,
+    edit: &RegistryEdit,
+    grim: &Invocation,
+) -> anyhow::Result<RegistryConfig> {
     // Before the pattern checks, mirroring `add`'s duplicate-alias ordering:
     // `registry set <missing> --include '<malformed>'` is a usage error about
     // the alias, not a value error about a pattern with nowhere to go.
-    let Some(existing) = find_registry(&scope.registries, alias) else {
+    let Some(existing) = find_registry(registries, alias).cloned() else {
         return Err(super::config_usage(format!(
-            "no registry '{}'; add it with `{} config registry add`",
-            alias.escape_debug(),
-            scope.invocation
+            "no registry '{}'; add it with `{grim} config registry add`",
+            alias.escape_debug()
         )));
     };
+    let include = edit.include.as_deref().unwrap_or_default();
+    let exclude = edit.exclude.as_deref().unwrap_or_default();
     check_filter_flags(alias, include, exclude)?;
     // Judged against the state the entry will have *after* this write —
     // both the kind and the flag, because either half can arrive from the
@@ -1967,9 +2111,12 @@ fn run_registry_set(
     // through to `commit_config`'s re-validation and surfaced as the
     // load-time `ConfigError` (78) naming the file path, where every other
     // route through this command reports the flag-shaped 65.
-    let will_be_index = locator.map_or(existing.index.is_some(), |(_, is_index)| is_index);
-    if will_be_index && insecure.unwrap_or(existing.insecure) {
-        return Err(super::config_value(if insecure == Some(true) {
+    let will_be_index = edit
+        .locator
+        .as_ref()
+        .map_or(existing.index.is_some(), |(_, is_index)| *is_index);
+    if will_be_index && edit.insecure.unwrap_or(existing.insecure) {
+        return Err(super::config_value(if edit.insecure == Some(true) {
             format!(
                 "--insecure does not apply to registry '{}': it is an index entry, and an index \
                  locator already carries its own http(s):// scheme",
@@ -1985,73 +2132,31 @@ fn run_registry_set(
         }));
     }
 
-    let _guard = acquire_config_lock(&scope)?;
-
-    let mut registries = scope.registries.clone();
-
-    if make_default {
-        clear_all_defaults(&mut registries);
-        set_registry_default(&mut registries, alias, true);
+    if edit.default {
+        clear_all_defaults(registries);
+        set_registry_default(registries, alias, true);
     }
-    if let Some(insecure) = insecure {
-        set_registry_field(&mut registries, alias, |rc| rc.insecure = insecure);
+    if let Some(insecure) = edit.insecure {
+        set_registry_field(registries, alias, |rc| rc.insecure = insecure);
     }
-    if let Some((locator, is_index)) = locator {
+    if let Some((locator, is_index)) = &edit.locator {
         // Swapping the kind clears the other side. `config set
         // registry.<a>.index` refuses this and tells the user to unset `oci`
         // first; here the locator flag *is* the whole declaration, so there is
         // nothing ambiguous to refuse — and an entry carrying both would fail
         // `validate_registries` on the way out anyway.
-        set_registry_field(&mut registries, alias, |rc| {
-            rc.oci = (!is_index).then(|| locator.to_string());
-            rc.index = is_index.then(|| locator.to_string());
+        set_registry_field(registries, alias, |rc| {
+            rc.oci = (!is_index).then(|| locator.clone());
+            rc.index = is_index.then(|| locator.clone());
         });
     }
-    // `else if` rather than a second `if`. Clap's `conflicts_with` rules the
-    // "patterns given AND cleared" pair out — but only at the ONE production
-    // call site (`run`'s dispatch arm); the unit tests call this function
-    // directly and bypass clap entirely, so this is a call-site guarantee, not
-    // a proof about the parameters. On a direct both-given call the patterns
-    // simply win, which is the sane reading and needs no assertion.
-    //
-    // Neither arm may run on an empty slice with no clear flag — that is the
-    // surviving mutant C-020 row 1 exists to kill, and it silently destroys a
-    // committed filter on every unrelated edit.
-    if !include.is_empty() {
-        set_registry_field(&mut registries, alias, |rc| rc.include = include.to_vec());
-    } else if clear_include {
-        set_registry_field(&mut registries, alias, |rc| rc.include.clear());
+    if let Some(include) = &edit.include {
+        set_registry_field(registries, alias, |rc| rc.include = include.clone());
     }
-    if !exclude.is_empty() {
-        set_registry_field(&mut registries, alias, |rc| rc.exclude = exclude.to_vec());
-    } else if clear_exclude {
-        set_registry_field(&mut registries, alias, |rc| rc.exclude.clear());
+    if let Some(exclude) = &edit.exclude {
+        set_registry_field(registries, alias, |rc| rc.exclude = exclude.clone());
     }
-
-    commit_config(&scope, &scope.options, &registries)?;
-
-    Ok((
-        ConfigReport::Write(ConfigWriteReport {
-            action: WriteAction::RegistrySet,
-            key: format!("registry.{alias}"),
-            // The locator is the only single-valued field a caller can have
-            // changed; a filter-only edit has no one value to report.
-            value: locator.map(|(l, _)| l.to_string()),
-            scope: origin,
-            dry_run: false,
-            fields: registry_set_fields(
-                locator,
-                existing,
-                make_default,
-                include,
-                clear_include,
-                exclude,
-                clear_exclude,
-                insecure,
-            ),
-        }),
-        ExitCode::Success,
-    ))
+    Ok(existing)
 }
 
 /// The `fields` array of a `registry set` write report — one element per field
@@ -2154,7 +2259,7 @@ fn run_registry_rm(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport, 
     }
     registries.retain(|r| r.alias.as_deref() != Some(alias));
 
-    commit_config(&scope, &scope.options, &registries)?;
+    commit_config(&scope.config_path, &scope.set, &scope.options, &registries)?;
 
     Ok((
         ConfigReport::Write(ConfigWriteReport {
@@ -2185,7 +2290,7 @@ fn run_registry_use(ctx: &Context, alias: &str) -> anyhow::Result<(ConfigReport,
     clear_all_defaults(&mut registries);
     set_registry_default(&mut registries, alias, true);
 
-    commit_config(&scope, &scope.options, &registries)?;
+    commit_config(&scope.config_path, &scope.set, &scope.options, &registries)?;
 
     Ok((
         ConfigReport::Write(ConfigWriteReport {
