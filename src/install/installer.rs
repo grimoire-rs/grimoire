@@ -973,7 +973,7 @@ fn hook_gate(
             state.record(InstallRecord {
                 kind: ArtifactKind::Hook,
                 name: artifact.name.clone(),
-                source: artifact.source.clone(),
+                source: tagless(&artifact.source),
                 dev: intent.is_dev(),
                 outputs: Vec::new(),
             });
@@ -1062,7 +1062,7 @@ async fn install_one<M: ArtifactMaterializer>(
         state.record(InstallRecord {
             kind,
             name: artifact.name.clone(),
-            source: artifact.source.clone(),
+            source: tagless(&artifact.source),
             dev: intent.is_dev(),
             outputs: Vec::new(),
         });
@@ -1702,7 +1702,7 @@ async fn install_one<M: ArtifactMaterializer>(
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
-        source: artifact.source.clone(),
+        source: tagless(&artifact.source),
         dev: intent.is_dev(),
         outputs,
     });
@@ -3042,6 +3042,17 @@ fn decode_refused(refusal: Refusal) -> crate::error::Error {
     AccessError::without_identifier(AccessErrorKind::Registry(Box::new(refusal))).into()
 }
 
+/// The source an install record stores: the pin without its advisory tag, so a
+/// record reads the same whichever command's lock it was written from.
+fn tagless(source: &crate::lock::locked_source::LockedSource) -> crate::lock::locked_source::LockedSource {
+    match source {
+        crate::lock::locked_source::LockedSource::Registry(pinned) => {
+            crate::lock::locked_source::LockedSource::Registry(pinned.strip_advisory())
+        }
+        path => path.clone(),
+    }
+}
+
 /// Refuse the whole run, before the first destination or state write, when an
 /// entry about to be installed has stale edges.
 ///
@@ -3057,9 +3068,9 @@ async fn refuse_stale_edges(
     state: &InstallState,
     roots: &AnchorRoots,
 ) -> Result<(), InstallError> {
+    use crate::oci::access::AccessMode;
     use crate::oci::access::cached_access::CachedAccess;
     use crate::oci::access::registry_client::RegistryClient;
-    use crate::oci::access::AccessMode;
     use crate::oci::tag_cache::TagCache;
     let paths = crate::store::paths::GrimPaths::new(roots.grim_home.clone());
     // Offline never calls the inner client; it only fills the type.
@@ -3209,7 +3220,7 @@ fn record_partial_pass(
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
-        source: recorded.map_or_else(|| artifact.source.clone(), |rec| rec.source),
+        source: recorded.map_or_else(|| tagless(&artifact.source), |rec| rec.source),
         dev: intent.is_dev(),
         outputs,
     });
@@ -3620,7 +3631,7 @@ async fn install_mcp(
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
-        source: artifact.source.clone(),
+        source: tagless(&artifact.source),
         dev: intent.is_dev(),
         outputs,
     });
@@ -5046,6 +5057,39 @@ mod tests {
         // The record no longer carries a support dir.
         let rec = state.get(ArtifactKind::Rule, "my-rule").unwrap();
         assert!(rec.outputs.iter().all(|c| c.support_dir.is_none()));
+    }
+
+    #[test]
+    fn a_partial_pass_without_a_prior_record_stores_the_tagless_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Identifier::new_registry("r", "localhost:5000")
+            .clone_with_tag("1")
+            .clone_with_digest(Digest::Sha256("a".repeat(64)));
+        let artifact = LockedArtifact::direct(
+            "r".to_string(),
+            ArtifactKind::Rule,
+            PinnedIdentifier::try_from(id).unwrap(),
+        );
+        assert_eq!(artifact.source.pinned().and_then(|p| p.tag()), Some("1"));
+        let outputs = vec![reap_output(
+            PathAnchor::Workspace,
+            "r.md",
+            Digest::Sha256("b".repeat(64)),
+        )];
+        let mut state = InstallState::empty(dir.path());
+
+        record_partial_pass(
+            &mut state,
+            &artifact,
+            ArtifactKind::Rule,
+            InstallIntent::Declared,
+            None,
+            outputs,
+            &roots(dir.path()),
+        );
+
+        let stored = state.get(ArtifactKind::Rule, "r").unwrap();
+        assert_eq!(stored.source.pinned().and_then(|p| p.tag()), None);
     }
 
     // ── reap_moved_outputs (layout-migration reaper) ────────────────────────

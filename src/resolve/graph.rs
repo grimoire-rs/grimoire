@@ -4817,7 +4817,13 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(err.kind, ResolveErrorKind::KindMismatch { declared: Skill, found: Rule }),
+            matches!(
+                err.kind,
+                ResolveErrorKind::KindMismatch {
+                    declared: Skill,
+                    found: Rule
+                }
+            ),
             "{err}"
         );
     }
