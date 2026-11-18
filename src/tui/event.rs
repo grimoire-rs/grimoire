@@ -869,6 +869,9 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                 };
                 if let Some((row_idx, bundle_repo)) = target {
                     let cache_key = (state.scope_label.clone(), bundle_repo.clone());
+                    // Children show only under an expanded repo with a cache entry.
+                    let had_children =
+                        state.expanded_bundles.contains(&bundle_repo) && state.bundle_members.contains_key(&cache_key);
 
                     // F3/P3.4: Insert the FULL bundle repo into expanded_bundles
                     // so the member splice gate in flatten_with_members passes.
@@ -896,6 +899,11 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                         state
                             .bundle_members
                             .insert(cache_key, crate::tui::bundle_members::BundleMemberCache::Loading);
+                    }
+                    if !had_children {
+                        state.reselect_after_expand(&bundle_repo);
+                    }
+                    if should_fetch {
                         return TuiAction::LoadBundleMembers {
                             row: row_idx,
                             bundle_repo,
@@ -2789,6 +2797,43 @@ mod p2_event_member_node_tests {
                 "C-12: placeholder member (None repo) must yield TuiAction::None for {input:?}"
             );
         }
+    }
+
+    /// `→` on a nested bundle expands every row at its repository, here the
+    /// catalog row above it too; the cursor stays on the member it expanded.
+    #[test]
+    fn expanding_a_nested_bundle_keeps_the_cursor_on_it() {
+        let mut s = TuiState::new();
+        s.view_mode = ViewMode::Flat;
+        s.set_rows(vec![bundle_row("reg/acme/pack"), bundle_row("reg/acme/suite")]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        let nested = MemberNode {
+            kind: crate::oci::ArtifactKind::Bundle,
+            label: "pack".to_string(),
+            member_repo: Some("reg/acme/pack".to_string()),
+            state: ArtifactState::Installed,
+            related: true,
+        };
+        s.bundle_members.insert(
+            (s.scope_label.clone(), "reg/acme/suite".to_string()),
+            BundleMemberCache::Ready(vec![nested]),
+        );
+        s.expanded_bundles.insert("reg/acme/suite".to_string());
+        assert!(select_member(&mut s), "suite shows its nested bundle");
+
+        handle(&mut s, TuiInput::Expand);
+
+        let flat = s.flattened();
+        assert!(
+            matches!(
+                flat.get(s.selected),
+                Some(DisplayRow::Member { member_repo: Some(r), parent_bundle_repo: p, expanded: true, .. })
+                    if r == "reg/acme/pack" && p == "reg/acme/suite"
+            ),
+            "the cursor left the expanded member: {:?}",
+            flat.get(s.selected)
+        );
     }
 }
 

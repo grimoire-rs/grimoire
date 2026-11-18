@@ -849,6 +849,12 @@ fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec
             value: rollup.not_installed.to_string(),
         });
     }
+    if rollup.pending > 0 {
+        lines.push(DetailLine::MetaEntry {
+            label: "Pending:",
+            value: rollup.pending.to_string(),
+        });
+    }
     lines.push(DetailLine::Blank);
     lines.push(DetailLine::MetaEntry {
         label: "Members:",
@@ -863,7 +869,7 @@ fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec
 /// `parent_bundle_repo` and the active scope label. When the member is itself
 /// a catalog row (its `member_repo` resolves to a `state.rows` entry), render
 /// the **rich** [`detail_lines_naming`] pane — the same Summary/Description/metadata
-/// a standalone selection gets — with a trailing `Via bundle:` provenance
+/// a standalone selection gets — with a trailing `Via bundle:` (or `Required by:`) provenance
 /// line. Otherwise (non-catalog / offline / foreign-registry member) fall back
 /// to the sparse [`detail_lines_for_member`]. Falls back to a generic "no
 /// selection" text when the cache entry is absent (race between display and
@@ -871,7 +877,7 @@ fn group_detail_lines(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec
 fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::DisplayRow>) -> Vec<DetailLine> {
     use super::bundle_members::BundleMemberCache;
     use super::tree::DisplayRow;
-    use crate::tui::detail::{dependency_lines, detail_lines_for_member};
+    use crate::tui::detail::{dependency_lines, detail_lines_for_member, parent_label};
 
     let Some(DisplayRow::Member {
         label,
@@ -888,23 +894,29 @@ fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::Di
         // Match by label AND kind to handle duplicate labels across different
         // artifact kinds (W4: label-only lookup could return the wrong member).
         if let Some(node) = members.iter().find(|m| &m.label == label && m.kind == *kind) {
+            // Only a locked artifact's `requires` fill a cache without a registry
+            // fetch, and a registry fetch serves bundles alone.
+            let parent_kind = state
+                .deps
+                .kind(parent_bundle_repo)
+                .unwrap_or(crate::oci::ArtifactKind::Bundle);
             // A member that is itself a catalog artifact gets the full detail
             // pane (Summary/Description/OCI metadata), keyed by the exact repo
-            // catalog rows are found by, plus a `Via bundle:` provenance line.
+            // catalog rows are found by, plus a `Via bundle:` / `Required by:` provenance line.
             if let Some(repo) = node.member_repo.as_deref()
                 && let Some(catalog_row) = state.rows.iter().find(|r| r.repo == repo)
             {
                 let mut lines = detail_lines_naming(Some(catalog_row), None, &state.invocation);
                 lines.push(DetailLine::MetaEntry {
-                    label: "Via bundle:",
+                    label: parent_label(parent_kind),
                     value: sanitize_member_label(parent_bundle_repo),
                 });
-                lines.extend(dependency_lines(&state.deps, repo));
+                extend_with_dependencies(&mut lines, dependency_lines(&state.deps, repo));
                 return lines;
             }
-            let mut lines = detail_lines_for_member(node, parent_bundle_repo);
+            let mut lines = detail_lines_for_member(node, parent_bundle_repo, parent_kind);
             if let Some(repo) = node.member_repo.as_deref() {
-                lines.extend(dependency_lines(&state.deps, repo));
+                extend_with_dependencies(&mut lines, dependency_lines(&state.deps, repo));
             }
             return lines;
         }
@@ -918,6 +930,30 @@ fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::Di
         DetailLine::Blank,
         DetailLine::Text("(member details unavailable)".to_string()),
     ]
+}
+
+/// Append a member's `deps` rows to `lines`, keeping one `Required by:` row:
+/// the dependency row when it lists parents as `kind/name`, else the requiring
+/// parent's own row, which names it where the lock's graph cannot.
+fn extend_with_dependencies(lines: &mut Vec<DetailLine>, mut deps: Vec<DetailLine>) {
+    let required_by = |l: &DetailLine| {
+        matches!(
+            l,
+            DetailLine::MetaEntry {
+                label: "Required by:",
+                ..
+            }
+        )
+    };
+    let lists_parents = deps
+        .iter()
+        .any(|l| matches!(l, DetailLine::MetaEntry { label: "Required by:", value } if value != "?" && value != "-"));
+    if lists_parents {
+        lines.retain(|l| !required_by(l));
+    } else if lines.iter().any(required_by) {
+        deps.retain(|l| !required_by(l));
+    }
+    lines.extend(deps);
 }
 
 /// Project `state` into a [`RenderModel`]. Pure — no I/O, no ratatui.
@@ -4709,6 +4745,75 @@ mod tests {
         assert!(text.contains("Via bundle:"), "sparse pane still shows provenance");
     }
 
+    /// A child shown under an artifact that requires it names that parent in
+    /// one `Required by:` row, on the sparse pane and the rich one alike: the
+    /// dependency row's `kind/name`, or the parent's location where the lock's
+    /// graph cannot be computed.
+    #[test]
+    fn a_requires_parent_is_labelled_required_by() {
+        use crate::config::DeclaredSource;
+        use crate::oci::Identifier;
+        use crate::tui::bundle_members::{
+            BundleMemberCache, DepIndex,
+            test_support::{declared, lock_of},
+        };
+        let lock = lock_of(
+            &[
+                ("top", "ghcr.io/acme/top", &[("skill", "leaf", "./leaf:1")]),
+                ("leaf", "ghcr.io/acme/leaf", &[]),
+            ],
+            "",
+        );
+        for (catalog, unknown) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut set = declared(&[("top", "ghcr.io/acme/top:1")]);
+            if unknown {
+                // A declared bundle the lock has no snapshot of: `Required by: ?`.
+                set.bundles.insert(
+                    "pack".to_string(),
+                    DeclaredSource::Registry(Identifier::parse("ghcr.io/acme/pack:1").unwrap()),
+                );
+            }
+            let mut s = TuiState::new();
+            s.deps = DepIndex::build(&set, Some(&lock));
+            if catalog {
+                s.set_rows(vec![row("ghcr.io/acme/leaf", ArtifactState::Installed)]);
+            }
+            let (member, node) = member_row_and_cache("ghcr.io/acme/top", "leaf", Some("ghcr.io/acme/leaf"));
+            s.bundle_members.insert(
+                (s.scope_label.clone(), "ghcr.io/acme/top".to_string()),
+                BundleMemberCache::Ready(vec![node]),
+            );
+
+            let lines = member_detail_lines_from_state(&s, Some(&member));
+            let required_by: Vec<&str> = lines
+                .iter()
+                .filter_map(|l| match l {
+                    DetailLine::MetaEntry {
+                        label: "Required by:",
+                        value,
+                    } => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let parent = if unknown { "ghcr.io/acme/top" } else { "skill/top" };
+            assert_eq!(
+                required_by,
+                [parent],
+                "catalog={catalog} unknown={unknown}: one row names the requiring parent: {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|l| matches!(
+                    l,
+                    DetailLine::MetaEntry {
+                        label: "Via bundle:",
+                        ..
+                    }
+                )),
+                "catalog={catalog}: a requires parent is no bundle: {lines:?}"
+            );
+        }
+    }
+
     #[test]
     fn frame_clamps_detail_scroll_to_content_height() {
         let mut s = TuiState::new();
@@ -5047,6 +5152,30 @@ mod tests {
                 "group detail pane must return non-empty lines when a group is selected"
             );
         }
+    }
+
+    /// The group summary counts `Pending` rows like every other state.
+    #[test]
+    fn tree_group_detail_counts_pending_rows() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![
+            row("reg/acme/alpha", ArtifactState::Installed),
+            row("reg/acme/beta", ArtifactState::Pending),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        s.selected = 0;
+        assert!(s.selected_is_group(), "row 0 is the group");
+
+        let lines = group_detail_lines(&s, &s.flattened());
+        assert!(
+            lines.contains(&DetailLine::MetaEntry {
+                label: "Pending:",
+                value: "1".to_string(),
+            }),
+            "the pending row is counted: {lines:?}"
+        );
     }
 
     // SEC-W1: the group detail pane draws the selected node's key. At depth 0
