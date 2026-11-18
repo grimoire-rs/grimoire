@@ -515,7 +515,7 @@ pub struct ValueConstraints {
 /// always-present-null policy (`subsystem-cli-api.md`): `--all` widens
 /// which keys appear as rows, never which fields a row's JSON object
 /// carries.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConfigEntry {
     /// The dotted key, e.g. `options.tui.default_view`.
     pub key: String,
