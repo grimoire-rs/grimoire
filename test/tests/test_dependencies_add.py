@@ -75,6 +75,52 @@ def test_pulled_in(
     assert "pulled in 2 dependencies: skill/d, rule/e" in plain_out.stderr, plain_out.stderr
 
 
+def test_pulled_in_lists_nested_bundles(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    m = _leaf(unique_repo, "m")
+    p = _leaf(unique_repo, "p")
+    mid = make_bundle(f"{unique_repo}/mid", [("skill", "m", m.fq)], tag="1")
+    pack = make_bundle(f"{unique_repo}/pack", [("skill", "p", p.fq)], tag="1")
+    suite = make_bundle(
+        f"{unique_repo}/suite",
+        [("bundle", "mid", mid.fq), ("bundle", "pack", pack.fq)],
+        tag="1",
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "add", "--kind", "bundle", suite.fq)
+
+    report = json.loads(result.stdout)
+    # Kind order puts the bundles after the skills; the target is not listed.
+    assert [(r["kind"], r["name"]) for r in report["pulled_in"]] == [
+        ("skill", "m"),
+        ("skill", "p"),
+        ("bundle", "mid"),
+        ("bundle", "pack"),
+    ], report["pulled_in"]
+
+
+def test_pulled_in_lists_a_bundle_the_target_requires(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    m = _leaf(unique_repo, "m")
+    inner = make_bundle(f"{unique_repo}/inner", [("skill", "m", m.fq)], tag="1")
+    sb = make_dependent(
+        f"{unique_repo}/sb", "1", "skill", _skill_files("sb"), [("bundle", "inner", inner.fq)]
+    )
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "add", sb.fq)
+
+    report = json.loads(result.stdout)
+    assert ("bundle", "inner") in [
+        (r["kind"], r["name"]) for r in report["pulled_in"]
+    ], report["pulled_in"]
+
+
 def test_add_installs_missing_locked_dependency(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
