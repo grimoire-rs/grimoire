@@ -607,6 +607,7 @@ fn classify_resolve(err: &ResolveError) -> Classification {
         ResolveErrorKind::BundleInvalid(_)
         | ResolveErrorKind::LocalBundleInvalid(_)
         | ResolveErrorKind::LocalSource(_)
+        | ResolveErrorKind::KindMismatch { .. }
         | ResolveErrorKind::DependencyCycle { .. }
         | ResolveErrorKind::GraphTooLarge { .. } => Classification::new(ExitCode::DataError),
         ResolveErrorKind::UnsupportedFeature(_) => unsupported_feature(),

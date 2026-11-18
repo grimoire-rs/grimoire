@@ -508,6 +508,11 @@ pub enum ResolveErrorKind {
     #[error("{0}")]
     UnsupportedFeature(ArtifactFeatureError),
 
+    /// The manifest at the pinned reference names another artifact kind than
+    /// the one declared, as when a repository is republished as a different kind.
+    #[error("declared as a {declared} but published as a {found}")]
+    KindMismatch { declared: ArtifactKind, found: ArtifactKind },
+
     /// A local path source failed to validate or pack at lock time: the
     /// path does not exist, the artifact fails kind validation, or a
     /// tool-namespaced metadata literal is invalid.

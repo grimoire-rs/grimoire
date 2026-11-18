@@ -148,3 +148,24 @@ def test_install_refuses_edited_requires_of_an_already_installed_entry(
     before = _snapshot(project_dir / ".claude", *state_roots)
     _stale(runner.run("--format", "json", "install", check=False))
     assert _snapshot(project_dir / ".claude", *state_roots) == before
+
+
+def test_update_refuses_a_repository_republished_as_another_kind(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    rule = make_artifact(f"{unique_repo}/thing", "rule", {"thing.md": "# thing\n"}, tag="1")
+    write_config(project_dir, rules={"thing": rule.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    lock = project_dir / "grimoire.lock"
+    before = lock.read_bytes()
+
+    make_artifact(
+        f"{unique_repo}/thing", "skill", {"thing/SKILL.md": SKILL_DOC}, tag="1"
+    )
+    result = runner.run("--format", "json", "update", check=False)
+
+    assert result.returncode == 65, result.stderr
+    message = json.loads(result.stdout)["error"]["message"]
+    assert "rule" in message and "skill" in message and "published as" in message, message
+    assert lock.read_bytes() == before

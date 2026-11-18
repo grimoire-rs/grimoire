@@ -719,6 +719,12 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
         }));
     };
     check_required_features(&text, &manifest).map_err(|e| fail(ResolveErrorKind::UnsupportedFeature(e)))?;
+    // A manifest naming no kind (a legacy artifact) stays accepted.
+    if let Some(found) = crate::oci::annotations::kind_from_manifest(&manifest)
+        && found != kind
+    {
+        return Err(fail(ResolveErrorKind::KindMismatch { declared: kind, found }));
+    }
 
     // `(layer, is_requires)`; a requires layer must list at least one member.
     let layer = match manifest
@@ -4791,6 +4797,29 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err.kind, ResolveErrorKind::UnsupportedFeature(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_manifest_naming_another_kind_is_refused() {
+        let fake = Fake::default();
+        fake.release("ghcr.io/acme/a", "1.0.0", &[]);
+        let (fake, access) = fake.arc();
+        let digest = fake.tags.lock().unwrap()[&"ghcr.io/acme/a:1".to_string()].clone();
+        fake.manifests
+            .lock()
+            .unwrap()
+            .get_mut(&digest.to_string())
+            .unwrap()
+            .artifact_type = Some(Rule.artifact_type().to_string());
+
+        let err = run(&access, vec![direct(Skill, "a", "ghcr.io/acme/a:1")])
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err.kind, ResolveErrorKind::KindMismatch { declared: Skill, found: Rule }),
+            "{err}"
+        );
     }
 
     #[tokio::test]
