@@ -1627,7 +1627,10 @@ fn update_notes(entries: &[StatusEntry], advice: &NoteAdvice) -> Vec<String> {
             let remedy = match advice.remedy(&(entry.kind, entry.name.clone()), entry.direct) {
                 Remedy::LockFirst => advice.lock_first(),
                 Remedy::Unpromised => "its tag moved, and more than one reference requires it".to_string(),
-                Remedy::Update => format!("`{}` moves its pin", advice.scope.grim.update(&entry.name)),
+                Remedy::Update => format!(
+                    "`{}` moves its pin, or says why it cannot",
+                    advice.scope.grim.update(&entry.name)
+                ),
             };
             format!("update available: {} '{name}': {remedy}", entry.kind)
         })
@@ -1841,7 +1844,7 @@ fn apply_nested_answers(
                 Remedy::LockFirst => advice.lock_first(),
                 Remedy::Unpromised => "more than one reference requires it".to_string(),
                 Remedy::Update => format!(
-                    "`{}` moves its pin and can change its members",
+                    "`{}` moves its pin and can change its members, or says why it cannot",
                     advice.scope.grim.update(&bundle.name)
                 ),
             };
@@ -4471,7 +4474,7 @@ mod tests {
         let notes = update_notes(&[moved(skill_entry("x"), true)], &advice);
         assert_eq!(
             notes,
-            ["update available: skill 'x': `grim --global update -- x` moves its pin"]
+            ["update available: skill 'x': `grim --global update -- x` moves its pin, or says why it cannot"]
         );
 
         let mut lock = nested_lock();
@@ -4495,7 +4498,9 @@ mod tests {
         let notes = update_notes(&[moved(skill_entry("x"), true)], &advice);
         assert_eq!(
             notes,
-            ["update available: skill 'x': `grim --config '/srv/my team/grimoire.toml' update -- x` moves its pin"]
+            [
+                "update available: skill 'x': `grim --config '/srv/my team/grimoire.toml' update -- x` moves its pin, or says why it cannot"
+            ]
         );
 
         let mut lock = nested_lock();
@@ -4544,7 +4549,10 @@ mod tests {
         assert!(notes[0].contains("more than one reference requires it"), "{notes:?}");
         assert!(!notes[0].contains("grim update"), "{notes:?}");
         let direct = update_notes(&[moved(skill_entry("dep"), true)], &advice);
-        assert!(direct[0].contains("`grim update -- dep` moves its pin"), "{direct:?}");
+        assert!(
+            direct[0].contains("`grim update -- dep` moves its pin, or says why it cannot"),
+            "{direct:?}"
+        );
     }
 
     /// A nested bundle two bundles list at different tags has no single
@@ -4577,7 +4585,7 @@ mod tests {
 
         assert_eq!(
             notes,
-            ["update available: skill 'dep': `grim update -- dep` moves its pin"]
+            ["update available: skill 'dep': `grim update -- dep` moves its pin, or says why it cannot"]
         );
     }
 
@@ -4851,7 +4859,7 @@ mod tests {
                 entries[0].update_available, expected,
                 "{version} {manifests_down}: {notes:?}"
             );
-            let moved = ["update available: skill 'dep': `grim update -- dep` moves its pin"];
+            let moved = ["update available: skill 'dep': `grim update -- dep` moves its pin, or says why it cannot"];
             let expected_notes: &[&str] = if expected == Some(true) { &moved } else { &[] };
             assert_eq!(notes, expected_notes);
         }
@@ -4923,7 +4931,7 @@ mod tests {
                 entries[0].update_available, expected,
                 "{declared} {edge} {shipped}: {notes:?}"
             );
-            let moved = ["update available: skill 'x': `grim update -- x` moves its pin"];
+            let moved = ["update available: skill 'x': `grim update -- x` moves its pin, or says why it cannot"];
             let expected_notes: &[&str] = if expected == Some(true) { &moved } else { &[] };
             assert_eq!(notes, expected_notes);
         }

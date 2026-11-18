@@ -261,9 +261,9 @@ mod tests {
     use crate::install::install_state::{ClientOutput, InstallRecord};
     use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::lock::grimoire_lock::LockMetadata;
+    use crate::lock::lock_version::LockVersion;
     use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
     use crate::oci::bundle::BundleMember;
-    use crate::lock::lock_version::LockVersion;
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Algorithm, ArtifactKind, Digest, Identifier};
     use std::path::PathBuf;
