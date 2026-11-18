@@ -9,7 +9,8 @@ environment, against one throwaway zot registry whose tag state is reset to
 the same bytes before each run. After **every** command the whole root
 (workspace, fake ``HOME``, ``GRIM_HOME``) is snapshotted; the two runs must
 match byte for byte outside the named ``VOLATILE`` mask and the
-``pinned-advisory-tag`` equivalence, ``--format json`` stdout may differ
+``pinned-advisory-tag`` and ``record-advisory-tag`` equivalences,
+``--format json`` stdout may differ
 only by the C-153 additive keys, and stderr gains no warning outside
 ``WARNING_EQUIVALENCES``.
 
@@ -128,6 +129,17 @@ _ARTIFACT_TABLE = re.compile(rb"\[\[(?:skill|rule|agent|mcp|hook|settings)\]\]")
 _PINNED_TAG = re.compile(
     rb'(pinned = "[^"/]+(?:/[^"/:@]+)+):[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}'
     rb'(@sha256:[0-9a-f]{64}")'
+)
+
+# Named state equivalence record-advisory-tag: main's `add` and `update` copy the
+# lock's tag into an install record's `pinned`, and the branch stores the pin
+# without it, as `install` always did. One direction only: a tag the branch
+# writes and main does not stays a difference.
+RECORD_TAG_STATES = ("*.grimoire/state.json", "*state/global.json")
+_RECORD_TAG = re.compile(
+    rb'^(\s*"pinned": "[^"/]+(?:/[^"/:@]+)+):[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}'
+    rb'(@sha256:[0-9a-f]{64}",?)$',
+    re.MULTILINE,
 )
 
 # Project scope cannot detect antigravity/openclaw (no project marker exists).
@@ -359,6 +371,16 @@ def _cached_blob(rel: str, entry: tuple) -> bool:
     )
 
 
+def _record_tag_dropped(rel: str, main: tuple, branch: tuple) -> bool:
+    """``record-advisory-tag``: see ``RECORD_TAG_STATES``."""
+    return (
+        any(fnmatch.fnmatch(rel, glob) for glob in RECORD_TAG_STATES)
+        and main[0] == branch[0] == "file"
+        and main[2] == branch[2]
+        and _RECORD_TAG.sub(rb"\1\2", main[1]) == branch[1]
+    )
+
+
 def diff_trees(label: str, a: dict[str, tuple], b: dict[str, tuple]) -> list[str]:
     out = []
     for rel in sorted(a.keys() | b.keys()):
@@ -367,7 +389,7 @@ def diff_trees(label: str, a: dict[str, tuple], b: dict[str, tuple]) -> list[str
         elif rel not in a:
             if not _cached_blob(rel, b[rel]):
                 out.append(f"{label}: {rel} only with branch")
-        elif a[rel] != b[rel]:
+        elif a[rel] != b[rel] and not _record_tag_dropped(rel, a[rel], b[rel]):
             (ka, pa, xa), (kb, pb, xb) = a[rel], b[rel]
             if ka != kb or xa != xb:
                 out.append(f"{label}: {rel} type/mode {ka},{xa} != {kb},{xb}")
@@ -808,6 +830,22 @@ def differential(main_bin: Path, branch_bin: Path, root: Path) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+def _self_test_record_tag() -> None:
+    pin = b'"pinned": "127.0.0.1:5000/p9/skills/s%s@sha256:' + b"a" * 64 + b'",'
+    tagged = b"{\n      " + pin % b":1" + b'\n      "outputs": []\n}'
+    bare = tagged.replace(b"/s:1@", b"/s@")
+    for rel in ("ws/.grimoire/state.json", "grim_home/state/global.json"):
+        main, branch = {rel: ("file", tagged, False)}, {rel: ("file", bare, False)}
+        assert diff_trees("t", main, branch) == [], rel
+        assert diff_trees("t", branch, main), f"{rel}: a tag only the branch writes"
+        other = {rel: ("file", bare.replace(b"/s@", b"/t@"), False)}
+        assert diff_trees("t", main, other), f"{rel}: another repository"
+        moved = {rel: ("file", bare.replace(b"aaaa", b"bbbb", 1), False)}
+        assert diff_trees("t", main, moved), f"{rel}: another digest"
+    lock = {"ws/other.json": ("file", tagged, False)}
+    assert diff_trees("t", lock, {"ws/other.json": ("file", bare, False)})
+
+
 def self_test(root: Path) -> None:
     root = root.resolve()
     shutil.rmtree(root, ignore_errors=True)
@@ -854,6 +892,7 @@ def self_test(root: Path) -> None:
     assert _mask_file("ws/other.toml", lock) == lock
 
     _self_test_pinned_tag()
+    _self_test_record_tag()
 
     # Per-command checkpoints: a difference erased by a later command is still reported.
     early = [Checkpoint("#0", 0, "{}", base), Checkpoint("#1", 0, "{}", moved)]
