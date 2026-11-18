@@ -9,7 +9,8 @@ variables. Settings (`[options]`, `[options.tui]`) and named registries
 (`[[registries]]`) are managed through [`grim config`][grim-config]; declarations
 (`[skills]`, `[rules]`, `[agents]`, [`[mcp]`](./mcp-servers.md#consuming),
 `[bundles]`) stay under [`grim add`][grim-add]
-and [`grim remove`][grim-remove]. You can also hand-edit either file directly.
+and [`grim remove`][grim-remove]. You can also hand-edit either file directly, or
+change settings and registries in the [`grim tui` config popup](./browse.md#tui-config).
 Any `grim` write — `grim config`, `grim add`, `grim remove` — **edits the file in
 place**: only the lines whose meaning changed move. Comments, blank lines and key
 order survive, and a new entry is appended at the end of its table.

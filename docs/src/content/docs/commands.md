@@ -142,6 +142,8 @@ grim init --registry ghcr.io/acme
 
 The command covers two areas of the file: **settings** (the `[options]` and `[options.tui]` tables) and **named registries** (the `[[registries]]` array). Declarations remain under [`grim add`](#add) and [`grim remove`](#remove), which keep the lockfile in step with every change. Those are the `[skills]`, `[rules]`, `[agents]`, `[mcp]`, `[hooks]`, `[settings]` and `[bundles]` tables.
 
+`grim tui` makes the same edits interactively; see [change settings in the browser](./browse.md#tui-config).
+
 Scope follows the same rule as every config-aware command: without a flag, `grim config` discovers and edits the project `grimoire.toml` by walking up from the working directory; `--global` targets `$GRIM_HOME/grimoire.toml`; `--config <path>` selects an explicit project file.
 
 Every write re-runs registry validation before touching the file, so the at-most-one-`default` constraint and alias rules always hold. The writer is shared with [`grim add`](#add) and [`grim remove`](#remove), and it **edits the file in place**: only the lines whose meaning changed move. Comments, blank lines and key order survive, and a new entry is appended at the end of its table.
@@ -3859,8 +3861,9 @@ It supports multi-select with batch install, update, and delete. Press `?` in th
 for the full key map; highlights are `t` to toggle tree/flat view, `v` to
 pick a version, `o` to open the selected entry's repository URL in the
 browser, `g` to switch scope, `h` to show/hide deprecated artifacts,
-`F` to open the [filter and sort popup](./browse.md#filter-sort), and
-`space` to mark rows. A search that hides rows below the relevance cutoff
+`F` to open the [filter and sort popup](./browse.md#filter-sort),
+`C` to edit settings and registries in the [config popup](./browse.md#tui-config),
+and `space` to mark rows. A search that hides rows below the relevance cutoff
 says so in the status line, as `N weaker matches hidden`.
 
 After the first load, and after each scope switch, one background task proves

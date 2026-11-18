@@ -30,7 +30,7 @@ pane for the row you are on.
    setup instead. Press `g` and confirm to create the project config.
 
 2. Press `/` and type part of a name to narrow the list.
-3. Press `f` to show one kind at a time, or `F` to pick several kinds in the [filter and sort popup](#filter-sort).
+3. Press `f` to show one kind at a time, or `F` to pick several kinds in the [filter and sort popup](#filter-sort). Press `C` to [change settings](#tui-config) without leaving the browser.
 4. Move to the row you want with the arrow keys.
 5. Press `i` to install it.
 
@@ -105,6 +105,7 @@ app. The website and the VS Code extension have no key map.
 | `S` | Flip the active order between ascending and descending |
 | `f` | Cycle a kind filter through the kinds in the catalog, one kind at a time. A wider selection from the popup collapses to the next single kind. The Catalog title names it, and the cursor returns to the top |
 | `F` | Open the [filter and sort popup](#filter-sort). In a `/` search, `F` is query text |
+| `C` | Open the [config popup](#tui-config). In a `/` search, `C` is query text |
 | `t` | Toggle tree and flat view |
 | `→` / `←` | Expand and collapse a group, in tree view. On a collapsed group or a leaf, `←` jumps to the parent |
 | `z` | Fold the whole tree, in tree view. Expands everything, or collapses back to the [`expand_levels`](./configuration.md#options-tui) depth |
@@ -132,6 +133,53 @@ The `s`, `S`, `f` and `h` keys act on the same state outside the popup. With
 several kinds checked, the Catalog title names up to three (`kind: skill,
 rule`) and counts more (`kind: 4 kinds`). The choice is not saved, and no
 command-line flag sets it.
+
+## Change settings in the browser {#tui-config}
+
+Press `C` to open the **Config** popup. It lists the settings that
+[`grim config list --all`](./commands.md#config) shows for the scope the
+browser is on, project or global, which `g` switches. The popup edits that
+scope's `grimoire.toml` and has no scope switch of its own. Its title names the
+scope and the file. A global file that does not exist yet reads `not created
+yet`, and the first edit creates it.
+
+Each edit is one save, written through the same code as `grim config set`,
+`unset`, `registry add` and `registry set`. Validation and messages match the
+command line, and comments in the file survive. Rows sit in groups: General,
+TUI, Experimental, Vendors, Registries and Plugin. Plugin rows show after you
+press `A` and exist at project scope only. [Configuration](./configuration.md)
+says what each key means.
+
+| Row | Keys |
+|---|---|
+| Boolean | `space` or `enter` toggles it |
+| Enum | `←` and `→` step through the values; `enter` opens a pick list |
+| `options.clients` | `enter` opens a checklist: `space` toggles, `enter` saves, and nothing checked clears the key |
+| Text or number | `enter` opens a one-line field: `enter` saves, an empty value clears the key, `esc` cancels. Typing appends and `backspace` deletes; there is no cursor movement or paste |
+| Any set key | `x` resets it to its default |
+
+`esc` or `C` closes the popup. `q` does nothing inside it.
+
+**Registries.** The Registries group has one row per declared registry, with
+the default marked. `enter` opens an edit form, `space` makes the registry the
+default or clears the default, and `x` then `enter` removes it; any other key
+keeps it. The last row adds a registry. The form holds the alias (fixed once
+saved), the kind (`oci` or `index`), the locator, `default` (add only),
+`insecure` (`oci` only), the include and exclude pattern lists, and the Save and
+Cancel buttons. Patterns are stored as typed, and a comma is glob alternation,
+not a separator. An entry with no alias is read-only here.
+
+**When an edit applies.** A saved edit takes effect in the running browser at
+once: clients, the tree options and the relevance cutoff. A changed registry
+list or filter reloads the catalog. These keys are read only at startup, and
+the popup marks them `applies when grim tui starts again`:
+`options.tui.theme`, `options.tui.default_view`, `options.tui.sort`,
+`options.tui.sort_order`, `options.show_deprecated` and a registry's
+`insecure`. Under `--registry`, registry edits are saved but the browse set
+stays what the flag selected.
+
+A terminal under 44 columns or 12 rows shows a one-line notice in place of the
+form. Enlarge it to continue.
 
 ## Badge legend
 
