@@ -549,6 +549,7 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
                 ));
             }
         }
+        notes.extend(prov.redundant_note(&(ArtifactKind::Bundle, name.clone())));
         entries.push(StatusEntry {
             kind: ArtifactKind::Bundle,
             name: name.clone(),
