@@ -3858,7 +3858,8 @@ the Repo cell is shortened to the registry-relative path so names stay readable.
 It supports multi-select with batch install, update, and delete. Press `?` in the TUI
 for the full key map; highlights are `t` to toggle tree/flat view, `v` to
 pick a version, `o` to open the selected entry's repository URL in the
-browser, `g` to switch scope, `h` to show/hide deprecated artifacts, and
+browser, `g` to switch scope, `h` to show/hide deprecated artifacts,
+`F` to open the [filter and sort popup](./browse.md#filter-sort), and
 `space` to mark rows. A search that hides rows below the relevance cutoff
 says so in the status line, as `N weaker matches hidden`.
 
@@ -3941,8 +3942,10 @@ picks the direction the order opens in. Omitted and unconfigured, the
 browse opens grouped by kind and then by name as it always has; the `s`
 key cycles through the same orders live, `S` flips the direction, and the
 Catalog title names the active one. The `f` key cycles a kind filter through
-the kinds present in the loaded catalog, and the title names it before the
-sort (`kind: agent · sort: rating desc`). While it is on, `/` search text
+the kinds present in the loaded catalog, one kind at a time. The `F` key opens
+a popup that checks any set of kinds and sets the sort, the direction and the
+deprecated toggle live. The title names up to three kinds before the sort
+(`kind: agent · sort: rating desc`) and counts more (`kind: 4 kinds`). While it is on, `/` search text
 matches as text. When the browse source publishes
 [artifact ratings](./ratings.md), the detail pane gains a `Rating:` row
 below the provenance rows (`42 upvotes`); an unrated artifact simply has no
