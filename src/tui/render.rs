@@ -17,8 +17,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
+use crate::catalog::SortMode;
 use crate::config::registry_resolve::RowSource;
 use crate::config::scope::Invocation;
+use crate::oci::ArtifactKind;
 use crate::tui::theme::{self, ScopeTone};
 
 use super::confirm;
@@ -26,7 +28,8 @@ use super::detail::{
     BULLET_PREFIX, CODE_PREFIX, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_DOWNLOADS, W_KIND, W_RATING, W_REGISTRY,
     W_REPO, W_STATUS, W_TAG, catalog_width, detail_lines_naming, scroll_max,
 };
-use super::state::{ArtifactState, BatchSource, Mode, TuiState};
+use super::list_popup::{self, ListPopupView, Mark, PopupRow};
+use super::state::{ArtifactState, BatchSource, FilterRow, Mode, TuiState, filter_rows};
 
 /// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
 /// concrete ratatui [`Color`]; keeping it abstract preserves the headless
@@ -446,6 +449,8 @@ pub struct RenderModel {
     pub invocation: Invocation,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
+    /// The filter and sort popup, when [`Mode::FilterSort`].
+    pub list_popup: Option<ListPopupView>,
     /// The confirmation overlay, when [`Mode::ConfirmForce`] or
     /// [`Mode::ConfirmBatch`].
     pub confirm: Option<ConfirmView>,
@@ -1100,10 +1105,10 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // a Status-column legend.
     let hint_tiers = if state.view_mode == crate::tui::state::ViewMode::Tree {
         vec![
-            "space mark · i/u/d act · v versions · o open · s sort · g scope · t tree · z fold · ? help · q quit"
+            "space mark · i/u/d act · v versions · o open · s/F sort · g scope · t tree · z fold · ? help · q quit"
                 .to_string(),
-            "space mark · i/u/d act · v versions · s sort · g scope · t tree · z fold · ? help · q quit".to_string(),
-            "i/u/d act · v ver · s sort · g scope · t tree · z fold · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · s/F sort · g scope · t tree · z fold · ? help · q quit".to_string(),
+            "i/u/d act · v ver · s/F sort · g scope · t tree · z fold · ? help · q quit".to_string(),
             "i/u/d g t z ? help q".to_string(),
             "i/u/d v g t ? q".to_string(),
             "? help".to_string(),
@@ -1111,9 +1116,9 @@ pub fn frame(state: &TuiState) -> RenderModel {
     } else {
         // Flat mode: `z` fold is inert — omit it to avoid misleading users.
         vec![
-            "space mark · i/u/d act · v versions · o open · s sort · g scope · t tree · ? help · q quit".to_string(),
-            "space mark · i/u/d act · v versions · s sort · g scope · t tree · ? help · q quit".to_string(),
-            "i/u/d act · v ver · s sort · g scope · t tree · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · o open · s/F sort · g scope · t tree · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · s/F sort · g scope · t tree · ? help · q quit".to_string(),
+            "i/u/d act · v ver · s/F sort · g scope · t tree · ? help · q quit".to_string(),
             "i/u/d g t ? help q".to_string(),
             "i/u/d v g t ? q".to_string(),
             "? help".to_string(),
@@ -1131,6 +1136,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
             pinned: state.rows.get(p.row).and_then(|r| r.pinned_version.clone()),
         }
     });
+
+    let list_popup = (state.mode == Mode::FilterSort).then(|| filter_popup_view(state));
 
     let confirm = state
         .confirm
@@ -1189,12 +1196,72 @@ pub fn frame(state: &TuiState) -> RenderModel {
         help_scroll: state.help_scroll,
         invocation: state.invocation.clone(),
         picker,
+        list_popup,
         confirm,
         // A: only show Registry column when more than one registry is in scope;
         // the tree view never needs it (registry roots are already tree nodes).
         show_registry_column: state.show_registry_column(),
         sort_label: state.sort_label(),
         kind_label: state.kind_label(),
+    }
+}
+
+/// Columns the filter and sort popup takes, borders and padding included.
+const FILTER_POPUP_WIDTH: u16 = 30;
+
+/// The section a popup row opens, when it is the first of its section.
+fn filter_header(row: FilterRow) -> Option<&'static str> {
+    match row {
+        FilterRow::Kind(k) if k == ArtifactKind::ALL[0] => Some("Kinds"),
+        FilterRow::Sort(None) => Some("Sort"),
+        FilterRow::Deprecated => Some("Show"),
+        _ => None,
+    }
+}
+
+/// The filter and sort popup as rows: every selectable [`filter_rows`] entry
+/// reads its mark from the live state, with section headers between them.
+fn filter_popup_view(state: &TuiState) -> ListPopupView {
+    let mut rows = Vec::new();
+    let mut cursor = None;
+    for (i, row) in filter_rows().into_iter().enumerate() {
+        if let Some(label) = filter_header(row) {
+            rows.push(PopupRow {
+                mark: Mark::None,
+                label: label.to_string(),
+                header: true,
+                muted: false,
+            });
+        }
+        if i == state.filter_cursor {
+            cursor = Some(rows.len());
+        }
+        let (mark, label, muted) = match row {
+            FilterRow::Kind(k) => (
+                Mark::Check(state.kind_filter.contains(&k)),
+                k.kind_str().to_string(),
+                !state.rows.iter().any(|r| r.kind == k.kind_str()),
+            ),
+            FilterRow::Sort(m) => (
+                Mark::Radio(state.sort == m),
+                m.map_or("default", SortMode::as_str).to_string(),
+                false,
+            ),
+            FilterRow::Direction => (Mark::None, format!("order: {}", state.sort_direction().as_str()), false),
+            FilterRow::Deprecated => (Mark::Check(state.hide_deprecated), "hide deprecated".to_string(), false),
+        };
+        rows.push(PopupRow {
+            mark,
+            label,
+            header: false,
+            muted,
+        });
+    }
+    ListPopupView {
+        title: "Filter & sort".to_string(),
+        rows,
+        cursor,
+        hint: "space toggle · esc close".to_string(),
     }
 }
 
@@ -1553,6 +1620,11 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     if model.show_help {
         draw_help(f, model.help_scroll, &model.invocation);
     }
+    if let Some(p) = &model.list_popup {
+        let rows = u16::try_from(p.rows.len()).unwrap_or(u16::MAX);
+        let height = rows.saturating_add(2 + 2 * confirm::PAD_ROWS);
+        list_popup::draw(f, list_popup::anchored(chunks[2], FILTER_POPUP_WIDTH, height), p);
+    }
     if let Some(p) = &model.picker {
         draw_picker(f, p);
     }
@@ -1877,7 +1949,7 @@ fn help_entries() -> [(&'static str, &'static str); 10] {
         ("v · o", "pick a version for the row · open its repository URL"),
         (
             "g · t · s · f",
-            "scope project ⇄ global · tree / flat view · sort (S flips) · kind",
+            "scope · tree / flat · sort (S flips) · kind · F filter & sort popup",
         ),
         ("→ / ←", "expand / collapse group; z folds all (tree mode)"),
         // `tab` shares this row rather than taking its own: the overlay is
@@ -2644,6 +2716,96 @@ mod tests {
         }
     }
 
+    fn filter_popup_state() -> TuiState {
+        let mut s = named_rows(&["alpha", "beta"]);
+        s.open_filter_sort();
+        s
+    }
+
+    #[test]
+    fn filter_popup_pads_rows_inside_border() {
+        let s = filter_popup_state();
+        let buf = draw_sized(&s, 80, 24);
+        let w = usize::from(buf.area.width);
+        let rows: Vec<Vec<String>> = buf
+            .content()
+            .chunks(w)
+            .map(|r| r.iter().map(|c| c.symbol().to_string()).collect())
+            .collect();
+        let (top, title_at) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(y, r)| r.concat().find("Filter & sort").map(|at| (y, at)))
+            .unwrap_or_else(|| panic!("popup title is drawn:\n{}", screen(&buf)));
+        let left = (0..title_at)
+            .rev()
+            .find(|&x| rows[top][x] == "┌")
+            .expect("popup corner");
+        let right = (title_at..w).find(|&x| rows[top][x] == "┐").expect("popup corner");
+        assert!(
+            rows[top][left + 1..right].concat().starts_with(" Filter & sort "),
+            "title names the popup, not its body"
+        );
+        let bottom = (top + 1..rows.len())
+            .find(|&y| rows[y][left] == "└")
+            .expect("popup bottom");
+        let pad = usize::from(confirm::PAD);
+        assert!(
+            rows[top + 1][left + 1..right].iter().all(|c| c == " "),
+            "the row under the top border is padding:\n{}",
+            screen(&buf)
+        );
+        for (y, row) in rows.iter().enumerate().take(bottom).skip(top + 1) {
+            for x in (left + 1..left + 1 + pad).chain(right - pad..right) {
+                assert_eq!(row[x], " ", "row {y} touches the border:\n{}", screen(&buf));
+            }
+        }
+        assert!(
+            rows[top + 2..bottom]
+                .iter()
+                .any(|r| r[left + 1 + pad..right - pad].concat().contains("skill")),
+            "rows are drawn:\n{}",
+            screen(&buf)
+        );
+    }
+
+    #[test]
+    fn filter_popup_leaves_catalog_title_visible() {
+        let mut s = filter_popup_state();
+        s.close_filter_sort();
+        s.set_kind_filter(vec![ArtifactKind::Skill, ArtifactKind::Rule]);
+        s.open_filter_sort();
+        let text = screen(&draw_sized(&s, 80, 24));
+        assert!(text.contains("Filter & sort"), "{text}");
+        assert!(text.contains("kind: skill, rule"), "{text}");
+    }
+
+    #[test]
+    fn filter_popup_marks_selected_kinds_and_sort() {
+        let mut s = filter_popup_state();
+        s.set_kind_filter(vec![ArtifactKind::Rule]);
+        s.set_sort_mode(Some(SortMode::Rating));
+        let text = screen(&draw_sized(&s, 80, 30));
+        for want in [
+            "[x] rule",
+            "[ ] skill",
+            "(•) rating",
+            "( ) name",
+            "order: desc",
+            "[ ] hide deprecated",
+        ] {
+            assert!(text.contains(want), "missing {want:?}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn filter_popup_scrolls_to_cursor_on_short_terminal() {
+        let mut s = filter_popup_state();
+        s.move_filter_cursor(i64::MAX);
+        let text = screen(&draw_sized(&s, 80, 12));
+        assert!(text.contains("hide deprecated"), "{text}");
+    }
+
     #[test]
     fn help_mode_sets_show_help() {
         let mut s = TuiState::new();
@@ -2768,6 +2930,7 @@ mod tests {
             ("h", "deprecated toggle"),
             ("r", "catalog refresh"),
             ("q", "quit"),
+            ("filter & sort popup", "F filter & sort popup"),
         ] {
             assert!(text.contains(needle), "{what} must be documented; overlay text: {text}");
         }
