@@ -178,6 +178,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         show_deprecated: args.show_deprecated || scope.options.show_deprecated,
         sort,
         sort_order,
+        browse_forced: ctx.registry_flags().iter().any(|f| !f.is_empty()),
     };
 
     // The session outlives the startup reads and can edit the global config: stop sharing the memo.

@@ -1229,6 +1229,7 @@ fn filter_header(row: FilterRow) -> Option<&'static str> {
 fn sanitized(mut view: ListPopupView) -> ListPopupView {
     view.title = sanitize_lines(&view.title);
     for row in &mut view.rows {
+        row.label = sanitize_lines(&row.label);
         row.value = sanitize_lines(&row.value);
     }
     view.notes = view.notes.iter().map(|n| sanitize_lines(n)).collect();
@@ -1286,6 +1287,8 @@ fn filter_popup_view(state: &TuiState) -> ListPopupView {
         notes: Vec::new(),
         message: None,
         centered: None,
+        buttons: Vec::new(),
+        button_cursor: None,
     }
 }
 
@@ -2759,6 +2762,7 @@ mod tests {
             path.to_string(),
             exists,
             rows,
+            Vec::new(),
         ));
         s
     }
@@ -2838,6 +2842,124 @@ mod tests {
         assert!(out.contains("Config · global"), "{out}");
         assert!(out.contains("enter edit · space toggle · x reset · esc close"), "{out}");
         assert!(out.contains("options."), "{out}");
+    }
+
+    fn registry_state(w: u16, h: u16) -> TuiState {
+        use crate::config::declaration::{ConfigOptions, RegistryConfig};
+        let registries = vec![
+            RegistryConfig {
+                alias: Some("acme".to_string()),
+                oci: Some("ghcr.io/acme".to_string()),
+                default: true,
+                ..Default::default()
+            },
+            RegistryConfig {
+                alias: Some("idx".to_string()),
+                index: Some("https://index.example".to_string()),
+                ..Default::default()
+            },
+        ];
+        let rows = crate::command::config::collect_entries(true, &ConfigOptions::default(), &registries);
+        let mut s = named_rows(&["alpha"]);
+        s.set_term_size((w, h));
+        s.open_config(crate::tui::config_dialog::ConfigDialog::new(
+            "global",
+            "/g/grimoire.toml".to_string(),
+            true,
+            rows,
+            registries,
+        ));
+        s
+    }
+
+    fn press_config(s: &mut TuiState, keys: &[crate::tui::event::TuiInput]) {
+        let size = s.term_size;
+        for key in keys {
+            s.config.as_mut().unwrap().handle(*key, size);
+        }
+    }
+
+    /// The add form open, with the cursor `downs` rows into it.
+    fn add_form_state(w: u16, h: u16, downs: usize) -> TuiState {
+        use crate::tui::event::TuiInput;
+        let mut s = registry_state(w, h);
+        press_config(&mut s, &[TuiInput::End, TuiInput::Enter]);
+        press_config(&mut s, &vec![TuiInput::Down; downs]);
+        s
+    }
+
+    fn cell_rows(buf: &ratatui::buffer::Buffer) -> Vec<Vec<String>> {
+        let w = usize::from(buf.area.width);
+        buf.content()
+            .chunks(w)
+            .map(|r| r.iter().map(|c| c.symbol().to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn registry_form_buttons_centered() {
+        let s = add_form_state(100, 30, 7);
+        let buf = draw_sized(&s, 100, 30);
+        let rows = cell_rows(&buf);
+        let row = rows
+            .iter()
+            .find(|r| r.concat().contains("[ Save ]"))
+            .unwrap_or_else(|| panic!("no buttons:\n{}", screen(&buf)));
+        let top = rows.iter().find(|r| r.concat().contains("Config ·")).unwrap();
+        let title_at = top.concat().find("Config ·").unwrap();
+        let left = (0..title_at).rev().find(|&x| top[x] == "┌").expect("corner");
+        let right = (title_at..top.len()).find(|&x| top[x] == "┐").expect("corner");
+        let first = (left + 1..right).find(|&x| row[x] != " ").unwrap();
+        let last = (left + 1..right).rev().find(|&x| row[x] != " ").unwrap();
+        let (gap_l, gap_r) = (first - left - 1, right - last - 1);
+        assert!(gap_l.abs_diff(gap_r) <= 2, "{gap_l} vs {gap_r}:\n{}", screen(&buf));
+        assert!(gap_l >= usize::from(confirm::PAD), "touches the border");
+    }
+
+    #[test]
+    fn registry_form_pads_rows_inside_border() {
+        let s = add_form_state(100, 30, 0);
+        let buf = draw_sized(&s, 100, 30);
+        let rows = cell_rows(&buf);
+        let w = rows[0].len();
+        let top = rows
+            .iter()
+            .position(|r| r.concat().contains("Config ·"))
+            .expect("title");
+        let title_at = rows[top].concat().find("Config ·").unwrap();
+        let left = (0..title_at).rev().find(|&x| rows[top][x] == "┌").expect("corner");
+        let right = (title_at..w).find(|&x| rows[top][x] == "┐").expect("corner");
+        let pad = usize::from(confirm::PAD);
+        for row in &rows[top + 1..top + 10] {
+            for x in (left + 1..left + 1 + pad).chain(right - pad..right) {
+                assert_eq!(row[x], " ", "touches the border:\n{}", screen(&buf));
+            }
+        }
+        assert!(rows[top + 1][left + 1..right].iter().all(|c| c == " "), "padding row");
+        assert!(screen(&buf).contains("New registry"), "{}", screen(&buf));
+    }
+
+    #[test]
+    fn registries_section_fits_80x24() {
+        use crate::tui::event::TuiInput;
+        let mut s = registry_state(80, 24);
+        press_config(&mut s, &[TuiInput::End]);
+        let out = screen(&draw_sized(&s, 80, 24));
+        assert!(out.contains("Registries"), "{out}");
+        assert!(out.contains("idx"), "{out}");
+        assert!(out.contains("+ add registry"), "{out}");
+        assert!(out.contains("enter add · esc close"), "{out}");
+    }
+
+    #[test]
+    fn pattern_list_shows_the_comma_note() {
+        use crate::tui::event::TuiInput;
+        let mut s = add_form_state(100, 30, 5);
+        press_config(&mut s, &[TuiInput::Enter]);
+        let out = screen(&draw_sized(&s, 100, 30));
+        assert!(out.contains("a comma is glob alternation, not a separator"), "{out}");
+        assert!(out.contains("+ add pattern"), "{out}");
+        assert!(out.contains("enter add · x remove · esc back"), "{out}");
     }
 
     fn filter_popup_state() -> TuiState {

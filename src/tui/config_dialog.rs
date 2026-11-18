@@ -5,11 +5,16 @@
 //! one edit a key press asks the app to write. Pure state; the app owns the
 //! file and reports back through [`ConfigDialog::saved`] / [`ConfigDialog::failed`].
 
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+
 use crate::api::config_report::{ConfigEntry, ConfigSection, ValueType};
+use crate::command::config::{RegistryDraft, RegistryEdit};
+use crate::config::declaration::RegistryConfig;
 
 use super::confirm::{PAD, wrap};
 use super::event::TuiInput;
 use super::list_popup::{ListPopupView, Mark, PopupRow};
+use super::registry_form::{FormStep, RegistryForm, registry_value};
 
 const MIN_COLS: u16 = 44;
 const MIN_ROWS: u16 = 12;
@@ -18,15 +23,67 @@ const MAX_NOTE_LINES: usize = 3;
 const CARET: &str = "▌";
 const TOO_SMALL: &str = "enlarge the terminal to edit settings";
 
-/// Sections in `grim config list` order, with their header text. `Registry`
-/// is absent on purpose: registry management is a later step.
-const SECTIONS: [(ConfigSection, &str); 5] = [
-    (ConfigSection::General, "General"),
-    (ConfigSection::Tui, "TUI"),
-    (ConfigSection::Experimental, "Experimental"),
-    (ConfigSection::Vendors, "Vendors"),
-    (ConfigSection::Plugin, "Plugin"),
+/// One block of the list. The `registry.*` entries are not a block: the
+/// Registries block is drawn from the declared `[[registries]]`.
+#[derive(Clone, Copy)]
+enum Block {
+    Section(ConfigSection, &'static str),
+    Registries,
+}
+
+const BLOCKS: [Block; 6] = [
+    Block::Section(ConfigSection::General, "General"),
+    Block::Section(ConfigSection::Tui, "TUI"),
+    Block::Section(ConfigSection::Experimental, "Experimental"),
+    Block::Section(ConfigSection::Vendors, "Vendors"),
+    Block::Registries,
+    Block::Section(ConfigSection::Plugin, "Plugin"),
 ];
+
+/// A selectable row: a setting, a declared registry, or the add row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Item {
+    Setting(usize),
+    Registry(usize),
+    AddRegistry,
+}
+
+/// What the cursor sits on, kept across a re-read of the file.
+enum Anchor {
+    Key(String),
+    Alias(String),
+    Add,
+}
+
+const NO_ALIAS_NOTE: &str = "this entry has no alias; edit it in the file";
+
+/// Append a printable character or delete the last one; false when `input`
+/// is neither.
+// shortcut: append and Backspace only (no caret, no paste), upgrade if users edit long values here
+pub(super) fn type_into(buf: &mut String, input: TuiInput, allow: impl Fn(char) -> bool) -> bool {
+    match input {
+        TuiInput::Char(c) if !c.is_control() && allow(c) => buf.push(c),
+        TuiInput::Backspace => {
+            buf.pop();
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// `buf` and the caret, keeping the end when the text is longer than `room`.
+pub(super) fn caret_tail(buf: &str, room: usize) -> String {
+    let mut width = CARET.width();
+    let mut start = buf.len();
+    for (i, c) in buf.char_indices().rev() {
+        width += c.width().unwrap_or(0);
+        if width > room {
+            break;
+        }
+        start = i;
+    }
+    format!("{}{CARET}", &buf[start..])
+}
 
 /// Whether `term` is too small to edit in. The handler and the view both ask.
 pub fn too_small(term: (u16, u16)) -> bool {
@@ -41,8 +98,19 @@ pub fn popup_size(term: (u16, u16)) -> (u16, u16) {
 /// One change for the app to write through the `grim config set|unset` path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigEdit {
-    Set { key: String, value: String },
-    Unset { key: String },
+    Set {
+        key: String,
+        value: String,
+    },
+    Unset {
+        key: String,
+    },
+    AddRegistry(RegistryDraft),
+    /// Only the fields the form changed.
+    EditRegistry {
+        alias: String,
+        edit: RegistryEdit,
+    },
 }
 
 /// What a key press asks of the app.
@@ -67,6 +135,7 @@ enum View {
         cursor: usize,
         single: bool,
     },
+    Registry(Box<RegistryForm>),
 }
 
 /// The config popup.
@@ -76,43 +145,69 @@ pub struct ConfigDialog {
     path: String,
     exists: bool,
     entries: Vec<ConfigEntry>,
-    /// Index into the visible entries.
+    /// The declared `[[registries]]` of the scope, as written.
+    registries: Vec<RegistryConfig>,
+    /// Index into [`Self::items`].
     cursor: usize,
     advanced: bool,
     view: View,
     message: Option<(String, bool)>,
+    /// A registry whose removal waits for an Enter.
+    armed: Option<String>,
 }
 
 impl ConfigDialog {
-    pub fn new(scope: &str, path: String, exists: bool, entries: Vec<ConfigEntry>) -> Self {
+    pub fn new(
+        scope: &str,
+        path: String,
+        exists: bool,
+        entries: Vec<ConfigEntry>,
+        registries: Vec<RegistryConfig>,
+    ) -> Self {
         Self {
             scope: scope.to_string(),
             path,
             exists,
             entries,
+            registries,
             cursor: 0,
             advanced: false,
             view: View::List,
             message: None,
+            armed: None,
         }
     }
 
-    /// Indices into `entries` of the rows on screen, in section order.
-    fn visible(&self) -> Vec<usize> {
-        SECTIONS
-            .iter()
-            .flat_map(|(section, _)| {
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .filter(move |(_, e)| e.section == *section && (self.advanced || !e.advanced))
-                    .map(|(i, _)| i)
-            })
-            .collect()
+    /// The selectable rows on screen, in block order.
+    fn items(&self) -> Vec<Item> {
+        let mut items = Vec::new();
+        for block in BLOCKS {
+            match block {
+                Block::Section(section, _) => items.extend(
+                    self.entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.section == section && (self.advanced || !e.advanced))
+                        .map(|(i, _)| Item::Setting(i)),
+                ),
+                Block::Registries => {
+                    items.extend((0..self.registries.len()).map(Item::Registry));
+                    items.push(Item::AddRegistry);
+                }
+            }
+        }
+        items
+    }
+
+    fn item(&self) -> Option<Item> {
+        self.items().get(self.cursor).copied()
     }
 
     fn selected(&self) -> Option<&ConfigEntry> {
-        self.visible().get(self.cursor).map(|&i| &self.entries[i])
+        match self.item()? {
+            Item::Setting(i) => Some(&self.entries[i]),
+            _ => None,
+        }
     }
 
     fn entry(&self, key: &str) -> Option<&ConfigEntry> {
@@ -120,7 +215,7 @@ impl ConfigDialog {
     }
 
     fn step(&mut self, delta: i64) {
-        let last = self.visible().len().saturating_sub(1);
+        let last = self.items().len().saturating_sub(1);
         self.cursor = (self.cursor as i64).saturating_add(delta).clamp(0, last as i64) as usize;
     }
 
@@ -137,10 +232,41 @@ impl ConfigDialog {
             View::List => self.list_key(input),
             View::Text { .. } => self.text_key(input),
             View::Pick { .. } => self.pick_key(input),
+            View::Registry(_) => self.form_key(input),
+        }
+    }
+
+    fn form_key(&mut self, input: TuiInput) -> DialogStep {
+        let View::Registry(form) = &mut self.view else {
+            return DialogStep::Stay;
+        };
+        match form.handle(input) {
+            FormStep::Stay => DialogStep::Stay,
+            FormStep::Back => {
+                self.view = View::List;
+                DialogStep::Stay
+            }
+            FormStep::Save(edit) => DialogStep::Write(edit),
         }
     }
 
     fn list_key(&mut self, input: TuiInput) -> DialogStep {
+        if let Some(alias) = self.armed.take() {
+            return match input {
+                TuiInput::Enter => DialogStep::Write(ConfigEdit::Unset {
+                    key: format!("registry.{alias}"),
+                }),
+                _ => DialogStep::Stay,
+            };
+        }
+        let handled = match self.item() {
+            Some(Item::Registry(i)) => self.registry_key(i, input),
+            Some(Item::AddRegistry) => self.add_key(input),
+            _ => None,
+        };
+        if let Some(step) = handled {
+            return step;
+        }
         match input {
             TuiInput::Up | TuiInput::Char('k') => self.step(-1),
             TuiInput::Down | TuiInput::Char('j') => self.step(1),
@@ -164,7 +290,48 @@ impl ConfigDialog {
             return;
         }
         self.advanced = !self.advanced;
-        self.cursor = self.cursor.min(self.visible().len().saturating_sub(1));
+        self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
+    }
+
+    /// Keys on a declared registry; `None` leaves the key to the list.
+    fn registry_key(&mut self, i: usize, input: TuiInput) -> Option<DialogStep> {
+        let rc = &self.registries[i];
+        let Some(alias) = rc.alias.clone() else {
+            return match input {
+                TuiInput::Enter | TuiInput::Char(' ') | TuiInput::Mark | TuiInput::Char('x') => {
+                    self.message = Some((NO_ALIAS_NOTE.to_string(), false));
+                    Some(DialogStep::Stay)
+                }
+                TuiInput::Collapse | TuiInput::Expand => Some(DialogStep::Stay),
+                _ => None,
+            };
+        };
+        match input {
+            TuiInput::Enter => {
+                self.view = View::Registry(Box::new(RegistryForm::edit(rc)));
+                Some(DialogStep::Stay)
+            }
+            TuiInput::Char(' ') | TuiInput::Mark => Some(DialogStep::Write(ConfigEdit::Set {
+                key: format!("registry.{alias}.default"),
+                value: (!rc.default).to_string(),
+            })),
+            TuiInput::Char('x') => {
+                self.message = Some((format!("remove {alias}? enter removes · any other key keeps"), false));
+                self.armed = Some(alias);
+                Some(DialogStep::Stay)
+            }
+            TuiInput::Collapse | TuiInput::Expand => Some(DialogStep::Stay),
+            _ => None,
+        }
+    }
+
+    fn add_key(&mut self, input: TuiInput) -> Option<DialogStep> {
+        match input {
+            TuiInput::Enter => self.view = View::Registry(Box::new(RegistryForm::add())),
+            TuiInput::Char(' ') | TuiInput::Mark | TuiInput::Char('x') | TuiInput::Collapse | TuiInput::Expand => {}
+            _ => return None,
+        }
+        Some(DialogStep::Stay)
     }
 
     fn unset_selected(&self) -> DialogStep {
@@ -218,7 +385,10 @@ impl ConfigDialog {
         let Some(e) = self.selected() else {
             return DialogStep::Stay;
         };
-        let Some(values) = e.values.filter(|_| matches!(e.value_type, ValueType::Enum { .. })) else {
+        let Some(values) = e
+            .values
+            .filter(|v| !v.is_empty() && matches!(e.value_type, ValueType::Enum { .. }))
+        else {
             return DialogStep::Stay;
         };
         let n = values.len() as isize;
@@ -336,12 +506,10 @@ impl ConfigDialog {
             .iter()
             .find(|e| e.key == *key)
             .is_some_and(|e| matches!(e.value_type, ValueType::U32 { .. }));
-        // shortcut: append and Backspace only (no caret, no paste), upgrade if users edit long values here
+        if type_into(buf, input, |c| !numeric || c.is_ascii_digit()) {
+            return DialogStep::Stay;
+        }
         match input {
-            TuiInput::Char(c) if !c.is_control() && (!numeric || c.is_ascii_digit()) => buf.push(c),
-            TuiInput::Backspace => {
-                buf.pop();
-            }
             TuiInput::Esc => self.view = View::List,
             TuiInput::Enter if buf.is_empty() => {
                 let key = key.clone();
@@ -359,14 +527,36 @@ impl ConfigDialog {
     }
 
     /// The app wrote the edit: show the fresh rows, keep the cursor on its key.
-    pub fn saved(&mut self, entries: Vec<ConfigEntry>, exists: bool, note: Option<String>) {
-        let key = self.selected().map(|e| e.key.clone());
+    pub fn saved(
+        &mut self,
+        entries: Vec<ConfigEntry>,
+        registries: Vec<RegistryConfig>,
+        exists: bool,
+        note: Option<String>,
+    ) {
+        let anchor = match &self.view {
+            View::Registry(form) => form.added_alias().map(|a| Anchor::Alias(a.to_string())),
+            _ => None,
+        }
+        .or_else(|| match self.item()? {
+            Item::Setting(i) => Some(Anchor::Key(self.entries[i].key.clone())),
+            Item::Registry(i) => self.registries[i].alias.clone().map(Anchor::Alias),
+            Item::AddRegistry => Some(Anchor::Add),
+        });
         self.entries = entries;
+        self.registries = registries;
         self.exists = exists;
         self.view = View::List;
-        let visible = self.visible();
-        let at = key.and_then(|k| visible.iter().position(|&i| self.entries[i].key == k));
-        self.cursor = at.unwrap_or(self.cursor).min(visible.len().saturating_sub(1));
+        let items = self.items();
+        let at = anchor.and_then(|a| {
+            items.iter().position(|item| match (&a, item) {
+                (Anchor::Key(k), Item::Setting(i)) => self.entries[*i].key == *k,
+                (Anchor::Alias(a), Item::Registry(i)) => self.registries[*i].alias.as_deref() == Some(a.as_str()),
+                (Anchor::Add, Item::AddRegistry) => true,
+                _ => false,
+            })
+        });
+        self.cursor = at.unwrap_or(self.cursor).min(items.len().saturating_sub(1));
         self.message = Some((note.unwrap_or_else(|| "saved".to_string()), false));
     }
 
@@ -387,48 +577,85 @@ impl ConfigDialog {
                 notes: Vec::new(),
                 message: None,
                 centered: Some(size),
+                buttons: Vec::new(),
+                button_cursor: None,
             };
         }
         let inner_w = usize::from(size.0.saturating_sub(2 + 2 * PAD));
-        let visible = self.visible();
+        if let View::Registry(form) = &self.view {
+            let shown = form.view(inner_w);
+            let mut notes = wrap(&shown.note, inner_w.max(1));
+            notes.truncate(MAX_NOTE_LINES);
+            return ListPopupView {
+                title: self.title(size.0),
+                rows: shown.rows,
+                cursor: shown.cursor,
+                hint: self.hint().to_string(),
+                notes,
+                message: self.message.clone(),
+                centered: Some(size),
+                buttons: shown.buttons,
+                button_cursor: shown.button_cursor,
+            };
+        }
+        let items = self.items();
+        let at = items.get(self.cursor).copied();
         let editing = match &self.view {
             View::Text { key, buf } => Some((key.as_str(), buf.as_str())),
             _ => None,
         };
         let mut rows = Vec::new();
         let mut cursor = None;
-        for (section, header) in SECTIONS {
-            let members: Vec<usize> = visible
-                .iter()
-                .copied()
-                .filter(|&i| self.entries[i].section == section)
-                .collect();
-            if members.is_empty() {
-                continue;
-            }
-            rows.push(PopupRow {
-                mark: Mark::None,
-                label: header.to_string(),
-                header: true,
-                muted: false,
-                value: String::new(),
-                modified: false,
-            });
-            for i in members {
-                let e = &self.entries[i];
-                if visible.get(self.cursor) == Some(&i) {
-                    cursor = Some(rows.len());
-                }
-                rows.push(match editing {
-                    Some((key, buf)) if key == e.key => {
-                        // Keep the end of a long entry, where the caret is.
-                        let room = inner_w.saturating_sub(4 + e.key.chars().count() + 5);
-                        let skip = (buf.chars().count() + 1).saturating_sub(room);
-                        let shown: String = buf.chars().skip(skip).collect();
-                        row(e.key.clone(), format!("{shown}{CARET}"), e.set, false)
+        for block in BLOCKS {
+            match block {
+                Block::Section(section, header) => {
+                    let members: Vec<usize> = items
+                        .iter()
+                        .filter_map(|item| match item {
+                            Item::Setting(i) if self.entries[*i].section == section => Some(*i),
+                            _ => None,
+                        })
+                        .collect();
+                    if members.is_empty() {
+                        continue;
                     }
-                    _ => row(e.key.clone(), value_text(e), e.set, !e.set),
-                });
+                    rows.push(header_row(header));
+                    for i in members {
+                        let e = &self.entries[i];
+                        if at == Some(Item::Setting(i)) {
+                            cursor = Some(rows.len());
+                        }
+                        rows.push(match editing {
+                            Some((key, buf)) if key == e.key => {
+                                let room = inner_w.saturating_sub(4 + e.key.chars().count() + 5);
+                                row(e.key.clone(), caret_tail(buf, room), e.set, false)
+                            }
+                            _ => row(e.key.clone(), value_text(e), e.set, !e.set),
+                        });
+                    }
+                }
+                Block::Registries => {
+                    rows.push(header_row("Registries"));
+                    for (i, rc) in self.registries.iter().enumerate() {
+                        if at == Some(Item::Registry(i)) {
+                            cursor = Some(rows.len());
+                        }
+                        rows.push(PopupRow {
+                            mark: Mark::Radio(rc.default),
+                            muted: rc.alias.is_none(),
+                            ..row(
+                                rc.alias.clone().unwrap_or_else(|| "(no alias)".to_string()),
+                                registry_value(rc),
+                                false,
+                                false,
+                            )
+                        });
+                    }
+                    if at == Some(Item::AddRegistry) {
+                        cursor = Some(rows.len());
+                    }
+                    rows.push(row("+ add registry".to_string(), String::new(), false, false));
+                }
             }
         }
         let mut view = ListPopupView {
@@ -439,6 +666,8 @@ impl ConfigDialog {
             notes: self.notes(inner_w),
             message: self.message.clone(),
             centered: Some(size),
+            buttons: Vec::new(),
+            button_cursor: None,
         };
         if let View::Pick {
             key,
@@ -478,6 +707,11 @@ impl ConfigDialog {
 
     fn hint(&self) -> &'static str {
         match &self.view {
+            View::List if self.item() == Some(Item::AddRegistry) => "enter add · esc close",
+            View::List if matches!(self.item(), Some(Item::Registry(_))) => {
+                "enter edit · space default · x remove · esc close"
+            }
+            View::Registry(form) => form.hint(),
             View::List if self.entries.iter().any(|e| e.advanced) => {
                 "enter edit · space toggle · x reset · A plugin · esc close"
             }
@@ -514,6 +748,13 @@ impl ConfigDialog {
     }
 }
 
+fn header_row(label: &str) -> PopupRow {
+    PopupRow {
+        header: true,
+        ..row(label.to_string(), String::new(), false, false)
+    }
+}
+
 fn row(label: String, value: String, modified: bool, muted: bool) -> PopupRow {
     PopupRow {
         mark: Mark::None,
@@ -541,6 +782,14 @@ fn value_text(e: &ConfigEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caret_tail_budgets_display_columns() {
+        assert_eq!(caret_tail("abc", 10), format!("abc{CARET}"));
+        assert_eq!(caret_tail("abcdef", 4), format!("def{CARET}"));
+        // Each of these is two columns wide.
+        assert_eq!(caret_tail("日本語", 5), format!("本語{CARET}"));
+    }
     use crate::command::config::collect_entries;
     use crate::config::declaration::{ConfigOptions, RegistryConfig};
 
@@ -556,7 +805,7 @@ mod tests {
         }];
         let mut entries = collect_entries(true, &options, &registries);
         entries.extend(crate::command::config::plugin_entries(true, None));
-        ConfigDialog::new("project", "/w/grimoire.toml".to_string(), true, entries)
+        ConfigDialog::new("project", "/w/grimoire.toml".to_string(), true, entries, registries)
     }
 
     fn press(d: &mut ConfigDialog, input: TuiInput) -> DialogStep {
@@ -572,7 +821,11 @@ mod tests {
     /// Put the cursor on `key` (turning the plugin rows on when needed).
     fn goto(d: &mut ConfigDialog, key: &str) {
         d.advanced = true;
-        let at = d.visible().iter().position(|&i| d.entries[i].key == key).unwrap();
+        let at = d
+            .items()
+            .iter()
+            .position(|item| matches!(item, Item::Setting(i) if d.entries[*i].key == key))
+            .unwrap();
         d.cursor = at;
     }
 
@@ -597,8 +850,20 @@ mod tests {
     fn sections_follow_config_list_order() {
         let mut d = dialog();
         d.advanced = true;
-        let rank = |s: ConfigSection| SECTIONS.iter().position(|(x, _)| *x == s).unwrap();
-        let ranks: Vec<usize> = d.visible().iter().map(|&i| rank(d.entries[i].section)).collect();
+        let rank = |s: ConfigSection| {
+            BLOCKS
+                .iter()
+                .position(|b| matches!(b, Block::Section(x, _) if *x == s))
+                .unwrap()
+        };
+        let ranks: Vec<usize> = d
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                Item::Setting(i) => Some(rank(d.entries[*i].section)),
+                _ => None,
+            })
+            .collect();
         assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{ranks:?}");
         let headers: Vec<String> = d
             .view(BIG)
@@ -607,7 +872,10 @@ mod tests {
             .filter(|r| r.header)
             .map(|r| r.label.clone())
             .collect();
-        assert_eq!(headers, ["General", "TUI", "Experimental", "Vendors", "Plugin"]);
+        assert_eq!(
+            headers,
+            ["General", "TUI", "Experimental", "Vendors", "Registries", "Plugin"]
+        );
     }
 
     #[test]
@@ -632,7 +900,7 @@ mod tests {
     #[test]
     fn advanced_at_global_scope_explains_instead_of_toggling() {
         let entries = collect_entries(true, &ConfigOptions::default(), &[]);
-        let mut d = ConfigDialog::new("global", "/g/grimoire.toml".to_string(), true, entries);
+        let mut d = ConfigDialog::new("global", "/g/grimoire.toml".to_string(), true, entries, Vec::new());
         assert_eq!(press(&mut d, TuiInput::Char('A')), DialogStep::Stay);
         assert!(!d.advanced);
         assert_eq!(
@@ -797,11 +1065,11 @@ mod tests {
             key: "options.tui.theme".to_string(),
             buf: String::new(),
         };
-        d.saved(fresh, true, Some("note".to_string()));
+        d.saved(fresh, d.registries.clone(), true, Some("note".to_string()));
         assert_eq!(d.selected().unwrap().key, "options.tui.theme");
         assert_eq!(d.view, View::List);
         assert_eq!(d.view(BIG).message, Some(("note".to_string(), false)));
-        d.saved(d.entries.clone(), true, None);
+        d.saved(d.entries.clone(), d.registries.clone(), true, None);
         assert_eq!(d.view(BIG).message, Some(("saved".to_string(), false)));
     }
 
@@ -817,5 +1085,227 @@ mod tests {
         assert_eq!(d.view(small).rows[0].label, TOO_SMALL);
         assert_eq!(d.handle(TuiInput::Esc, (80, 11)), DialogStep::Close);
         assert_eq!(d.handle(TuiInput::Char('C'), small), DialogStep::Close);
+    }
+
+    fn reg(alias: &str, default: bool) -> RegistryConfig {
+        RegistryConfig {
+            alias: Some(alias.to_string()),
+            oci: Some(format!("ghcr.io/{alias}")),
+            default,
+            ..Default::default()
+        }
+    }
+
+    fn with_registries(registries: Vec<RegistryConfig>) -> ConfigDialog {
+        let entries = collect_entries(true, &ConfigOptions::default(), &registries);
+        ConfigDialog::new("global", "/g/grimoire.toml".to_string(), true, entries, registries)
+    }
+
+    fn goto_registry(d: &mut ConfigDialog, i: usize) {
+        d.cursor = d.items().iter().position(|it| *it == Item::Registry(i)).unwrap();
+    }
+
+    fn goto_add(d: &mut ConfigDialog) {
+        d.cursor = d.items().iter().position(|it| *it == Item::AddRegistry).unwrap();
+    }
+
+    fn rows_of(d: &ConfigDialog) -> Vec<PopupRow> {
+        d.view(BIG).rows
+    }
+
+    #[test]
+    fn registries_section_sits_between_vendors_and_plugin() {
+        let mut d = dialog();
+        d.advanced = true;
+        let labels: Vec<String> = rows_of(&d)
+            .iter()
+            .filter(|r| r.header)
+            .map(|r| r.label.clone())
+            .collect();
+        let at = labels.iter().position(|l| l == "Registries").unwrap();
+        assert_eq!(
+            (labels[at - 1].as_str(), labels[at + 1].as_str()),
+            ("Vendors", "Plugin")
+        );
+    }
+
+    #[test]
+    fn registry_row_names_kind_locator_filters_and_default() {
+        let rc = RegistryConfig {
+            include: vec!["a/**".to_string()],
+            exclude: vec!["b/**".to_string(), "c/**".to_string()],
+            insecure: true,
+            ..reg("acme", true)
+        };
+        let index = RegistryConfig {
+            index: Some("https://index.example".to_string()),
+            oci: None,
+            ..reg("idx", false)
+        };
+        let d = with_registries(vec![rc, index]);
+        let rows = rows_of(&d);
+        let acme = rows.iter().find(|r| r.label == "acme").unwrap();
+        assert_eq!(acme.value, "oci ghcr.io/acme · 1 include, 2 exclude · insecure");
+        assert_eq!(acme.mark, Mark::Radio(true));
+        let idx = rows.iter().find(|r| r.label == "idx").unwrap();
+        assert_eq!(idx.value, "index https://index.example");
+        assert_eq!(idx.mark, Mark::Radio(false));
+    }
+
+    #[test]
+    fn add_row_shows_with_no_registries() {
+        let d = with_registries(Vec::new());
+        let rows = rows_of(&d);
+        assert!(rows.iter().any(|r| r.header && r.label == "Registries"));
+        assert!(rows.iter().any(|r| r.label == "+ add registry"));
+    }
+
+    #[test]
+    fn legacy_registry_row_is_read_only() {
+        let legacy = RegistryConfig {
+            alias: None,
+            ..reg("x", false)
+        };
+        let mut d = with_registries(vec![legacy]);
+        goto_registry(&mut d, 0);
+        assert!(rows_of(&d).iter().any(|r| r.muted && r.label == "(no alias)"));
+        for key in [TuiInput::Enter, TuiInput::Char(' '), TuiInput::Char('x')] {
+            assert_eq!(press(&mut d, key), DialogStep::Stay);
+            assert_eq!(d.view, View::List);
+            assert_eq!(d.message, Some((NO_ALIAS_NOTE.to_string(), false)));
+        }
+        assert_eq!(d.armed, None);
+    }
+
+    #[test]
+    fn space_on_registry_makes_it_default_and_on_the_default_clears_it() {
+        let mut d = with_registries(vec![reg("a", false), reg("b", true)]);
+        goto_registry(&mut d, 0);
+        assert_eq!(press(&mut d, TuiInput::Char(' ')), set("registry.a.default", "true"));
+        goto_registry(&mut d, 1);
+        assert_eq!(press(&mut d, TuiInput::Char(' ')), set("registry.b.default", "false"));
+        assert_eq!(press(&mut d, TuiInput::Expand), DialogStep::Stay);
+    }
+
+    #[test]
+    fn x_then_enter_removes_registry() {
+        let mut d = with_registries(vec![reg("a", false)]);
+        goto_registry(&mut d, 0);
+        assert_eq!(press(&mut d, TuiInput::Char('x')), DialogStep::Stay);
+        assert_eq!(
+            d.view(BIG).message,
+            Some(("remove a? enter removes · any other key keeps".to_string(), false))
+        );
+        assert_eq!(press(&mut d, TuiInput::Enter), unset("registry.a"));
+    }
+
+    #[test]
+    fn x_then_other_key_keeps_registry() {
+        let mut d = with_registries(vec![reg("a", false), reg("b", false)]);
+        goto_registry(&mut d, 0);
+        press(&mut d, TuiInput::Char('x'));
+        assert_eq!(press(&mut d, TuiInput::Down), DialogStep::Stay);
+        assert_eq!(d.item(), Some(Item::Registry(0)), "the key was swallowed");
+        assert_eq!(d.view(BIG).message, None);
+        assert!(matches!(press(&mut d, TuiInput::Enter), DialogStep::Stay));
+        assert!(
+            matches!(d.view, View::Registry(_)),
+            "enter opens the form, it does not remove"
+        );
+    }
+
+    /// Walk the open form's focus down `n` rows.
+    fn down(d: &mut ConfigDialog, n: usize) {
+        for _ in 0..n {
+            press(d, TuiInput::Down);
+        }
+    }
+
+    #[test]
+    fn enter_on_add_opens_an_empty_form_and_save_emits_the_draft() {
+        let mut d = with_registries(Vec::new());
+        goto_add(&mut d);
+        press(&mut d, TuiInput::Enter);
+        assert!(matches!(d.view, View::Registry(_)));
+        press(&mut d, TuiInput::Enter);
+        type_str(&mut d, "new");
+        press(&mut d, TuiInput::Enter);
+        down(&mut d, 2);
+        press(&mut d, TuiInput::Enter);
+        type_str(&mut d, "ghcr.io/new");
+        press(&mut d, TuiInput::Enter);
+        down(&mut d, 5);
+        assert_eq!(d.view(BIG).button_cursor, Some(0));
+        assert_eq!(
+            press(&mut d, TuiInput::Enter),
+            DialogStep::Write(ConfigEdit::AddRegistry(RegistryDraft {
+                alias: "new".to_string(),
+                locator: "ghcr.io/new".to_string(),
+                is_index: false,
+                default: false,
+                insecure: false,
+                include: Vec::new(),
+                exclude: Vec::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn esc_in_a_field_restores_the_text_and_esc_in_the_form_returns_to_the_list() {
+        let mut d = with_registries(Vec::new());
+        goto_add(&mut d);
+        press(&mut d, TuiInput::Enter);
+        press(&mut d, TuiInput::Enter);
+        type_str(&mut d, "ab");
+        press(&mut d, TuiInput::Esc);
+        assert!(matches!(d.view, View::Registry(_)));
+        assert!(
+            d.view(BIG)
+                .rows
+                .iter()
+                .any(|r| r.label == "alias" && r.value.is_empty())
+        );
+        assert_eq!(press(&mut d, TuiInput::Esc), DialogStep::Stay);
+        assert_eq!(d.view, View::List);
+    }
+
+    #[test]
+    fn failed_keeps_the_form_open_with_its_text() {
+        let mut d = with_registries(Vec::new());
+        goto_add(&mut d);
+        press(&mut d, TuiInput::Enter);
+        press(&mut d, TuiInput::Enter);
+        type_str(&mut d, "dup");
+        press(&mut d, TuiInput::Enter);
+        d.failed("already exists".to_string());
+        assert!(matches!(d.view, View::Registry(_)));
+        let view = d.view(BIG);
+        assert_eq!(view.message, Some(("already exists".to_string(), true)));
+        assert!(view.rows.iter().any(|r| r.label == "alias" && r.value == "dup"));
+    }
+
+    #[test]
+    fn saved_after_add_puts_the_cursor_on_the_new_alias() {
+        let mut d = with_registries(vec![reg("a", false)]);
+        goto_add(&mut d);
+        press(&mut d, TuiInput::Enter);
+        press(&mut d, TuiInput::Enter);
+        type_str(&mut d, "zeta");
+        press(&mut d, TuiInput::Enter);
+        let fresh = vec![reg("a", false), reg("zeta", false)];
+        d.saved(d.entries.clone(), fresh, true, None);
+        assert_eq!(d.view, View::List);
+        let Some(Item::Registry(i)) = d.item() else {
+            panic!("cursor is not on a registry");
+        };
+        assert_eq!(d.registries[i].alias.as_deref(), Some("zeta"));
+    }
+
+    #[test]
+    fn saved_after_remove_keeps_the_position_clamped() {
+        let mut d = with_registries(vec![reg("a", false), reg("b", false)]);
+        goto_registry(&mut d, 1);
+        d.saved(d.entries.clone(), vec![reg("a", false)], true, None);
+        assert_eq!(d.item(), Some(Item::AddRegistry));
     }
 }

@@ -696,7 +696,7 @@ fn warn_on_discarded_patterns(alias: &str, field: RegistryField, previous: &[Str
 /// Whether `pattern` carries a comma outside every `{…}` group — the shape
 /// of a list somebody expected to be split, rather than legitimate glob
 /// alternation (`acme/{platform,tools}/**`, which must stay silent).
-fn has_bare_comma(pattern: &str) -> bool {
+pub(crate) fn has_bare_comma(pattern: &str) -> bool {
     let mut depth = 0usize;
     for ch in pattern.chars() {
         match ch {
@@ -1777,6 +1777,7 @@ fn run_registry_add(
 
 /// A new `[[registries]]` entry as a front end collects it, before any scope
 /// is resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistryDraft {
     pub alias: String,
     pub locator: String,
@@ -2032,6 +2033,7 @@ fn run_registry_set(
 
 /// The fields a `registry set` writes. `None` leaves a field alone;
 /// `Some(vec![])` on a list empties it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistryEdit {
     /// `(locator, is_index)`; swapping the kind clears the other side.
     pub locator: Option<(String, bool)>,

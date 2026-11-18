@@ -176,6 +176,8 @@ pub struct TuiContext {
     /// The direction that ordering opens in — `[options.tui].sort_order`,
     /// else the mode's own. Seeded once, like `sort`; the `S` key flips it.
     pub sort_order: crate::catalog::SortOrder,
+    /// `--registry` fixed the browse set, so a registry edit cannot change it.
+    pub browse_forced: bool,
 }
 
 /// The scope-dependent fields that swap when the user toggles scope.
@@ -3120,7 +3122,7 @@ fn config_guard(ctx: &TuiContext) -> anyhow::Result<ConfigFileLock> {
 
 /// The config popup's rows for the active scope, read from the file as
 /// declared, with whether the file exists. Reads only.
-fn config_rows(ctx: &TuiContext) -> anyhow::Result<(Vec<crate::api::config_report::ConfigEntry>, bool)> {
+fn config_rows(ctx: &TuiContext) -> anyhow::Result<ConfigRows> {
     use crate::command::config::{collect_entries, plugin_entries};
     let (options, registries, _set) = load_scope_declaration(ctx)?;
     let mut rows = collect_entries(true, &options, &registries);
@@ -3128,16 +3130,25 @@ fn config_rows(ctx: &TuiContext) -> anyhow::Result<(Vec<crate::api::config_repor
         let plugin = grim(crate::command::add::read_plugin_table(&ctx.config_path))?;
         rows.extend(plugin_entries(true, plugin.as_ref()));
     }
-    Ok((rows, ctx.config_path.exists()))
+    Ok((rows, registries, ctx.config_path.exists()))
 }
 
+/// The popup's settings rows, the declared registries (not the resolved
+/// browse set, which folds in fallbacks), and whether the file exists.
+type ConfigRows = (
+    Vec<crate::api::config_report::ConfigEntry>,
+    Vec<crate::config::declaration::RegistryConfig>,
+    bool,
+);
+
 fn open_config_dialog(ctx: &TuiContext) -> anyhow::Result<super::config_dialog::ConfigDialog> {
-    let (rows, exists) = config_rows(ctx)?;
+    let (rows, registries, exists) = config_rows(ctx)?;
     Ok(super::config_dialog::ConfigDialog::new(
         &ctx.scope_label,
         ctx.config_path.display().to_string(),
         exists,
         rows,
+        registries,
     ))
 }
 
@@ -3153,6 +3164,8 @@ fn apply_config_edit(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) 
     let (key, value) = match edit {
         ConfigEdit::Set { key, value } => (key.as_str(), Some(value.as_str())),
         ConfigEdit::Unset { key } => (key.as_str(), None),
+        ConfigEdit::AddRegistry(draft) => return apply_registry_add(ctx, draft),
+        ConfigEdit::EditRegistry { alias, edit } => return apply_registry_edit(ctx, alias, edit),
     };
     let _guard = config_guard(ctx)?;
     if let Some(field) = PluginField::parse(key) {
@@ -3193,6 +3206,66 @@ fn apply_config_edit(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) 
     Ok(note)
 }
 
+/// `grim config registry add`, under the config lock over a fresh read.
+fn apply_registry_add(
+    ctx: &TuiContext,
+    draft: &crate::command::config::RegistryDraft,
+) -> anyhow::Result<Option<String>> {
+    use crate::command::config::{add_registry, check_draft, commit_config};
+    check_draft(draft)?;
+    let _guard = config_guard(ctx)?;
+    let (options, mut registries, set) = load_scope_declaration(ctx)?;
+    add_registry(&mut registries, draft.clone(), &ctx.invocation)?;
+    commit_config(&ctx.config_path, &set, &options, &registries)?;
+    Ok(comma_note(draft.include.iter().chain(&draft.exclude)))
+}
+
+/// `grim config registry set`, under the config lock over a fresh read.
+fn apply_registry_edit(
+    ctx: &TuiContext,
+    alias: &str,
+    edit: &crate::command::config::RegistryEdit,
+) -> anyhow::Result<Option<String>> {
+    use crate::command::config::{check_edit, commit_config, edit_registry};
+    check_edit(alias, edit, &ctx.invocation)?;
+    let _guard = config_guard(ctx)?;
+    let (options, mut registries, set) = load_scope_declaration(ctx)?;
+    edit_registry(&mut registries, alias, edit, &ctx.invocation)?;
+    commit_config(&ctx.config_path, &set, &options, &registries)?;
+    let lists = edit.include.iter().chain(&edit.exclude).flatten();
+    Ok(comma_note(lists))
+}
+
+/// The seam warns through `tracing` about a bare comma, which the TUI never shows.
+fn comma_note<'a>(mut patterns: impl Iterator<Item = &'a String>) -> Option<String> {
+    patterns
+        .any(|p| crate::command::config::has_bare_comma(p))
+        .then(|| "saved · a comma is glob alternation, so that pattern is one glob".to_string())
+}
+
+const NEXT_START_NOTE: &str = "saved · applies when grim tui starts again";
+
+/// What a registry edit says beyond "saved": the plain-HTTP host set is fixed
+/// when the browser starts, and `--registry` fixes the browse set.
+fn registry_note(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) -> Option<String> {
+    use super::config_dialog::ConfigEdit;
+    let (registry, insecure) = match edit {
+        ConfigEdit::AddRegistry(draft) => (true, draft.insecure),
+        ConfigEdit::EditRegistry { edit, .. } => (true, edit.insecure.is_some()),
+        ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key } => (
+            key.starts_with("registry."),
+            key.starts_with("registry.") && key.ends_with(".insecure"),
+        ),
+    };
+    match (registry, insecure) {
+        (false, _) => None,
+        (true, true) => Some(NEXT_START_NOTE.to_string()),
+        (true, false) => ctx
+            .browse_forced
+            .then(|| "saved · --registry still selects what is browsed".to_string()),
+    }
+}
+
 /// The background machinery a scope swap re-arms.
 struct ConfigEffects<'a> {
     checker: &'a mut UpdateChecker,
@@ -3212,8 +3285,8 @@ fn launch_only(key: &str) -> bool {
     )
 }
 
-/// Whether a changed registry set needs the catalog loaded again.
-fn needs_catalog_reload(before: &[String], after: &[String]) -> bool {
+/// Whether a changed registry set, filters included, needs the catalog loaded again.
+fn needs_catalog_reload(before: &[ResolvedRegistry], after: &[ResolvedRegistry]) -> bool {
     before != after
 }
 
@@ -3226,12 +3299,12 @@ fn reapply_config(ctx: &mut TuiContext, reresolve: &Reresolve<'_>) -> anyhow::Re
         Some(alt) if ctx.scope == ConfigScope::Global => Some(reresolve(alt.scope, &alt.config_path)?),
         _ => None,
     };
-    let before = registry_order(ctx);
+    let before = ctx.registries.clone();
     ctx.swap_in(active);
     if alt.is_some() {
         ctx.alt = alt;
     }
-    Ok(needs_catalog_reload(&before, &registry_order(ctx)))
+    Ok(needs_catalog_reload(&before, &ctx.registries))
 }
 
 /// After a saved edit: make the running browser pick it up and tell the open
@@ -3245,24 +3318,20 @@ fn finish_config_write(
     note: Option<String>,
 ) -> bool {
     use super::config_dialog::ConfigEdit;
-    let reload = match reapply_config(ctx, reresolve) {
-        Ok(reload) => reload,
-        Err(e) => {
-            if let Some(dialog) = state.config.as_mut() {
-                dialog.failed(format!("saved, but could not be applied: {e:#}"));
-            }
-            return false;
-        }
-    };
-    // Resets what a scope swap resets (bundle expansion, background checks);
-    // the dialog's own message is untouched.
-    after_scope_swap(ctx, state, on.checker, on.bundle_checker, on.adoption);
-    let (ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key }) = edit;
-    let note = note.or_else(|| launch_only(key).then(|| "saved · applies when grim tui starts again".to_string()));
+    let applied = reapply_config(ctx, reresolve);
+    if applied.is_ok() {
+        // Resets what a scope swap resets (bundle expansion, background checks);
+        // the dialog's own message is untouched.
+        after_scope_swap(ctx, state, on.checker, on.bundle_checker, on.adoption);
+    }
+    let launch = matches!(edit, ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key } if launch_only(key));
+    let note = note
+        .or_else(|| registry_note(ctx, edit))
+        .or_else(|| launch.then(|| NEXT_START_NOTE.to_string()));
     match config_rows(ctx) {
-        Ok((rows, exists)) => {
+        Ok((rows, registries, exists)) => {
             if let Some(dialog) = state.config.as_mut() {
-                dialog.saved(rows, exists, note);
+                dialog.saved(rows, registries, exists, note);
             }
         }
         Err(e) => {
@@ -3271,7 +3340,11 @@ fn finish_config_write(
             }
         }
     }
-    reload
+    // The file is written either way, so the rows above are fresh even here.
+    if let (Err(e), Some(dialog)) = (&applied, state.config.as_mut()) {
+        dialog.failed(format!("saved, but could not be applied: {e:#}"));
+    }
+    applied.unwrap_or(false)
 }
 
 /// Under `--locked`, refuse an action that writes the lock when the lock is
@@ -7883,6 +7956,7 @@ mod tests {
             show_deprecated: false,
             sort: None,
             sort_order: crate::catalog::SortOrder::Asc,
+            browse_forced: false,
         }
     }
 
@@ -9024,6 +9098,7 @@ mod tests {
             show_deprecated: false,
             sort: None,
             sort_order: crate::catalog::SortOrder::Asc,
+            browse_forced: false,
         }
     }
 
@@ -9049,7 +9124,7 @@ mod tests {
     fn dialog_open_never_creates_global_file() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = global_config_ctx(tmp.path());
-        let (rows, exists) = config_rows(&ctx).unwrap();
+        let (rows, _, exists) = config_rows(&ctx).unwrap();
         assert!(!exists);
         assert!(rows.iter().any(|r| r.key == "options.show_deprecated"));
         assert!(
@@ -9071,7 +9146,7 @@ mod tests {
         let body = std::fs::read_to_string(&ctx.config_path).unwrap();
         assert!(body.contains("show_deprecated = true"), "{body}");
         assert!(!body.contains("[options.tui]") && !body.contains("clients"), "{body}");
-        let (rows, exists) = config_rows(&ctx).unwrap();
+        let (rows, _, exists) = config_rows(&ctx).unwrap();
         assert!(exists);
         assert!(rows.iter().any(|r| r.key == "options.show_deprecated" && r.set));
     }
@@ -9232,17 +9307,36 @@ mod tests {
         assert_eq!(ctx.alt.as_ref().unwrap().scope, ConfigScope::Project);
     }
 
+    fn resolved(url: &str) -> ResolvedRegistry {
+        ResolvedRegistry {
+            insecure: false,
+            url: url.to_string(),
+            alias: None,
+            is_default: true,
+            kind: crate::config::registry_resolve::SourceKind::Registry,
+            filter: crate::config::registry_filter::RegistryFilter::default(),
+        }
+    }
+
     #[test]
     fn registry_change_needs_a_catalog_reload() {
-        let a = vec!["x".to_string(), "y".to_string()];
-        assert!(needs_catalog_reload(&a, &["y".to_string(), "x".to_string()]));
-        assert!(needs_catalog_reload(&a, &["x".to_string()]));
+        let a = vec![resolved("x"), resolved("y")];
+        assert!(needs_catalog_reload(&a, &[resolved("y"), resolved("x")]));
+        assert!(needs_catalog_reload(&a, &[resolved("x")]));
     }
 
     #[test]
     fn same_registries_need_no_reload() {
-        let a = vec!["x".to_string(), "y".to_string()];
+        let a = vec![resolved("x"), resolved("y")];
         assert!(!needs_catalog_reload(&a, &a.clone()));
+    }
+
+    #[test]
+    fn filter_change_needs_a_reload() {
+        let a = vec![resolved("x")];
+        let mut filtered = resolved("x");
+        filtered.filter = crate::config::registry_filter::RegistryFilter::new(&["acme/**".to_string()], &[]).unwrap();
+        assert!(needs_catalog_reload(&a, &[filtered]));
     }
 
     #[test]
@@ -9330,6 +9424,193 @@ mod tests {
             dialog_message(&state).unwrap().0,
             "saved · applies when grim tui starts again"
         );
+    }
+
+    const TWO_REGISTRIES: &str = "[[registries]]\nalias = \"a\"\noci = \"ghcr.io/a\"\ninclude = [\"x/**\"]\n\n\
+                                  [[registries]]\nalias = \"b\"\noci = \"ghcr.io/b\"\ndefault = true\n";
+
+    fn ctx_with_two_registries(dir: &std::path::Path) -> TuiContext {
+        let ctx = global_config_ctx(dir);
+        std::fs::write(&ctx.config_path, TWO_REGISTRIES).unwrap();
+        ctx
+    }
+
+    fn declared_registries(ctx: &TuiContext) -> Vec<crate::config::declaration::RegistryConfig> {
+        config_rows(ctx).unwrap().1
+    }
+
+    fn edit_of(alias: &str, edit: crate::command::config::RegistryEdit) -> super::super::config_dialog::ConfigEdit {
+        super::super::config_dialog::ConfigEdit::EditRegistry {
+            alias: alias.to_string(),
+            edit,
+        }
+    }
+
+    fn include_edit(patterns: &[&str]) -> crate::command::config::RegistryEdit {
+        crate::command::config::RegistryEdit {
+            locator: None,
+            default: false,
+            include: Some(patterns.iter().map(|p| (*p).to_string()).collect()),
+            exclude: None,
+            insecure: None,
+        }
+    }
+
+    #[test]
+    fn registry_add_writes_what_grim_config_registry_add_writes() {
+        use crate::command::config::{RegistryDraft, add_registry, check_draft, commit_config};
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        let draft = RegistryDraft {
+            alias: "acme".to_string(),
+            locator: "ghcr.io/acme".to_string(),
+            is_index: false,
+            default: true,
+            insecure: false,
+            include: vec!["a/**".to_string(), "b/**".to_string()],
+            exclude: Vec::new(),
+        };
+        apply_config_edit(
+            &ctx,
+            &super::super::config_dialog::ConfigEdit::AddRegistry(draft.clone()),
+        )
+        .unwrap();
+        let expected = tmp.path().join("expected.toml");
+        let (options, mut registries, set) = GlobalConfig::load(&expected)
+            .map(|c| (c.options, c.registries, c.set))
+            .unwrap();
+        check_draft(&draft).unwrap();
+        add_registry(&mut registries, draft, &ctx.invocation).unwrap();
+        commit_config(&expected, &set, &options, &registries).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&ctx.config_path).unwrap(),
+            std::fs::read_to_string(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn registry_edit_keeps_unnamed_fields_and_position() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_two_registries(tmp.path());
+        let edit = crate::command::config::RegistryEdit {
+            locator: Some(("ghcr.io/moved".to_string(), false)),
+            ..include_edit(&[])
+        };
+        let edit = crate::command::config::RegistryEdit { include: None, ..edit };
+        apply_config_edit(&ctx, &edit_of("a", edit)).unwrap();
+        let regs = declared_registries(&ctx);
+        assert_eq!(regs[0].alias.as_deref(), Some("a"));
+        assert_eq!(regs[0].oci.as_deref(), Some("ghcr.io/moved"));
+        assert_eq!(regs[0].include, ["x/**"]);
+        assert_eq!(regs[1].alias.as_deref(), Some("b"));
+        assert!(regs[1].default);
+    }
+
+    #[test]
+    fn registry_default_moves_and_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_two_registries(tmp.path());
+        let defaults = |ctx: &TuiContext| declared_registries(ctx).iter().map(|r| r.default).collect::<Vec<_>>();
+        assert_eq!(defaults(&ctx), [false, true]);
+        apply_config_edit(&ctx, &set_edit("registry.a.default", "true")).unwrap();
+        assert_eq!(defaults(&ctx), [true, false]);
+        apply_config_edit(&ctx, &set_edit("registry.a.default", "false")).unwrap();
+        assert_eq!(defaults(&ctx), [false, false]);
+    }
+
+    #[test]
+    fn registry_remove_drops_the_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_two_registries(tmp.path());
+        let unset = super::super::config_dialog::ConfigEdit::Unset {
+            key: "registry.a".to_string(),
+        };
+        apply_config_edit(&ctx, &unset).unwrap();
+        let regs = declared_registries(&ctx);
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].alias.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn duplicate_alias_is_refused_with_the_cli_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_two_registries(tmp.path());
+        let draft = crate::command::config::RegistryDraft {
+            alias: "a".to_string(),
+            locator: "ghcr.io/other".to_string(),
+            is_index: false,
+            default: false,
+            insecure: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        let err = apply_config_edit(&ctx, &super::super::config_dialog::ConfigEdit::AddRegistry(draft)).unwrap_err();
+        assert!(format!("{err:#}").contains("registry 'a' already exists"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&ctx.config_path).unwrap(), TWO_REGISTRIES);
+    }
+
+    #[test]
+    fn bad_pattern_is_refused_with_the_cli_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_two_registries(tmp.path());
+        let err = apply_config_edit(&ctx, &edit_of("a", include_edit(&["acme{unclosed"]))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid value for registry.a.include"),
+            "{err:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&ctx.config_path).unwrap(), TWO_REGISTRIES);
+    }
+
+    #[test]
+    fn bare_comma_pattern_is_noted_not_logged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_two_registries(tmp.path());
+        let note = apply_config_edit(&ctx, &edit_of("a", include_edit(&["a,b"]))).unwrap();
+        assert!(note.unwrap().contains("a comma is glob alternation"));
+        assert_eq!(
+            apply_config_edit(&ctx, &edit_of("a", include_edit(&["{a,b}"]))).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn insecure_edit_says_it_applies_at_next_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_two_registries(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let edit = set_edit("registry.a.insecure", "true");
+        apply_config_edit(&ctx, &edit).unwrap();
+        finish_with(&mut ctx, &mut state, &swap_from_file, &edit).await;
+        assert_eq!(dialog_message(&state).unwrap().0, NEXT_START_NOTE);
+        let insecure = crate::command::config::RegistryEdit {
+            insecure: Some(true),
+            ..include_edit(&[])
+        };
+        assert_eq!(
+            registry_note(&ctx, &edit_of("a", insecure)).as_deref(),
+            Some(NEXT_START_NOTE)
+        );
+        assert_eq!(registry_note(&ctx, &edit_of("a", include_edit(&["x"]))), None);
+    }
+
+    #[tokio::test]
+    async fn registry_edit_under_the_registry_flag_says_the_browse_set_stays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_two_registries(tmp.path());
+        ctx.browse_forced = true;
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let edit = edit_of("a", include_edit(&["y/**"]));
+        apply_config_edit(&ctx, &edit).unwrap();
+        finish_with(&mut ctx, &mut state, &swap_from_file, &edit).await;
+        assert_eq!(
+            dialog_message(&state).unwrap().0,
+            "saved · --registry still selects what is browsed"
+        );
+        let insecure = set_edit("registry.a.insecure", "true");
+        assert_eq!(registry_note(&ctx, &insecure).as_deref(), Some(NEXT_START_NOTE));
+        assert_eq!(registry_note(&ctx, &set_edit("options.clients", "claude")), None);
     }
 
     #[tokio::test]
@@ -17533,6 +17814,7 @@ mod tests {
             show_deprecated: false,
             sort: None,
             sort_order: crate::catalog::SortOrder::Asc,
+            browse_forced: false,
         };
         (tmp, ctx)
     }
@@ -21362,6 +21644,7 @@ mod p2_app_member_node_tests {
             show_deprecated: false,
             sort: None,
             sort_order: crate::catalog::SortOrder::Asc,
+            browse_forced: false,
         }
     }
 

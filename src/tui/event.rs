@@ -1751,7 +1751,7 @@ mod tests {
     fn config_dialog() -> crate::tui::config_dialog::ConfigDialog {
         let rows =
             crate::command::config::collect_entries(true, &crate::config::declaration::ConfigOptions::default(), &[]);
-        crate::tui::config_dialog::ConfigDialog::new("project", "/w/grimoire.toml".to_string(), true, rows)
+        crate::tui::config_dialog::ConfigDialog::new("project", "/w/grimoire.toml".to_string(), true, rows, Vec::new())
     }
 
     #[test]

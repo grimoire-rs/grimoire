@@ -45,6 +45,7 @@ pub mod event;
 pub mod install_progress;
 pub mod list_popup;
 pub mod markdown;
+pub mod registry_form;
 pub mod render;
 pub mod state;
 pub mod terminal_guard;
