@@ -1805,3 +1805,34 @@ def test_a_stale_pin_naming_no_recorded_edge_moves_with_a_warning(
     assert _pins(project_dir)["x"].endswith(moved.digest)
     assert "moved skill 'x'" in relocked.stderr, relocked.stderr
     assert "skill 'other'" not in relocked.stderr, "a declared key is not named"
+
+
+def test_install_state_is_tagless_after_add_as_after_install(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The record never carries the advisory tag, whichever command wrote it."""
+    skill = _skill(unique_repo, "s")
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("add", "--kind", "skill", "--name", "s", skill.fq)
+    state_file = project_dir / ".grimoire" / "state.json"
+
+    def recorded() -> list[str]:
+        records = json.loads(state_file.read_text(encoding="utf-8"))["records"]
+        return [record["pinned"] for record in records]
+
+    def installed_rows() -> list[str]:
+        return [r["state"] for r in runner.json("status")["items"] if r["name"] == "s"]
+
+    after_add = recorded()
+    assert after_add == [skill.pinned], after_add
+    assert installed_rows() == ["installed"]
+
+    state_file.unlink()
+    shutil.rmtree(project_dir / ".claude")
+    runner.run("install", "--client", "claude")
+
+    assert recorded() == after_add
+    assert installed_rows() == ["installed"]
+    assert _pins(project_dir)["s"] == f"{REGISTRY_HOST}/{unique_repo}/s:1@{skill.digest}"
