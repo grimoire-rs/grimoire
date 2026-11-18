@@ -121,3 +121,30 @@ def test_install_refuses_mismatched_requires(
         if p.is_file()
     )
     assert tree == ["SKILL.md"]
+
+
+def test_install_refuses_edited_requires_of_an_already_installed_entry(
+    grim_at, project_dir: Path, grim_home: Path, unique_repo: str
+) -> None:
+    dep = make_dependent(
+        f"{unique_repo}/dep", "1", "skill", {"dep/SKILL.md": SKILL_DOC}, [EDGE]
+    )
+    make_artifact(f"{unique_repo}/base", "skill", {"base/SKILL.md": BASE_DOC}, tag="1")
+    write_config(project_dir, skills={"dep": dep.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    lock = project_dir / "grimoire.lock"
+    intact = lock.read_text(encoding="utf-8")
+    assert "[[skill.requires]]" in intact
+
+    # An unedited, installed project must not need the network to say so.
+    runner.env["GRIM_OFFLINE"] = "1"
+    assert runner.run("install").returncode == 0
+    del runner.env["GRIM_OFFLINE"]
+
+    state_roots = (project_dir / ".grimoire", grim_home / "state", grim_home / "hooks")
+    lock.write_text(REQUIRES_BLOCK.sub("\n", intact), encoding="utf-8", newline="\n")
+    before = _snapshot(project_dir / ".claude", *state_roots)
+    _stale(runner.run("--format", "json", "install", check=False))
+    assert _snapshot(project_dir / ".claude", *state_roots) == before

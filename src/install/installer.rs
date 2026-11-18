@@ -784,7 +784,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
         "install_and_persist installs hooks without a hook policy"
     );
     refuse_uninstallable_fallback(lock, target, state, roots)?;
-    refuse_stale_edges(lock, access, state)
+    refuse_stale_edges(lock, access, state, roots)
         .await
         .map_err(|e| e.naming(target.grim()))?;
     // The fallback is the right default for the pool-reading clients, but a
@@ -3048,21 +3048,37 @@ fn decode_refused(refusal: Refusal) -> crate::error::Error {
 /// Only a [`InstallErrorKind::StaleDependencies`] verdict stops the run here: a
 /// fetch failure or an unreadable layout skips the entry, and the per-node
 /// check in [`fetch_verified_layer`] reports it with its own exit code. An
-/// entry already recorded at its pinned digest is skipped: it was checked when
-/// it was installed, and an unchanged install must not need the network.
+/// entry already recorded at its pinned digest is checked too, but only against
+/// the local store, so an unchanged install never needs the network: a store
+/// that lacks its manifest or requires layer skips the entry.
 async fn refuse_stale_edges(
     lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
     state: &InstallState,
+    roots: &AnchorRoots,
 ) -> Result<(), InstallError> {
+    use crate::oci::access::cached_access::CachedAccess;
+    use crate::oci::access::registry_client::RegistryClient;
+    use crate::oci::access::AccessMode;
+    use crate::oci::tag_cache::TagCache;
+    let paths = crate::store::paths::GrimPaths::new(roots.grim_home.clone());
+    // Offline never calls the inner client; it only fills the type.
+    let store: Arc<dyn OciAccess> = Arc::new(CachedAccess::new(
+        RegistryClient::with_plain_http_hosts(Vec::<String>::new().into()),
+        TagCache::new(paths.tags_dir()),
+        crate::store::BlobStore::new(paths.blobs_dir()),
+        AccessMode::Offline,
+    ));
     for artifact in lock.iter_artifacts() {
         let Some(pinned) = artifact.source.pinned() else {
             continue;
         };
         let recorded = state.get(artifact.kind, &artifact.name);
-        if recorded.is_some_and(|rec| rec.source.eq_content(&artifact.source)) {
-            continue;
-        }
+        let access = if recorded.is_some_and(|rec| rec.source.eq_content(&artifact.source)) {
+            &store
+        } else {
+            access
+        };
         let Ok(Some(manifest)) = access.fetch_manifest(pinned).await else {
             continue;
         };
