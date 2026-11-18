@@ -42,6 +42,9 @@ pub enum ArtifactState {
     /// member nodes only (a catalog row never derives it); `Modified`,
     /// `Outdated`, and `IntegrityMissing` take precedence over it.
     ViaBundle,
+    /// [`Self::ViaBundle`]'s twin for an artifact no bundle lists, present only
+    /// because an artifact the scope holds requires it. Same precedence.
+    ViaDependency,
     /// Locked + recorded, but the locked pin is ahead of the record.
     Outdated,
     /// Recorded, outputs present, but on-disk content drifted.
@@ -70,6 +73,7 @@ impl std::fmt::Display for ArtifactState {
             Self::NotInstalled => "not-installed",
             Self::Installed => "installed",
             Self::ViaBundle => "via-bundle",
+            Self::ViaDependency => "via-dependency",
             Self::Outdated => "outdated",
             Self::Modified => "modified",
             Self::IntegrityMissing => "integrity-missing",

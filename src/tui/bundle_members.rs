@@ -228,7 +228,7 @@ pub fn locked_children(lock: &GrimoireLock, repo: &str) -> Option<Vec<BundleMemb
     Some(members.iter().map(|m| absolute_member(m, parent_id)).collect())
 }
 
-fn absolute_member(member: &BundleMember, parent: Option<&Identifier>) -> BundleMember {
+pub(super) fn absolute_member(member: &BundleMember, parent: Option<&Identifier>) -> BundleMember {
     match MemberRef::parse(&member.id) {
         Ok(relative @ MemberRef::Relative { .. }) => match parent.map(|p| relative.resolve(p)) {
             Some(Ok(id)) => BundleMember {

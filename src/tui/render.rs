@@ -67,6 +67,7 @@ fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
     match state {
         ArtifactState::Installed => ("✓", "installed", ColorKey::Installed),
         ArtifactState::ViaBundle => ("◆", "via-bundle", ColorKey::ViaBundle),
+        ArtifactState::ViaDependency => ("◆", "via-dependency", ColorKey::ViaBundle),
         ArtifactState::NotInstalled => ("·", "not-installed", ColorKey::NotInstalled),
         ArtifactState::Outdated => ("↑", "outdated", ColorKey::Outdated),
         ArtifactState::Modified => ("✱", "modified", ColorKey::Modified),
@@ -1970,8 +1971,8 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 
 /// Every browse-mode keybinding shown in the `?` help overlay, as
 /// `(keys, description)` rows. Sibling keys share a row (`i / u / d`) and the
-/// description names each. Left column first, then right: ten rows each, so
-/// the overlay fits 80×24. A free function so a unit test can assert the
+/// description names each. Left column first, then right: nine rows each, so
+/// the overlay and the status legend fit 80×24. A free function so a unit test can assert the
 /// overlay documents every key `handle_browse` binds.
 fn help_entries() -> &'static [(&'static str, &'static str)] {
     &[
@@ -1983,18 +1984,16 @@ fn help_entries() -> &'static [(&'static str, &'static str)] {
         ("/", "search"),
         ("space", "mark / unmark"),
         ("a / c", "mark all / clear"),
-        ("?", "this help"),
-        ("C", "config popup"),
+        ("? / C", "help / config"),
         ("home / end", "first / last row"),
         ("pgup/pgdn", "page detail"),
         ("(shift) tab", "switch detail panel"),
-        ("q / esc", "quit"),
         ("i / u / d", "install/update/uninstall"),
         ("v / o", "pick version / open repo"),
         ("g / t", "scope / tree-flat"),
         ("s / S", "cycle sort / flip order"),
         ("f / F", "kind / filter popup"),
-        ("h / r", "deprecated / refresh"),
+        ("h/r/q/esc", "deprecated/refresh/quit"),
     ]
 }
 
@@ -2003,7 +2002,7 @@ fn help_entries() -> &'static [(&'static str, &'static str)] {
 /// [`status_view`] rather than restated, so the legend cannot drift from what
 /// is actually rendered — a legend that disagrees with the screen is worse
 /// than no legend.
-fn legend_entries() -> [(ArtifactState, &'static str); 7] {
+fn legend_entries() -> [(ArtifactState, &'static str); 8] {
     [
         (ArtifactState::Installed, "present, intact, at the locked version"),
         (ArtifactState::NotInstalled, "not installed in this scope"),
@@ -2020,6 +2019,10 @@ fn legend_entries() -> [(ArtifactState, &'static str); 7] {
             "you edited the installed copy; `u` asks before overwriting",
         ),
         (ArtifactState::ViaBundle, "present only because a bundle provides it"),
+        (
+            ArtifactState::ViaDependency,
+            "present only because an installed artifact requires it",
+        ),
         (
             ArtifactState::IntegrityMissing,
             "recorded as installed, but its files are gone or unreadable",
@@ -2641,6 +2644,7 @@ mod tests {
         for (st, glyph, label, color) in [
             (ArtifactState::Installed, "✓", "installed", ColorKey::Installed),
             (ArtifactState::ViaBundle, "◆", "via-bundle", ColorKey::ViaBundle),
+            (ArtifactState::ViaDependency, "◆", "via-dependency", ColorKey::ViaBundle),
             (
                 ArtifactState::NotInstalled,
                 "·",
@@ -3344,7 +3348,7 @@ mod tests {
     fn help_falls_back_to_one_column_when_narrow() {
         let entries = help_entries().len();
         let lines = help_lines_for(&Invocation::WALKED, 40);
-        assert_eq!(lines.len(), 1 + entries + 1 + 10);
+        assert_eq!(lines.len(), 1 + entries + 1 + 11);
         assert!(
             lines[1..=entries].iter().all(|l| l.spans.len() == 2),
             "one pair per row"
@@ -3568,6 +3572,7 @@ mod tests {
             ArtifactState::Modified,
             ArtifactState::Pending,
             ArtifactState::ViaBundle,
+            ArtifactState::ViaDependency,
             ArtifactState::IntegrityMissing,
             ArtifactState::Gated,
             ArtifactState::NotArmed,
