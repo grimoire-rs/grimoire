@@ -1777,13 +1777,15 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
 /// active scope's `[bundles]` (`ctx.declared_bundle_repos`); every other kind
 /// derives from its own lock entry + install record.
 fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeContext) -> ArtifactState {
-    if row_kind(kind) == ArtifactKind::Bundle {
-        derive_bundle_state(&format!("{registry}/{repository}"), ctx)
+    let location = format!("{registry}/{repository}");
+    let kind = row_kind(kind, &location, ctx.lock, Some(ctx.state));
+    if kind == ArtifactKind::Bundle {
+        derive_bundle_state(&location, ctx)
     } else {
         // A row installed but not directly declared is present only via a bundle
         // → ViaBundle, consistent with the member-node badge.
         member_display_state(
-            row_kind(kind),
+            kind,
             registry,
             repository,
             ctx.lock,
@@ -2169,7 +2171,8 @@ fn rederive_states(ctx: &TuiContext, state: &mut TuiState) {
         // as `NotInstalled`. Re-derive it the way `local_rows` does, keyed on
         // the binding name (`repo`) instead.
         r.state = if matches!(r.source, RowSource::Local) {
-            let kind = row_kind(&r.kind);
+            let location = format!("{}/{}", r.registry, r.repository);
+            let kind = row_kind(&r.kind, &location, lock.as_ref(), Some(&install_state));
             let locked = locked_by_name.get(&(kind, r.repo.as_str())).copied();
             let locked_bundle = local_locked_bundle(lock.as_ref(), kind, &r.repo);
             local_row_state(locked, locked_bundle, kind, &r.repo, &install_state)
@@ -3619,7 +3622,7 @@ async fn perform_uninstall(
     if repository.is_empty() {
         return Err(anyhow::anyhow!("malformed catalog repo: {}", row.repo));
     }
-    let kind = row_kind(&row.kind);
+    let kind = action_row_kind(ctx, row);
     let basename = repository.rsplit('/').next().unwrap_or(&repository).to_string();
 
     // Hold the config flock for the whole read-modify-write. The keep-files
@@ -3730,7 +3733,7 @@ async fn perform_local_uninstall(
     ledger: &mut SettingsLedger,
     force: &ForceScope,
 ) -> anyhow::Result<Deleted> {
-    let kind = row_kind(&row.kind);
+    let kind = action_row_kind(ctx, row);
     // A hook has no path source, so no Local row can carry one. A live refusal
     // rather than `unreachable!()`: `row_kind` reads a registry-controlled string.
     if kind == ArtifactKind::Hook {
@@ -3858,7 +3861,7 @@ async fn perform(
         return Err(anyhow::anyhow!("malformed catalog repo: {}", row.repo));
     }
 
-    let kind = row_kind(&row.kind);
+    let kind = action_row_kind(ctx, row);
     // ⛔ DECISION (WP-H): the TUI does not install or update a hook row in v1.
     // It has no surface to show what arming consents to; `grim add` /
     // `grim install` are the supported path, and the error names them. A hook
@@ -4894,7 +4897,7 @@ async fn perform_local(
     pruned_ahead: &BTreeSet<NodeKey>,
     ledger: &mut SettingsLedger,
 ) -> anyhow::Result<InstallSummary> {
-    let kind = row_kind(&row.kind);
+    let kind = action_row_kind(ctx, row);
     // No Local row can carry a hook (see `perform_local_uninstall`).
     if kind == ArtifactKind::Hook {
         return Err(crate::oci::hook::tui_install_unsupported(&ctx.invocation).into());
@@ -6686,10 +6689,37 @@ fn direct_line_elsewhere(ctx: &TuiContext, kind: ArtifactKind, name: &str, locat
 }
 
 /// Map a catalog row's kind string (`skill`/`rule`/`bundle`) onto the
-/// typed artifact kind. Unknown / `-` defaults to skill (a directory
-/// artifact); the materializer validates the actual payload shape.
-fn row_kind(kind: &str) -> ArtifactKind {
-    ArtifactKind::from_kind_str(kind).unwrap_or(ArtifactKind::Skill)
+/// typed artifact kind. Unknown / `-` takes the kind of the lock entry, else
+/// the install record, at the row's `registry/repository` `location`, and
+/// defaults to skill (a directory artifact) when neither matches; the
+/// materializer validates the actual payload shape.
+fn row_kind(kind: &str, location: &str, lock: Option<&GrimoireLock>, state: Option<&InstallState>) -> ArtifactKind {
+    let here = |pin: Option<&crate::oci::PinnedIdentifier>| pin.is_some_and(|p| p.registry_repository() == location);
+    ArtifactKind::from_kind_str(kind)
+        .or_else(|| {
+            let lock = lock?;
+            let artifact = lock.iter_artifacts().find(|a| here(a.source.pinned())).map(|a| a.kind);
+            artifact.or_else(|| {
+                lock.bundles
+                    .iter()
+                    .any(|b| here(b.pinned()))
+                    .then_some(ArtifactKind::Bundle)
+            })
+        })
+        .or_else(|| state?.iter_records().find(|r| here(r.source.pinned())).map(|r| r.kind))
+        .unwrap_or(ArtifactKind::Skill)
+}
+
+/// [`row_kind`] for an action on `row`, reading the lock and install state only
+/// when the row names no kind.
+fn action_row_kind(ctx: &TuiContext, row: &TuiRow) -> ArtifactKind {
+    if let Some(kind) = ArtifactKind::from_kind_str(&row.kind) {
+        return kind;
+    }
+    let lock = lock_io::load(&ctx.lock_path).ok();
+    let state = read_state(ctx).map(|read| read.exempt(Exempt::Browse)).ok();
+    let location = format!("{}/{}", row.registry, row.repository);
+    row_kind(&row.kind, &location, lock.as_ref(), state.as_ref())
 }
 
 /// Split `registry/repository` at the first `/`.
@@ -17444,6 +17474,75 @@ mod tests {
         );
     }
 
+    /// Push a one-file rule to `acme/<name>` and move tag `1` onto it.
+    async fn publish_rule(reg: &crate::oci::access::memory_registry::MemoryRegistry, name: &str) {
+        use crate::oci::manifest::{Descriptor, OciManifest};
+
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join(format!("{name}.md"));
+        std::fs::write(&file, "# rule\n").unwrap();
+        let blob = crate::skill::skill_package::pack_rule_file(&file).unwrap();
+        let id = Identifier::new_registry(format!("acme/{name}"), "localhost:5050");
+        let layer = Descriptor {
+            digest: reg.push_blob(&id, &blob).await.unwrap(),
+            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+            size: blob.len() as u64,
+            annotations: None,
+        };
+        let manifest = OciManifest {
+            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(ArtifactKind::Rule.artifact_type().to_string()),
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers: vec![layer],
+            annotations: Default::default(),
+        };
+        let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+        reg.put_tag(&id, "1", &digest).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kindless_row_takes_the_kind_its_lock_entry_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        publish_rule(&reg, "guard").await;
+        let ctx = test_ctx(tmp.path(), Arc::new(reg));
+        let mut row = skill_row("guard");
+        row.kind = "rule".to_string();
+        perform(&ctx, &row, None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect("the rule installs");
+        let file = ctx.workspace.join(".claude/rules/guard.md");
+        assert!(file.is_file(), "the rule is materialized");
+
+        row.kind = "-".to_string();
+        let (lock, state, _config, declared_bundle_repos, direct_repos, snapshot_repos, _target) =
+            load_scope_for_badges(&ctx);
+        let badge = BadgeContext {
+            lock: lock.as_ref(),
+            state: &state,
+            roots: &ctx.roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &declared_bundle_repos,
+            direct_repos: &direct_repos,
+            snapshot_repos: &snapshot_repos,
+            target: None,
+            settings: SettingsCheck::default(),
+        };
+        assert_eq!(
+            derive_row_state(&row.kind, &row.registry, &row.repository, &badge),
+            ArtifactState::Installed,
+            "a kindless row reads the rule the lock records at its location"
+        );
+
+        perform_uninstall(&ctx, &row).await.expect("the delete succeeds");
+        assert!(
+            load_state(&ctx).unwrap().get(ArtifactKind::Rule, "guard").is_none(),
+            "the delete drops the rule's record"
+        );
+        assert!(!file.exists(), "the delete removes the rule's file");
+    }
+
     #[tokio::test]
     async fn deleting_bundle_only_member_keeps_files() {
         // Bug 1: a skill provided ONLY by a declared bundle must NOT have its
@@ -17750,13 +17849,14 @@ mod tests {
 
     #[test]
     fn row_kind_maps_every_catalog_kind() {
-        assert_eq!(row_kind("skill"), ArtifactKind::Skill);
-        assert_eq!(row_kind("rule"), ArtifactKind::Rule);
-        assert_eq!(row_kind("agent"), ArtifactKind::Agent);
-        assert_eq!(row_kind("bundle"), ArtifactKind::Bundle);
-        // Unknown / absent kind defaults to skill; the materializer
-        // validates the actual payload shape.
-        assert_eq!(row_kind("-"), ArtifactKind::Skill);
+        let kind = |kind| row_kind(kind, "localhost:5050/acme/a", None, None);
+        assert_eq!(kind("skill"), ArtifactKind::Skill);
+        assert_eq!(kind("rule"), ArtifactKind::Rule);
+        assert_eq!(kind("agent"), ArtifactKind::Agent);
+        assert_eq!(kind("bundle"), ArtifactKind::Bundle);
+        // Unknown / absent kind with nothing at its location defaults to skill;
+        // the materializer validates the actual payload shape.
+        assert_eq!(kind("-"), ArtifactKind::Skill);
     }
 
     fn stamp(mut a: LockedArtifact, repo: &str, tag: &str) -> LockedArtifact {
