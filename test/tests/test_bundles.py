@@ -1336,3 +1336,27 @@ def test_status_check_reports_bundle_member_update_available(
     rows = {(r["kind"], r["name"]): r for r in result["items"]}
     assert rows[("bundle", "stack")]["update_available"] is False, rows
     assert rows[("skill", "skill-a")]["update_available"] is True, rows
+
+
+def test_uninstall_nested_member_names_the_declared_bundle(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A member held through a nested bundle is removed via the declared outer bundle."""
+    sk = _member_skill(unique_repo, "code-review")
+    pack = make_bundle(f"{unique_repo}/pack", [("skill", "code-review", sk.fq)], tag="1.0.0")
+    suite = make_bundle(f"{unique_repo}/suite", [("bundle", "pack", pack.fq)], tag="1.0.0")
+    write_config(project_dir, bundles={"suite": suite.fq})
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.run("uninstall", "skill", "code-review", format="json")
+
+    assert json.loads(result.stdout)["status"] == "kept-by-bundle", result.stdout
+    lines = [line for line in result.stderr.splitlines() if "code-review" in line]
+    assert len(lines) == 1, result.stderr
+    assert "bundle 'suite'" in lines[0], lines[0]
+    assert "`grim remove bundle suite`" in lines[0], lines[0]
+    assert "pack" not in lines[0], lines[0]
+    assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
