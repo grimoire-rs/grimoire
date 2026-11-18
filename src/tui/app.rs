@@ -224,8 +224,15 @@ impl TuiContext {
         let Some(alt) = self.alt.take() else {
             return false;
         };
-        let now_alt = ScopeSwap {
-            scope: self.scope,
+        self.alt = Some(self.swap_in(alt));
+        true
+    }
+
+    /// Install `incoming` as the active scope; returns the fields that were active.
+    fn swap_in(&mut self, incoming: ScopeSwap) -> ScopeSwap {
+        let alt = incoming;
+        ScopeSwap {
+            scope: std::mem::replace(&mut self.scope, alt.scope),
             invocation: std::mem::replace(&mut self.invocation, alt.invocation),
             workspace: std::mem::replace(&mut self.workspace, alt.workspace),
             lock_path: std::mem::replace(&mut self.lock_path, alt.lock_path),
@@ -240,12 +247,12 @@ impl TuiContext {
             resolved_options: std::mem::replace(&mut self.resolved_options, alt.resolved_options),
             registries: std::mem::replace(&mut self.registries, alt.registries),
             primary_registry: std::mem::replace(&mut self.primary_registry, alt.primary_registry),
-        };
-        self.scope = alt.scope;
-        self.alt = Some(now_alt);
-        true
+        }
     }
 }
+
+/// Re-reads one scope's config from disk: which scope, and its config path.
+pub type Reresolve<'a> = dyn Fn(ConfigScope, &std::path::Path) -> anyhow::Result<ScopeSwap> + 'a;
 
 /// The project setup `g` offers when the session has no project scope to
 /// switch to: where the config would go, and how to create it. `create`
@@ -267,7 +274,11 @@ pub struct ProjectInit<'a> {
 /// A terminal-setup or draw I/O failure. Catalog-load and install/update
 /// failures are surfaced *in* the status line, not as a hard error — the
 /// TUI degrades rather than crashing (offline included).
-pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>) -> anyhow::Result<()> {
+pub async fn run(
+    mut ctx: TuiContext,
+    mut project_init: Option<ProjectInit<'_>>,
+    reresolve: &Reresolve<'_>,
+) -> anyhow::Result<()> {
     // Redirect tracing output to $GRIM_HOME/tui.log for the duration of
     // the alt-screen session. Declared BEFORE the terminal guard so it
     // drops AFTER it (Rust drops locals in reverse declaration order):
@@ -437,29 +448,14 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
                 state.set_loading(true);
                 state.set_status("refreshing catalog…");
                 terminal.draw(|f| draw(f, &frame(&state)))?;
-                reload_into(&ctx, &mut state, true).await;
-                // Invalidate any in-flight or cached bundle-member results
-                // spawned under the previous catalog version: the refresh may
-                // have changed which bundles exist or their member lists.
-                // The generation bump is the correctness-critical mechanism —
-                // it causes the drain loop to discard any in-flight stale
-                // results whose generation no longer matches. The cache itself
-                // was already cleared by reload_into → set_rows above, so no
-                // redundant clear is needed here.
-                bundle_checker.bump_generation();
-                companion_fetcher.bump_generation();
-                // The companion cache is cleared HERE rather than relying on
-                // `set_rows`. A refresh that fails never reaches `set_rows`
-                // (`reload_into` takes its `Err` arm and degrades to the
-                // existing rows), so the bump above would discard an in-flight
-                // result while its `Loading` placeholder survived — and a
-                // `Loading` entry is settled to both fetch predicates, so that
-                // row's companion would never load again for the session.
-                // Clearing beside the bump keeps the two in step on every path.
-                state.companions.clear();
-                // Re-arm the background checks against the freshly-loaded
-                // rows (the `r` key is an explicit "check again" too).
-                arm_background_checks(&ctx, &state, &mut checker);
+                reload_catalog(
+                    &ctx,
+                    &mut state,
+                    &mut checker,
+                    &mut bundle_checker,
+                    &mut companion_fetcher,
+                )
+                .await;
             }
             TuiAction::Batch { op, rows } => {
                 // A modal gauge animates over the marked rows during the
@@ -655,12 +651,31 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
                 Err(e) => state.set_status(format!("config unavailable: {e:#}")),
             },
             TuiAction::ConfigWrite(edit) => {
-                let outcome = apply_config_edit(&ctx, &edit).and_then(|note| Ok((config_rows(&ctx)?, note)));
-                if let Some(dialog) = state.config.as_mut() {
-                    match outcome {
-                        Ok(((rows, exists), note)) => dialog.saved(rows, exists, note),
-                        Err(e) => dialog.failed(format!("{e:#}")),
+                let reload = match apply_config_edit(&ctx, &edit) {
+                    Ok(note) => {
+                        let mut on = ConfigEffects {
+                            checker: &mut checker,
+                            bundle_checker: &mut bundle_checker,
+                            adoption: &mut adoption,
+                        };
+                        finish_config_write(&mut ctx, &mut state, &mut on, reresolve, &edit, note)
                     }
+                    Err(e) => {
+                        if let Some(dialog) = state.config.as_mut() {
+                            dialog.failed(format!("{e:#}"));
+                        }
+                        false
+                    }
+                };
+                if reload {
+                    reload_catalog(
+                        &ctx,
+                        &mut state,
+                        &mut checker,
+                        &mut bundle_checker,
+                        &mut companion_fetcher,
+                    )
+                    .await;
                 }
             }
             TuiAction::InitProject => {
@@ -697,6 +712,40 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
         terminal.draw(|f| draw(f, &frame(&state)))?;
     }
     Ok(())
+}
+
+/// Reload the catalog and re-arm everything keyed to the previous one: the
+/// `r` key and a registry-set change both come here.
+async fn reload_catalog(
+    ctx: &TuiContext,
+    state: &mut TuiState,
+    checker: &mut UpdateChecker,
+    bundle_checker: &mut super::bundle_member_fetch::BundleMemberChecker,
+    companion_fetcher: &mut super::companion_fetch::CompanionFetcher,
+) {
+    reload_into(ctx, state, true).await;
+    // Invalidate any in-flight or cached bundle-member results
+    // spawned under the previous catalog version: the refresh may
+    // have changed which bundles exist or their member lists.
+    // The generation bump is the correctness-critical mechanism —
+    // it causes the drain loop to discard any in-flight stale
+    // results whose generation no longer matches. The cache itself
+    // was already cleared by reload_into → set_rows above, so no
+    // redundant clear is needed here.
+    bundle_checker.bump_generation();
+    companion_fetcher.bump_generation();
+    // The companion cache is cleared HERE rather than relying on
+    // `set_rows`. A refresh that fails never reaches `set_rows`
+    // (`reload_into` takes its `Err` arm and degrades to the
+    // existing rows), so the bump above would discard an in-flight
+    // result while its `Loading` placeholder survived — and a
+    // `Loading` entry is settled to both fetch predicates, so that
+    // row's companion would never load again for the session.
+    // Clearing beside the bump keeps the two in step on every path.
+    state.companions.clear();
+    // Re-arm the background checks against the freshly-loaded
+    // rows (the `r` key is an explicit "check again" too).
+    arm_background_checks(ctx, state, checker);
 }
 
 /// The next terminal event already queued, as [`drop_typeahead`] reads it: a
@@ -3142,6 +3191,87 @@ fn apply_config_edit(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) 
     };
     commit_config(&ctx.config_path, &set, &options, &registries)?;
     Ok(note)
+}
+
+/// The background machinery a scope swap re-arms.
+struct ConfigEffects<'a> {
+    checker: &'a mut UpdateChecker,
+    bundle_checker: &'a mut super::bundle_member_fetch::BundleMemberChecker,
+    adoption: &'a mut Background,
+}
+
+/// Keys read once at startup and not re-seeded on a scope swap.
+fn launch_only(key: &str) -> bool {
+    matches!(
+        key,
+        "options.tui.theme"
+            | "options.tui.default_view"
+            | "options.tui.sort"
+            | "options.tui.sort_order"
+            | "options.show_deprecated"
+    )
+}
+
+/// Whether a changed registry set needs the catalog loaded again.
+fn needs_catalog_reload(before: &[String], after: &[String]) -> bool {
+    before != after
+}
+
+/// Re-resolve the edited scope (and a project `alt` after a global edit)
+/// before touching `ctx`, so a failure leaves it as it was. True when the
+/// registry set changed.
+fn reapply_config(ctx: &mut TuiContext, reresolve: &Reresolve<'_>) -> anyhow::Result<bool> {
+    let active = reresolve(ctx.scope, &ctx.config_path)?;
+    let alt = match &ctx.alt {
+        Some(alt) if ctx.scope == ConfigScope::Global => Some(reresolve(alt.scope, &alt.config_path)?),
+        _ => None,
+    };
+    let before = registry_order(ctx);
+    ctx.swap_in(active);
+    if alt.is_some() {
+        ctx.alt = alt;
+    }
+    Ok(needs_catalog_reload(&before, &registry_order(ctx)))
+}
+
+/// After a saved edit: make the running browser pick it up and tell the open
+/// dialog. True when the caller must reload the catalog.
+fn finish_config_write(
+    ctx: &mut TuiContext,
+    state: &mut TuiState,
+    on: &mut ConfigEffects<'_>,
+    reresolve: &Reresolve<'_>,
+    edit: &super::config_dialog::ConfigEdit,
+    note: Option<String>,
+) -> bool {
+    use super::config_dialog::ConfigEdit;
+    let reload = match reapply_config(ctx, reresolve) {
+        Ok(reload) => reload,
+        Err(e) => {
+            if let Some(dialog) = state.config.as_mut() {
+                dialog.failed(format!("saved, but could not be applied: {e:#}"));
+            }
+            return false;
+        }
+    };
+    // Resets what a scope swap resets (bundle expansion, background checks);
+    // the dialog's own message is untouched.
+    after_scope_swap(ctx, state, on.checker, on.bundle_checker, on.adoption);
+    let (ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key }) = edit;
+    let note = note.or_else(|| launch_only(key).then(|| "saved · applies when grim tui starts again".to_string()));
+    match config_rows(ctx) {
+        Ok((rows, exists)) => {
+            if let Some(dialog) = state.config.as_mut() {
+                dialog.saved(rows, exists, note);
+            }
+        }
+        Err(e) => {
+            if let Some(dialog) = state.config.as_mut() {
+                dialog.failed(format!("saved, but could not be read back: {e:#}"));
+            }
+        }
+    }
+    reload
 }
 
 /// Under `--locked`, refuse an action that writes the lock when the lock is
@@ -9025,6 +9155,217 @@ mod tests {
         let ctx = global_config_ctx(tmp.path());
         let err = apply_config_edit(&ctx, &set_edit("plugin.name", "team")).unwrap_err();
         assert!(format!("{err:#}").contains("project-only"), "{err:#}");
+    }
+
+    /// A scope fixture whose options come from the file at `path`, as the real closure does.
+    fn swap_from_file(scope: ConfigScope, path: &std::path::Path) -> anyhow::Result<ScopeSwap> {
+        let dir = path.parent().unwrap();
+        let options = GlobalConfig::load(path)?.options;
+        Ok(ScopeSwap {
+            scope,
+            invocation: crate::config::scope::Invocation::WALKED,
+            workspace: dir.to_path_buf(),
+            lock_path: dir.join("grimoire.lock"),
+            state_path: dir.join("state.json"),
+            config_path: path.to_path_buf(),
+            roots: test_roots(dir),
+            clients_default: options.clients.clone(),
+            clients_global: Vec::new(),
+            vendors: Default::default(),
+            clients_selected: Vec::new(),
+            label: if scope == ConfigScope::Global {
+                "global"
+            } else {
+                "project"
+            }
+            .to_string(),
+            resolved_options: options.resolved(),
+            registries: vec![ResolvedRegistry {
+                insecure: false,
+                url: "localhost:5050".to_string(),
+                alias: None,
+                is_default: true,
+                kind: crate::config::registry_resolve::SourceKind::Registry,
+                filter: crate::config::registry_filter::RegistryFilter::default(),
+            }],
+            primary_registry: "localhost:5050".to_string(),
+        })
+    }
+
+    /// Run `finish_config_write` over a context with an open dialog.
+    async fn finish_with(
+        ctx: &mut TuiContext,
+        state: &mut TuiState,
+        reresolve: &Reresolve<'_>,
+        edit: &super::super::config_dialog::ConfigEdit,
+    ) -> bool {
+        let (mut checker, _rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.primary_registry.clone());
+        let (mut bundle_checker, _brx) =
+            crate::tui::bundle_member_fetch::BundleMemberChecker::new(Arc::clone(&ctx.access));
+        let mut adoption = Background::new(crate::oci::access::bounded_access::TUI_RUN_DEADLINE);
+        let mut on = ConfigEffects {
+            checker: &mut checker,
+            bundle_checker: &mut bundle_checker,
+            adoption: &mut adoption,
+        };
+        finish_config_write(ctx, state, &mut on, reresolve, edit, None)
+    }
+
+    fn dialog_message(state: &TuiState) -> Option<(String, bool)> {
+        state.config.as_ref().unwrap().view((120, 40)).message
+    }
+
+    #[test]
+    fn swap_in_returns_the_previous_scope_and_toggle_still_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let incoming = swap_from_file(ConfigScope::Project, &other.join("grimoire.toml")).unwrap();
+        let previous = ctx.swap_in(incoming);
+        assert_eq!(previous.scope, ConfigScope::Global);
+        assert_eq!(previous.label, "global");
+        assert_eq!((ctx.scope, ctx.scope_label.as_str()), (ConfigScope::Project, "project"));
+        ctx.alt = Some(previous);
+        assert!(ctx.toggle_scope());
+        assert_eq!(ctx.scope, ConfigScope::Global);
+        assert_eq!(ctx.alt.as_ref().unwrap().scope, ConfigScope::Project);
+    }
+
+    #[test]
+    fn registry_change_needs_a_catalog_reload() {
+        let a = vec!["x".to_string(), "y".to_string()];
+        assert!(needs_catalog_reload(&a, &["y".to_string(), "x".to_string()]));
+        assert!(needs_catalog_reload(&a, &["x".to_string()]));
+    }
+
+    #[test]
+    fn same_registries_need_no_reload() {
+        let a = vec!["x".to_string(), "y".to_string()];
+        assert!(!needs_catalog_reload(&a, &a.clone()));
+    }
+
+    #[test]
+    fn launch_only_keys_are_named() {
+        for key in [
+            "options.tui.theme",
+            "options.tui.default_view",
+            "options.tui.sort",
+            "options.tui.sort_order",
+            "options.show_deprecated",
+        ] {
+            assert!(launch_only(key), "{key}");
+        }
+        assert!(!launch_only("options.clients"));
+        assert!(!launch_only("options.tui.group_by_type"));
+    }
+
+    fn ctx_with_project_alt(dir: &std::path::Path) -> TuiContext {
+        let mut ctx = global_config_ctx(dir);
+        let project = dir.join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("grimoire.toml"), "").unwrap();
+        ctx.alt = Some(swap_from_file(ConfigScope::Project, &project.join("grimoire.toml")).unwrap());
+        ctx
+    }
+
+    #[tokio::test]
+    async fn global_edit_rebuilds_the_cached_project_alt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_project_alt(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let stub = |scope: ConfigScope, path: &std::path::Path| {
+            asked.borrow_mut().push(scope);
+            swap_from_file(scope, path)
+        };
+        finish_with(&mut ctx, &mut state, &stub, &set_edit("options.clients", "claude")).await;
+        assert_eq!(*asked.borrow(), [ConfigScope::Global, ConfigScope::Project]);
+    }
+
+    #[tokio::test]
+    async fn project_edit_keeps_the_global_alt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_project_alt(tmp.path());
+        ctx.toggle_scope();
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let stub = |scope: ConfigScope, path: &std::path::Path| {
+            asked.borrow_mut().push(scope);
+            swap_from_file(scope, path)
+        };
+        finish_with(&mut ctx, &mut state, &stub, &set_edit("options.clients", "claude")).await;
+        assert_eq!(*asked.borrow(), [ConfigScope::Project]);
+        assert_eq!(ctx.alt.as_ref().unwrap().scope, ConfigScope::Global);
+    }
+
+    #[tokio::test]
+    async fn config_edit_refreshes_clients_and_options() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        assert_eq!(ctx.resolved_options.search_min_relevance, 50);
+        let edit = set_edit("options.search_min_relevance", "30");
+        apply_config_edit(&ctx, &edit).unwrap();
+        let reload = finish_with(&mut ctx, &mut state, &swap_from_file, &edit).await;
+        assert!(!reload, "a settings edit must not reload the catalog");
+        assert_eq!(ctx.resolved_options.search_min_relevance, 30);
+        assert_eq!(state.search_min_relevance, 30);
+        assert_eq!(dialog_message(&state), Some(("saved".to_string(), false)));
+    }
+
+    #[tokio::test]
+    async fn launch_only_edit_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let edit = set_edit("options.show_deprecated", "true");
+        apply_config_edit(&ctx, &edit).unwrap();
+        finish_with(&mut ctx, &mut state, &swap_from_file, &edit).await;
+        assert_eq!(
+            dialog_message(&state).unwrap().0,
+            "saved · applies when grim tui starts again"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_re_resolve_keeps_the_old_context_and_reports_in_the_dialog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_project_alt(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        // The active scope resolves, the alt does not: nothing may be swapped.
+        let stub = |scope: ConfigScope, path: &std::path::Path| match scope {
+            ConfigScope::Global => swap_from_file(scope, path),
+            ConfigScope::Project => Err(anyhow::anyhow!("invalid config")),
+        };
+        ctx.resolved_options.search_min_relevance = 77;
+        let reload = finish_with(&mut ctx, &mut state, &stub, &set_edit("options.clients", "claude")).await;
+        assert!(!reload);
+        assert_eq!(ctx.resolved_options.search_min_relevance, 77, "context was swapped");
+        let (text, is_error) = dialog_message(&state).unwrap();
+        assert!(
+            is_error && text.starts_with("saved, but could not be applied"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_edit_keeps_the_popup_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let edit = set_edit("options.tui.group_by_type", "true");
+        apply_config_edit(&ctx, &edit).unwrap();
+        finish_with(&mut ctx, &mut state, &swap_from_file, &edit).await;
+        assert_eq!(state.mode, Mode::Config);
+        assert!(state.config.is_some());
+        assert!(state.group_by_type, "state was re-seeded");
     }
 
     #[test]

@@ -182,7 +182,14 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
 
     // The session outlives the startup reads and can edit the global config: stop sharing the memo.
     ctx.stop_global_config_memo();
-    app::run(tui_ctx, project_init).await?;
+    let reresolve = |scope: ConfigScope, config_path: &std::path::Path| {
+        // Walked sessions re-walk, so the swapped scope keeps its remedy spelling.
+        let explicit = ctx.config().map(|_| config_path);
+        let resolved = scope_resolution::resolve(ctx, scope == ConfigScope::Global, explicit)
+            .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+        scope_swap(ctx, resolved)
+    };
+    app::run(tui_ctx, project_init, &reresolve).await?;
     Ok(ExitCode::Success)
 }
 
