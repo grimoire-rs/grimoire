@@ -186,7 +186,7 @@ fn columns(text: &str) -> usize {
 
 /// `line` word-wrapped to `width` columns. A word wider than a row is broken
 /// across rows, the spaces a row breaks at are dropped, and leading spaces stay.
-fn wrap(line: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap(line: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     let (mut row, mut row_w) = (String::new(), 0usize);
     // A wrapped row that holds no word yet takes no separating space.

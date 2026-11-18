@@ -650,6 +650,19 @@ pub async fn run(mut ctx: TuiContext, mut project_init: Option<ProjectInit<'_>>)
                     state.set_status("no alternate scope to switch to");
                 }
             }
+            TuiAction::OpenConfig => match open_config_dialog(&ctx) {
+                Ok(dialog) => state.open_config(dialog),
+                Err(e) => state.set_status(format!("config unavailable: {e:#}")),
+            },
+            TuiAction::ConfigWrite(edit) => {
+                let outcome = apply_config_edit(&ctx, &edit).and_then(|note| Ok((config_rows(&ctx)?, note)));
+                if let Some(dialog) = state.config.as_mut() {
+                    match outcome {
+                        Ok(((rows, exists), note)) => dialog.saved(rows, exists, note),
+                        Err(e) => dialog.failed(format!("{e:#}")),
+                    }
+                }
+            }
             TuiAction::InitProject => {
                 if let Some(init) = &project_init {
                     match (init.create)() {
@@ -3054,6 +3067,81 @@ fn config_guard(ctx: &TuiContext) -> anyhow::Result<ConfigFileLock> {
     grim(ConfigFileLock::try_acquire(
         &crate::command::scope_resolution::lockable_path(&ctx.config_path),
     ))
+}
+
+/// The config popup's rows for the active scope, read from the file as
+/// declared, with whether the file exists. Reads only.
+fn config_rows(ctx: &TuiContext) -> anyhow::Result<(Vec<crate::api::config_report::ConfigEntry>, bool)> {
+    use crate::command::config::{collect_entries, plugin_entries};
+    let (options, registries, _set) = load_scope_declaration(ctx)?;
+    let mut rows = collect_entries(true, &options, &registries);
+    if ctx.scope == ConfigScope::Project {
+        let plugin = grim(crate::command::add::read_plugin_table(&ctx.config_path))?;
+        rows.extend(plugin_entries(true, plugin.as_ref()));
+    }
+    Ok((rows, ctx.config_path.exists()))
+}
+
+fn open_config_dialog(ctx: &TuiContext) -> anyhow::Result<super::config_dialog::ConfigDialog> {
+    let (rows, exists) = config_rows(ctx)?;
+    Ok(super::config_dialog::ConfigDialog::new(
+        &ctx.scope_label,
+        ctx.config_path.display().to_string(),
+        exists,
+        rows,
+    ))
+}
+
+/// Write one popup edit the way `grim config set|unset` does: under the
+/// config lock, over a fresh read of the declaration. The note is the
+/// hooks-disarm advice, set exactly when the CLI would warn it.
+fn apply_config_edit(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) -> anyhow::Result<Option<String>> {
+    use super::config_dialog::ConfigEdit;
+    use crate::command::config::{
+        ParsedKey, apply_plugin_set, apply_plugin_unset, apply_set, apply_unset, commit_config, disarm_note, parse_key,
+    };
+    use crate::command::config_keys::{ConfigKey, PluginField};
+    let (key, value) = match edit {
+        ConfigEdit::Set { key, value } => (key.as_str(), Some(value.as_str())),
+        ConfigEdit::Unset { key } => (key.as_str(), None),
+    };
+    let _guard = config_guard(ctx)?;
+    if let Some(field) = PluginField::parse(key) {
+        if ctx.scope == ConfigScope::Global {
+            return Err(crate::command::config_usage(format!(
+                "{key} is project-only: the global config has no [plugin] table"
+            )));
+        }
+        let (options, registries, set) = load_scope_declaration(ctx)?;
+        let mut plugin = grim(crate::command::add::read_plugin_table(&ctx.config_path))?;
+        match value {
+            Some(v) => drop(apply_plugin_set(field, v, &mut plugin)?),
+            None => apply_plugin_unset(field, &mut plugin),
+        }
+        grim(crate::command::add::write_config_with_plugin(
+            &ctx.config_path,
+            &options,
+            &registries,
+            &set,
+            plugin.as_ref(),
+        ))?;
+        return Ok(None);
+    }
+    let parsed = parse_key(key)?;
+    let (mut options, mut registries, set) = load_scope_declaration(ctx)?;
+    let hooks = matches!(parsed, ParsedKey::Fixed(ConfigKey::ExperimentalHooks));
+    let note = match value {
+        Some(v) => {
+            apply_set(&parsed, v, &mut options, &mut registries, &ctx.invocation)?;
+            (hooks && v == "false").then(|| disarm_note("set options.experimental.hooks false", &ctx.invocation))
+        }
+        None => {
+            apply_unset(&parsed, &mut options, &mut registries, &ctx.invocation)?;
+            hooks.then(|| disarm_note("unset options.experimental.hooks", &ctx.invocation))
+        }
+    };
+    commit_config(&ctx.config_path, &set, &options, &registries)?;
+    Ok(note)
 }
 
 /// Under `--locked`, refuse an action that writes the lock when the lock is
@@ -8807,6 +8895,149 @@ mod tests {
             sort: None,
             sort_order: crate::catalog::SortOrder::Asc,
         }
+    }
+
+    /// A global-scope context whose config file is `<tmp>/grimoire.toml`, absent.
+    fn global_config_ctx(dir: &std::path::Path) -> TuiContext {
+        let mut ctx = test_ctx(
+            dir,
+            Arc::new(crate::oci::access::memory_registry::MemoryRegistry::new()),
+        );
+        ctx.scope = ConfigScope::Global;
+        ctx.scope_label = "global".to_string();
+        ctx
+    }
+
+    fn set_edit(key: &str, value: &str) -> super::super::config_dialog::ConfigEdit {
+        super::super::config_dialog::ConfigEdit::Set {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn dialog_open_never_creates_global_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        let (rows, exists) = config_rows(&ctx).unwrap();
+        assert!(!exists);
+        assert!(rows.iter().any(|r| r.key == "options.show_deprecated"));
+        assert!(
+            !rows.iter().any(|r| r.key.starts_with("plugin.")),
+            "no plugin rows at global scope"
+        );
+        open_config_dialog(&ctx).unwrap();
+        assert!(!ctx.config_path.exists());
+    }
+
+    #[test]
+    fn dialog_write_creates_absent_global_file_with_only_that_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        assert_eq!(
+            apply_config_edit(&ctx, &set_edit("options.show_deprecated", "true")).unwrap(),
+            None
+        );
+        let body = std::fs::read_to_string(&ctx.config_path).unwrap();
+        assert!(body.contains("show_deprecated = true"), "{body}");
+        assert!(!body.contains("[options.tui]") && !body.contains("clients"), "{body}");
+        let (rows, exists) = config_rows(&ctx).unwrap();
+        assert!(exists);
+        assert!(rows.iter().any(|r| r.key == "options.show_deprecated" && r.set));
+    }
+
+    #[test]
+    fn dialog_write_matches_grim_config_set() {
+        use crate::command::config::{apply_set, commit_config, parse_key};
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        apply_config_edit(&ctx, &set_edit("options.search_min_relevance", "30")).unwrap();
+        apply_config_edit(&ctx, &set_edit("options.tui.theme", &ctx_first_theme())).unwrap();
+        let expected = tmp.path().join("expected.toml");
+        let (mut options, mut registries, set) = GlobalConfig::load(&expected)
+            .map(|c| (c.options, c.registries, c.set))
+            .unwrap();
+        for (k, v) in [
+            ("options.search_min_relevance", "30"),
+            ("options.tui.theme", ctx_first_theme().as_str()),
+        ] {
+            apply_set(
+                &parse_key(k).unwrap(),
+                v,
+                &mut options,
+                &mut registries,
+                &ctx.invocation,
+            )
+            .unwrap();
+        }
+        commit_config(&expected, &set, &options, &registries).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&ctx.config_path).unwrap(),
+            std::fs::read_to_string(&expected).unwrap()
+        );
+        apply_config_edit(
+            &ctx,
+            &super::super::config_dialog::ConfigEdit::Unset {
+                key: "options.search_min_relevance".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(
+            !std::fs::read_to_string(&ctx.config_path)
+                .unwrap()
+                .contains("search_min_relevance")
+        );
+    }
+
+    fn ctx_first_theme() -> String {
+        crate::command::config::collect_entries(true, &ConfigOptions::default(), &[])
+            .into_iter()
+            .find(|e| e.key == "options.tui.theme")
+            .and_then(|e| e.values)
+            .map(|v| v[0].to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn bad_value_is_refused_with_the_cli_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        let err = apply_config_edit(&ctx, &set_edit("options.search_min_relevance", "101")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("must be a percentage from 0 to 100"),
+            "{err:#}"
+        );
+        assert!(!ctx.config_path.exists());
+    }
+
+    #[test]
+    fn held_lock_reports_contention() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        let _held = config_guard(&ctx).unwrap();
+        assert!(apply_config_edit(&ctx, &set_edit("options.show_deprecated", "true")).is_err());
+        assert!(!ctx.config_path.exists());
+    }
+
+    #[test]
+    fn plugin_key_at_global_scope_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        let err = apply_config_edit(&ctx, &set_edit("plugin.name", "team")).unwrap_err();
+        assert!(format!("{err:#}").contains("project-only"), "{err:#}");
+    }
+
+    #[test]
+    fn hooks_off_carries_the_disarm_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        assert!(
+            apply_config_edit(&ctx, &set_edit("options.experimental.hooks", "true"))
+                .unwrap()
+                .is_none()
+        );
+        let note = apply_config_edit(&ctx, &set_edit("options.experimental.hooks", "false")).unwrap();
+        assert!(note.is_some_and(|n| n.contains("run `") && n.contains("install")));
     }
 
     #[tokio::test]
