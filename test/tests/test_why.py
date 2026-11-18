@@ -187,6 +187,51 @@ def test_overrides(grim_at, project_dir: Path) -> None:
     assert "can be removed" in runner.plain("why", "skill", "x").stderr
 
 
+def _bundle_of_bundles(name: str, byte: str, nested: list[tuple[str, str]]) -> str:
+    out = (
+        f'[[bundle]]\nname = "{name}"\nrepo = "{HOST}/bundles/{name}"\ntag = "1"\n'
+        f'pinned = "{HOST}/bundles/{name}@{_digest(byte)}"\n'
+    )
+    for member, ident in nested:
+        out += f'\n[[bundle.member]]\nkind = "bundle"\nname = "{member}"\nid = "{ident}"\n'
+    return out + "\n"
+
+
+def test_a_declared_bundle_reports_the_override_of_a_bundle_requiring_it(grim_at, project_dir: Path) -> None:
+    """`mid` lists `pack:1` while the declaration pins `pack:1.0.0`: the
+    declaration wins, as it does for a skill, and the request is reported. A
+    declared bundle nobody else asks for has none."""
+    write_config(
+        project_dir,
+        bundles={"pack": f"{HOST}/bundles/pack:1.0.0", "mid": f"{HOST}/bundles/mid:1"},
+    )
+    pack = _bundle("pack", "a", []).replace('tag = "1"', 'tag = "1.0.0"')
+    mid = _bundle_of_bundles("mid", "b", [("pack", f"{HOST}/bundles/pack:1")])
+    _write_lock(project_dir, pack, mid)
+    runner = grim_at(project_dir)
+
+    assert _why(runner, "bundle", "pack")["overrides"] == [
+        {"kind": "bundle", "name": "mid", "id": f"{HOST}/bundles/pack:1"}
+    ]
+    assert _why(runner, "bundle", "mid")["overrides"] == []
+
+
+def test_a_declared_bundle_a_skill_also_requires_gets_the_removal_note(grim_at, project_dir: Path) -> None:
+    write_config(project_dir, skills={"omega": _ref("omega")}, bundles={"flat": f"{HOST}/bundles/flat:1"})
+    _write_lock(
+        project_dir,
+        _entry("omega", "b").rstrip("\n")
+        + f'\n\n[[skill.requires]]\nkind = "bundle"\nname = "flat"\nid = "{HOST}/bundles/flat:1"\n\n',
+        _bundle("flat", "a", []),
+    )
+    runner = grim_at(project_dir)
+
+    why = runner.plain("why", "bundle", "flat")
+    assert "bundle/flat is declared directly and also required by skill/omega" in why.stderr, why.stderr
+    status = runner.plain("status", check=False)
+    assert "bundle/flat is declared directly and also required by skill/omega" in status.stderr, status.stderr
+
+
 def test_a_bare_declaration_yielding_to_a_claim_overrides_nothing(grim_at, project_dir: Path) -> None:
     """`x` is declared with no tag and `y` requires `x:1.2`: the pin follows the
     claim, so nothing is overridden and the declaration is not called removable.

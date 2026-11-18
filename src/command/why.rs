@@ -8,7 +8,7 @@
 //! `required_by` and the dependency source literals, so both commands answer
 //! from one graph.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use clap::Args;
 
@@ -50,6 +50,9 @@ pub(super) struct Provenance<'a> {
     /// and a scan of the graph per question is quadratic on a crafted lock
     /// (CWE-407).
     parents: HashMap<NodeKey, Vec<NodeKey>>,
+    /// The declared bundles: the effective graph holds them as roots, never as
+    /// nodes, so they carry no [`Origin`].
+    bundles: BTreeMap<String, DeclaredSource>,
 }
 
 impl<'a> Provenance<'a> {
@@ -63,7 +66,12 @@ impl<'a> Provenance<'a> {
                 parents.entry(kid.clone()).or_default().push(parent.clone());
             }
         }
-        Self { lock, graph, parents }
+        Self {
+            lock,
+            graph,
+            parents,
+            bundles: set.bundles.clone(),
+        }
     }
 
     /// The parents of `key`, sorted by `(kind, name)`.
@@ -121,23 +129,35 @@ impl<'a> Provenance<'a> {
         member.absolute_id(parent_pin.map(|p| p.as_identifier()))
     }
 
+    /// What the declaration of `key` names: a declared bundle's own entry, or
+    /// the source of a directly declared artifact.
+    fn declared_source(&self, key: &NodeKey) -> Option<&DeclaredSource> {
+        if key.0 == ArtifactKind::Bundle {
+            return self.bundles.get(&key.1);
+        }
+        match self.graph()?.nodes.get(key)? {
+            Origin::Direct(source) => Some(source),
+            _ => None,
+        }
+    }
+
     /// Whether `requested` is what the direct declaration of `key` already
     /// resolves to. Offline there is no registry to ask, so this compares
     /// digests when both sides carry one and repository plus tag otherwise.
     fn same_as_direct(&self, requested: &Identifier, key: &NodeKey) -> bool {
-        let Some(Origin::Direct(source)) = self.graph().and_then(|g| g.nodes.get(key)) else {
-            return false;
-        };
-        let DeclaredSource::Registry(declared) = source else {
+        let Some(DeclaredSource::Registry(declared)) = self.declared_source(key) else {
             return false;
         };
         if declared.registry_repository() != requested.registry_repository() {
             return false;
         }
-        let locked = self
-            .lock
-            .and_then(|l| find_locked(l, key.0, &key.1))
-            .and_then(|a| a.source.pinned().map(|p| p.digest()));
+        let locked = self.lock.and_then(|l| {
+            if key.0 == ArtifactKind::Bundle {
+                l.bundles.iter().find(|b| b.name == key.1)?.pinned().map(|p| p.digest())
+            } else {
+                find_locked(l, key.0, &key.1)?.source.pinned().map(|p| p.digest())
+            }
+        });
         if let (Some(asked), Some(have)) = (requested.digest(), locked) {
             return asked == have;
         }
@@ -148,8 +168,7 @@ impl<'a> Provenance<'a> {
     /// claim of the declaration's own repository chooses the pin, so it neither
     /// overrides the declaration nor asks for what the declaration pins.
     fn yields_to(&self, parent: &NodeKey, requested: &Identifier, key: &NodeKey) -> bool {
-        let Some(Origin::Direct(DeclaredSource::Registry(declared))) = self.graph().and_then(|g| g.nodes.get(key))
-        else {
+        let Some(DeclaredSource::Registry(declared)) = self.declared_source(key) else {
             return false;
         };
         declared.digest().is_none()
@@ -163,10 +182,10 @@ impl<'a> Provenance<'a> {
     fn direct_edges(&self, key: &NodeKey) -> (Vec<NodeKey>, Vec<WhyOverride>) {
         let mut same = Vec::new();
         let mut overrides = Vec::new();
-        let Some(graph) = self.graph() else {
+        if self.graph().is_none() {
             return (same, overrides);
-        };
-        if !matches!(graph.nodes.get(key), Some(Origin::Direct(_))) {
+        }
+        if self.declared_source(key).is_none() {
             return (same, overrides);
         }
         for parent in self.parents_of(key) {
