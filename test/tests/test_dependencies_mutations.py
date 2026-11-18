@@ -10,6 +10,7 @@ lock by hand.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -241,3 +242,22 @@ def test_uninstall_dependency_only_kept(
     assert _declared(project_dir) == {"parent"}
     assert _installed(project_dir) == everything
     assert "both" in _lock_names(project_dir), "the parent still requires it"
+
+
+def test_uninstall_direct_rule_also_required_names_no_bundle(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A declaration kept only by a dependency never blames a bundle."""
+    beta = make_artifact(f"{unique_repo}/beta", "rule", {"beta.md": "# beta\n"}, tag="1")
+    gamma = make_dependent(
+        f"{unique_repo}/gamma", "1", "skill", _files("gamma"), [("rule", "beta", "./beta:1")]
+    )
+    write_config(project_dir, skills={"gamma": gamma.fq}, rules={"beta": beta.fq})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.run("uninstall", "rule", "beta", format="json")
+
+    assert json.loads(result.stdout)["status"] == "uninstalled", result.stdout
+    assert "bundle" not in result.stderr, result.stderr
