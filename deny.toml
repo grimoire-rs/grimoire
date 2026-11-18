@@ -28,6 +28,11 @@ yanked = "warn"
 # can swap teaches people to bypass the gate. Direct dependencies — the ones
 # actually chosen — still fail.
 unmaintained = "workspace"
+# chrono is a direct dependency in 22 files, so it is replaced on its own
+# (issue 376), not in whichever change first meets the advisory.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; replacement tracked in grimoire-rs/grimoire#376" },
+]
 
 [bans]
 multiple-versions = "warn"
