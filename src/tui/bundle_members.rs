@@ -158,6 +158,11 @@ impl DepIndex {
         self.expandable.contains(repo)
     }
 
+    /// The kind the lock binds the node at `repo` as; `None` when it is not locked.
+    pub fn kind(&self, repo: &str) -> Option<ArtifactKind> {
+        self.by_repo.get(repo).map(|(kind, _)| *kind)
+    }
+
     /// The dependency answers for the locked node at `repo`; `None` when the
     /// lock carries no dependency data or does not hold the node, so a
     /// dependency-free project shows nothing.

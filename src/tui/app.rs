@@ -10841,6 +10841,41 @@ mod tests {
         );
     }
 
+    /// The picker opens on a catalog row alone, and a namespaced source's
+    /// catalog entry already keeps the namespace in its repository
+    /// (`namespaced_registry_scopes_to_its_namespace`), so its tags list at the host.
+    #[tokio::test]
+    async fn version_picker_on_a_namespaced_source_lists_tags_at_the_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        publish_skill(&reg, "a", "first").await;
+        let access = Arc::new(HostOnly {
+            inner: reg,
+            misrouted: std::sync::Mutex::default(),
+        });
+        let mut ctx = test_ctx(tmp.path(), access.clone());
+        ctx.registries[0].url = "localhost:5050/acme".to_string();
+        ctx.primary_registry = "localhost:5050/acme".to_string();
+        let mut state = TuiState::new();
+        state.view_mode = crate::tui::state::ViewMode::Flat;
+        // The shape `Catalog::build_entry` stores: the bare host, the namespace in the repository.
+        let mut row = skill_row("a");
+        row.registry = "localhost:5050".to_string();
+        row.repository = "acme/a".to_string();
+        state.set_rows(vec![row]);
+
+        let row = state.open_version_pick().expect("the catalog row opens the picker");
+        load_versions(&ctx, &mut state, row).await;
+
+        assert_eq!(
+            *access.misrouted.lock().unwrap(),
+            Vec::<String>::new(),
+            "requests sent to a namespace"
+        );
+        let tags = state.picker.as_ref().map(|p| p.tags.clone());
+        assert_eq!(tags, Some(vec!["1".to_string()]), "status: {}", state.status_line);
+    }
+
     #[tokio::test]
     async fn tui_install_on_a_catalog_row_of_a_bundle_member_declares_nothing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -17636,6 +17671,52 @@ mod tests {
             badges(&ctx, ArtifactKind::Skill, "beta"),
             installed,
             "declared directly too"
+        );
+    }
+
+    /// `suite` lists `gamma` and `beta`, and `gamma` requires `beta`: the
+    /// bundle wins over the dependency, and a direct declaration over both.
+    #[tokio::test]
+    async fn bundle_listed_and_required_artifact_reads_via_bundle_on_both_surfaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        publish_skill(&reg, "beta", "first").await;
+        let edge = (ArtifactKind::Skill, "beta", "localhost:5050/acme/beta:1");
+        publish_skill_requiring(&reg, "gamma", "gamma", "1", "first", &[edge]).await;
+        let members = [
+            (ArtifactKind::Skill, "gamma", "localhost:5050/acme/gamma:1"),
+            (ArtifactKind::Skill, "beta", "localhost:5050/acme/beta:1"),
+        ];
+        publish_bundle_at(&reg, "suite", "1", &members).await;
+        let ctx = test_ctx(tmp.path(), Arc::new(reg));
+        perform(
+            &ctx,
+            &bundle_row("suite"),
+            None,
+            BatchOp::Install,
+            &SilentProgress,
+            false,
+        )
+        .await
+        .expect("the bundle installs");
+
+        let via_bundle = (ArtifactState::ViaBundle, ArtifactState::ViaBundle);
+        assert_eq!(
+            badges(&ctx, ArtifactKind::Skill, "beta"),
+            via_bundle,
+            "listed by suite and required by gamma"
+        );
+
+        let config = std::fs::read_to_string(&ctx.config_path).unwrap();
+        let declared = config.replacen("[skills]\n", "[skills]\nbeta = \"localhost:5050/acme/beta:1\"\n", 1);
+        assert_ne!(declared, config, "the fixture declares beta");
+        std::fs::write(&ctx.config_path, declared).unwrap();
+        let installed = (ArtifactState::Installed, ArtifactState::Installed);
+        assert_eq!(
+            badges(&ctx, ArtifactKind::Skill, "beta"),
+            installed,
+            "declared directly, listed and required"
         );
     }
 

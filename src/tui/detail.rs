@@ -528,8 +528,13 @@ pub fn dependency_lines(deps: &super::bundle_members::DepIndex, repo: &str) -> V
 /// `parent_bundle_repo` is the `registry/repository` of the bundle that owns
 /// this member (from `DisplayRow::Member::parent_bundle_repo`); rendered as
 /// the "Via bundle:" metadata line so the user can trace the virtual row back
-/// to its parent.
-pub fn detail_lines_for_member(node: &MemberNode, parent_bundle_repo: &str) -> Vec<DetailLine> {
+/// to its parent. A `parent_kind` other than bundle is an artifact that
+/// requires the member, labelled "Required by:" ([`parent_label`]).
+pub fn detail_lines_for_member(
+    node: &MemberNode,
+    parent_bundle_repo: &str,
+    parent_kind: crate::oci::ArtifactKind,
+) -> Vec<DetailLine> {
     // Sanitize the raw label at the display boundary (never stored sanitized).
     let sanitized_label = super::render::sanitize_member_label(&node.label);
 
@@ -557,12 +562,22 @@ pub fn detail_lines_for_member(node: &MemberNode, parent_bundle_repo: &str) -> V
             value: node.state.to_string(),
         },
         DetailLine::MetaEntry {
-            label: "Via bundle:",
+            label: parent_label(parent_kind),
             // F9: sanitize at display boundary — parent_bundle_repo is
             // registry-controlled and must not reach the terminal raw.
             value: super::render::sanitize_member_label(parent_bundle_repo),
         },
     ]
+}
+
+/// The provenance label naming a child row's parent: a bundle lists its
+/// members, any other kind requires them.
+pub fn parent_label(parent_kind: crate::oci::ArtifactKind) -> &'static str {
+    if parent_kind == crate::oci::ArtifactKind::Bundle {
+        "Via bundle:"
+    } else {
+        "Required by:"
+    }
 }
 
 /// The visible text of one semantic detail line (the wrap-count input;
@@ -716,7 +731,7 @@ mod tests {
         // Per C-7, parent_repo comes from DisplayRow::Member.parent_bundle_repo
         // and is threaded in by the call site.
         let parent_repo = "reg.example.io/acme/my-bundle";
-        let lines = detail_lines_for_member(&node, parent_repo);
+        let lines = detail_lines_for_member(&node, parent_repo, crate::oci::ArtifactKind::Bundle);
         // Must be non-empty.
         assert!(!lines.is_empty(), "C-7: detail lines for member must be non-empty");
         // Must have an Identifier line (the sanitized label).
@@ -764,7 +779,7 @@ mod tests {
         // from a MemberNode alone, it proves TuiRow independence. We verify it
         // produces output for a "minimal" MemberNode (rule kind, no member_repo).
         let node = make_member_node("some-rule", ArtifactKind::Rule, None, ArtifactState::NotInstalled);
-        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle");
+        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle", crate::oci::ArtifactKind::Bundle);
         assert!(
             !lines.is_empty(),
             "C-7: even a rule member with no repo must produce lines"
@@ -783,7 +798,7 @@ mod tests {
             None,
             ArtifactState::NotInstalled,
         );
-        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle");
+        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle", crate::oci::ArtifactKind::Bundle);
         assert!(
             !lines.is_empty(),
             "C-7: unparseable-id member (member_repo=None) must still render, got empty"
@@ -799,7 +814,7 @@ mod tests {
             Some("reg/acme/code-review"),
             ArtifactState::Installed,
         );
-        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle");
+        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle", crate::oci::ArtifactKind::Bundle);
         let identifier_value = lines.iter().find_map(|l| match l {
             DetailLine::Identifier(s) => Some(s.clone()),
             _ => None,

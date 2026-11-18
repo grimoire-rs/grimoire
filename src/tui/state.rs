@@ -2146,6 +2146,42 @@ impl TuiState {
         self.clamp_tree_selection_to(new_len);
     }
 
+    /// Keep the selection on the row it was on after `repo` gained child
+    /// rows. Expansion is keyed by repository, so every row at `repo` grew
+    /// children, some of them above the selection.
+    ///
+    /// Call it only when no row at `repo` showed children before: every row
+    /// below one in the new list is then new and is skipped in the count.
+    pub fn reselect_after_expand(&mut self, repo: &str) {
+        use super::tree::DisplayRow;
+        let depth = |r: &DisplayRow| match r {
+            DisplayRow::Group { depth, .. } | DisplayRow::Leaf { depth, .. } | DisplayRow::Member { depth, .. } => {
+                *depth
+            }
+        };
+        let at_repo = |r: &DisplayRow| match r {
+            DisplayRow::Leaf { row, .. } => self.rows.get(*row).is_some_and(|t| t.repo == repo),
+            DisplayRow::Member { member_repo, .. } => member_repo.as_deref() == Some(repo),
+            DisplayRow::Group { .. } => false,
+        };
+        let flat = self.flattened();
+        let (mut kept, mut new_below) = (0, None);
+        for (i, r) in flat.iter().enumerate() {
+            if new_below.is_some_and(|d| depth(r) > d) {
+                continue;
+            }
+            new_below = None;
+            if kept == self.selected {
+                self.selected = i;
+                return;
+            }
+            if at_repo(r) {
+                new_below = Some(depth(r));
+            }
+            kept += 1;
+        }
+    }
+
     /// Handle the `←` (Collapse) key with ARIA/tree-widget standard behavior:
     ///
     /// - On an expanded group: collapse it (same as [`Self::collapse_selected`]).
