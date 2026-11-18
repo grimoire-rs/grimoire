@@ -5609,9 +5609,33 @@ mod spec_multi_registry_render_tests {
         let bare = drawn(&s);
         assert!(!bare.contains("kind:") && !bare.contains("sort:"), "{bare:?}");
         s.cycle_sort();
-        s.kind_filter = Some(crate::oci::ArtifactKind::Agent);
+        s.kind_filter = vec![crate::oci::ArtifactKind::Agent];
         let text = drawn(&s);
         assert!(text.contains("kind: agent · sort:"), "{text:?}");
+    }
+
+    #[test]
+    fn catalog_title_counts_four_kinds() {
+        use crate::oci::ArtifactKind::*;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(vec![row_with_reg("ghcr.io/acme", "alpha", ArtifactState::Installed)]);
+        s.set_kind_filter(vec![Skill, Rule, Agent, Mcp]);
+        let model = frame(&s);
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        let cols = buf.area.width as usize;
+        let line = buf
+            .content()
+            .chunks(cols)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .find(|l| l.contains("Catalog"))
+            .expect("the Catalog block is rendered");
+        assert!(line.contains("kind: 4 kinds"), "{line:?}");
     }
 
     // The two sidecar-signal columns: right-aligned counts, `-` when the

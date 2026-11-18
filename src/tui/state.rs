@@ -495,8 +495,9 @@ pub struct TuiState {
     /// screen — the default grouping, an explicit sort, or a query's
     /// relevance ranking — rather than only the explicit modes.
     pub sort_reversed: bool,
-    /// The `f` key's kind filter; `None` shows every kind.
-    pub kind_filter: Option<ArtifactKind>,
+    /// The kind filter: always in `ArtifactKind::ALL` order, no duplicates;
+    /// empty shows every kind. Set through `set_kind_filter` to keep that.
+    pub kind_filter: Vec<ArtifactKind>,
     /// Current interaction mode.
     pub mode: Mode,
     /// Whether a catalog load is in flight.
@@ -668,7 +669,7 @@ impl Default for TuiState {
             detail_scroll: 0,
             sort: None,
             sort_reversed: false,
-            kind_filter: None,
+            kind_filter: Vec::new(),
             // A sane universal default until the app reports the real
             // size (before the first key event is ever processed).
             term_size: (80, 24),
@@ -1300,13 +1301,15 @@ impl TuiState {
     /// The direction is left alone: a user who flipped it flipped it on
     /// purpose, and `S` flips it back.
     pub fn cycle_sort(&mut self) {
-        self.sort = match self.sort {
-            None => Some(SortMode::Name),
-            Some(SortMode::Name) => Some(SortMode::Updated),
-            Some(SortMode::Updated) => Some(SortMode::Rating),
-            Some(SortMode::Rating) => Some(SortMode::Downloads),
-            Some(SortMode::Downloads) => None,
-        };
+        self.step_sort(1);
+    }
+
+    /// Step the browse order by `delta` positions over default + every
+    /// [`SortMode`], wrapping both ways, and re-sort.
+    fn step_sort(&mut self, delta: isize) {
+        let order: Vec<Option<SortMode>> = std::iter::once(None).chain(SortMode::ALL.map(Some)).collect();
+        let at = order.iter().position(|m| *m == self.sort).unwrap_or(0);
+        self.sort = order[(at as isize + delta).rem_euclid(order.len() as isize) as usize];
         self.resort();
     }
 
@@ -1321,29 +1324,47 @@ impl TuiState {
     /// typed kind word into text, so the tree/flat switch runs as for a query
     /// edit. The cursor returns to the top.
     pub fn cycle_kind_filter(&mut self) {
-        self.reset_detail_view();
-        let was_ranked = self.search_query().has_text_terms();
         let present = |k: &ArtifactKind| self.rows.iter().any(|r| r.kind == k.kind_str());
         let mut kinds = ArtifactKind::ALL.iter().copied().filter(|k| present(k));
-        self.kind_filter = match self.kind_filter {
+        let next = match self.kind_filter.last() {
             None => kinds.next(),
             Some(cur) => {
-                let pos = ArtifactKind::ALL.iter().position(|&k| k == cur);
+                let pos = ArtifactKind::ALL.iter().position(|k| k == cur);
                 kinds.find(|k| ArtifactKind::ALL.iter().position(|a| a == k) > pos)
             }
         };
+        self.set_kind_filter(next.into_iter().collect());
+    }
+
+    /// Replace the kind filter (normalized to `ArtifactKind::ALL` order,
+    /// deduplicated). The filter can turn a typed kind word into text, so the
+    /// tree/flat switch runs as for a query edit. The cursor returns to the top.
+    pub fn set_kind_filter(&mut self, kinds: Vec<ArtifactKind>) {
+        self.reset_detail_view();
+        let was_ranked = self.search_query().has_text_terms();
+        self.kind_filter = ArtifactKind::ALL
+            .iter()
+            .copied()
+            .filter(|k| kinds.contains(k))
+            .collect();
         self.refilter(was_ranked);
         self.move_selection(i64::MIN);
     }
 
     /// The kind filter as the Catalog title states it, or empty with none.
     pub fn kind_label(&self) -> String {
-        self.kind_filter
-            .map_or_else(String::new, |k| format!("kind: {}", k.kind_str()))
+        match self.kind_filter.len() {
+            0 => String::new(),
+            1..=3 => {
+                let names: Vec<_> = self.kind_filter.iter().map(|k| k.kind_str()).collect();
+                format!("kind: {}", names.join(", "))
+            }
+            n => format!("kind: {n} kinds"),
+        }
     }
 
     fn search_query(&self) -> SearchQuery {
-        SearchQuery::parse_with_kinds(&self.query, self.kind_filter.as_slice())
+        SearchQuery::parse_with_kinds(&self.query, &self.kind_filter)
     }
 
     /// Re-order the loaded rows under the current `sort` / `sort_reversed`,
@@ -2779,19 +2800,19 @@ mod tests {
             kinded("r/c", "agent"),
             kinded("r/d", "mcp"),
         ]);
-        assert_eq!(s.kind_filter, None);
+        assert!(s.kind_filter.is_empty());
         let mut seen = Vec::new();
         for _ in 0..4 {
             s.cycle_kind_filter();
-            seen.push(s.kind_filter);
+            seen.push(s.kind_filter.clone());
         }
         assert_eq!(
             seen,
             vec![
-                Some(ArtifactKind::Skill),
-                Some(ArtifactKind::Agent),
-                Some(ArtifactKind::Mcp),
-                None
+                vec![ArtifactKind::Skill],
+                vec![ArtifactKind::Agent],
+                vec![ArtifactKind::Mcp],
+                vec![]
             ]
         );
     }
@@ -2807,7 +2828,7 @@ mod tests {
         ]);
         s.cycle_kind_filter();
         s.cycle_kind_filter();
-        assert_eq!(s.kind_filter, Some(ArtifactKind::Agent));
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Agent]);
         assert_eq!(s.filtered.len(), 2);
         assert!(s.filtered.iter().all(|&i| s.rows[i].kind == "agent"));
     }
@@ -2821,7 +2842,7 @@ mod tests {
             kinded("r/other", "settings"),
         ]);
         s.cycle_kind_filter();
-        assert_eq!(s.kind_filter, Some(ArtifactKind::Skill));
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Skill]);
         s.apply_query("settings");
         assert_eq!(visible(&s), vec!["r/vscode-settings"]);
     }
@@ -2839,8 +2860,63 @@ mod tests {
     fn kind_label_names_the_active_kind() {
         let mut s = TuiState::new();
         assert_eq!(s.kind_label(), "");
-        s.kind_filter = Some(ArtifactKind::Agent);
+        s.kind_filter = vec![ArtifactKind::Agent];
         assert_eq!(s.kind_label(), "kind: agent");
+    }
+
+    #[test]
+    fn two_kinds_show_rows_of_both() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            kinded("r/a", "skill"),
+            kinded("r/b", "rule"),
+            kinded("r/c", "agent"),
+        ]);
+        s.set_kind_filter(vec![ArtifactKind::Skill, ArtifactKind::Rule]);
+        let mut kinds: Vec<_> = s.filtered.iter().map(|&i| s.rows[i].kind.as_str()).collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, ["rule", "skill"]);
+    }
+
+    #[test]
+    fn set_kind_filter_orders_and_dedups() {
+        let mut s = TuiState::new();
+        s.set_kind_filter(vec![ArtifactKind::Rule, ArtifactKind::Skill, ArtifactKind::Rule]);
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Skill, ArtifactKind::Rule]);
+    }
+
+    #[test]
+    fn kind_label_names_three_kinds_then_counts() {
+        use ArtifactKind::*;
+        let mut s = TuiState::new();
+        s.set_kind_filter(vec![Agent]);
+        assert_eq!(s.kind_label(), "kind: agent");
+        s.set_kind_filter(vec![Agent, Skill, Rule]);
+        assert_eq!(s.kind_label(), "kind: skill, rule, agent");
+        s.set_kind_filter(vec![Agent, Skill, Rule, Mcp]);
+        assert_eq!(s.kind_label(), "kind: 4 kinds");
+    }
+
+    #[test]
+    fn f_from_several_kinds_steps_past_the_last() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            kinded("r/a", "skill"),
+            kinded("r/b", "rule"),
+            kinded("r/c", "agent"),
+        ]);
+        s.set_kind_filter(vec![ArtifactKind::Skill, ArtifactKind::Rule]);
+        s.cycle_kind_filter();
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Agent]);
+    }
+
+    #[test]
+    fn step_sort_back_from_default_lands_on_downloads() {
+        let mut s = TuiState::new();
+        s.step_sort(-1);
+        assert_eq!(s.sort, Some(SortMode::Downloads));
+        s.step_sort(1);
+        assert_eq!(s.sort, None);
     }
 
     fn kind_word_tree() -> TuiState {
@@ -2861,7 +2937,7 @@ mod tests {
         s.apply_query("settings");
         assert_eq!(s.view_mode, ViewMode::Tree, "a kind-only query keeps the tree");
         s.cycle_kind_filter();
-        assert_eq!(s.kind_filter, Some(ArtifactKind::Skill));
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Skill]);
         assert_eq!(s.view_mode, ViewMode::Flat);
         assert!(s.tree_suspended_by_search);
         let repos: Vec<_> = s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect();
@@ -2872,9 +2948,9 @@ mod tests {
     fn kind_filter_with_a_text_query_ranks_within_the_kind() {
         let mut s = kind_word_tree();
         s.apply_query("vscode");
-        s.kind_filter = None;
+        s.kind_filter = vec![];
         s.cycle_kind_filter();
-        assert_eq!(s.kind_filter, Some(ArtifactKind::Skill));
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Skill]);
         let repos: Vec<_> = s.filtered.iter().map(|&i| s.rows[i].repo.as_str()).collect();
         assert_eq!(repos, ["reg/acme/vscode-settings"]);
     }
