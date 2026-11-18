@@ -1662,10 +1662,10 @@ mod tests {
     #[test]
     fn f_cycles_the_kind_filter() {
         let mut s = seeded();
-        assert_eq!(s.kind_filter, None);
+        assert!(s.kind_filter.is_empty());
         assert_eq!(handle(&mut s, TuiInput::Char('f')), TuiAction::None);
-        assert!(s.kind_filter.is_some());
-        let before = s.kind_filter;
+        assert!(!s.kind_filter.is_empty());
+        let before = s.kind_filter.clone();
         handle(&mut s, TuiInput::Char('/'));
         assert_eq!(handle(&mut s, TuiInput::Char('f')), TuiAction::None);
         assert_eq!(s.query, "f", "f is a query character while searching");
