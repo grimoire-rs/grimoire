@@ -81,8 +81,8 @@ use crate::config::declaration::{DesiredSet, ExperimentalOptions, RegistryConfig
 use crate::config::scope::{ConfigScope, Invocation};
 use crate::context::Context;
 use crate::hook::consent::{self, Consent};
-use crate::hook::policy::{ConsentInputs, ConsentPolicies, HookPolicy};
-use crate::hook::trust::{self, Arming, ConsentAnswer, ConsentNoun};
+use crate::hook::policy::{ConsentInputs, ConsentPolicies, HookPolicy, not_armed_message};
+use crate::hook::trust::{self, Arming, ConsentAnswer, ConsentNoun, NotArmedReason};
 use crate::install::hook_dispatch;
 use crate::install::hook_registrar::validate_grim_home;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -402,7 +402,15 @@ pub fn resolve_for_add(
 ) -> anyhow::Result<ConsentPolicies> {
     let lock = &*lock_to_consent(lock, &scope.roots.grim_home, &scope.workspace, scope.scope);
     let declared = declared_consent_keys(lock, &scope.options.experimental);
-    let policies = scope_policies(ctx, scope, flag, &declared)?;
+    // The projection `lock` is only what this add installs; the hooks the
+    // workspace already declares judge drift as `grim install` will.
+    let flags = &scope.options.experimental;
+    let mut workspace = consent::split_by_kind(&config_consent_keys(&scope.set, flags)).0;
+    if let Ok(on_disk) = crate::lock::lock_io::load(&scope.lock_path) {
+        workspace.extend(consent::split_by_kind(&declared_consent_keys(&on_disk, flags)).0);
+    }
+    workspace.extend(declared.iter().cloned());
+    let policies = scope_policies(ctx, scope, flag, &workspace)?;
     if !policies.any_feature_enabled() || declared.is_empty() {
         return Ok(policies);
     }
@@ -418,11 +426,12 @@ pub fn resolve_for_add(
 /// record that results: `grim add`'s rule, which the TUI's declaring Install
 /// shares for hooks.
 ///
-/// Every hook the record covers keeps arming: judged against the declaration
-/// alone, one hook the record lacks reads as drift, and drift disarms every hook
-/// (CWE-636). A write that fails warns and arms hooks on the record as it
-/// stands. A settings package applies its values during the install, so it arms
-/// only on a write that landed.
+/// Hooks arm on the record that results only when it covers every hook the
+/// workspace declares: one declared hook it lacks is drift, and drift disarms
+/// every hook, as under `grim install` (CWE-636). Otherwise the policy stays as
+/// read and one warning names the uncovered hooks. A write that fails warns and
+/// judges the record as it stands. A settings package applies its values during
+/// the install, so it arms only on a write that landed.
 ///
 /// Records nothing under `--no-trust-workspace`: that is this invocation's
 /// explicit "no", per invocation and never persisted
@@ -457,7 +466,31 @@ pub fn gesture(
     }
     let covered = written.unwrap_or(recorded);
     if policies.hooks.feature_enabled() && !covered.is_empty() {
-        policies.hooks.adopt_consent(covered);
+        let uncovered: Vec<&str> = policies
+            .hooks
+            .declared()
+            .difference(&covered)
+            .map(|key| key.split_once('@').map_or(key.as_str(), |(binding, _)| binding))
+            .collect();
+        // Global scope keeps no record, so `covered` is never the whole set there
+        // and a drift warning would name a remedy that exits 64.
+        if uncovered.is_empty() || site.scope == ConfigScope::Global {
+            policies.hooks.adopt_consent(covered);
+        } else if flag != Some(true) {
+            tracing::warn!(
+                "hook {} not consented: {}",
+                uncovered
+                    .iter()
+                    .map(|name| format!("'{name}'"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                not_armed_message(
+                    ArtifactKind::Hook,
+                    NotArmedReason::ConsentDrifted,
+                    policies.hooks.invocation()
+                ),
+            );
+        }
     }
     policies
 }
@@ -874,9 +907,58 @@ mod tests {
         assert!(project.arms(&policy.hooks, "fresh"));
     }
 
+    /// One declared hook the record lacks is drift, and drift disarms every hook
+    /// of the workspace: `grim add` decides as the `grim install` after it does.
+    #[test]
+    fn an_add_beside_an_unconsented_declared_hook_arms_nothing() {
+        let project = Project::with_hooks(&["a", "x", "b"]);
+        let scope = &project.scope;
+        consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["a"])).unwrap();
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &keys(&["b"]), None).unwrap();
+
+        assert_eq!(
+            project.recorded(),
+            keys(&["a", "b"]),
+            "what the add brought is still recorded"
+        );
+        assert!(!project.arms(&policy.hooks, "a"));
+        assert!(!project.arms(&policy.hooks, "b"));
+        assert!(!project.arms(&policy.hooks, "x"));
+        let logs = capture.text();
+        assert!(logs.contains("'x'") && logs.contains("grim hook allow"), "{logs}");
+    }
+
+    /// Global scope keeps no record, so an uncovered declared hook is not drift
+    /// there: the add adopts what it consented to.
+    #[test]
+    fn a_global_add_beside_another_declared_hook_still_adopts() {
+        let mut project = Project::with_hooks(&["a", "b"]);
+        project.scope.scope = ConfigScope::Global;
+
+        let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &keys(&["b"]), None).unwrap();
+
+        assert!(project.arms(&policy.hooks, "b"));
+    }
+
+    #[test]
+    fn an_add_that_covers_every_declared_hook_arms_them_all_and_warns_of_nothing() {
+        let project = Project::with_hooks(&["a", "b"]);
+        let scope = &project.scope;
+        consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["a"])).unwrap();
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+
+        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &keys(&["b"]), None).unwrap();
+
+        assert!(project.arms(&policy.hooks, "a"));
+        assert!(project.arms(&policy.hooks, "b"));
+        assert!(!capture.text().contains("grim hook allow"), "{}", capture.text());
+    }
+
     #[cfg(unix)]
     #[test]
-    fn a_failed_write_arms_on_what_the_record_covers() {
+    fn a_failed_write_judges_the_record_as_it_stands() {
         use std::os::unix::fs::PermissionsExt;
         let project = Project::with_hooks(&["kept", "fresh"]);
         let scope = &project.scope;
@@ -890,7 +972,10 @@ mod tests {
         std::fs::set_permissions(&dir, writable).unwrap();
         let policy = policy.unwrap();
         assert_eq!(project.recorded(), keys(&["kept"]));
-        assert!(project.arms(&policy.hooks, "kept"), "the record still covers it");
+        assert!(
+            !project.arms(&policy.hooks, "kept"),
+            "the record lacks a declared hook, which is drift"
+        );
         assert!(
             !project.arms(&policy.hooks, "fresh"),
             "a record that did not land must not arm"
@@ -977,17 +1062,17 @@ mod tests {
         assert!(!project.home.path().join("hooks/consent").exists());
     }
 
-    /// CWE-636: judged against this add's own hooks, one the record lacks reads
-    /// as drift, and drift disarms every hook the record covers.
+    /// One declared hook the record lacks is drift, and drift disarms every hook
+    /// the record covers, as under `grim install` (CWE-636).
     #[test]
-    fn an_add_that_consents_to_nothing_keeps_what_the_record_covers() {
+    fn an_add_that_consents_to_nothing_leaves_drift_disarming_every_hook() {
         let project = Project::with_hooks(&["kept", "fresh"]);
         let scope = &project.scope;
         consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["kept"])).unwrap();
 
         let policy = resolve_for_add(&project.ctx, scope, &project.lock, &BTreeSet::new(), None).unwrap();
 
-        assert!(project.arms(&policy.hooks, "kept"), "the record still covers it");
+        assert!(!project.arms(&policy.hooks, "kept"), "the record lacks a declared hook");
         assert!(!project.arms(&policy.hooks, "fresh"), "nothing consented to it");
         assert_eq!(project.recorded(), keys(&["kept"]));
     }
@@ -1387,8 +1472,8 @@ mod tests {
     }
 
     /// `grim add` vouches for what it brought, so a package added under hook
-    /// drift consents to no hook: the hooks keep the record as it stands, the
-    /// covered one arming and the drifted one gated (CWE-636, RB-6).
+    /// drift consents to no hook: the drift stays and gates every hook, as under
+    /// `grim install`, while the package applies on its own answer (CWE-636).
     #[test]
     fn adding_a_package_leaves_a_drifted_hook_gated() {
         let home = tempfile::tempdir().unwrap();
@@ -1409,7 +1494,10 @@ mod tests {
         let other = locked("other", ArtifactKind::Hook).source;
         let team = locked("team", ArtifactKind::Settings).source;
         assert!(policies.settings.arms("team", &team), "positive control");
-        assert!(policies.hooks.arms("guard", &guard), "the record covers it");
+        assert!(
+            !policies.hooks.arms("guard", &guard),
+            "drift gates the covered hook too"
+        );
         assert!(!policies.hooks.arms("other", &other), "nothing consented to it");
     }
 
