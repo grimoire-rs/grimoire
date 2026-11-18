@@ -4,8 +4,8 @@
 
 - **Plan:** plan_tui_filter_config_dialog
 - **Active phase:** 2 — Phase B: config dialog
-- **Step:** /hex-execute → Implement
-- **Last update:** 2026-11-18 (after 2304fddf: chore: note the filter and sort popup in the command index)
+- **Step:** awaiting /finalize
+- **Last update:** 2026-11-18 (after 48dc6667: feat(tui): manage registries from the config dialog)
 
 ---
 
