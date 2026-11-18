@@ -38,6 +38,7 @@ pub mod bundle_member_fetch;
 pub mod bundle_members;
 pub mod companion;
 pub mod companion_fetch;
+pub mod config_dialog;
 pub mod confirm;
 pub mod detail;
 pub mod event;

@@ -107,7 +107,7 @@ fn fit_tail(s: &str, width: usize) -> String {
 /// Cut `s` to at most `width` terminal columns, ending in `…` when anything
 /// was dropped. Measures display columns, not chars, so a wide glyph in an
 /// error message cannot push the result past `width`.
-fn ellipsize(s: &str, width: usize) -> String {
+pub(super) fn ellipsize(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
     }
@@ -1105,7 +1105,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // a Status-column legend.
     let hint_tiers = if state.view_mode == crate::tui::state::ViewMode::Tree {
         vec![
-            "space mark · i/u/d act · v versions · o open · s/F sort · g scope · t tree · z fold · ? help · q quit"
+            "space mark · i/u/d act · v versions · o open · s/F sort · g scope · t tree · z fold · C config · ? help · q quit"
                 .to_string(),
             "space mark · i/u/d act · v versions · s/F sort · g scope · t tree · z fold · ? help · q quit".to_string(),
             "i/u/d act · v ver · s/F sort · g scope · t tree · z fold · ? help · q quit".to_string(),
@@ -1116,7 +1116,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
     } else {
         // Flat mode: `z` fold is inert — omit it to avoid misleading users.
         vec![
-            "space mark · i/u/d act · v versions · o open · s/F sort · g scope · t tree · ? help · q quit".to_string(),
+            "space mark · i/u/d act · v versions · o open · s/F sort · g scope · t tree · C config · ? help · q quit"
+                .to_string(),
             "space mark · i/u/d act · v versions · s/F sort · g scope · t tree · ? help · q quit".to_string(),
             "i/u/d act · v ver · s/F sort · g scope · t tree · ? help · q quit".to_string(),
             "i/u/d g t ? help q".to_string(),
@@ -1137,7 +1138,11 @@ pub fn frame(state: &TuiState) -> RenderModel {
         }
     });
 
-    let list_popup = (state.mode == Mode::FilterSort).then(|| filter_popup_view(state));
+    let list_popup = match (state.mode, &state.config) {
+        (Mode::FilterSort, _) => Some(filter_popup_view(state)),
+        (Mode::Config, Some(dialog)) => Some(sanitized(dialog.view(state.term_size))),
+        _ => None,
+    };
 
     let confirm = state
         .confirm
@@ -1219,6 +1224,18 @@ fn filter_header(row: FilterRow) -> Option<&'static str> {
     }
 }
 
+/// `view` with the title and every value, note and message that can carry
+/// file or error text stripped of terminal control sequences.
+fn sanitized(mut view: ListPopupView) -> ListPopupView {
+    view.title = sanitize_lines(&view.title);
+    for row in &mut view.rows {
+        row.value = sanitize_lines(&row.value);
+    }
+    view.notes = view.notes.iter().map(|n| sanitize_lines(n)).collect();
+    view.message = view.message.map(|(text, error)| (sanitize_lines(&text), error));
+    view
+}
+
 /// The filter and sort popup as rows: every selectable [`filter_rows`] entry
 /// reads its mark from the live state, with section headers between them.
 fn filter_popup_view(state: &TuiState) -> ListPopupView {
@@ -1231,6 +1248,8 @@ fn filter_popup_view(state: &TuiState) -> ListPopupView {
                 label: label.to_string(),
                 header: true,
                 muted: false,
+                value: String::new(),
+                modified: false,
             });
         }
         if i == state.filter_cursor {
@@ -1255,6 +1274,8 @@ fn filter_popup_view(state: &TuiState) -> ListPopupView {
             label,
             header: false,
             muted,
+            value: String::new(),
+            modified: false,
         });
     }
     ListPopupView {
@@ -1262,6 +1283,9 @@ fn filter_popup_view(state: &TuiState) -> ListPopupView {
         rows,
         cursor,
         hint: "space toggle · esc close".to_string(),
+        notes: Vec::new(),
+        message: None,
+        centered: None,
     }
 }
 
@@ -1621,9 +1645,15 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         draw_help(f, model.help_scroll, &model.invocation);
     }
     if let Some(p) = &model.list_popup {
-        let rows = u16::try_from(p.rows.len()).unwrap_or(u16::MAX);
-        let height = rows.saturating_add(2 + 2 * confirm::PAD_ROWS);
-        list_popup::draw(f, list_popup::anchored(chunks[2], FILTER_POPUP_WIDTH, height), p);
+        let area = match p.centered {
+            Some((w, h)) => list_popup::centered(f.area(), w, h),
+            None => {
+                let rows = u16::try_from(p.rows.len()).unwrap_or(u16::MAX);
+                let height = rows.saturating_add(2 + 2 * confirm::PAD_ROWS);
+                list_popup::anchored(chunks[2], FILTER_POPUP_WIDTH, height)
+            }
+        };
+        list_popup::draw(f, area, p);
     }
     if let Some(p) = &model.picker {
         draw_picker(f, p);
@@ -1955,7 +1985,10 @@ fn help_entries() -> [(&'static str, &'static str); 10] {
         // `tab` shares this row rather than taking its own: the overlay is
         // sized to fit an 80×24 terminal, and an eleventh row overflows it.
         ("(shift) tab", "switch detail panel — overview / readme / changelog"),
-        ("h · r · ?", "deprecated on/off · refresh catalog · this help — q quits"),
+        (
+            "h · r · C · ?",
+            "deprecated on/off · refresh · config · this help — q quits",
+        ),
     ]
 }
 
@@ -2714,6 +2747,97 @@ mod tests {
                 assert!(cell.starts_with("  "), "leaf lost its indent: {cell:?}");
             }
         }
+    }
+
+    fn config_state(w: u16, h: u16, exists: bool, path: &str) -> TuiState {
+        let rows =
+            crate::command::config::collect_entries(true, &crate::config::declaration::ConfigOptions::default(), &[]);
+        let mut s = named_rows(&["alpha"]);
+        s.set_term_size((w, h));
+        s.open_config(crate::tui::config_dialog::ConfigDialog::new(
+            "global",
+            path.to_string(),
+            exists,
+            rows,
+        ));
+        s
+    }
+
+    #[test]
+    fn config_dialog_title_names_scope_and_file() {
+        let s = config_state(100, 30, true, "/home/u/.grimoire/grimoire.toml");
+        let out = screen(&draw_sized(&s, 100, 30));
+        assert!(
+            out.contains("Config · global · /home/u/.grimoire/grimoire.toml"),
+            "{out}"
+        );
+        let long = format!("/{}/grimoire.toml", "d".repeat(120));
+        let out = screen(&draw_sized(&config_state(100, 30, true, &long), 100, 30));
+        assert!(
+            out.contains("…") && out.contains("/grimoire.toml "),
+            "path cut from the left:\n{out}"
+        );
+        assert!(out.contains("Config · global · …"), "{out}");
+    }
+
+    #[test]
+    fn config_dialog_marks_absent_file_not_created() {
+        let s = config_state(100, 30, false, "/g/grimoire.toml");
+        let out = screen(&draw_sized(&s, 100, 30));
+        assert!(out.contains("/g/grimoire.toml · not created yet"), "{out}");
+    }
+
+    #[test]
+    fn config_dialog_pads_rows_inside_border() {
+        let s = config_state(100, 30, true, "/g/grimoire.toml");
+        let buf = draw_sized(&s, 100, 30);
+        let w = usize::from(buf.area.width);
+        let rows: Vec<Vec<String>> = buf
+            .content()
+            .chunks(w)
+            .map(|r| r.iter().map(|c| c.symbol().to_string()).collect())
+            .collect();
+        let top = rows
+            .iter()
+            .position(|r| r.concat().contains("Config ·"))
+            .expect("title");
+        let title_at = rows[top].concat().find("Config ·").unwrap();
+        let left = (0..title_at).rev().find(|&x| rows[top][x] == "┌").expect("corner");
+        let right = (title_at..w).find(|&x| rows[top][x] == "┐").expect("corner");
+        let pad = usize::from(confirm::PAD);
+        for row in &rows[top + 1..top + 10] {
+            for x in (left + 1..left + 1 + pad).chain(right - pad..right) {
+                assert_eq!(row[x], " ", "touches the border:\n{}", screen(&buf));
+            }
+        }
+        assert!(rows[top + 1][left + 1..right].iter().all(|c| c == " "), "padding row");
+    }
+
+    #[test]
+    fn config_dialog_shows_description_of_selected_row() {
+        let s = config_state(100, 30, true, "/g/grimoire.toml");
+        let model = frame(&s);
+        let popup = model.list_popup.as_ref().expect("popup");
+        assert!(!popup.notes.is_empty() && popup.notes.len() <= 3);
+        let out = screen(&draw_sized(&s, 100, 30));
+        assert!(out.contains(popup.notes[0].trim_end()), "{out}");
+    }
+
+    #[test]
+    fn config_dialog_asks_to_enlarge_when_too_small() {
+        let s = config_state(40, 20, true, "/g/grimoire.toml");
+        let out = screen(&draw_sized(&s, 40, 20));
+        assert!(out.contains("enlarge the terminal"), "{out}");
+        assert!(!out.contains("options.clients"), "{out}");
+    }
+
+    #[test]
+    fn config_dialog_fits_80x24() {
+        let s = config_state(80, 24, true, "/g/grimoire.toml");
+        let out = screen(&draw_sized(&s, 80, 24));
+        assert!(out.contains("Config · global"), "{out}");
+        assert!(out.contains("enter edit · space toggle · x reset · esc close"), "{out}");
+        assert!(out.contains("options."), "{out}");
     }
 
     fn filter_popup_state() -> TuiState {

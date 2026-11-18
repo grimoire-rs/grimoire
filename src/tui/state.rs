@@ -125,6 +125,8 @@ pub enum Mode {
     /// The filter and sort popup: kinds, order, direction and deprecated
     /// visibility, each applied live.
     FilterSort,
+    /// The config popup: settings rows edited through `grim config`'s writers.
+    Config,
 }
 
 /// What a finished action did to settings values, when
@@ -507,6 +509,8 @@ pub struct TuiState {
     pub help_scroll: u16,
     /// The cursor's index into [`filter_rows`], while [`Mode::FilterSort`].
     pub filter_cursor: usize,
+    /// The config popup, while [`Mode::Config`].
+    pub config: Option<super::config_dialog::ConfigDialog>,
     /// The live search query.
     pub query: String,
     /// When true, deprecated artifacts that are not installed are hidden from
@@ -705,6 +709,7 @@ impl Default for TuiState {
             term_size: (80, 24),
             help_scroll: 0,
             filter_cursor: 0,
+            config: None,
             query: String::new(),
             hide_deprecated: false,
             mode: Mode::List,
@@ -1373,6 +1378,18 @@ impl TuiState {
     pub fn open_filter_sort(&mut self) {
         self.mode = Mode::FilterSort;
         self.filter_cursor = 0;
+    }
+
+    /// Show the config popup.
+    pub fn open_config(&mut self, dialog: super::config_dialog::ConfigDialog) {
+        self.config = Some(dialog);
+        self.mode = Mode::Config;
+    }
+
+    /// Close the config popup.
+    pub fn close_config(&mut self) {
+        self.config = None;
+        self.mode = Mode::List;
     }
 
     /// Close the popup; every change already applied stays.

@@ -161,6 +161,10 @@ pub enum TuiAction {
     /// Create the project `grimoire.toml` and switch to project scope, after
     /// the user chose **Initialize** in [`Mode::ConfirmInit`].
     InitProject,
+    /// Open the config popup for the active scope.
+    OpenConfig,
+    /// Write one config edit through the `grim config` path.
+    ConfigWrite(crate::tui::config_dialog::ConfigEdit),
     /// Exit the TUI cleanly.
     Quit,
     /// Nothing to do beyond the in-place state change.
@@ -178,6 +182,7 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
         Mode::Help => handle_help(state, input),
         Mode::VersionPick => handle_picker(state, input),
         Mode::FilterSort => handle_filter_sort(state, input),
+        Mode::Config => handle_config(state, input),
         Mode::ConfirmForce => handle_confirm_force(state, input),
         Mode::ConfirmBatch => handle_confirm_batch(state, input),
         Mode::ConfirmInit => handle_confirm_init(state, input),
@@ -370,6 +375,23 @@ fn handle_filter_sort(state: &mut TuiState, input: TuiInput) -> TuiAction {
         _ => {}
     }
     TuiAction::None
+}
+
+/// Config popup keys: the dialog decides; `Close` drops it.
+fn handle_config(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    use crate::tui::config_dialog::DialogStep;
+    let Some(dialog) = state.config.as_mut() else {
+        state.close_config();
+        return TuiAction::None;
+    };
+    match dialog.handle(input, state.term_size) {
+        DialogStep::Stay => TuiAction::None,
+        DialogStep::Close => {
+            state.close_config();
+            TuiAction::None
+        }
+        DialogStep::Write(edit) => TuiAction::ConfigWrite(edit),
+    }
 }
 
 /// Help-overlay keys: scroll keys (`↑`/`↓`, `j`/`k`, `PageUp`/`PageDown`)
@@ -807,6 +829,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             state.cycle_kind_filter();
             TuiAction::None
         }
+        TuiInput::Char('C') => TuiAction::OpenConfig,
         TuiInput::Char('F') => {
             state.open_filter_sort();
             TuiAction::None
@@ -1723,6 +1746,39 @@ mod tests {
         handle(&mut s, TuiInput::End);
         handle(&mut s, TuiInput::Enter);
         assert!(s.hide_deprecated, "the last row toggles deprecated");
+    }
+
+    fn config_dialog() -> crate::tui::config_dialog::ConfigDialog {
+        let rows =
+            crate::command::config::collect_entries(true, &crate::config::declaration::ConfigOptions::default(), &[]);
+        crate::tui::config_dialog::ConfigDialog::new("project", "/w/grimoire.toml".to_string(), true, rows)
+    }
+
+    #[test]
+    fn shift_c_asks_the_app_to_open_config() {
+        let mut s = seeded();
+        assert_eq!(handle(&mut s, TuiInput::Char('C')), TuiAction::OpenConfig);
+    }
+
+    #[test]
+    fn shift_c_in_search_is_query_text() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('C')), TuiAction::None);
+        assert_eq!(s.query, "C");
+        assert_eq!(s.mode, Mode::Search);
+    }
+
+    #[test]
+    fn esc_closes_the_config_dialog() {
+        let mut s = seeded();
+        s.set_term_size((100, 40));
+        s.open_config(config_dialog());
+        assert_eq!(handle(&mut s, TuiInput::Char('q')), TuiAction::None);
+        assert_eq!(s.mode, Mode::Config);
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert!(s.config.is_none());
     }
 
     #[test]
