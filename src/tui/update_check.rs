@@ -114,7 +114,8 @@ pub struct RowCheck {
 /// The pure "is this row worth a registry re-check?" decision.
 ///
 /// Only rows that already have a lock pin to compare against can become
-/// "outdated": `Installed` (the common case) and `Outdated` (so a row that
+/// "outdated": `Installed` (the common case), `ViaBundle` / `ViaDependency`
+/// (present through a parent, pinned all the same) and `Outdated` (so a row that
 /// was flipped, then had its pin advanced by an install elsewhere, can flip
 /// back). A `NotInstalled` row has no pin, so "a newer tag" is meaningless
 /// for the `↑` icon — new-package discovery is the catalog-refresh path,
@@ -122,7 +123,10 @@ pub struct RowCheck {
 /// on-disk truth the background check must never override, so they are
 /// excluded to avoid wasting a spawn + permit.
 pub fn eligible_for_recheck(row: &TuiRow) -> bool {
-    matches!(row.state, ArtifactState::Installed | ArtifactState::Outdated)
+    matches!(
+        row.state,
+        ArtifactState::Installed | ArtifactState::ViaBundle | ArtifactState::ViaDependency | ArtifactState::Outdated
+    )
 }
 
 /// Owns the background-check machinery: the results sender, the concurrency
@@ -436,9 +440,11 @@ mod tests {
     // ── eligible_for_recheck row selection ───────────────────────────────
 
     #[test]
-    fn only_installed_and_outdated_rows_are_eligible() {
+    fn only_present_and_outdated_rows_are_eligible() {
         assert!(eligible_for_recheck(&row("r/a", ArtifactState::Installed)));
         assert!(eligible_for_recheck(&row("r/b", ArtifactState::Outdated)));
+        assert!(eligible_for_recheck(&row("r/f", ArtifactState::ViaBundle)));
+        assert!(eligible_for_recheck(&row("r/g", ArtifactState::ViaDependency)));
         assert!(!eligible_for_recheck(&row("r/c", ArtifactState::NotInstalled)));
         assert!(!eligible_for_recheck(&row("r/d", ArtifactState::Modified)));
         assert!(!eligible_for_recheck(&row("r/e", ArtifactState::IntegrityMissing)));
