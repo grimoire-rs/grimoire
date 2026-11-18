@@ -330,7 +330,10 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
             .as_ref()
             .map(|lock| providing_bundles(&ctx.paths(), &scope.set, lock, &key))
             .unwrap_or_default();
-        tracing::warn!("{}", kept_by_bundle_note(&key, &bundles, &scope.invocation));
+        tracing::warn!(
+            "{}",
+            kept_by_bundle_note(&key, &bundles, &plan.required_by, &scope.invocation)
+        );
     }
     for line in left {
         tracing::warn!("{line}");
@@ -523,7 +526,7 @@ fn providing_bundles(
 
 /// Why `key` stayed and what removes it: each bundle in `bundles`, then `key`.
 /// It may be empty, when only the bundles together provide `key`.
-fn kept_by_bundle_note(key: &NodeKey, bundles: &[String], grim: &Invocation) -> String {
+fn kept_by_bundle_note(key: &NodeKey, bundles: &[String], required_by: &[NodeKey], grim: &Invocation) -> String {
     let (kind, name) = key;
     let shown = crate::oci::text::registry_text(name);
     let uninstall = grim.uninstall("", kind, name);
@@ -546,6 +549,20 @@ fn kept_by_bundle_note(key: &NodeKey, bundles: &[String], grim: &Invocation) -> 
             ),
             format!("`{grim} remove bundle <name>` for each"),
         ),
+    };
+    // A requirer outlives the bundle's removal, so naming the bundle alone would promise too much.
+    let (held, remove) = if required_by.is_empty() {
+        (held, remove)
+    } else {
+        let named = |(k, n): &NodeKey| format!("{k} '{}'", crate::oci::text::registry_text(n));
+        let who = required_by.iter().map(named).collect::<Vec<_>>().join(", ");
+        let verb = if required_by.len() == 1 { "requires" } else { "require" };
+        let steps = required_by
+            .iter()
+            .map(|(k, n)| format!("`{}`", grim.uninstall("", k, n)))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        (format!("{held} and {who} {verb} it"), format!("{remove} and {steps}"))
     };
     format!("{kind} '{shown}' stays: {held}; {remove}, then `{uninstall}` removes it")
 }
@@ -866,6 +883,8 @@ pub(crate) struct HoldPlan {
     /// Set when the target stays in the effective set after its direct
     /// declaration goes; a bundle member wins over a dependency.
     pub(crate) hold: Option<Hold>,
+    /// The artifacts that still require the target, when a remaining declaration holds it.
+    pub(crate) required_by: Vec<NodeKey>,
     /// Installable nodes only the target reached, in effective-set order.
     pub(crate) orphans: Vec<crate::lock::effective_set::NodeKey>,
 }
@@ -878,10 +897,11 @@ pub(crate) fn plan_hold(
     lock: Option<&crate::lock::grimoire_lock::GrimoireLock>,
     key: &crate::lock::effective_set::NodeKey,
 ) -> HoldPlan {
-    use crate::lock::effective_set::{Origin, effective_set};
+    use crate::lock::effective_set::{Origin, effective_graph, effective_set};
 
     let none = HoldPlan {
         hold: None,
+        required_by: Vec::new(),
         orphans: Vec::new(),
     };
     let Some(lock) = lock else { return none };
@@ -896,19 +916,48 @@ pub(crate) fn plan_hold(
         ArtifactKind::Bundle => return none,
     };
     after.invalidate_declaration_hash_cache();
-    let (Some(before), Some(after)) = (effective_set(set, lock), effective_set(&after, lock)) else {
+    let (Some(before), Some(graph)) = (effective_set(set, lock), effective_graph(&after, lock)) else {
         return none;
     };
+    // A contributor can be a nested bundle no declaration names, so the hold is a bundle's
+    // only when a declared bundle reaches the key.
+    let mut reached: std::collections::BTreeSet<&NodeKey> = std::collections::BTreeSet::new();
+    let mut stack: Vec<NodeKey> = after
+        .bundles
+        .keys()
+        .map(|b| (ArtifactKind::Bundle, b.clone()))
+        .collect();
+    while let Some(node) = stack.pop() {
+        for child in graph.children.get(&node).into_iter().flatten() {
+            if reached.insert(child) {
+                stack.push(child.clone());
+            }
+        }
+    }
+    let after = &graph.nodes;
     let hold = after.get(key).map(|origin| match origin {
-        Origin::Implied { contributors, .. } if contributors.is_empty() => Hold::Dependency,
+        Origin::Implied { contributors, .. } if contributors.is_empty() || !reached.contains(key) => Hold::Dependency,
         _ => Hold::Bundle,
     });
+    let required_by = match after.get(key) {
+        // A bundle's own edge is the bundle hold the note already names.
+        Some(Origin::Implied { required_by, .. }) => required_by
+            .iter()
+            .filter(|(kind, _)| *kind != ArtifactKind::Bundle)
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    };
     let orphans = before
         .keys()
         .filter(|k| *k != key && k.0 != ArtifactKind::Bundle && !after.contains_key(*k))
         .cloned()
         .collect();
-    HoldPlan { hold, orphans }
+    HoldPlan {
+        hold,
+        required_by,
+        orphans,
+    }
 }
 
 /// Where a declaration edit lands: the scope's config and lock, the scope whose
@@ -1647,7 +1696,7 @@ mod tests {
     #[test]
     fn a_kept_member_whose_name_reads_as_a_flag_gets_no_command() {
         let key = (ArtifactKind::Mcp, "--force".to_string());
-        let note = kept_by_bundle_note(&key, &["-pack".to_string()], &Invocation::WALKED);
+        let note = kept_by_bundle_note(&key, &["-pack".to_string()], &[], &Invocation::WALKED);
 
         assert!(!note.contains("uninstall mcp --force"), "{note}");
         assert!(!note.contains("remove bundle -pack"), "{note}");

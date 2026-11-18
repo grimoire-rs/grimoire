@@ -302,3 +302,47 @@ def test_uninstall_of_an_unedited_dependency_prints_no_edit_warning(
     result = runner.run("uninstall", "skill", "gamma")
 
     assert "local edits" not in result.stderr, result.stderr
+
+
+def test_uninstall_bundle_and_requirer_note_names_both(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A member a bundle provides and a skill requires: the note names both holders."""
+    x = make_artifact(f"{unique_repo}/x", "rule", {"x.md": "# x\n"}, tag="1")
+    tb = make_bundle(f"{unique_repo}/tb", [("rule", "x", x.fq)], tag="1")
+    ts = make_dependent(f"{unique_repo}/ts", "1", "skill", _files("ts"), [("rule", "x", "./x:1")])
+    write_config(project_dir, skills={"ts": ts.fq}, bundles={"tb": tb.fq})
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.run("uninstall", "rule", "x", format="json")
+
+    assert json.loads(result.stdout)["status"] == "kept-by-bundle", result.stdout
+    lines = [line for line in result.stderr.splitlines() if "rule 'x'" in line]
+    assert len(lines) == 1, result.stderr
+    assert "bundle 'tb'" in lines[0], lines[0]
+    assert "skill 'ts' requires it" in lines[0], lines[0]
+
+
+def test_uninstall_member_of_a_required_bundle_is_kept_by_dependency(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """No declared bundle provides it: the holder is the requires chain, so no bundle note."""
+    m1 = _leaf(unique_repo, "m1")
+    inner = make_bundle(f"{unique_repo}/inner", [("skill", "m1", m1.fq)], tag="1")
+    sb = make_dependent(
+        f"{unique_repo}/sb", "1", "skill", _files("sb"), [("bundle", "inner", "./inner:1")]
+    )
+    write_config(project_dir, skills={"sb": sb.fq})
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.run("uninstall", "skill", "m1", format="json")
+
+    assert json.loads(result.stdout)["status"] == "kept-by-dependency", result.stdout
+    assert "bundle" not in result.stderr, result.stderr
+    assert (project_dir / ".claude" / "skills" / "m1").is_dir()
