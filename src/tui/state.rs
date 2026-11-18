@@ -122,6 +122,9 @@ pub enum Mode {
     /// Reading what a finished action did to settings values. The TUI sends
     /// tracing to a log file, so this panel is where the user sees the list.
     SettingsResult,
+    /// The filter and sort popup: kinds, order, direction and deprecated
+    /// visibility, each applied live.
+    FilterSort,
 }
 
 /// What a finished action did to settings values, when
@@ -323,6 +326,31 @@ pub struct VersionPicker {
     pub loading: bool,
 }
 
+/// One selectable row of the filter and sort popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterRow {
+    /// Toggle one kind in the kind filter.
+    Kind(ArtifactKind),
+    /// Pick the browse order; `None` is the default grouping.
+    Sort(Option<SortMode>),
+    /// Run the active order the other way.
+    Direction,
+    /// Hide or show deprecated artifacts.
+    Deprecated,
+}
+
+/// The popup's selectable rows in screen order, derived from the `ALL` sets
+/// so a new kind or sort mode appears without a second edit.
+pub fn filter_rows() -> Vec<FilterRow> {
+    ArtifactKind::ALL
+        .into_iter()
+        .map(FilterRow::Kind)
+        .chain(std::iter::once(FilterRow::Sort(None)))
+        .chain(SortMode::ALL.map(|m| FilterRow::Sort(Some(m))))
+        .chain([FilterRow::Direction, FilterRow::Deprecated])
+        .collect()
+}
+
 /// One catalog row, projected from a [`crate::catalog::registry_catalog::CatalogEntry`]
 /// plus the scope-derived install badge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,6 +505,8 @@ pub struct TuiState {
     /// overlay opens and clamped by [`Self::scroll_help`] so the dialog can
     /// scroll when it does not fully fit the terminal height.
     pub help_scroll: u16,
+    /// The cursor's index into [`filter_rows`], while [`Mode::FilterSort`].
+    pub filter_cursor: usize,
     /// The live search query.
     pub query: String,
     /// When true, deprecated artifacts that are not installed are hidden from
@@ -674,6 +704,7 @@ impl Default for TuiState {
             // size (before the first key event is ever processed).
             term_size: (80, 24),
             help_scroll: 0,
+            filter_cursor: 0,
             query: String::new(),
             hide_deprecated: false,
             mode: Mode::List,
@@ -1319,6 +1350,53 @@ impl TuiState {
         self.resort();
     }
 
+    /// Add `kind` to the kind filter, or drop it when already there.
+    pub fn toggle_kind(&mut self, kind: ArtifactKind) {
+        let mut kinds = self.kind_filter.clone();
+        match kinds.iter().position(|k| *k == kind) {
+            Some(at) => {
+                kinds.remove(at);
+            }
+            None => kinds.push(kind),
+        }
+        self.set_kind_filter(kinds);
+    }
+
+    /// Set the browse order directly (the filter popup's sort rows) and
+    /// re-sort. The direction is left alone, as for [`Self::cycle_sort`].
+    pub fn set_sort_mode(&mut self, mode: Option<SortMode>) {
+        self.sort = mode;
+        self.resort();
+    }
+
+    /// The `F` key: open the filter and sort popup on its first row.
+    pub fn open_filter_sort(&mut self) {
+        self.mode = Mode::FilterSort;
+        self.filter_cursor = 0;
+    }
+
+    /// Close the popup; every change already applied stays.
+    pub fn close_filter_sort(&mut self) {
+        self.mode = Mode::List;
+    }
+
+    /// Move the popup cursor by `delta`, clamped to the rows.
+    pub fn move_filter_cursor(&mut self, delta: i64) {
+        let max = filter_rows().len() as i64 - 1;
+        self.filter_cursor = (self.filter_cursor as i64).saturating_add(delta).clamp(0, max) as usize;
+    }
+
+    /// Apply the row under the popup cursor through the same methods the
+    /// `s`, `S`, `f` and `h` keys use. The cursor stays where it is.
+    pub fn activate_filter_row(&mut self) {
+        match filter_rows()[self.filter_cursor] {
+            FilterRow::Kind(k) => self.toggle_kind(k),
+            FilterRow::Sort(m) => self.set_sort_mode(m),
+            FilterRow::Direction => self.toggle_sort_direction(),
+            FilterRow::Deprecated => self.toggle_hide_deprecated(),
+        }
+    }
+
     /// The `f` key: step the kind filter through the kinds present in the
     /// rows (absent kinds are skipped) and back to none. The filter can turn a
     /// typed kind word into text, so the tree/flat switch runs as for a query
@@ -1401,9 +1479,13 @@ impl TuiState {
             return String::new();
         }
         let mode = self.sort.map_or("default", SortMode::as_str);
+        format!("sort: {mode} {}", self.sort_direction().as_str())
+    }
+
+    /// The direction the active order runs in: its natural one, flipped by `S`.
+    pub fn sort_direction(&self) -> SortOrder {
         let natural = SortMode::natural_order(self.sort);
-        let order = if self.sort_reversed { natural.flipped() } else { natural };
-        format!("sort: {mode} {}", order.as_str())
+        if self.sort_reversed { natural.flipped() } else { natural }
     }
 
     /// Flip the deprecated-hiding filter live (the `h` key). Recomputes the
@@ -2987,6 +3069,48 @@ mod tests {
         s.toggle_sort_direction();
         assert_eq!(visible(&s), vec!["r/alpha", "r/beta", "r/gamma"]);
         assert_eq!(s.sort_label(), "sort: rating desc");
+    }
+
+    #[test]
+    fn toggle_kind_keeps_all_order_and_removes_on_second_press() {
+        let mut s = seeded();
+        s.toggle_kind(ArtifactKind::Rule);
+        s.toggle_kind(ArtifactKind::Skill);
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Skill, ArtifactKind::Rule]);
+        s.toggle_kind(ArtifactKind::Skill);
+        assert_eq!(s.kind_filter, vec![ArtifactKind::Rule]);
+        s.toggle_kind(ArtifactKind::Rule);
+        assert!(s.kind_filter.is_empty());
+    }
+
+    #[test]
+    fn set_sort_mode_keeps_the_direction() {
+        let mut s = seeded();
+        s.toggle_sort_direction();
+        s.set_sort_mode(Some(SortMode::Rating));
+        assert_eq!(s.sort, Some(SortMode::Rating));
+        assert!(s.sort_reversed, "picking a mode leaves the direction flag alone");
+        assert_eq!(s.sort_label(), "sort: rating asc");
+        s.set_sort_mode(None);
+        assert_eq!(s.sort, None);
+    }
+
+    #[test]
+    fn activating_a_row_keeps_the_popup_cursor() {
+        let mut s = seeded();
+        s.open_filter_sort();
+        assert_eq!(s.mode, Mode::FilterSort);
+        for (i, row) in filter_rows().into_iter().enumerate() {
+            s.filter_cursor = i;
+            s.activate_filter_row();
+            assert_eq!(s.filter_cursor, i, "{row:?} moved the popup cursor");
+        }
+        s.move_filter_cursor(i64::MAX);
+        assert_eq!(s.filter_cursor, filter_rows().len() - 1);
+        s.move_filter_cursor(i64::MIN);
+        assert_eq!(s.filter_cursor, 0);
+        s.close_filter_sort();
+        assert_eq!(s.mode, Mode::List);
     }
 
     #[test]

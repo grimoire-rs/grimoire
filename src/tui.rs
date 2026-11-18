@@ -42,6 +42,7 @@ pub mod confirm;
 pub mod detail;
 pub mod event;
 pub mod install_progress;
+pub mod list_popup;
 pub mod markdown;
 pub mod render;
 pub mod state;

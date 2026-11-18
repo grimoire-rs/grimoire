@@ -177,6 +177,7 @@ pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
         Mode::Search => handle_search(state, input),
         Mode::Help => handle_help(state, input),
         Mode::VersionPick => handle_picker(state, input),
+        Mode::FilterSort => handle_filter_sort(state, input),
         Mode::ConfirmForce => handle_confirm_force(state, input),
         Mode::ConfirmBatch => handle_confirm_batch(state, input),
         Mode::ConfirmInit => handle_confirm_init(state, input),
@@ -353,6 +354,22 @@ fn handle_picker(state: &mut TuiState, input: TuiInput) -> TuiAction {
         TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
         _ => TuiAction::None,
     }
+}
+
+/// Filter and sort popup keys: move the cursor, `space` / `Enter` apply the
+/// row live, `Esc` / `F` close (the filter stays), `q` quits.
+fn handle_filter_sort(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    match input {
+        TuiInput::Up | TuiInput::Char('k') => state.move_filter_cursor(-1),
+        TuiInput::Down | TuiInput::Char('j') => state.move_filter_cursor(1),
+        TuiInput::Home => state.move_filter_cursor(i64::MIN),
+        TuiInput::End => state.move_filter_cursor(i64::MAX),
+        TuiInput::Char(' ') | TuiInput::Mark | TuiInput::Enter => state.activate_filter_row(),
+        TuiInput::Esc | TuiInput::Char('F') => state.close_filter_sort(),
+        TuiInput::Char('q') | TuiInput::Quit => return TuiAction::Quit,
+        _ => {}
+    }
+    TuiAction::None
 }
 
 /// Help-overlay keys: scroll keys (`↑`/`↓`, `j`/`k`, `PageUp`/`PageDown`)
@@ -788,6 +805,10 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
         }
         TuiInput::Char('f') => {
             state.cycle_kind_filter();
+            TuiAction::None
+        }
+        TuiInput::Char('F') => {
+            state.open_filter_sort();
             TuiAction::None
         }
         TuiInput::Expand => {
@@ -1657,6 +1678,97 @@ mod tests {
             Some(crate::catalog::SortMode::Name),
             "and neither touched the order"
         );
+    }
+
+    #[test]
+    fn shift_f_opens_filter_sort() {
+        let mut s = seeded();
+        assert_eq!(handle(&mut s, TuiInput::Char('F')), TuiAction::None);
+        assert_eq!(s.mode, Mode::FilterSort);
+        assert_eq!(s.filter_cursor, 0);
+    }
+
+    #[test]
+    fn shift_f_in_search_is_query_text() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('/'));
+        handle(&mut s, TuiInput::Char('F'));
+        assert_eq!(s.mode, Mode::Search);
+        assert_eq!(s.query, "F");
+    }
+
+    #[test]
+    fn space_toggles_kind_under_cursor() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('F'));
+        handle(&mut s, TuiInput::Char('j'));
+        assert_eq!(s.filter_cursor, 1);
+        handle(&mut s, TuiInput::Char(' '));
+        assert_eq!(s.kind_filter, vec![crate::oci::ArtifactKind::ALL[1]]);
+        handle(&mut s, TuiInput::Char(' '));
+        assert!(s.kind_filter.is_empty());
+        assert_eq!(s.mode, Mode::FilterSort, "the popup stays open");
+    }
+
+    #[test]
+    fn enter_on_sort_row_picks_that_mode() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('F'));
+        // Kinds first, then default, then name.
+        for _ in 0..crate::oci::ArtifactKind::ALL.len() + 1 {
+            handle(&mut s, TuiInput::Down);
+        }
+        handle(&mut s, TuiInput::Enter);
+        assert_eq!(s.sort, Some(crate::catalog::SortMode::Name));
+        handle(&mut s, TuiInput::End);
+        handle(&mut s, TuiInput::Enter);
+        assert!(s.hide_deprecated, "the last row toggles deprecated");
+    }
+
+    #[test]
+    fn esc_closes_and_keeps_filter() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('F'));
+        handle(&mut s, TuiInput::Char(' '));
+        let kept = s.kind_filter.clone();
+        assert!(!kept.is_empty());
+        assert_eq!(handle(&mut s, TuiInput::Esc), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        assert_eq!(s.kind_filter, kept);
+        handle(&mut s, TuiInput::Char('F'));
+        handle(&mut s, TuiInput::Char('F'));
+        assert_eq!(s.mode, Mode::List, "F closes too");
+    }
+
+    #[test]
+    fn q_in_filter_popup_quits() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('F'));
+        assert_eq!(handle(&mut s, TuiInput::Char('q')), TuiAction::Quit);
+        assert_eq!(handle(&mut s, TuiInput::Quit), TuiAction::Quit);
+        assert_eq!(handle(&mut s, TuiInput::Char('x')), TuiAction::None);
+        assert_eq!(s.mode, Mode::FilterSort, "other keys leave it open");
+    }
+
+    #[test]
+    fn filter_popup_keeps_s_f_h_shared_state() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char('F'));
+        handle(&mut s, TuiInput::Char(' '));
+        handle(&mut s, TuiInput::Esc);
+        assert_eq!(s.kind_filter, vec![crate::oci::ArtifactKind::ALL[0]]);
+        // The rows are all skills: `f` steps past the popup's selection to none.
+        handle(&mut s, TuiInput::Char('f'));
+        assert!(s.kind_filter.is_empty());
+        handle(&mut s, TuiInput::Char('s'));
+        assert_eq!(s.sort, Some(crate::catalog::SortMode::Name));
+        handle(&mut s, TuiInput::Char('F'));
+        handle(&mut s, TuiInput::End);
+        handle(&mut s, TuiInput::Char(' '));
+        handle(&mut s, TuiInput::Esc);
+        assert!(s.hide_deprecated);
+        handle(&mut s, TuiInput::Char('h'));
+        assert!(!s.hide_deprecated);
     }
 
     #[test]
