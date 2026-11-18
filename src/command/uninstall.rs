@@ -249,7 +249,9 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         let (roots, workspace, config_path) = (scope.roots.clone(), scope.workspace.clone(), scope.config_path.clone());
         let (config_scope, force, grim) = (scope.scope, ForceScope::from(args.force), scope.invocation.clone());
         // Deleting reads, writes and removes files, so it runs on the blocking pool.
+        let named = key.clone();
         let work = move || {
+            warn_edited_dependencies(&state, &nodes, &named, &roots);
             let env = DeleteEnv {
                 roots: &roots,
                 scope: config_scope,
@@ -794,6 +796,40 @@ pub(crate) fn delete_nodes(
         lock_in_line: false,
     };
     out
+}
+
+/// Warns of each node but `named` whose installed files the user edited and the
+/// delete is about to remove, which the report alone does not say.
+fn warn_edited_dependencies(
+    state: &crate::install::install_state::InstallState,
+    nodes: &[NodeKey],
+    named: &NodeKey,
+    roots: &crate::install::path_anchor::AnchorRoots,
+) {
+    for (kind, name) in nodes.iter().filter(|node| *node != named) {
+        // Warn-only: an unreadable output must not stop the uninstall.
+        if !crate::install::prune::is_modified(state, *kind, name, roots).unwrap_or(false) {
+            continue;
+        }
+        let path = state
+            .get(*kind, name)
+            .and_then(|record| {
+                record.outputs.iter().find_map(|out| {
+                    let path = out
+                        .resolved_target(roots, crate::install::path_anchor::Containment::Strict)
+                        .ok()?;
+                    path.exists().then_some(path)
+                })
+            })
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        tracing::warn!(
+            "{kind} '{}' had local edits; '{path}' was removed with {} '{}'",
+            crate::oci::text::registry_text(name),
+            named.0,
+            crate::oci::text::registry_text(&named.1)
+        );
+    }
 }
 
 /// Every refusal [`delete_nodes`] would meet over `nodes` under `force`, each

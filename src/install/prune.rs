@@ -346,7 +346,12 @@ pub fn prune_orphans(
 ///
 /// [`PruneError::Anchor`] when resolving/hashing an output hits a
 /// security-class anchor failure.
-fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &AnchorRoots) -> Result<bool, PruneError> {
+pub(crate) fn is_modified(
+    state: &InstallState,
+    kind: ArtifactKind,
+    name: &str,
+    roots: &AnchorRoots,
+) -> Result<bool, PruneError> {
     let Some(record) = state.get(kind, name) else {
         return Ok(false);
     };

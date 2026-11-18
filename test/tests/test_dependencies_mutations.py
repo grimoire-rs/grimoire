@@ -261,3 +261,44 @@ def test_uninstall_direct_rule_also_required_names_no_bundle(
 
     assert json.loads(result.stdout)["status"] == "uninstalled", result.stdout
     assert "bundle" not in result.stderr, result.stderr
+
+
+def _gamma_requires_beta(project_dir: Path, unique_repo: str):
+    beta = make_artifact(f"{unique_repo}/beta", "rule", {"beta.md": "# beta\n"}, tag="1")
+    gamma = make_dependent(
+        f"{unique_repo}/gamma", "1", "skill", _files("gamma"), [("rule", "beta", "./beta:1")]
+    )
+    write_config(project_dir, skills={"gamma": gamma.fq})
+    (project_dir / ".claude").mkdir(exist_ok=True)
+
+
+def test_uninstall_warns_about_a_locally_edited_dependency(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    _gamma_requires_beta(project_dir, unique_repo)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    beta = project_dir / ".claude" / "rules" / "beta.md"
+    beta.write_text("# beta, edited\n", encoding="utf-8", newline="\n")
+
+    result = runner.run("uninstall", "skill", "gamma")
+
+    assert not beta.exists()
+    warning = [line for line in result.stderr.splitlines() if "had local edits" in line]
+    assert len(warning) == 1, result.stderr
+    assert "rule 'beta'" in warning[0] and "beta.md" in warning[0], warning[0]
+    assert "skill 'gamma'" in warning[0], warning[0]
+
+
+def test_uninstall_of_an_unedited_dependency_prints_no_edit_warning(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    _gamma_requires_beta(project_dir, unique_repo)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    result = runner.run("uninstall", "skill", "gamma")
+
+    assert "local edits" not in result.stderr, result.stderr
