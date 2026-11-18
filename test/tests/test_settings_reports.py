@@ -542,10 +542,10 @@ def test_uninstall_stop_keeps_changes(grim, grim_home: Path, tmp_path: Path, uni
     _closes_the_list(failed, "removed claude")
 
 
-def test_uninstall_refused_dependency_keeps_changes(
+def test_uninstall_refused_dependency_changes_nothing(
     grim_at, project_dir: Path, tmp_path: Path, unique_repo: str
 ) -> None:
-    """The target's values left before its dependency refused, and the error holds both."""
+    """A dependency that refuses stops the run before the target's values leave."""
     _package(unique_repo, "base", {"claude": {"language": "en"}})
     document = {"description": "team defaults", "claude": {"model": "sonnet"}}
     team = make_settings(f"{unique_repo}/team", "1", document, requires=[("settings", "base", "./base:1")])
@@ -559,10 +559,9 @@ def test_uninstall_refused_dependency_keeps_changes(
 
     assert failed.returncode == 65, failed.stderr
     error = _error(failed)
-    assert _listed(error["settings_changes"]) == [REMOVED_MODEL]
+    assert "settings_changes" not in error
     assert [piece["pointer"] for piece in error["pieces"]] == ["/language"]
-    assert _file(target) == {"language": "de"}
-    _closes_the_list(failed, f"removed claude {LOCAL} /model (team)")
+    assert _file(target) == {"model": "sonnet", "language": "de"}
 
 
 @needs_an_unwritable_directory

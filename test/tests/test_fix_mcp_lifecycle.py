@@ -18,7 +18,7 @@ import json
 import tomllib  # stdlib (Python 3.11+)
 from pathlib import Path
 
-from src.helpers import make_bundle, write_config
+from src.helpers import make_bundle, make_dependent, write_config
 
 DESCRIPTOR = """\
 description = "Grimoire catalog search and install status over MCP."
@@ -190,3 +190,44 @@ def test_uninstall_removes_an_unmodified_mcp_entry_without_force(
         assert "grim-mcp" not in names, f"{client} kept the managed entry: {names}"
     claude = json.loads((project_dir / ".mcp.json").read_text(encoding="utf-8"))
     assert claude["mcpServers"]["user-server"]["command"] == "keep-me", "user entry preserved"
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_uninstall_refuses_whole_run_on_a_drifted_dependency_entry(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A dependency's drifted MCP entry refuses the run before the target is touched."""
+    runner = grim_at(project_dir)
+    _release_mcp(runner, project_dir, registry, unique_repo)
+    parent = make_dependent(
+        f"{unique_repo}/parent",
+        "1",
+        "skill",
+        {"parent/SKILL.md": "---\nname: parent\ndescription: d\n---\n# parent\n"},
+        [("mcp", "grim-mcp", "./mcp/grim-mcp:1.0.0")],
+    )
+    write_config(project_dir)
+    runner.json("add", parent.fq)
+    cfg = project_dir / ".mcp.json"
+    doc = json.loads(cfg.read_text(encoding="utf-8"))
+    assert "grim-mcp" in doc["mcpServers"], "precondition: the dependency registered"
+    doc["mcpServers"]["grim-mcp"]["args"] = ["mcp", "--allow-writes"]
+    cfg.write_text(json.dumps(doc, indent=2), encoding="utf-8", newline="\n")
+
+    watched = [project_dir / "grimoire.toml", project_dir / "grimoire.lock", project_dir / ".grimoire" / "state.json"]
+    before = [p.read_bytes() for p in watched]
+    skill_dir = project_dir / ".claude" / "skills" / "parent"
+    skill_before = _tree_bytes(skill_dir)
+    assert skill_before, "precondition: the skill installed"
+
+    refused = runner.run("uninstall", "skill", "parent", check=False)
+    assert refused.returncode == 65, refused.stderr
+    assert [p.read_bytes() for p in watched] == before, "a refused run writes nothing"
+    assert _tree_bytes(skill_dir) == skill_before
+
+    runner.json("uninstall", "--force", "skill", "parent")
+    assert not skill_dir.exists()
+    assert "grim-mcp" not in json.loads(cfg.read_text(encoding="utf-8")).get("mcpServers", {})
