@@ -30,6 +30,15 @@ tasks:
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
 
+  scripts:
+    desc: Lint (ruff) and test (pytest) the repo-level Python in scripts/
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      # pytest comes from the acceptance-test project's locked environment.
+      - ocx exec -- ruff check scripts
+      - ocx exec -- ruff format --check scripts
+      - ocx exec -- uv run --project test pytest scripts/tests -q -p no:cacheprovider
+
   .index-e2e-indexer:
     internal: true
     preconditions:

@@ -69,7 +69,7 @@ tasks:
   verify:
     desc: Full quality gate
     summary: |
-      Phase 1 (parallel): format, clippy, shell lint, claude verify
+      Phase 1 (parallel): format, clippy, shell lint, claude verify, scripts lint+tests
       Phase 2 (sequential): license audit, build, unit tests, acceptance tests
       Use `task --force verify` to bypass caching.
     cmds:
@@ -91,6 +91,7 @@ tasks:
       - task: rust:clippy:check
       - task: shell:verify
       - task: claude:verify
+      - task: test:scripts
 
   .verify:build-test:
     internal: true

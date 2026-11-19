@@ -1,0 +1,129 @@
+name: Backfill
+
+# Signs and attests versions whose OCX package was published before it was signed. For every version tag and
+# every platform of its package index, a signature by THIS workflow's identity is added unless
+# `ocx package verify` already finds one (by this identity or by `release-ocx.yml`), and a CycloneDX
+# attestation likewise: each judged on its own, so a second run adds nothing. A tag is never moved and no
+# GitHub Release asset is touched; both are referrers of the digest the tag already names.
+#
+# The job is the second signing identity of the package
+# (`<repo>/.github/workflows/backfill.yml@refs/heads/main`), defined here and never in a called workflow, so the
+# certificate names this file. It runs in the `release-backfill` environment, whose required reviewer is the
+# human gate on a dispatch.
+#
+# `tags` is a newline- or space-separated list of version tags (`v0.14.3`); empty backfills every version tag
+# (a tag with no OCX package is reported and skipped). `limit` caps a dispatch at that many versions needing
+# work; repeat the dispatch until none remain. `dry_run` (default true) prints what would be signed and writes
+# nothing. The SBOM of a version is built from the source at its git tag by `generate_sbom` in
+# `scripts/backfill_release.py`; a tag whose source has no root Cargo.toml gets its signature and a logged
+# "no sbom source" row instead of a failure.
+#
+# Repository values live in the one `env:` block.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: Version tags to backfill, one per line (v0.14.3). Empty backfills every version tag.
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: Report what would be signed and attested; write nothing.
+        required: false
+        type: boolean
+        default: true
+      limit:
+        description: Stop after this many versions that needed a signature or an attestation; empty is unlimited. Dispatch again to continue.
+        required: false
+        type: string
+        default: ''
+
+permissions: {}
+
+env:
+  REPOSITORY_ID: "1239848793"
+  PACKAGE: ghcr.io/grimoire-rs/grimoire/cli
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
+  # The published ocx that drives the backfill; it needs `package sign`, `attest` and `verify` (0.6.0 and later).
+  OCX_VERSION: '0.6.8'
+  CARGO_CYCLONEDX_VERSION: '0.5.5'
+  CARGO_CYCLONEDX_SHA256: 9136714bd6e1ac703f5c2c889af578d9783852886d6ebfe18d471555637ad2b3 # Linux tarball, as in .github/actions/release-ocx
+  # What `release-ocx.yml` signs as: a platform it already signed is not signed again.
+  RELEASE_IDENTITY: ${{ github.server_url }}/grimoire-rs/grimoire/.github/workflows/release-ocx.yml@refs/heads/main
+
+concurrency:
+  group: backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: Backfill signatures and SBOMs
+    runs-on: ubuntu-latest
+    environment: release-backfill
+    # A full-history run is serial and network-bound; under the 360-minute ceiling, `limit` and a rerun finish it.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Guard the ref and the repository
+        env:
+          REPOSITORY_ID_ACTUAL: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::backfill runs only from refs/heads/main (this run is $GITHUB_REF)"
+            exit 1
+          fi
+          if [[ "$REPOSITORY_ID_ACTUAL" != "$REPOSITORY_ID" ]]; then
+            echo "::error::this workflow signs only for the repository it was written for (id $REPOSITORY_ID)"
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
+        with:
+          version: ${{ env.OCX_VERSION }}
+          project: "" # binary-only; the root ocx.toml is the test toolchain, not needed here
+      # `cargo cyclonedx` needs a Rust toolchain; the action reads `rust-toolchain.toml` from this main checkout.
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache: false # only `cargo metadata` runs; nothing worth caching
+      - name: Install cargo-cyclonedx
+        run: |
+          set -euo pipefail
+          archive="cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${CARGO_CYCLONEDX_VERSION}/${archive}"
+          echo "${CARGO_CYCLONEDX_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/cdx-bin"
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/cdx-bin" --strip-components=1 \
+            cargo-cyclonedx-x86_64-unknown-linux-gnu/cargo-cyclonedx
+          echo "$RUNNER_TEMP/cdx-bin" >> "$GITHUB_PATH"
+      - name: Backfill every platform of every requested version
+        env:
+          TAGS: ${{ inputs.tags }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          LIMIT: ${{ inputs.limit }}
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2153 # TAGS is the env var above; `tags` is the array built from it
+          mapfile -t tags < <(printf '%s\n' "$TAGS" | tr -s ' \t\r' '\n' | sed '/^$/d')
+          flags=()
+          [[ "$DRY_RUN" == true ]] && flags+=(--dry-run)
+          [[ -n "$LIMIT" ]] && flags+=(--limit "$LIMIT")
+          python3 scripts/backfill_release.py \
+            --package "$PACKAGE" \
+            --identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --also-trusted "$RELEASE_IDENTITY" \
+            --issuer "$OIDC_ISSUER" \
+            "${flags[@]}" "${tags[@]}"
