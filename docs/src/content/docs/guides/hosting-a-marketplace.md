@@ -318,7 +318,7 @@ jobs:
       - name: Install grim
         # The one step that differs from the documented workflow: grim comes
         # from ocx.toml (a dev build), not from a release tarball plus sha256.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.3"
           # A job that holds a write token restores no shared cache.
@@ -779,7 +779,7 @@ jobs:
       - name: Install grim
         # The one step that differs from the documented workflow: grim comes
         # from ocx.toml (a dev build), not from a release tarball plus sha256.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.3"
 
