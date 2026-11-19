@@ -1815,6 +1815,37 @@ mod tests {
     }
 
     #[test]
+    fn is_fresh_at_forms_are_pinned() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-21T09:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cases = [
+            ("2026-10-21T08:59:00Z", true),
+            ("2026-10-21T08:59:00+00:00", true),
+            ("2026-10-21T10:59:00+02:00", true),
+            ("2026-10-21T08:59:00.123456789Z", true),
+            ("2026-10-21T08:00:01Z", true),
+            ("2026-10-21T08:00:00.5Z", true),
+            ("2026-10-21T08:00:00Z", false),
+            ("2026-10-21T07:59:59Z", false),
+            ("2026-10-21T09:00:00Z", true),
+            ("2026-10-21T09:00:00.5Z", true),
+            ("2026-10-21T09:00:01Z", false),
+            ("2026-10-21T11:00:00+02:00", true),
+            ("", false),
+            ("garbage", false),
+            ("2026-10-21", false),
+            // lenient forms
+            ("2026-10-21t08:59:00z", true),
+            ("2026-10-21 08:59:00Z", true),
+            ("2026-10-21T08:59:60Z", true),
+        ];
+        for (built_at, fresh) in cases {
+            assert_eq!(is_fresh_at(built_at, now), fresh, "{built_at:?}");
+        }
+    }
+
+    #[test]
     fn future_timestamp_is_stale() {
         // A built_at in the future (clock skew) must not pin the cache.
         let now = chrono::Utc::now();

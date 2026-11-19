@@ -661,6 +661,79 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_http_date_forms_are_pinned() {
+        let cases: [(&str, Option<u64>); 12] = [
+            ("Wed, 21 Oct 2026 09:28:00 GMT", Some(1680)),
+            ("Wed, 21 Oct 2026 07:28:00 GMT", Some(0)),
+            ("Wed, 21 Oct 2026 09:28:00 +0200", Some(0)),
+            ("Mon, 21 Oct 2026 09:28:00 GMT", None),
+            ("Wed, 21 Oct 2026 09:28:00", None),
+            ("2026-10-21T09:02:00Z", None),
+            ("garbage", None),
+            // lenient forms an RFC 2822 parser may or may not accept
+            ("21 Oct 2026 09:28:00 GMT", Some(1680)),
+            ("Wed, 21 Oct 2026 09:28:00 gmt", Some(1680)),
+            ("wed, 21 oct 2026 09:28:00 GMT", Some(1680)),
+            ("Wed, 21 Oct 2026 09:28:60 GMT", Some(1740)),
+            ("Wed, 21 Oct 2026 09:28 GMT", Some(1680)),
+        ];
+        for (value, secs) in cases {
+            assert_eq!(
+                RetryAfter::parse(value, now()),
+                secs.map(|s| RetryAfter(Duration::from_secs(s))),
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            RetryAfter::parse(
+                "Wed, 21 Oct 2026 09:02:00 GMT",
+                now() + chrono::TimeDelta::milliseconds(500)
+            ),
+            Some(RetryAfter(Duration::from_millis(119_500))),
+            "the wait keeps the sub-second remainder"
+        );
+    }
+
+    #[test]
+    fn the_stored_deadline_is_rounded_up_to_the_next_second_and_stamps_floor() {
+        let mut whole = SyncState::unbound(KEY);
+        whole.on_failure(now(), None, "down");
+        assert_eq!(whole.retry_after.as_deref(), Some("2026-10-21T09:00:48Z"));
+
+        // 500 ms of jitter unit gives a 60 s wait; the deadline is then
+        // 09:01:00.5 + 0.999999999 s, which stamps as the floor of that second.
+        let mut half = SyncState::unbound(KEY);
+        half.on_failure(now() + chrono::TimeDelta::milliseconds(500), None, "down");
+        assert_eq!(half.last_failure_at.as_deref(), Some("2026-10-21T09:00:00Z"));
+        assert_eq!(half.retry_after.as_deref(), Some("2026-10-21T09:01:01Z"));
+
+        assert_eq!(
+            rfc3339(now() + chrono::TimeDelta::nanoseconds(999_999_999)),
+            "2026-10-21T09:00:00Z"
+        );
+    }
+
+    #[test]
+    fn parse_time_forms_are_pinned() {
+        let cases: [(&str, Option<&str>); 9] = [
+            ("2026-10-21T09:00:00Z", Some("2026-10-21T09:00:00Z")),
+            ("2026-10-21T09:00:00+00:00", Some("2026-10-21T09:00:00Z")),
+            ("2026-10-21T11:00:00+02:00", Some("2026-10-21T09:00:00Z")),
+            ("2026-10-21T09:00:00.123456789Z", Some("2026-10-21T09:00:00Z")),
+            ("not a time", None),
+            ("", None),
+            // lenient forms
+            ("2026-10-21t09:00:00z", Some("2026-10-21T09:00:00Z")),
+            ("2026-10-21 09:00:00Z", Some("2026-10-21T09:00:00Z")),
+            ("2026-10-21T09:00:60Z", Some("2026-10-21T09:00:60Z")),
+        ];
+        for (text, want) in cases {
+            assert_eq!(parse_time(Some(text)).map(rfc3339).as_deref(), want, "{text:?}");
+        }
+        assert_eq!(parse_time(None), None);
+    }
+
+    #[test]
     fn an_oversized_delta_is_a_long_wait_not_a_parse_failure() {
         let parsed = RetryAfter::parse("99999999999999999999999999", now()).expect("all digits parse");
         assert!(parsed.0 > BACKOFF_MAX);
