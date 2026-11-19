@@ -84,8 +84,9 @@ background and its selection bar, and only bold remains.
 ## Key map
 
 This key map belongs to `grim tui` alone, and pressing `?` shows it inside the
-app. The help lists every key below in two columns and scrolls on a short
-terminal. The website and the VS Code extension have no key map.
+app. The help lists the keys below in two columns, with sibling keys such as
+`i / u / d` sharing a row. It fits an 80×24 terminal, and it scrolls on a
+shorter one. The website and the VS Code extension have no key map.
 
 | Key | What it does |
 |---|---|
@@ -184,13 +185,20 @@ Cancel buttons. Patterns are stored as typed, and a comma is glob alternation,
 not a separator. An entry with no alias is read-only here.
 
 **When an edit applies.** A saved edit takes effect in the running browser at
-once: clients, the tree options and the relevance cutoff. A changed registry
-list or filter reloads the catalog. These keys are read only at startup, and
-the popup marks them `applies when grim tui starts again`:
-`options.tui.theme`, `options.tui.default_view`, `options.tui.sort`,
-`options.tui.sort_order`, `options.show_deprecated` and a registry's
-`insecure`. Under `--registry`, registry edits are saved but the browse set
-stays what the flag selected.
+once. That covers clients, the tree options, the relevance cutoff, the theme,
+the default view, the sort order and direction, and deprecated visibility. A
+changed registry list or filter reloads the catalog. Only a registry's
+`insecure` waits for the next start, and the popup says so. Under `--registry`,
+registry edits are saved but the browse set stays what the flag selected.
+
+A saved setting replaces your live choice for that one key. Saving an unrelated
+key leaves the `s`, `S`, `h` and `t` choices and any launch flag as they are.
+
+**Preview.** In the pick list for `options.tui.theme`, the whole browser,
+popup included, repaints in the highlighted theme as you move. The pick lists
+for `default_view`, `sort` and `sort_order` preview the same way. `enter`
+saves the value. `esc`, closing the popup or a failed save puts back what was
+showing before the list opened, and a preview writes no file.
 
 A terminal under 44 columns or 12 rows shows a one-line notice in place of the
 form. Enlarge it to continue.

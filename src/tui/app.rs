@@ -29,6 +29,7 @@ use crate::api::artifact_status::ArtifactStatus;
 use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece, SettingsChange, SettingsChangeAction};
 use crate::catalog::catalog_service;
 use crate::catalog::registry_catalog::Catalog;
+use crate::catalog::{SortMode, SortOrder};
 use crate::command::add::{declare, restore_config_unless_edited, snapshot_config, write_config};
 use crate::command::grim;
 use crate::command::hook_consent::ConsentSite;
@@ -41,7 +42,7 @@ use crate::command::uninstall::{
     EditTarget, Hold, relock_drops, relock_keeps, relock_undeclared, save_relocked, undeclare_and_unlock,
 };
 use crate::command::update::NamedScope;
-use crate::config::declaration::{ConfigOptions, DesiredSet};
+use crate::config::declaration::{ConfigOptions, DesiredSet, TuiTheme};
 use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
 use crate::config::registry_resolve::RowSource;
@@ -83,10 +84,12 @@ use crate::store::paths::GrimPaths;
 use crate::tui::install_progress::InstallModal;
 
 use super::adoption::{self, Background};
+use super::config_dialog::ConfigEdit;
 use super::event::{BatchOp, TuiAction, TuiInput, drop_typeahead, handle};
 use super::render::{draw, frame, sanitize_member_label};
-use super::state::{ArtifactState, Mode, PinChanges, TuiRow, TuiState};
+use super::state::{ArtifactState, Mode, PinChanges, TuiRow, TuiState, ViewMode};
 use super::terminal_guard::TerminalGuard;
+use super::theme;
 use super::update_check::{CheckMsg, RowCheck, UpdateChecker, eligible_for_recheck};
 
 use std::time::Instant;
@@ -363,6 +366,7 @@ pub async fn run(
     let (mut companion_fetcher, mut companion_rx) =
         super::companion_fetch::CompanionFetcher::new(Arc::clone(&ctx.access));
     let mut settings_gates = SettingsGateReads::new();
+    let mut preview = Preview::default();
 
     loop {
         // Reap finished background tasks so panics surface (deliberately
@@ -653,12 +657,14 @@ pub async fn run(
                 Err(e) => state.set_status(format!("config unavailable: {e:#}")),
             },
             TuiAction::ConfigWrite(edit) => {
+                preview.restore(&mut state, &mut theme::set);
                 let reload = match apply_config_edit(&ctx, &edit) {
                     Ok(note) => {
                         let mut on = ConfigEffects {
                             checker: &mut checker,
                             bundle_checker: &mut bundle_checker,
                             adoption: &mut adoption,
+                            set_theme: &mut theme::set,
                         };
                         finish_config_write(&mut ctx, &mut state, &mut on, reresolve, &edit, note)
                     }
@@ -711,6 +717,7 @@ pub async fn run(
             drop_typeahead(&mut state, std::iter::from_fn(next_queued_event));
         }
 
+        preview.sync(&mut state, theme::active(), &mut theme::set);
         terminal.draw(|f| draw(f, &frame(&state)))?;
     }
     Ok(())
@@ -3265,7 +3272,6 @@ fn comma_note<'a>(mut patterns: impl Iterator<Item = &'a String>) -> Option<Stri
 }
 
 const NEXT_START_NOTE: &str = "saved · applies when grim tui starts again";
-const RESET_ALL_START_NOTE: &str = "saved · some settings apply when grim tui starts again";
 
 /// What a registry edit says beyond "saved": the plain-HTTP host set is fixed
 /// when the browser starts, and `--registry` fixes the browse set.
@@ -3294,18 +3300,101 @@ struct ConfigEffects<'a> {
     checker: &'a mut UpdateChecker,
     bundle_checker: &'a mut super::bundle_member_fetch::BundleMemberChecker,
     adoption: &'a mut Background,
+    set_theme: SetTheme<'a>,
 }
 
-/// Keys read once at startup and not re-seeded on a scope swap.
-fn launch_only(key: &str) -> bool {
-    matches!(
-        key,
-        "options.tui.theme"
-            | "options.tui.default_view"
-            | "options.tui.sort"
-            | "options.tui.sort_order"
-            | "options.show_deprecated"
-    )
+/// What `t`, `s`, `S` and the theme show now: a pick-list preview overrides
+/// it and puts it back.
+#[derive(Clone, Copy)]
+struct LiveView {
+    theme: TuiTheme,
+    view: ViewMode,
+    sort: Option<SortMode>,
+    order: SortOrder,
+}
+
+/// Sets the theme in use; tests record the call instead of moving the process-wide one.
+type SetTheme<'a> = &'a mut dyn FnMut(TuiTheme);
+
+/// The config popup's highlighted value shown live, and the live values to
+/// put back when it goes away unsaved.
+#[derive(Default)]
+struct Preview {
+    before: Option<LiveView>,
+    shown: Option<(String, String)>,
+}
+
+impl Preview {
+    fn sync(&mut self, state: &mut TuiState, theme: TuiTheme, set_theme: SetTheme<'_>) {
+        use crate::command::config::{parse_default_view, parse_sort, parse_sort_order, parse_theme};
+        let want = state
+            .config
+            .as_ref()
+            .and_then(|d| d.preview())
+            .map(|(k, v)| (k.to_string(), v.to_string()));
+        if want == self.shown {
+            return;
+        }
+        let Some((key, value)) = want else {
+            self.restore(state, set_theme);
+            self.shown = None;
+            return;
+        };
+        self.before.get_or_insert(LiveView {
+            theme,
+            view: state.view_mode,
+            sort: state.sort,
+            order: state.sort_direction(),
+        });
+        match key.as_str() {
+            "options.tui.theme" => parse_theme(&value).iter().for_each(|t| set_theme(*t)),
+            "options.tui.default_view" => parse_default_view(&value)
+                .iter()
+                .for_each(|v| state.set_view((*v).into())),
+            "options.tui.sort" => parse_sort(&value).iter().for_each(|m| state.set_sort_mode(Some(*m))),
+            _ => parse_sort_order(&value)
+                .iter()
+                .for_each(|o| state.apply_sort(state.sort, *o)),
+        }
+        self.shown = Some((key, value));
+    }
+
+    /// Put back what was live before the preview; `shown` stays, so the same
+    /// highlighted value is not applied again.
+    fn restore(&mut self, state: &mut TuiState, set_theme: SetTheme<'_>) {
+        if let Some(b) = self.before.take() {
+            set_theme(b.theme);
+            state.set_view(b.view);
+            state.apply_sort(b.sort, b.order);
+        }
+    }
+}
+
+/// Apply to the running browser the settings `edit` changed, as just
+/// re-resolved; every other live choice stays.
+fn apply_saved_settings(ctx: &TuiContext, state: &mut TuiState, edit: &ConfigEdit, set_theme: SetTheme<'_>) {
+    let hit = |k: &str| match edit {
+        ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key } => key == k,
+        ConfigEdit::ResetAll => true,
+        ConfigEdit::AddRegistry(_) | ConfigEdit::EditRegistry { .. } => false,
+    };
+    let o = &ctx.resolved_options;
+    if hit("options.tui.theme") {
+        set_theme(o.theme);
+    }
+    if hit("options.tui.default_view") {
+        state.set_view(o.default_view.into());
+    }
+    if hit("options.tui.sort") {
+        state.apply_sort(o.sort, o.sort_order);
+    } else if hit("options.tui.sort_order") {
+        state.apply_sort(state.sort, o.sort_order);
+    }
+    // Unset means the default, hidden.
+    let shown = matches!(edit, ConfigEdit::Set { value, .. } if value == "true");
+    if hit("options.show_deprecated") && state.hide_deprecated == shown {
+        state.toggle_hide_deprecated();
+    }
 }
 
 /// Whether a changed registry set, filters included, needs the catalog loaded again.
@@ -3340,33 +3429,14 @@ fn finish_config_write(
     edit: &super::config_dialog::ConfigEdit,
     note: Option<String>,
 ) -> bool {
-    use super::config_dialog::ConfigEdit;
     let applied = reapply_config(ctx, reresolve);
     if applied.is_ok() {
         // Resets what a scope swap resets (bundle expansion, background checks);
         // the dialog's own message is untouched.
         after_scope_swap(ctx, state, on.checker, on.bundle_checker, on.adoption);
+        apply_saved_settings(ctx, state, edit, on.set_theme);
     }
-    let launch = match edit {
-        ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key } => launch_only(key),
-        // What the dialog showed as set is what the reset cleared.
-        ConfigEdit::ResetAll => state
-            .config
-            .as_ref()
-            .is_some_and(|d| d.set_settings().into_iter().any(launch_only)),
-        ConfigEdit::AddRegistry(_) | ConfigEdit::EditRegistry { .. } => false,
-    };
-    let reset_all = matches!(edit, ConfigEdit::ResetAll);
-    let note = note.or_else(|| registry_note(ctx, edit)).or_else(|| {
-        launch.then(|| {
-            if reset_all {
-                RESET_ALL_START_NOTE
-            } else {
-                NEXT_START_NOTE
-            }
-            .to_string()
-        })
-    });
+    let note = note.or_else(|| registry_note(ctx, edit));
     match config_rows(ctx) {
         Ok((rows, registries, exists)) => {
             if let Some(dialog) = state.config.as_mut() {
@@ -9307,11 +9377,12 @@ mod tests {
     }
 
     /// Run `finish_config_write` over a context with an open dialog.
-    async fn finish_with(
+    async fn finish_with_theme(
         ctx: &mut TuiContext,
         state: &mut TuiState,
         reresolve: &Reresolve<'_>,
         edit: &super::super::config_dialog::ConfigEdit,
+        set_theme: SetTheme<'_>,
     ) -> bool {
         let (mut checker, _rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.primary_registry.clone());
         let (mut bundle_checker, _brx) =
@@ -9321,8 +9392,19 @@ mod tests {
             checker: &mut checker,
             bundle_checker: &mut bundle_checker,
             adoption: &mut adoption,
+            set_theme,
         };
         finish_config_write(ctx, state, &mut on, reresolve, edit, None)
+    }
+
+    /// `finish_with` that discards the theme: no test moves the process-wide one.
+    async fn finish_with(
+        ctx: &mut TuiContext,
+        state: &mut TuiState,
+        reresolve: &Reresolve<'_>,
+        edit: &super::super::config_dialog::ConfigEdit,
+    ) -> bool {
+        finish_with_theme(ctx, state, reresolve, edit, &mut |_| {}).await
     }
 
     fn dialog_message(state: &TuiState) -> Option<(String, bool)> {
@@ -9376,21 +9458,6 @@ mod tests {
         let mut filtered = resolved("x");
         filtered.filter = crate::config::registry_filter::RegistryFilter::new(&["acme/**".to_string()], &[]).unwrap();
         assert!(needs_catalog_reload(&a, &[filtered]));
-    }
-
-    #[test]
-    fn launch_only_keys_are_named() {
-        for key in [
-            "options.tui.theme",
-            "options.tui.default_view",
-            "options.tui.sort",
-            "options.tui.sort_order",
-            "options.show_deprecated",
-        ] {
-            assert!(launch_only(key), "{key}");
-        }
-        assert!(!launch_only("options.clients"));
-        assert!(!launch_only("options.tui.group_by_type"));
     }
 
     fn ctx_with_project_alt(dir: &std::path::Path) -> TuiContext {
@@ -9448,21 +9515,6 @@ mod tests {
         assert_eq!(ctx.resolved_options.search_min_relevance, 30);
         assert_eq!(state.search_min_relevance, 30);
         assert_eq!(dialog_message(&state), Some(("saved".to_string(), false)));
-    }
-
-    #[tokio::test]
-    async fn launch_only_edit_says_so() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut ctx = global_config_ctx(tmp.path());
-        let mut state = TuiState::new();
-        state.open_config(open_config_dialog(&ctx).unwrap());
-        let edit = set_edit("options.show_deprecated", "true");
-        apply_config_edit(&ctx, &edit).unwrap();
-        finish_with(&mut ctx, &mut state, &swap_from_file, &edit).await;
-        assert_eq!(
-            dialog_message(&state).unwrap().0,
-            "saved · applies when grim tui starts again"
-        );
     }
 
     const TWO_REGISTRIES: &str = "[[registries]]\nalias = \"a\"\noci = \"ghcr.io/a\"\ninclude = [\"x/**\"]\n\n\
@@ -9620,25 +9672,222 @@ mod tests {
         assert!(note.contains("grim install"), "{note}");
     }
 
+    /// A global context whose file already holds `body`.
+    fn ctx_with_file(dir: &std::path::Path, body: &str) -> TuiContext {
+        let ctx = global_config_ctx(dir);
+        std::fs::write(&ctx.config_path, body).unwrap();
+        ctx
+    }
+
+    /// Write `edit`, then apply it the way the loop does; returns the themes set.
+    async fn save(ctx: &mut TuiContext, state: &mut TuiState, edit: &ConfigEdit) -> Vec<TuiTheme> {
+        apply_config_edit(ctx, edit).unwrap();
+        let mut themes = Vec::new();
+        finish_with_theme(ctx, state, &swap_from_file, edit, &mut |t| themes.push(t)).await;
+        themes
+    }
+
     #[tokio::test]
-    async fn reset_all_with_a_launch_only_key_says_so() {
+    async fn saving_sort_applies_it_to_the_running_state() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ctx = global_config_ctx(tmp.path());
-        seed_reset_file(&ctx, "");
         let mut state = TuiState::new();
         state.open_config(open_config_dialog(&ctx).unwrap());
-        apply_config_edit(&ctx, &reset_all_edit()).unwrap();
-        finish_with(&mut ctx, &mut state, &swap_from_file, &reset_all_edit()).await;
-        assert_eq!(
-            dialog_message(&state).unwrap().0,
-            "saved · some settings apply when grim tui starts again"
-        );
-        // Only a live setting was set: nothing waits for a restart.
-        std::fs::write(&ctx.config_path, "[options]\nsearch_min_relevance = 30\n").unwrap();
-        state.open_config(open_config_dialog(&ctx).unwrap());
-        apply_config_edit(&ctx, &reset_all_edit()).unwrap();
-        finish_with(&mut ctx, &mut state, &swap_from_file, &reset_all_edit()).await;
+        save(&mut ctx, &mut state, &set_edit("options.tui.sort", "rating")).await;
+        assert_eq!(state.sort, Some(SortMode::Rating));
+        assert_eq!(state.sort_direction(), SortOrder::Desc, "the mode's own direction");
         assert_eq!(dialog_message(&state), Some(("saved".to_string(), false)));
+        save(&mut ctx, &mut state, &set_edit("options.tui.sort_order", "asc")).await;
+        assert_eq!(
+            (state.sort, state.sort_direction()),
+            (Some(SortMode::Rating), SortOrder::Asc)
+        );
+        save(
+            &mut ctx,
+            &mut state,
+            &ConfigEdit::Unset {
+                key: "options.tui.sort".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(state.sort, None);
+    }
+
+    #[tokio::test]
+    async fn saving_default_view_switches_the_view() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        assert_eq!(state.view_mode, ViewMode::Tree);
+        save(&mut ctx, &mut state, &set_edit("options.tui.default_view", "flat")).await;
+        assert_eq!(state.view_mode, ViewMode::Flat);
+    }
+
+    #[tokio::test]
+    async fn saving_show_deprecated_changes_visibility() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let mut state = TuiState::new();
+        state.set_hide_deprecated(true);
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        save(&mut ctx, &mut state, &set_edit("options.show_deprecated", "true")).await;
+        assert!(!state.hide_deprecated);
+        save(
+            &mut ctx,
+            &mut state,
+            &ConfigEdit::Unset {
+                key: "options.show_deprecated".to_string(),
+            },
+        )
+        .await;
+        assert!(state.hide_deprecated);
+    }
+
+    #[tokio::test]
+    async fn saving_a_theme_sets_it_and_an_unrelated_key_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        assert_eq!(
+            save(&mut ctx, &mut state, &set_edit("options.tui.theme", "nord")).await,
+            [TuiTheme::Nord]
+        );
+        assert!(
+            save(&mut ctx, &mut state, &set_edit("options.search_min_relevance", "30"))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_an_unrelated_key_keeps_the_live_sort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_file(tmp.path(), "[options.tui]\nsort = \"rating\"\n");
+        let mut state = TuiState::new();
+        state.set_hide_deprecated(true);
+        state.apply_sort(Some(SortMode::Updated), SortOrder::Asc);
+        state.set_view(ViewMode::Flat);
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let themes = save(&mut ctx, &mut state, &set_edit("options.search_min_relevance", "30")).await;
+        assert!(themes.is_empty());
+        assert_eq!(
+            (state.sort, state.sort_direction()),
+            (Some(SortMode::Updated), SortOrder::Asc)
+        );
+        assert_eq!(state.view_mode, ViewMode::Flat);
+        assert!(state.hide_deprecated);
+    }
+
+    #[tokio::test]
+    async fn reset_all_applies_the_defaults_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = "[options]\nshow_deprecated = true\n[options.tui]\ndefault_view = \"flat\"\nsort = \"rating\"\ntheme = \"dracula\"\n";
+        let mut ctx = ctx_with_file(tmp.path(), body);
+        let mut state = TuiState::new();
+        state.set_view(ViewMode::Flat);
+        state.apply_sort(Some(SortMode::Rating), SortOrder::Desc);
+        state.set_hide_deprecated(false);
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        let themes = save(&mut ctx, &mut state, &reset_all_edit()).await;
+        assert_eq!(themes, [TuiTheme::Terminal]);
+        assert_eq!((state.view_mode, state.sort), (ViewMode::Tree, None));
+        assert!(state.hide_deprecated);
+        assert_eq!(dialog_message(&state), Some(("saved".to_string(), false)));
+    }
+
+    /// Press `input` in the open popup, then sync the preview as the loop does.
+    fn drive(state: &mut TuiState, preview: &mut Preview, live: &mut TuiTheme, input: TuiInput) -> TuiAction {
+        let action = handle(state, input);
+        let now = *live;
+        preview.sync(state, now, &mut |t| *live = t);
+        action
+    }
+
+    fn open_pick_on(ctx: &TuiContext, key: &str) -> TuiState {
+        let mut state = TuiState::new();
+        let mut dialog = open_config_dialog(ctx).unwrap();
+        dialog.select_key(key);
+        state.open_config(dialog);
+        state
+    }
+
+    #[test]
+    fn preview_then_escape_restores_the_live_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        let mut state = open_pick_on(&ctx, "options.tui.sort");
+        state.apply_sort(Some(SortMode::Updated), SortOrder::Asc);
+        let (mut preview, mut live) = (Preview::default(), TuiTheme::Nord);
+        drive(&mut state, &mut preview, &mut live, TuiInput::Enter);
+        drive(&mut state, &mut preview, &mut live, TuiInput::End);
+        assert_eq!(state.sort, Some(SortMode::Downloads), "previewed");
+        drive(&mut state, &mut preview, &mut live, TuiInput::Esc);
+        assert_eq!(
+            (state.sort, state.sort_direction()),
+            (Some(SortMode::Updated), SortOrder::Asc)
+        );
+        assert_eq!(live, TuiTheme::Nord);
+
+        let mut state = open_pick_on(&ctx, "options.tui.theme");
+        drive(&mut state, &mut preview, &mut live, TuiInput::Enter);
+        drive(&mut state, &mut preview, &mut live, TuiInput::End);
+        assert_eq!(live, TuiTheme::Dracula);
+        drive(&mut state, &mut preview, &mut live, TuiInput::Esc);
+        drive(&mut state, &mut preview, &mut live, TuiInput::Esc);
+        assert_eq!(live, TuiTheme::Nord, "closing the popup restores too");
+        assert!(state.config.is_none());
+    }
+
+    #[tokio::test]
+    async fn preview_then_save_keeps_the_saved_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        let mut state = open_pick_on(&ctx, "options.tui.sort");
+        let (mut preview, mut live) = (Preview::default(), TuiTheme::Terminal);
+        drive(&mut state, &mut preview, &mut live, TuiInput::Enter);
+        drive(&mut state, &mut preview, &mut live, TuiInput::Down);
+        let TuiAction::ConfigWrite(edit) = drive(&mut state, &mut preview, &mut live, TuiInput::Enter) else {
+            panic!("enter saves the highlighted value");
+        };
+        assert_eq!(edit, set_edit("options.tui.sort", "updated"));
+        preview.restore(&mut state, &mut |t| live = t);
+        assert_eq!(state.sort, None, "restored before the write");
+        save(&mut ctx, &mut state, &edit).await;
+        let now = live;
+        preview.sync(&mut state, now, &mut |t| live = t);
+        assert_eq!(state.sort, Some(SortMode::Updated));
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_restores_the_previewed_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        let mut state = open_pick_on(&ctx, "options.tui.theme");
+        let (mut preview, mut live) = (Preview::default(), TuiTheme::Light);
+        drive(&mut state, &mut preview, &mut live, TuiInput::Enter);
+        drive(&mut state, &mut preview, &mut live, TuiInput::End);
+        assert_eq!(live, TuiTheme::Dracula);
+        let TuiAction::ConfigWrite(edit) = drive(&mut state, &mut preview, &mut live, TuiInput::Enter) else {
+            panic!("enter saves");
+        };
+        preview.restore(&mut state, &mut |t| live = t);
+        let _held = config_guard(&ctx).unwrap();
+        assert!(apply_config_edit(&ctx, &edit).is_err());
+        let now = live;
+        preview.sync(&mut state, now, &mut |t| live = t);
+        assert_eq!(live, TuiTheme::Light, "the failed write left the session as it was");
+    }
+
+    #[tokio::test]
+    async fn insecure_edit_still_says_next_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with_two_registries(tmp.path());
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        save(&mut ctx, &mut state, &set_edit("registry.a.insecure", "true")).await;
+        assert_eq!(dialog_message(&state).unwrap().0, NEXT_START_NOTE);
     }
 
     #[test]
@@ -9684,7 +9933,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insecure_edit_says_it_applies_at_next_start() {
+    async fn insecure_edit_says_it_applies_at_next_start_via_the_seam() {
         let tmp = tempfile::tempdir().unwrap();
         let mut ctx = ctx_with_two_registries(tmp.path());
         let mut state = TuiState::new();

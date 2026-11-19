@@ -14,6 +14,7 @@
 #![allow(clippy::disallowed_types)]
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
@@ -563,13 +564,14 @@ impl Theme {
     }
 }
 
-static CURRENT: OnceLock<Theme> = OnceLock::new();
+/// Every theme, in [`TuiTheme::ALL`] order, built once by [`init`].
+static THEMES: OnceLock<Vec<Theme>> = OnceLock::new();
+/// Index into [`THEMES`] of the theme in use.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
-/// Select the process-wide theme; without `truecolor`, 24-bit colours are
-/// reduced to the 256-colour palette. The first call wins; no unit test may
-/// call this, since the state is global.
-pub fn init(name: TuiTheme, truecolor: bool) {
-    let base = match name {
+/// The palette a theme name stands for.
+fn palette(name: TuiTheme) -> Theme {
+    match name {
         TuiTheme::Terminal => TERMINAL,
         TuiTheme::Dark => DARK,
         TuiTheme::Light => LIGHT,
@@ -584,13 +586,52 @@ pub fn init(name: TuiTheme, truecolor: bool) {
         TuiTheme::TokyoNight => TOKYO_NIGHT,
         TuiTheme::Nord => NORD,
         TuiTheme::Dracula => DRACULA,
-    };
-    let _ = CURRENT.set(if truecolor { base } else { base.downsample() });
+    }
+}
+
+/// Every theme in [`TuiTheme::ALL`] order; without `truecolor`, 24-bit
+/// colours are reduced to the 256-colour palette.
+fn build_table(truecolor: bool) -> Vec<Theme> {
+    TuiTheme::ALL
+        .into_iter()
+        .map(palette)
+        .map(|t| if truecolor { t } else { t.downsample() })
+        .collect()
+}
+
+fn index_of(name: TuiTheme) -> usize {
+    TuiTheme::ALL.iter().position(|t| *t == name).unwrap_or(0)
+}
+
+/// The theme at `index`, `terminal` while there is no table or the index is out of it.
+fn pick(table: Option<&[Theme]>, index: usize) -> &Theme {
+    table.and_then(|t| t.get(index)).unwrap_or(&TERMINAL)
+}
+
+/// Build the theme table and select `name`. Only the first call builds the
+/// table; no unit test may call this, since the state is global.
+pub fn init(name: TuiTheme, truecolor: bool) {
+    if THEMES.set(build_table(truecolor)).is_ok() {
+        set(name);
+    }
+}
+
+/// Switch the theme in use. Cheap: it moves an index into the table [`init`] built.
+pub fn set(name: TuiTheme) {
+    ACTIVE.store(index_of(name), Ordering::Relaxed);
+}
+
+/// The theme in use, so a caller can put it back after a preview.
+pub fn active() -> TuiTheme {
+    TuiTheme::ALL
+        .get(ACTIVE.load(Ordering::Relaxed))
+        .copied()
+        .unwrap_or_default()
 }
 
 /// The selected theme, `terminal` until [`init`] runs.
 pub fn current() -> &'static Theme {
-    CURRENT.get().unwrap_or(&TERMINAL)
+    pick(THEMES.get().map(Vec::as_slice), ACTIVE.load(Ordering::Relaxed))
 }
 
 /// Fill the canvas colours into every cell the widgets left at the terminal
@@ -722,8 +763,34 @@ mod tests {
     }
 
     #[test]
-    fn current_is_terminal_until_init() {
-        assert!(std::ptr::eq(current(), &TERMINAL));
+    fn pick_falls_back_to_terminal_without_a_table() {
+        assert!(std::ptr::eq(pick(None, 3), &TERMINAL));
+        let table = build_table(true);
+        assert!(std::ptr::eq(pick(Some(&table), 99), &TERMINAL));
+        assert!(std::ptr::eq(pick(Some(&table), 1), &table[1]));
+    }
+
+    #[test]
+    fn every_theme_name_maps_to_its_palette() {
+        let table = build_table(true);
+        assert_eq!(table.len(), TuiTheme::ALL.len());
+        for (i, name) in TuiTheme::ALL.into_iter().enumerate() {
+            assert_eq!(index_of(name), i, "{name:?}");
+            assert_eq!(table[i].roles().len(), palette(name).roles().len());
+            assert_eq!(format!("{:?}", table[i]), format!("{:?}", palette(name)), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn table_downsamples_without_truecolor() {
+        let flat = build_table(false);
+        let rgb = |t: &Theme| {
+            t.roles()
+                .iter()
+                .any(|(_, s)| matches!(s.fg, Some(Color::Rgb(..))) || matches!(s.bg, Some(Color::Rgb(..))))
+        };
+        assert!(build_table(true).iter().any(rgb), "the fixture needs a truecolor theme");
+        assert!(!flat.iter().any(rgb));
     }
 
     /// Every non-terminal built-in theme; a new palette theme adds one line.
