@@ -9,8 +9,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use grimoire_hook_core::time::rfc3339_utc;
 use serde::{Deserialize, Deserializer, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::{Rfc2822, Rfc3339};
 
 use crate::catalog::index_root::BlobRef;
 use crate::catalog::redact::redact_url;
@@ -98,7 +100,7 @@ pub struct SyncState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
     Proceed,
-    Deferred(DateTime<Utc>),
+    Deferred(OffsetDateTime),
 }
 
 /// A `Retry-After` header value, as a delay from the response time.
@@ -108,14 +110,14 @@ pub struct RetryAfter(pub Duration);
 impl RetryAfter {
     /// Parses delta-seconds or an HTTP-date relative to `now`; anything else
     /// is `None`.
-    pub fn parse(value: &str, now: DateTime<Utc>) -> Option<Self> {
+    pub fn parse(value: &str, now: OffsetDateTime) -> Option<Self> {
         let value = value.trim();
         if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
             // An all-digit value too large for u64 is still "a long time".
             return Some(Self(Duration::from_secs(value.parse().unwrap_or(u64::MAX))));
         }
-        let date = DateTime::parse_from_rfc2822(value).ok()?.with_timezone(&Utc);
-        Some(Self(date.signed_duration_since(now).to_std().unwrap_or_default()))
+        let date = OffsetDateTime::parse(value, &Rfc2822).ok()?;
+        Some(Self(Duration::try_from(date - now).unwrap_or_default()))
     }
 }
 
@@ -246,11 +248,11 @@ impl SyncState {
 
     /// Counts a failed refresh, stores the redacted `error`, and schedules
     /// the next attempt; a 429 or 503 `Retry-After` can only lengthen it.
-    pub fn on_failure(&mut self, now: DateTime<Utc>, retry_after: Option<RetryAfter>, error: &str) {
+    pub fn on_failure(&mut self, now: OffsetDateTime, retry_after: Option<RetryAfter>, error: &str) {
         self.failures = self.failures.saturating_add(1);
         self.last_failure_at = Some(rfc3339(now));
         self.last_error = Some(redact_url(error));
-        let unit = f64::from(now.timestamp_subsec_nanos()) / 1e9;
+        let unit = f64::from(now.nanosecond()) / 1e9;
         let wait = backoff_delay(self.failures, unit)
             .max(retry_after.map_or(Duration::ZERO, |r| r.0))
             .min(BACKOFF_MAX);
@@ -270,7 +272,7 @@ impl SyncState {
     /// means the clock moved back, and a schedule more than an hour out is
     /// cut to an hour: a bad clock or a hand-edited file never parks a
     /// source for good. The stored value is left as it is.
-    pub fn gate(&self, now: DateTime<Utc>) -> Gate {
+    pub fn gate(&self, now: OffsetDateTime) -> Gate {
         if parse_time(self.last_failure_at.as_deref()).is_some_and(|failed| failed > now) {
             return Gate::Proceed;
         }
@@ -287,7 +289,7 @@ impl SyncState {
 
     /// The text a deferred refresh reports as its error: the end of the wait,
     /// the last error when there is one, and that `--refresh` skips the wait.
-    pub fn deferral_text(&self, until: DateTime<Utc>) -> String {
+    pub fn deferral_text(&self, until: OffsetDateTime) -> String {
         let mut text = format!("refresh deferred until {}", rfc3339(until));
         if let Some(error) = &self.last_error {
             text.push_str("; last error: ");
@@ -328,31 +330,29 @@ fn backoff_delay(failures: u32, unit: f64) -> Duration {
     base.mul_f64(0.8 + 0.4 * unit.clamp(0.0, 1.0)).min(BACKOFF_MAX)
 }
 
-pub(crate) fn rfc3339(time: DateTime<Utc>) -> String {
-    time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+pub(crate) fn rfc3339(at: OffsetDateTime) -> String {
+    rfc3339_utc(at.into())
 }
 
-fn parse_time(text: Option<&str>) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(text?).ok().map(|t| t.with_timezone(&Utc))
+fn parse_time(text: Option<&str>) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(text?, &Rfc3339).ok()
 }
 
-/// `now` plus `wait`, saturating at the end of chrono's range instead of
-/// panicking on an injected clock near it.
-fn after(now: DateTime<Utc>, wait: Duration) -> DateTime<Utc> {
-    chrono::TimeDelta::from_std(wait)
+/// `now` plus `wait`, saturating at the end of the representable range
+/// instead of panicking on an injected clock near it.
+fn after(now: OffsetDateTime, wait: Duration) -> OffsetDateTime {
+    time::Duration::try_from(wait)
         .ok()
-        .and_then(|span| now.checked_add_signed(span))
-        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        .and_then(|span| now.checked_add(span))
+        .unwrap_or(time::PrimitiveDateTime::MAX.assume_utc())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-10-21T09:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn now() -> OffsetDateTime {
+        OffsetDateTime::parse("2026-10-21T09:00:00Z", &Rfc3339).unwrap()
     }
 
     const KEY: &str = "https://index.example/grimoire";
@@ -666,7 +666,8 @@ mod tests {
             ("Wed, 21 Oct 2026 09:28:00 GMT", Some(1680)),
             ("Wed, 21 Oct 2026 07:28:00 GMT", Some(0)),
             ("Wed, 21 Oct 2026 09:28:00 +0200", Some(0)),
-            ("Mon, 21 Oct 2026 09:28:00 GMT", None),
+            // a wrong weekday is ignored
+            ("Mon, 21 Oct 2026 09:28:00 GMT", Some(1680)),
             ("Wed, 21 Oct 2026 09:28:00", None),
             ("2026-10-21T09:02:00Z", None),
             ("garbage", None),
@@ -674,7 +675,8 @@ mod tests {
             ("21 Oct 2026 09:28:00 GMT", Some(1680)),
             ("Wed, 21 Oct 2026 09:28:00 gmt", Some(1680)),
             ("wed, 21 oct 2026 09:28:00 GMT", Some(1680)),
-            ("Wed, 21 Oct 2026 09:28:60 GMT", Some(1740)),
+            // a leap second `:60` is rejected
+            ("Wed, 21 Oct 2026 09:28:60 GMT", None),
             ("Wed, 21 Oct 2026 09:28 GMT", Some(1680)),
         ];
         for (value, secs) in cases {
@@ -687,7 +689,7 @@ mod tests {
         assert_eq!(
             RetryAfter::parse(
                 "Wed, 21 Oct 2026 09:02:00 GMT",
-                now() + chrono::TimeDelta::milliseconds(500)
+                now() + time::Duration::milliseconds(500)
             ),
             Some(RetryAfter(Duration::from_millis(119_500))),
             "the wait keeps the sub-second remainder"
@@ -703,12 +705,12 @@ mod tests {
         // 500 ms of jitter unit gives a 60 s wait; the deadline is then
         // 09:01:00.5 + 0.999999999 s, which stamps as the floor of that second.
         let mut half = SyncState::unbound(KEY);
-        half.on_failure(now() + chrono::TimeDelta::milliseconds(500), None, "down");
+        half.on_failure(now() + time::Duration::milliseconds(500), None, "down");
         assert_eq!(half.last_failure_at.as_deref(), Some("2026-10-21T09:00:00Z"));
         assert_eq!(half.retry_after.as_deref(), Some("2026-10-21T09:01:01Z"));
 
         assert_eq!(
-            rfc3339(now() + chrono::TimeDelta::nanoseconds(999_999_999)),
+            rfc3339(now() + time::Duration::nanoseconds(999_999_999)),
             "2026-10-21T09:00:00Z"
         );
     }
@@ -725,7 +727,8 @@ mod tests {
             // lenient forms
             ("2026-10-21t09:00:00z", Some("2026-10-21T09:00:00Z")),
             ("2026-10-21 09:00:00Z", Some("2026-10-21T09:00:00Z")),
-            ("2026-10-21T09:00:60Z", Some("2026-10-21T09:00:60Z")),
+            // a leap second `:60` is rejected
+            ("2026-10-21T09:00:60Z", None),
         ];
         for (text, want) in cases {
             assert_eq!(parse_time(Some(text)).map(rfc3339).as_deref(), want, "{text:?}");
@@ -739,16 +742,13 @@ mod tests {
         assert!(parsed.0 > BACKOFF_MAX);
     }
 
-    fn at(offset_secs: i64) -> DateTime<Utc> {
-        now() + chrono::TimeDelta::seconds(offset_secs)
+    fn at(offset_secs: i64) -> OffsetDateTime {
+        now() + time::Duration::seconds(offset_secs)
     }
 
     fn wait_of(state: &SyncState) -> Duration {
-        parse_time(state.retry_after.as_deref())
-            .expect("a failure schedules a retry")
-            .signed_duration_since(now())
-            .to_std()
-            .expect("the retry lies ahead")
+        let until = parse_time(state.retry_after.as_deref()).expect("a failure schedules a retry");
+        Duration::try_from(until - now()).expect("the retry lies ahead")
     }
 
     #[test]
@@ -774,7 +774,7 @@ mod tests {
         let mut early = SyncState::unbound(KEY);
         let mut late = SyncState::unbound(KEY);
         early.on_failure(now(), None, "down");
-        late.on_failure(now() + chrono::TimeDelta::milliseconds(999), None, "down");
+        late.on_failure(now() + time::Duration::milliseconds(999), None, "down");
         assert_eq!(wait_of(&early), Duration::from_secs(48));
         assert!(wait_of(&late) > wait_of(&early));
     }

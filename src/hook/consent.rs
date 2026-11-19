@@ -80,11 +80,6 @@ use crate::install::hook_dispatch;
 use crate::lock::locked_source::LockedSource;
 use crate::oci::{ArtifactKind, Identifier};
 
-/// Timestamp format for [`ConsentRecord::consented_at`] — RFC 3339, UTC,
-/// second precision. Provenance for a human reading the file; nothing reads it
-/// back, and in particular consent **never expires**.
-const CONSENTED_AT_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
-
 /// The on-disk schema version.
 ///
 /// A `serde_repr` enum rather than an integer field, following
@@ -331,7 +326,9 @@ pub fn record(
         v: ConsentVersion::V1,
         workspace: workspace.to_path_buf(),
         hooks: hooks.clone(),
-        consented_at: chrono::Utc::now().format(CONSENTED_AT_FORMAT).to_string(),
+        // RFC 3339, UTC, second precision. Provenance for a human reading the
+        // file; nothing reads it back, and in particular consent **never expires**.
+        consented_at: grimoire_hook_core::time::rfc3339_utc(std::time::SystemTime::now()),
     };
     let bytes = serde_json::to_vec_pretty(&record).map_err(io::Error::other)?;
     // No advisory lock, and none is needed: one file per workspace means there

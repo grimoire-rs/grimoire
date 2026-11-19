@@ -1289,7 +1289,7 @@ mod tests {
             "registry": url,
             "scope": "",
             "truncated": truncated,
-            "built_at": chrono::Utc::now().to_rfc3339(),
+            "built_at": grimoire_hook_core::time::rfc3339_utc(std::time::SystemTime::now()),
             "entries": entries,
         });
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -1443,7 +1443,7 @@ mod tests {
                 "registry": "https://index.example",
                 "scope": "",
                 "truncated": false,
-                "built_at": chrono::Utc::now().to_rfc3339(),
+                "built_at": grimoire_hook_core::time::rfc3339_utc(std::time::SystemTime::now()),
                 "entries": {
                     "ghcr.io/acme/rated": {
                         "registry": "ghcr.io", "repository": "acme/rated", "kind": "skill",
@@ -1493,7 +1493,7 @@ mod tests {
                 "registry": "https://index.example",
                 "scope": "",
                 "truncated": false,
-                "built_at": chrono::Utc::now().to_rfc3339(),
+                "built_at": grimoire_hook_core::time::rfc3339_utc(std::time::SystemTime::now()),
                 "entries": {
                     "ghcr.io/acme/x": {
                         "registry": "ghcr.io", "repository": "acme/x", "kind": "skill",

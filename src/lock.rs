@@ -6,7 +6,7 @@
 //!
 //! Adapted from OCX `project::{lock,project_lock,error}`, trimmed to the
 //! Grimoire scope: skills/rules split by kind, no `projects.json` GC
-//! registry, `chrono` for RFC3339, and the atomic write delegated to the
+//! registry, `time` for RFC3339, and the atomic write delegated to the
 //! shared `store::atomic_write` primitive.
 
 pub mod advisory_lock;

@@ -22,7 +22,7 @@ use crate::store::atomic_write::atomic_write_through_symlink;
 
 /// Current UTC time as an RFC3339 string (`%Y-%m-%dT%H:%M:%SZ`).
 pub fn now_rfc3339() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    grimoire_hook_core::time::rfc3339_utc(std::time::SystemTime::now())
 }
 
 /// Load a lock from `path`, enforcing [`config::FILE_SIZE_LIMIT_BYTES`].
@@ -300,14 +300,9 @@ fn lists_content_equal(a: &[LockedArtifact], b: &[LockedArtifact]) -> bool {
 /// `iso` + 1 second, preserving the `%Y-%m-%dT%H:%M:%SZ` shape. `None`
 /// if `iso` is not RFC3339 — callers fall back to their own timestamp.
 fn bump_one_second(iso: &str) -> Option<String> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
-    let bumped = parsed.checked_add_signed(chrono::Duration::seconds(1))?;
-    Some(
-        bumped
-            .with_timezone(&chrono::Utc)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string(),
-    )
+    let parsed = time::OffsetDateTime::parse(iso, &time::format_description::well_known::Rfc3339).ok()?;
+    let bumped = parsed.checked_add(time::Duration::seconds(1))?;
+    Some(grimoire_hook_core::time::rfc3339_utc(bumped.into()))
 }
 
 #[cfg(test)]

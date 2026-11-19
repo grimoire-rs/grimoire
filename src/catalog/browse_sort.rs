@@ -157,9 +157,10 @@ impl SortKey {
 /// --format=%cI`), so `2026-01-01T00:30:00+02:00` precedes
 /// `2026-01-01T00:00:00Z` in time while following it lexicographically.
 fn epoch_millis(created: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(created)
+    time::OffsetDateTime::parse(created, &time::format_description::well_known::Rfc3339)
         .ok()
-        .map(|t| t.timestamp_millis())
+        // Floor, not `/`: plain division truncates toward zero, so a pre-epoch fraction would round up.
+        .map(|t| t.unix_timestamp_nanos().div_euclid(1_000_000) as i64)
 }
 
 /// Bigger first, with `None` as its own bucket underneath every value.
@@ -379,7 +380,8 @@ mod tests {
         let lenient = [
             ("2026-01-01t00:00:00z", Some(1_767_225_600_000)),
             ("2026-01-01 00:00:00Z", Some(1_767_225_600_000)),
-            ("2026-01-01T00:00:60Z", Some(1_767_225_660_000)),
+            // a leap second `:60` is rejected
+            ("2026-01-01T00:00:60Z", None),
         ];
         for (created, millis) in lenient {
             assert_eq!(epoch_millis(created), millis, "{created:?}");
