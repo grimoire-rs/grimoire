@@ -198,7 +198,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         super::access_seam(ctx)
     })
     .await
-    .map_err(|e| declare_error(e, &scope.config_path, &scope.invocation))?;
+    .map_err(|e| declare_error(e, &scope.config_path, &scope.invocation, ctx.offline()))?;
 
     // At 1.0 a declared name is a true per-scope-unique key: declaring
     // `(kind, name)` against a *different repository* than what is already
@@ -653,7 +653,7 @@ async fn add_path_source(
         &no_access,
     )
     .await
-    .map_err(|e| declare_error(e, &scope.config_path, &scope.invocation))?;
+    .map_err(|e| declare_error(e, &scope.config_path, &scope.invocation, ctx.offline()))?;
 
     // Same-name conflict guard, on full-source equality rather than the
     // registry path's repository comparison: a path pins by content hash and
@@ -1701,10 +1701,15 @@ fn overrides(args: &AddArgs) -> DeclareOverrides {
 }
 
 /// Map a [`DeclareError`] to the exact error `grim add` raised before the
-/// seam was extracted: the four registry misses are one
-/// [`CommandError::KindInferenceFailed`] (65), path-shape refusals a usage
-/// error (64), path-value failures a config error on `config_path`.
-fn declare_error(e: DeclareError, config_path: &std::path::Path, grim: &Invocation) -> anyhow::Error {
+/// seam was extracted: the registry misses are one
+/// [`CommandError::KindInferenceFailed`] (65) except offline cache misses
+/// (see below), path-shape refusals a usage error (64), path-value
+/// failures a config error on `config_path`.
+/// Under `offline`, an [`DeclareError::Unresolved`] or
+/// [`DeclareError::NoManifest`] is an offline cache miss, not a missing
+/// kind: it surfaces as the offline-blocked error (81), the same
+/// disambiguation export's `declare_failure` already makes (#358).
+fn declare_error(e: DeclareError, config_path: &std::path::Path, grim: &Invocation, offline: bool) -> anyhow::Error {
     let config_error =
         |kind| crate::error::Error::from(crate::config::ConfigError::new(config_path.to_path_buf(), kind));
     let err = match e {
@@ -1712,6 +1717,17 @@ fn declare_error(e: DeclareError, config_path: &std::path::Path, grim: &Invocati
         DeclareError::Reference(e) => crate::error::Error::from(e),
         DeclareError::Access(e) => crate::error::Error::from(e),
         DeclareError::Source(e) => crate::error::Error::from(e),
+        // Offline, an unresolvable reference or a missing manifest is a
+        // cache miss, not a missing kind: the `Query` lookup answers
+        // `Ok(None)` for both, and only the caller's offline flag tells
+        // them apart. Surface the offline-blocked error (81) so the user
+        // is not sent to `--kind`, a flag that cannot help offline.
+        DeclareError::Unresolved { reference } | DeclareError::NoManifest { reference } if offline => {
+            crate::error::Error::from(crate::oci::access::error::AccessError {
+                identifier: crate::oci::Identifier::parse(&reference).ok(),
+                kind: crate::oci::access::error::AccessErrorKind::OfflineMiss,
+            })
+        }
         DeclareError::Unresolved { reference }
         | DeclareError::Unpinnable { reference }
         | DeclareError::NoManifest { reference }
@@ -1769,9 +1785,11 @@ pub(crate) struct Declared {
 /// Why [`declare_reference`] could not produce a [`Declared`].
 ///
 /// Each variant keeps its underlying cause so every caller can map it to
-/// its own exit code: `grim add` folds the three registry misses into
-/// [`CommandError::KindInferenceFailed`] (65) exactly as before, while
-/// export tells a missing tag or manifest (79) from a foreign image (65).
+/// its own exit code: `grim add` folds the registry misses into
+/// [`CommandError::KindInferenceFailed`] (65), except an unresolved
+/// reference or missing manifest under offline mode, which it reports as
+/// offline-blocked (81); export tells a missing tag or manifest (79) from
+/// a foreign image (65).
 /// Messages of the path-shape variants are the text `grim add` has always
 /// printed as a usage error. Every registry `reference` is the expanded
 /// identifier's `Display` (`:latest` added when the input had no tag).
@@ -2076,7 +2094,10 @@ fn invalid_binding(kind: ArtifactKind, binding: &str) -> Option<DeclareError> {
 /// reference that does not resolve, cannot be pinned, has no manifest, or
 /// carries no/unknown kind annotation (a non-Grimoire image) yields its own
 /// [`DeclareError`] variant; `grim add` folds all four into
-/// [`CommandError::KindInferenceFailed`] so the user can pass `--kind`.
+/// [`CommandError::KindInferenceFailed`] so the user can pass `--kind`,
+/// except an unresolved reference or missing manifest under offline mode,
+/// which it reports as offline-blocked instead (the `Query` lookup cannot
+/// tell a cache miss from a missing tag — see `declare_error`).
 ///
 /// # Errors
 ///
@@ -5027,8 +5048,13 @@ style = \"ghcr.io/acme/rules/style:1\"
         use crate::error::classify_error;
         use crate::oci::access::error::{AccessError, AccessErrorKind};
 
-        fn mapped(e: DeclareError) -> (ExitCode, String) {
-            let err = declare_error(e, std::path::Path::new("/p/grimoire.toml"), &Invocation::WALKED);
+        fn mapped(e: DeclareError, offline: bool) -> (ExitCode, String) {
+            let err = declare_error(
+                e,
+                std::path::Path::new("/p/grimoire.toml"),
+                &Invocation::WALKED,
+                offline,
+            );
             (classify_error(&err), format!("{err:#}"))
         }
 
@@ -5041,12 +5067,39 @@ style = \"ghcr.io/acme/rules/style:1\"
                 DeclareError::NoManifest { reference: reference() },
                 DeclareError::NoKind { reference: reference() },
             ] {
-                let (exit, msg) = mapped(e);
+                let (exit, msg) = mapped(e, false);
                 assert_eq!(exit, ExitCode::DataError, "{msg}");
                 assert!(
                     msg.contains("could not infer the kind of 'localhost:5000/acme/x:latest'; pass --kind"),
                     "{msg}"
                 );
+            }
+        }
+
+        /// Issue #358: offline, an uncached artifact must blame offline mode,
+        /// not the missing `--kind`. Online the same misses still fold into
+        /// kind inference (65).
+        #[test]
+        fn c003_offline_cache_miss_is_offline_blocked_81_not_kind_inference() {
+            let reference = || "localhost:5000/acme/x:latest".to_string();
+            for e in [
+                DeclareError::Unresolved { reference: reference() },
+                DeclareError::NoManifest { reference: reference() },
+            ] {
+                let (exit, msg) = mapped(e, true);
+                assert_eq!(exit, ExitCode::OfflineBlocked, "{msg}");
+                assert!(
+                    msg.contains("offline mode blocked a required network operation"),
+                    "{msg}"
+                );
+            }
+            for e in [
+                DeclareError::Unresolved { reference: reference() },
+                DeclareError::NoManifest { reference: reference() },
+            ] {
+                let (exit, msg) = mapped(e, false);
+                assert_eq!(exit, ExitCode::DataError, "{msg}");
+                assert!(msg.contains("could not infer the kind of"), "{msg}");
             }
         }
 
@@ -5078,7 +5131,7 @@ style = \"ghcr.io/acme/rules/style:1\"
                 ),
             ];
             for (e, text) in cases {
-                let (exit, msg) = mapped(e);
+                let (exit, msg) = mapped(e, false);
                 assert_eq!(exit, ExitCode::UsageError, "{msg}");
                 assert!(msg.contains(text), "{msg}");
             }
@@ -5088,10 +5141,13 @@ style = \"ghcr.io/acme/rules/style:1\"
         /// and every other kind stays a usage error.
         #[test]
         fn a_settings_binding_refusal_is_data_where_other_kinds_stay_usage() {
-            let (exit, msg) = mapped(DeclareError::InvalidBindingName {
-                kind: ArtifactKind::Settings,
-                reason: "bad".to_string(),
-            });
+            let (exit, msg) = mapped(
+                DeclareError::InvalidBindingName {
+                    kind: ArtifactKind::Settings,
+                    reason: "bad".to_string(),
+                },
+                false,
+            );
             assert_eq!(exit, ExitCode::DataError, "{msg}");
 
             let err = refuse_bad_binding_name(ArtifactKind::Settings, "Team/Defaults").expect_err("bad binding");
@@ -5104,17 +5160,21 @@ style = \"ghcr.io/acme/rules/style:1\"
 
         #[test]
         fn c003_path_value_failures_are_config_errors_on_the_config_path() {
-            let (exit, msg) = mapped(DeclareError::PathInvalid {
-                name: "rust-style".to_string(),
-                value: "/weird/rust-style.md".to_string(),
-                reason: "backslash".to_string(),
-            });
+            let (exit, msg) = mapped(
+                DeclareError::PathInvalid {
+                    name: "rust-style".to_string(),
+                    value: "/weird/rust-style.md".to_string(),
+                    reason: "backslash".to_string(),
+                },
+                false,
+            );
             assert_eq!(exit, ExitCode::DataError, "{msg}");
             assert!(msg.contains("artifact 'rust-style': path value"), "{msg}");
 
-            let (exit, msg) = mapped(DeclareError::ConfigDirIo(std::io::Error::from(
-                std::io::ErrorKind::NotFound,
-            )));
+            let (exit, msg) = mapped(
+                DeclareError::ConfigDirIo(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                false,
+            );
             assert_eq!(exit, ExitCode::NotFound, "{msg}");
             assert!(msg.contains("/p/grimoire.toml"), "{msg}");
         }
@@ -5124,14 +5184,14 @@ style = \"ghcr.io/acme/rules/style:1\"
             let setup = anyhow::Error::from(crate::error::Error::from(CommandError::ConfigUsage(
                 "setup failed".to_string(),
             )));
-            let (exit, msg) = mapped(DeclareError::AccessSetup(setup));
+            let (exit, msg) = mapped(DeclareError::AccessSetup(setup), false);
             assert_eq!(exit, ExitCode::UsageError, "{msg}");
             assert_eq!(msg, "setup failed");
 
             let auth = AccessError::without_identifier(AccessErrorKind::Authentication(Box::new(
                 std::io::Error::other("denied"),
             )));
-            assert_eq!(mapped(DeclareError::Access(auth)).0, ExitCode::AuthError);
+            assert_eq!(mapped(DeclareError::Access(auth), false).0, ExitCode::AuthError);
         }
     }
 

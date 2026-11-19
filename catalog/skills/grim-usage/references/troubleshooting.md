@@ -27,7 +27,7 @@ no stderr parsing needed:
 | 1 | Failure | unclassified fall-through |
 | 64 | Usage error | bad invocation; `grim init` when the config already exists; invalid `grim fetch` flag combinations; a release/publish tag colliding with the reserved `__grimoire` namespace; a dotted config key naming a client that does not exist (`options.vendors.<typo>.shared_skills` is an *unknown key*, not a bad value) |
 | 65 | Data error | validation failures of any kind — see below; a dependency graph over the resolve's work or tag-listing budget |
-| 69 | Unavailable | registry unreachable, resolve timeout; an offline `grim lock`, `add --kind <kind>` or `update` whose resolve needs a tag or manifest the cache lacks (offline, `add` without `--kind` exits 65 and `update --marketplace` exits 81) |
+| 69 | Unavailable | registry unreachable, resolve timeout; an offline `grim lock`, `add --kind <kind>` or `update` whose resolve needs a tag or manifest the cache lacks (offline, `add` without `--kind` exits 81 and `update --marketplace` exits 81) |
 | 74 | I/O error | filesystem read/write failure (non-permission) |
 | 75 | Temporary failure | another grim process holds the lock; Cline's own lock on its MCP settings file; a settings file changed during the run, left untouched; credential-helper timeout — retry |
 | 77 | No permission | permission denied anywhere in the chain |
@@ -581,10 +581,10 @@ before you treat a 69 as an outage. That covers `grim lock`, `add` and
 `update` on a tag or manifest the cache lacks. The message says offline
 mode blocked a required network operation.
 
-Two offline runs exit otherwise. `grim add` without `--kind` exits 65 on an
-uncached reference, because it cannot infer the kind. Pass `--kind` there.
-`grim update --marketplace` exits 81 where it needs the network, a recorded
-bundle digest the store lacks included.
+One offline run exits otherwise. `grim update --marketplace` exits 81 where it needs the network, a recorded
+bundle digest the store lacks included. `grim add` without `--kind` also exits 81 on an
+uncached reference: offline mode blocks the fetch the kind inference needs, so it never
+reaches the kind-inference error (exit 65). Passing `--kind` does not help there; warm the cache online first.
 
 ## Auth Failures
 
