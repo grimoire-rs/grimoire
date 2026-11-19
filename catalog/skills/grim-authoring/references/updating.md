@@ -10,7 +10,7 @@ first:
 
 1. **The installed binary** — `grim build` output and `grim build --help`
    reflect the schema actually compiled in. For the TOML surfaces,
-   `grim schema --kind <config|publish|lock|mcp|hook|settings>` emits the schema
+   `grim schema --kind <config|publish|lock|mcp|hook|settings|mod>` emits the schema
    generated from grim's own parse structs, doc comments included — for
    `hook.toml` this is the shortest path to ground truth, shorter than
    reading the source.

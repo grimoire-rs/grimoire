@@ -1,22 +1,22 @@
 ---
 name: grim-authoring
-description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, hook manifests, settings documents, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when writing a hook.toml with its events, tiers, matchers, and handlers; when creating or maintaining a plugin marketplace git repository (marketplace.toml, grim export marketplace, regenerate CI) or hosting a package index; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
+description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, hook manifests, settings documents, bundle TOMLs, and mod directories. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when writing a hook.toml with its events, tiers, matchers, and handlers; when creating or maintaining a plugin marketplace git repository (marketplace.toml, grim export marketplace, regenerate CI) or hosting a package index; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
 license: Apache-2.0
 compatibility: grim>=0.16
 metadata:
-  summary: Deep authoring guide for grim skill, rule, agent, mcp, hook, settings, and bundle artifacts
-  keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,hook,settings,bundle,packaging
+  summary: Deep authoring guide for grim skill, rule, agent, mcp, hook, settings, bundle, and mod artifacts
+  keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,hook,settings,bundle,mod,packaging
   repository: https://github.com/grimoire-rs/grimoire
 ---
 
 # Grim Artifact Authoring
 
-Grim publishes seven artifact kinds to OCI registries. Each has its own
+Grim publishes eight artifact kinds to OCI registries. Each has its own
 source shape, frontmatter schema, and validation gates. This root file
 holds the invariants that apply to every kind; per-kind depth lives in
 `references/`, loaded via the routing table below.
 
-## The Seven Kinds
+## The Eight Kinds
 
 `grim build` and `grim release` infer the kind from the path — except
 agents (always `--kind agent`, or they silently pack as rules), MCP
@@ -32,6 +32,7 @@ bundle and the build exits 78).
 | MCP server | `.toml` descriptor with a `[server]` table | **never — `--kind mcp` mandatory** | Entry in each client's MCP config file, per-client render |
 | Hook | Directory with a `hook.toml` manifest + its payload files | directory with `hook.toml` → hook | Payload tree materialized once per scope, one recorded output per client. **Arming is gated and off by default** — see [hook-spec.md](references/hook-spec.md) |
 | Settings (experimental) | `settings/<name>.toml`: top-level catalog keys plus one table per harness (`claude`, `codex`, `copilot`, `cursor`, `opencode`, `qoder`, `antigravity`, `amp`, `droid`, `gemini`, `kilo`, `kiro`, `warp`) | **never — `--kind settings` mandatory** | Values merged into each harness's own settings file, never a file of its own. **Applies only past its flag and workspace consent** — see [Settings Ship Gated](#settings-ship-gated) |
+| Mod (experimental) | Directory with a `mod.toml` descriptor plus `claude/` and/or `opencode/` code directories | directory with `mod.toml` (after `SKILL.md` and `hook.toml`) | Client-loaded code written per client (`.claude/mods/<binding>/`, `.opencode/plugins/<binding>/`). **Gated like settings and hooks** — see [references/mod-spec.md](references/mod-spec.md) |
 | Bundle | `.toml` member list | `.toml` → bundle | Never materializes — expands to its members |
 
 A skill or hook directory can drop a `.grimignore`
@@ -61,13 +62,13 @@ rename cannot silently reclassify the artifact.
 
 Any kind except a bundle can declare the artifacts it needs, and installing it
 installs them too. The grammar is one table per target kind (`skills`,
-`rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`) mapping a binding
+`rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`, `mods`) mapping a binding
 name to a reference, relative (`./shared:1`) or fully qualified:
 
 | Kind | Where it lives |
 |---|---|
 | Skill, rule, agent | `grim.requires.<table>.<name>` keys in frontmatter `metadata` |
-| MCP server, hook, settings | `[requires.<table>]` tables in the descriptor / `hook.toml` / settings document (kept out of the settings layer) |
+| MCP server, hook, settings, mod | `[requires.<table>]` tables in the descriptor / `hook.toml` / settings document / `mod.toml` (kept out of the settings layer) |
 | Bundle | a `[bundles]` table: nested bundles |
 
 A tag on a `requires` reference is a version claim: `:2` means "any 2.x" and
@@ -161,7 +162,7 @@ separate:
 
 1. **Is the feature on?** `options.experimental.hooks`, off by default.
 2. **Has this workspace consented?** A machine-local consent record under
-   `$GRIM_HOME/hooks/consent/`, one file per workspace, naming the checkout
+   `$GRIM_HOME/consent/`, one file per workspace, naming the checkout
    by absolute path and listing the hooks it covers as
    `<binding>@<registry>/<repository>`. Global scope is always consented and
    carries no record.
@@ -206,14 +207,23 @@ payload tree — and by default nothing armed. Write the hook's
 your hook to consumers as something that fires on install. Consumers
 inspect what they have with `grim hook list`.
 
+## Mods Ship Gated
+
+A mod is the third experimental kind, gated the same two ways:
+`options.experimental.mods` (off by default, config-only) and workspace
+consent through the one shared record. Consent decides what grim writes,
+never what a client loads. A skill whose root carries a `.claude-plugin`
+directory is refused at build and publish (exit 65, `skill-plugin-manifest`);
+ship client-loaded code as a mod. Depth: `references/mod-spec.md`.
+
 ## Settings Ship Gated
 
 A settings package is the second experimental kind, and it is gated the
 same two ways. `options.experimental.settings` is off by default and
 config-only. At project scope the workspace must also have consented: the
-hook consent record carries `settings:<binding>@<registry>/<repository>`
-keys beside the hook keys, so `grim hook allow` (alias `grim consent
-allow`) and the `--trust-workspace` pair answer for both kinds. Global scope
+workspace consent record carries the settings bindings as unprefixed
+`<binding>@<registry>/<repository>` entries beside the hook entries, so `grim hook allow` (alias `grim consent
+allow`) and the `--trust-workspace` pair answer for every gated kind. Global scope
 is always consented. A consumer who adds your package with the flag off gets
 a declaration and a lock pin, and nothing written.
 
@@ -378,6 +388,7 @@ Four surfaces, and the choice can change what you author:
 | [references/rule-spec.md](references/rule-spec.md) | Authoring a rule file, its globs, or replacing a rule's support directory with a support skill |
 | [references/agent-spec.md](references/agent-spec.md) | Authoring an agent definition or its vendor overrides |
 | [references/mcp-spec.md](references/mcp-spec.md) | Authoring an MCP server descriptor or its env references |
+| [references/mod-spec.md](references/mod-spec.md) | Authoring a `mod.toml` and its `claude/` or `opencode/` code, entries, served clients, publishing and testing against a local registry |
 | [references/hook-spec.md](references/hook-spec.md) | Authoring a `hook.toml`, choosing an event and tier, writing a matcher, or fixing the payload-not-executable refusal |
 | [references/bundle-spec.md](references/bundle-spec.md) | Authoring a bundle TOML or choosing pinning strategy |
 | [Settings][settings] (docs site) | Authoring a settings document: harness tables, merge classes, the field table, limits |
@@ -396,7 +407,7 @@ incomplete, the docs page is the source of truth:
 [Artifact Reference][artifacts] · [Vendor-Specific Metadata][vendor] ·
 [Publishing][publishing] · [Agent Artifacts][agents] ·
 [Client Compatibility][clients]. For the TOML
-surfaces, `grim schema --kind <config|publish|lock|mcp|hook|settings>` prints the
+surfaces, `grim schema --kind <config|publish|lock|mcp|hook|settings|mod>` prints the
 JSON Schema generated from grim's own parsers — bind it in your editor to
 catch manifest typos before any command runs. `--kind hook` is the fastest
 way to read the authoritative `hook.toml` shape, because the schema

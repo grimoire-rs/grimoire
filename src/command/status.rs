@@ -69,14 +69,22 @@ use crate::install::hook_registrar::{
 };
 use crate::install::install_state::{
     ClientOutput, CommitOutcome, InstallRecord, InstallState, ProvenRecord, SettingsStore, SkipCause, active_outputs,
+    own_file_hash, settings_value_hash,
 };
 use crate::install::installer::{client_hosts, client_supports_kind};
+use crate::install::json_splice::PointerRead;
 use crate::install::launcher::{self, LauncherState};
-use crate::install::path_anchor::{AnchorRoots, AnchoredPath, Containment};
+use crate::install::mod_phase;
+use crate::install::mod_store::{ModStore, ModStoreSlot};
+use crate::install::path_anchor::{AnchorRoots, AnchoredPath, Containment, PathAnchor};
 use crate::install::progress::InstallProgress;
-use crate::install::settings_phase::{RootFence, SettingsDecline, recorded_refusal, report_fence, settings_surface};
+use crate::install::settings_phase::{
+    RootFence, SettingsDecline, recorded_refusal, report_fence, root_refusal, settings_surface,
+};
 use crate::install::settings_store;
+use crate::install::settings_writer;
 use crate::install::target::{InstallTarget, active_clients, clients_note};
+use crate::install::vendor::McpConfigFormat;
 use crate::lock::effective_set::{EffectiveGraph, NodeKey};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -458,7 +466,7 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
     ))?;
     // One hash per recorded output a run: the candidate pass and the report share it.
     let hashes = OutputHashes::default();
-    let state = adopt_proven(
+    let mut state = adopt_proven(
         ctx,
         &scope,
         lock.as_ref(),
@@ -470,6 +478,19 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
         progress,
     )
     .await;
+
+    // A mod record lives only in the mod store, never in a state file, so the
+    // rows read it from there; the in-memory state then derives them as any kind.
+    let mod_store = if declares_mods(&scope.set, lock.as_ref()) {
+        let (_slot, store): (ModStoreSlot, ModStore) =
+            ModStoreSlot::open(&scope.roots.grim_home, &scope.workspace, scope.scope);
+        for record in &store.records {
+            state.record(record.clone());
+        }
+        Some(store)
+    } else {
+        None
+    };
 
     // The *explicitly configured* client set, or `None` under autodetect —
     // a deliberately narrower question than `target` above, and it must stay
@@ -493,6 +514,11 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
         Some(SettingsArmingInputs::resolve(ctx, &scope, &target, lock.as_ref(), &state).await?)
     } else {
         None
+    };
+
+    let mod_inputs = match &mod_store {
+        Some(store) => Some(ModArmingInputs::resolve(ctx, &scope, &target, lock.as_ref(), store).await?),
+        None => None,
     };
 
     let prov = Provenance::new(&scope.set, lock.as_ref());
@@ -580,6 +606,7 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
             direct: true,
             required_by: prov.required_by(&(ArtifactKind::Bundle, name.clone())),
             moved_nested_bundles: None,
+            serves: None,
         });
     }
 
@@ -598,6 +625,7 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
             record,
             &scope.roots,
         );
+        let mod_row = mod_arming_for_row(decl.kind, &decl.name, locked, mod_inputs.as_ref(), record, &scope.roots);
         let mut entry_state = derive_settings_aware(
             settings_row.as_ref(),
             || {
@@ -627,8 +655,14 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
             Some(path) => format!("path: {path}"),
             None => "direct".to_string(),
         };
-        let (clients_missing, clients_extra) =
-            row_client_drift(desired_clients.as_deref(), record, decl.kind, &decl.name, &scope);
+        let (clients_missing, clients_extra) = row_client_drift(
+            desired_clients.as_deref(),
+            record,
+            decl.kind,
+            &decl.name,
+            locked,
+            &scope,
+        );
         // C-017: a `hook` row's real state is its per-client arming verdict,
         // not its materialization lifecycle. A hook whose payload is on disk
         // and whose registration was refused is `not-armed`, NOT `installed` —
@@ -648,6 +682,13 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
             warn_unarmed(decl.kind, &decl.name, &row.arming);
             entry_state = settings_row_state(entry_state, &row);
             arming = row.arming;
+        }
+        let mut serves = None;
+        if let Some(row) = mod_row {
+            warn_unarmed(decl.kind, &decl.name, &row.arming);
+            entry_state = mod_row_state(entry_state, &row);
+            arming = row.arming;
+            serves = row.serves;
         }
         // A registry-locked row is eligible for a fresh update re-resolution
         // (issue #43); path/dev rows carry no pin. Bundle rows and bundle
@@ -695,6 +736,7 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
             direct: true,
             required_by,
             moved_nested_bundles: None,
+            serves,
         });
     }
 
@@ -740,6 +782,7 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
             direct: false,
             required_by: prov.required_by(&(record.kind, record.name.clone())),
             moved_nested_bundles: None,
+            serves: None,
         });
     }
 
@@ -767,6 +810,14 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
                 record,
                 &scope.roots,
             );
+            let mod_row = mod_arming_for_row(
+                member.kind,
+                &member.name,
+                Some(member),
+                mod_inputs.as_ref(),
+                record,
+                &scope.roots,
+            );
             let mut st = derive_settings_aware(
                 settings_row.as_ref(),
                 || {
@@ -787,8 +838,14 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
             // multi-provenance), comma-joined in lock order.
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
             let outputs = record_outputs(record, &active, &scope.roots);
-            let (clients_missing, clients_extra) =
-                row_client_drift(desired_clients.as_deref(), record, member.kind, &member.name, &scope);
+            let (clients_missing, clients_extra) = row_client_drift(
+                desired_clients.as_deref(),
+                record,
+                member.kind,
+                &member.name,
+                Some(member),
+                &scope,
+            );
             let outputs_pending = pending_outputs_for(record, member.kind, &member.name, &target, &scope.roots);
             // A bundle-provided hook is a first-class member (`effective_set`
             // lists `(Hook, set.hooks)`), so its arming verdict is reported the
@@ -811,6 +868,13 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
                 warn_unarmed(member.kind, &member.name, &row.arming);
                 st = settings_row_state(st, &row);
                 arming = row.arming;
+            }
+            let mut serves = None;
+            if let Some(row) = mod_row {
+                warn_unarmed(member.kind, &member.name, &row.arming);
+                st = mod_row_state(st, &row);
+                arming = row.arming;
+                serves = row.serves;
             }
             // A member's own reference can float independently of the bundle
             // that carries it (`stack:1.0.0` listing `code-review:stable`):
@@ -858,6 +922,7 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
                 direct: false,
                 required_by: prov.required_by(&member_key),
                 moved_nested_bundles: None,
+                serves,
             });
         }
     }
@@ -1960,6 +2025,7 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
         (&scope.set.mcp, ArtifactKind::Mcp),
         (&scope.set.hooks, ArtifactKind::Hook),
         (&scope.set.settings, ArtifactKind::Settings),
+        (&scope.set.mods, ArtifactKind::Mod),
     ];
     for (table, kind) in tables {
         for (name, source) in table.iter() {
@@ -2912,6 +2978,381 @@ pub(crate) fn settings_row_state(lifecycle: ArtifactStatus, row: &SettingsArming
     }
 }
 
+/// What a mod row's verdicts read, resolved once per `grim status`.
+///
+/// Read from the mod store, the consent record and the lock; no client file
+/// outside grim's own outputs, no client log and no client binary.
+pub(crate) struct ModArmingInputs {
+    policy: HookPolicy,
+    refusal: Option<ArmRefusal>,
+    clients: Vec<ClientTarget>,
+    plugin_api: Option<String>,
+    workspace: PathBuf,
+    scope: ConfigScope,
+    fences: [(ClientTarget, Option<SettingsDecline>); 2],
+    /// `(binding, client)` pairs with a written output git tracks.
+    tracked: BTreeSet<(String, String)>,
+    /// Bindings whose recorded `enabledPlugins` value now reads `false`.
+    disabled: BTreeSet<String>,
+    /// `(binding, client)` pairs a disarm left kept files for.
+    disarmed: BTreeSet<(String, String)>,
+    /// A shared output (the marketplace file or its settings entry) no longer matches a recorded hash.
+    shared_drift: bool,
+}
+
+/// One mod row's verdicts, the state they impose and the clients it serves.
+pub(crate) struct ModArming {
+    pub(crate) arming: Vec<HookArming>,
+    /// Set by a gate or a refusal only; the advisory causes never set it.
+    pub(crate) state: Option<ArtifactStatus>,
+    pub(crate) serves: Option<Vec<String>>,
+    /// A shared output the row lists was edited or removed.
+    pub(crate) drifted: bool,
+}
+
+/// Whether a mod is declared directly or locked, so a project without the kind does no new work.
+fn declares_mods(set: &DesiredSet, lock: Option<&GrimoireLock>) -> bool {
+    !set.mods.is_empty() || lock.is_some_and(|l| l.iter_artifacts().any(|a| a.kind == ArtifactKind::Mod))
+}
+
+/// The Claude plugin tree's directory and the OpenCode plugins directory, as the write half places them.
+fn mod_dir(client: ClientTarget, scope: ConfigScope) -> Option<AnchoredPath> {
+    let (anchor, relative) = match (client, scope) {
+        (ClientTarget::Claude, ConfigScope::Project) => (PathAnchor::Workspace, ".claude/mods"),
+        (ClientTarget::Claude, ConfigScope::Global) => (PathAnchor::VendorRoot(client.vendor().name()), "mods"),
+        (ClientTarget::OpenCode, ConfigScope::Project) => (PathAnchor::Workspace, ".opencode/plugins"),
+        (ClientTarget::OpenCode, ConfigScope::Global) => (PathAnchor::OpenCodeRoot, "plugins"),
+        _ => return None,
+    };
+    Some(AnchoredPath {
+        anchor,
+        relative: relative.to_string(),
+    })
+}
+
+/// The settings root fence for a global mod surface; project scope has none.
+fn mod_fence(
+    client: ClientTarget,
+    roots: &AnchorRoots,
+    scope: ConfigScope,
+    workspace: &Path,
+) -> Option<SettingsDecline> {
+    if scope == ConfigScope::Project {
+        return None;
+    }
+    let fence = RootFence::of(scope);
+    let tree = mod_dir(client, scope)?.lexical(roots);
+    let file = (client == ClientTarget::Claude)
+        .then(|| client.vendor().settings_config_path(workspace, scope))
+        .flatten();
+    tree.into_iter()
+        .chain(file)
+        .find_map(|path| root_refusal(&path, scope, &fence))
+}
+
+impl ModArmingInputs {
+    /// Read the gates and the store-backed advisory evidence.
+    ///
+    /// # Errors
+    ///
+    /// A global config that cannot be loaded (78), while the flag is on and
+    /// `GRIM_HOME` is one grim will read from.
+    pub(crate) async fn resolve(
+        ctx: &Context,
+        scope: &scope_resolution::ResolvedScope,
+        target: &InstallTarget,
+        lock: Option<&GrimoireLock>,
+        store: &ModStore,
+    ) -> anyhow::Result<Self> {
+        let flags = &scope.options.experimental;
+        let refusal = validate_grim_home(&scope.roots.grim_home, &scope.workspace, scope.scope).err();
+        let readable_home = refusal.is_none();
+        let registries = super::hook_consent::policy_registries(ctx, scope, flags.mods_enabled() && readable_home)?;
+        let record = if readable_home {
+            consent::load(&scope.roots.grim_home, &scope.workspace)
+        } else {
+            None
+        };
+        let declared = lock
+            .map(|lock| super::hook_consent::declared_keys(lock, flags))
+            .unwrap_or_default();
+        let inputs = ConsentInputs {
+            flags,
+            flag: None,
+            interactivity: Interactivity::NonInteractive,
+            scope: scope.scope,
+            workspace: &scope.workspace,
+            registries: &registries,
+        };
+        let policy = ConsentPolicies::new(&inputs, record.as_ref(), &declared)
+            .naming(&scope.invocation)
+            .mods;
+        let (workspace, mod_scope) = (target.workspace().to_path_buf(), target.scope());
+        let fences = [ClientTarget::Claude, ClientTarget::OpenCode]
+            .map(|client| (client, mod_fence(client, &scope.roots, mod_scope, &workspace)));
+        let mut tracked = BTreeSet::new();
+        if mod_scope == ConfigScope::Project {
+            for record in &store.records {
+                for output in &record.outputs {
+                    let Ok(path) = output.resolved_target(&scope.roots, Containment::AllowRelocatedAncestor) else {
+                        continue;
+                    };
+                    let Ok(relative) = path.strip_prefix(&workspace) else {
+                        continue;
+                    };
+                    let key = (record.name.clone(), output.client.clone());
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    if !tracked.contains(&key) && is_tracked_within(&workspace, &relative, TRACKED_PROBE_DEADLINE).await
+                    {
+                        tracked.insert(key);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            policy,
+            refusal,
+            clients: target.clients().to_vec(),
+            plugin_api: target.plugin_api().map(str::to_string),
+            workspace,
+            scope: mod_scope,
+            fences,
+            tracked,
+            disabled: disabled_in_client(store, &scope.roots),
+            disarmed: store.disarmed.iter().cloned().collect(),
+            shared_drift: shared_output_drifted(store, &scope.roots),
+        })
+    }
+
+    /// The whole-row gate holding `binding` back, in the order the mod phase
+    /// stops in: a path source, the flag, the `GRIM_HOME` refusal, consent.
+    fn gate(&self, binding: &str, source: &LockedSource) -> Option<(HookArmingCause, String)> {
+        let grim = self.policy.invocation();
+        let cause = match self.policy.verdict(binding, source) {
+            None => HookArmingCause::NotRegistered,
+            Some(Arming::NotArmed(NotArmedReason::FeatureOff)) => HookArmingCause::FeatureFlagOff,
+            _ if self.refusal.is_some() => {
+                let cause = cause_from_refusal(self.refusal?);
+                return Some((cause, cause.message(grim)));
+            }
+            Some(Arming::Armed(_)) => return None,
+            Some(Arming::NotArmed(NotArmedReason::InsecureTransport)) => HookArmingCause::InsecureTransport,
+            Some(Arming::NotArmed(NotArmedReason::ConsentDrifted)) => HookArmingCause::ConsentDrifted,
+            Some(
+                Arming::NotArmed(NotArmedReason::NoTtyToAsk)
+                | Arming::ConsentRequired
+                | Arming::NotArmed(NotArmedReason::FlagDenied | NotArmedReason::ConsentDeclined),
+            ) => HookArmingCause::WorkspaceNotConsented,
+        };
+        let message = self.policy.refusal_reason(binding, source);
+        Some((cause, message.unwrap_or_else(|| cause.message(grim))))
+    }
+}
+
+/// Bindings whose `enabledPlugins` entry for grim's own marketplace reads `false`, in the
+/// settings file the recorded marketplace entry names: grim's own output, never a client file.
+fn disabled_in_client(store: &ModStore, roots: &AnchorRoots) -> BTreeSet<String> {
+    let mut disabled = BTreeSet::new();
+    for shared in &store.shared {
+        let Some(marketplace) = shared
+            .entry
+            .as_deref()
+            .and_then(|entry| entry.strip_prefix("/extraKnownMarketplaces/"))
+        else {
+            continue;
+        };
+        let at = AnchoredPath {
+            anchor: shared.anchor,
+            relative: shared.relative.clone(),
+        };
+        let Ok(path) = at.resolve(roots, Containment::AllowRelocatedAncestor) else {
+            continue;
+        };
+        let Ok(text) = crate::store::read_regular_to_string(&path) else {
+            continue;
+        };
+        let Some(plugins) = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("enabledPlugins").and_then(|p| p.as_object().cloned()))
+        else {
+            continue;
+        };
+        for (key, value) in plugins {
+            if let Some((binding, name)) = key.rsplit_once('@')
+                && name == marketplace
+                && value == serde_json::Value::Bool(false)
+            {
+                disabled.insert(binding.to_string());
+            }
+        }
+    }
+    disabled
+}
+
+/// Whether a shared output no longer matches a hash its slot records: the
+/// marketplace file by bytes, a settings entry by its value. A slot keeps both
+/// generations during a rewrite, so either one is grim's. A user's `false` at an
+/// `enabledPlugins` pointer is no slot, so it is never drift. Reads only.
+fn shared_output_drifted(store: &ModStore, roots: &AnchorRoots) -> bool {
+    store.shared.iter().any(|slot| {
+        let at = AnchoredPath {
+            anchor: slot.anchor,
+            relative: slot.relative.clone(),
+        };
+        let Ok(path) = at.resolve(roots, Containment::AllowRelocatedAncestor) else {
+            return false;
+        };
+        let owns = |hash: &Digest| {
+            store.shared.iter().any(|other| {
+                (&other.client, other.anchor, &other.relative, &other.entry)
+                    == (&slot.client, slot.anchor, &slot.relative, &slot.entry)
+                    && other.content_hash == *hash
+            })
+        };
+        match slot.entry.as_deref() {
+            None => match crate::store::read_regular(&path) {
+                Ok(bytes) => !owns(&own_file_hash(&bytes)),
+                Err(_) => true,
+            },
+            Some(pointer) => {
+                let keys: Vec<String> = pointer.trim_start_matches('/').split('/').map(str::to_string).collect();
+                let Ok(text) = settings_writer::reread(&path) else {
+                    return true;
+                };
+                match settings_writer::read_pointer(McpConfigFormat::Json, &text, &keys) {
+                    Ok(PointerRead::Found(value)) => !owns(&settings_value_hash(&value)),
+                    _ => true,
+                }
+            }
+        }
+    })
+}
+
+/// Why a mod row reads what it reads: the whole-row gate, each hosting client's
+/// fence, then the three advisory causes. Pure over `inputs` but for a look at
+/// the expected paths, so a mod grim did not write is told apart from one it did.
+fn mod_arming(
+    inputs: &ModArmingInputs,
+    binding: &str,
+    locked: &LockedArtifact,
+    record: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> ModArming {
+    let serves = (!locked.clients.is_empty()).then(|| locked.clients.clone());
+    let mut hosted: Vec<ClientTarget> = inputs
+        .clients
+        .iter()
+        .copied()
+        .filter(|client| {
+            mod_phase::mod_hosting(
+                *client,
+                binding,
+                &locked.clients,
+                inputs.plugin_api.as_deref(),
+                &inputs.workspace,
+                inputs.scope,
+            ) == mod_phase::ModHosting::Hosted
+        })
+        .collect();
+    hosted.sort_by_key(ToString::to_string);
+    // A written output is the machine-local arming evidence: the store sits under
+    // `$GRIM_HOME`, which a repository cannot supply, and a run that armed through
+    // `--trust-workspace` leaves no consent record. Only the consent causes defer
+    // to it; the next converging run disarms what consent no longer covers.
+    let disarmed = |client: &str| inputs.disarmed.contains(&(binding.to_string(), client.to_string()));
+    let written = record.is_some_and(|r| r.outputs.iter().any(|o| !disarmed(&o.client)));
+    let files_present = |client: ClientTarget| {
+        mod_dir(client, inputs.scope)
+            .and_then(|dir| dir.lexical(roots))
+            .is_some_and(|dir| std::fs::symlink_metadata(dir.join(binding)).is_ok())
+    };
+    let grim = inputs.policy.invocation();
+    let gate = inputs.gate(binding, &locked.source).filter(|(cause, _)| {
+        !(written
+            && matches!(
+                cause,
+                HookArmingCause::WorkspaceNotConsented | HookArmingCause::ConsentDrifted
+            ))
+    });
+    if let Some((cause, message)) = gate {
+        let mut arming: Vec<HookArming> = hosted
+            .iter()
+            .map(|client| settings_verdict(*client, cause, message.clone()))
+            .collect();
+        let state = hook_row_state(&arming);
+        // Kept files a disarm left behind are advisory beside the gate.
+        let present = HookArmingCause::ModFilesPresent;
+        arming.extend(
+            hosted
+                .iter()
+                .filter(|c| disarmed(c.as_str()) && files_present(**c))
+                .map(|c| settings_verdict(*c, present, present.message(grim))),
+        );
+        arming.sort_by(|a, b| a.client.cmp(&b.client));
+        return ModArming {
+            state,
+            arming,
+            serves,
+            drifted: false,
+        };
+    }
+    let mut arming = Vec::new();
+    for (client, fence) in &inputs.fences {
+        let Some(decline) = fence.as_ref().filter(|_| hosted.contains(client)) else {
+            continue;
+        };
+        hosted.retain(|c| c != client);
+        arming.push(declined_verdict(*client, decline, grim, record));
+    }
+    let state = hook_row_state(&arming);
+    for client in hosted {
+        let name = client.as_str();
+        let cause = if inputs.tracked.contains(&(binding.to_string(), name.to_string())) {
+            Some(HookArmingCause::ModFilesTracked)
+        } else if client == ClientTarget::Claude && inputs.disabled.contains(binding) {
+            Some(HookArmingCause::ModDisabledInClient)
+        } else if (disarmed(name) || !record.is_some_and(|r| r.outputs.iter().any(|o| o.client == name)))
+            && files_present(client)
+        {
+            Some(HookArmingCause::ModFilesPresent)
+        } else {
+            None
+        };
+        arming.extend(cause.map(|cause| settings_verdict(client, cause, cause.message(grim))));
+    }
+    arming.sort_by(|a, b| a.client.cmp(&b.client));
+    let drifted = inputs.shared_drift && record.is_some_and(|r| r.outputs.iter().any(|o| o.client == "claude"));
+    ModArming {
+        arming,
+        state,
+        serves,
+        drifted,
+    }
+}
+
+/// A mod row's state: the lock's `stale` first, then a gate or refusal, then the lifecycle.
+fn mod_row_state(lifecycle: ArtifactStatus, row: &ModArming) -> ArtifactStatus {
+    match row.state {
+        Some(state) if lifecycle != ArtifactStatus::Stale => state,
+        _ if row.drifted && lifecycle == ArtifactStatus::Installed => ArtifactStatus::Modified,
+        _ => lifecycle,
+    }
+}
+
+/// [`mod_arming`] for one `grim status` row, one function for both row loops.
+/// `None` for any other kind, and for a row the lock does not know yet.
+fn mod_arming_for_row(
+    kind: ArtifactKind,
+    name: &str,
+    locked: Option<&LockedArtifact>,
+    inputs: Option<&ModArmingInputs>,
+    record: Option<&InstallRecord>,
+    roots: &AnchorRoots,
+) -> Option<ModArming> {
+    let inputs = inputs.filter(|_| kind == ArtifactKind::Mod)?;
+    Some(mod_arming(inputs, name, locked?, record, roots))
+}
+
 /// [`settings_arming`] for one `grim status` row. One function so the
 /// directly-declared loop and the bundle-member loop cannot drift. `None` for
 /// any other kind, and for a row the lock does not know yet.
@@ -3302,16 +3743,22 @@ fn recorded_clients(record: Option<&InstallRecord>) -> &[ClientOutput] {
 
 /// [`client_drift`] for one row. A settings package records a client only for
 /// the pieces it declares, which status cannot see without the package, so a
-/// settings row reports no missing client, as a bundle row does.
+/// settings row reports no missing client, as a bundle row does. A mod row is
+/// hosted by the clients its lock row lists, and OpenCode only once the scope's
+/// config declares `plugin_api`.
 fn row_client_drift(
     desired: Option<&[ClientTarget]>,
     record: Option<&InstallRecord>,
     kind: ArtifactKind,
     name: &str,
+    locked: Option<&LockedArtifact>,
     scope: &scope_resolution::ResolvedScope,
 ) -> (Vec<String>, Vec<String>) {
+    let served: &[String] = locked.map_or(&[], |row| row.clients.as_slice());
     client_drift(desired, recorded_clients(record), |c| {
-        kind != ArtifactKind::Settings && client_hosts(c, kind, name, &scope.workspace, scope.scope)
+        kind != ArtifactKind::Settings
+            && client_hosts(c, kind, name, served, &scope.workspace, scope.scope)
+            && (kind != ArtifactKind::Mod || mod_phase::host_declared(c, &scope.options.vendors))
     })
 }
 
@@ -4081,7 +4528,15 @@ impl OutputHashes {
         {
             return hash.clone();
         }
-        let hash = out.current_hash(kind, roots, Containment::AllowRelocatedAncestor).ok();
+        let hash = if kind == ArtifactKind::Mod && out.entry.is_none() {
+            // A mod output is one file hashed on its bytes, not a footprint.
+            out.resolved_target(roots, Containment::AllowRelocatedAncestor)
+                .ok()
+                .and_then(|path| crate::store::read_regular(&path).ok())
+                .map(|bytes| own_file_hash(&bytes))
+        } else {
+            out.current_hash(kind, roots, Containment::AllowRelocatedAncestor).ok()
+        };
         if let Ok(mut kept) = self.0.lock() {
             kept.entry(key).or_default().push((out.clone(), hash.clone()));
         }
@@ -4226,6 +4681,7 @@ mod tests {
             direct: true,
             required_by: None,
             moved_nested_bundles: None,
+            serves: None,
         }
     }
 
@@ -4299,6 +4755,7 @@ mod tests {
             version: None,
             rating: None,
             downloads: None,
+            serves: None,
             badge: crate::install::status_badge::StatusBadge::NotInstalled,
         }
     }
@@ -4422,6 +4879,7 @@ mod tests {
         rows.map(|row| StatusEntry {
             update_available: Some(false),
             moved_nested_bundles: Some(Vec::new()),
+            serves: None,
             ..row
         })
     }
@@ -7463,6 +7921,60 @@ mod tests {
         );
     }
 
+    /// A mod row's drift asks the row's own clients, and OpenCode only once the
+    /// scope declares `plugin_api`; a client the row does not list, or whose
+    /// vendor declines the kind, is never drift.
+    #[test]
+    fn a_mod_row_drift_follows_its_clients_and_the_host_declaration() {
+        use crate::config::declaration::VendorOptions;
+        let drift = |plugin_api: Option<&str>, listed: &[&str]| {
+            let mut options = crate::config::declaration::ConfigOptions::default();
+            if let Some(api) = plugin_api {
+                options.vendors.insert(
+                    "opencode".to_string(),
+                    VendorOptions {
+                        plugin_api: Some(api.to_string()),
+                        ..Default::default()
+                    },
+                );
+            }
+            let scope = scope_resolution::ResolvedScope {
+                scope: crate::config::scope::ConfigScope::Project,
+                set: Default::default(),
+                options,
+                registries: Default::default(),
+                config_path: Default::default(),
+                lock_path: Default::default(),
+                state_path: Default::default(),
+                workspace: PathBuf::from("/ws"),
+                roots: AnchorRoots::default(),
+                invocation: Invocation::WALKED,
+            };
+            let mut row = LockedArtifact::direct(
+                "band".to_string(),
+                ArtifactKind::Mod,
+                PinnedIdentifier::try_from(
+                    Identifier::parse("ghcr.io/acme/mods/band:1")
+                        .unwrap()
+                        .clone_with_digest(crate::oci::Algorithm::Sha256.hash(b"band")),
+                )
+                .unwrap(),
+            );
+            row.clients = listed.iter().map(|c| (*c).to_string()).collect();
+            let desired = [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Cursor];
+            row_client_drift(Some(&desired), None, ArtifactKind::Mod, "band", Some(&row), &scope).0
+        };
+        let both = ["claude", "opencode", "cursor"];
+        assert_eq!(drift(Some("v2"), &both), ["claude", "opencode"], "cursor declines");
+        assert_eq!(drift(None, &both), ["claude"], "no plugin_api: opencode is not drift");
+        assert_eq!(
+            drift(Some("v2"), &["claude"]),
+            ["claude"],
+            "an unlisted client is not drift"
+        );
+        assert!(drift(Some("v2"), &[]).is_empty());
+    }
+
     /// C4 guard: a present (active) client whose file is missing still flags
     /// `missing` — tolerance must never mask a genuinely broken install.
     #[test]
@@ -7529,6 +8041,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
         assert!(
             path_source_drifted(&locked, dir.path()).await,
@@ -7543,7 +8056,11 @@ mod tests {
         home_refusal: Option<HookArmingCause>,
     ) -> SettingsArmingInputs {
         let workspace = std::path::Path::new("/w/proj");
-        let flags = ExperimentalOptions { hooks: false, settings };
+        let flags = ExperimentalOptions {
+            hooks: false,
+            settings,
+            ..Default::default()
+        };
         let inputs = ConsentInputs {
             flags: &flags,
             flag: None,
@@ -7569,6 +8086,7 @@ mod tests {
             source,
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -7771,6 +8289,7 @@ mod tests {
         let flags = ExperimentalOptions {
             hooks: false,
             settings: true,
+            ..Default::default()
         };
         let inputs = ConsentInputs {
             flags: &flags,
@@ -8020,6 +8539,7 @@ mod tests {
         let flags = ExperimentalOptions {
             hooks: false,
             settings: true,
+            ..Default::default()
         };
         let inputs = ConsentInputs {
             flags: &flags,
@@ -8152,6 +8672,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
 
         assert!(path_source_drifted(&locked, dir.path()).await);
@@ -8678,6 +9199,7 @@ mod fetch_budget_tests {
                 hooks: Vec::new(),
                 settings: Vec::new(),
                 bundles: Vec::new(),
+                mods: Vec::new(),
             };
             let dir = tempfile::tempdir().unwrap();
             let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
@@ -9048,6 +9570,7 @@ mod proof_memo_tests {
                 hooks: Vec::new(),
                 settings: Vec::new(),
                 bundles: Vec::new(),
+                mods: Vec::new(),
             };
             let dir = tempfile::tempdir().unwrap();
             let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
@@ -9421,6 +9944,7 @@ mod proof_memo_tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: Vec::new(),
+            mods: Vec::new(),
         };
         let key = (ArtifactKind::Mcp, "srv".to_string());
         let read = || ProofInputs::read(&lock, &key, Some(&record), &target, &roots).unwrap();
@@ -9482,6 +10006,7 @@ mod proof_memo_tests {
                 hooks: Vec::new(),
                 settings: Vec::new(),
                 bundles: Vec::new(),
+                mods: Vec::new(),
             };
             let key = (ArtifactKind::Mcp, "srv".to_string());
             let inputs = ProofInputs::read(&lock, &key, None, &target, &roots).unwrap();

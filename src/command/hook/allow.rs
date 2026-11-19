@@ -88,7 +88,8 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
         .map(hook_consent::reviewed_consent_keys)
         .unwrap_or_default();
     let keys = consent::all_keys(&declared);
-    let has_settings = !consent::keys_of(&declared, ArtifactKind::Settings).is_empty();
+    let has_settings = !consent::keys_of(&declared, ArtifactKind::Settings).is_empty()
+        || !consent::keys_of(&declared, ArtifactKind::Mod).is_empty();
 
     // Replace, not union: this is the reviewing gesture, so the set the user was
     // shown is the set that lands. An artifact that dropped out of the declaration
@@ -125,7 +126,9 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
 /// The refusal for a scope that carries no record. A scope with no settings
 /// keeps its shipped sentence, which also reaches the JSON error document.
 fn global_refusal(declared: &consent::DeclaredKeys) -> &'static str {
-    if consent::keys_of(declared, ArtifactKind::Settings).is_empty() {
+    if consent::keys_of(declared, ArtifactKind::Settings).is_empty()
+        && consent::keys_of(declared, ArtifactKind::Mod).is_empty()
+    {
         "the global scope is always consented for hooks and carries no consent record; \
          run `grim hook allow` inside a workspace instead"
     } else {

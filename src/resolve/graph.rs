@@ -54,6 +54,7 @@ use crate::lock::pin_rule::{self, EdgeEvidence, HashProof, PinRecord, WalkedEdge
 use crate::lock::refresh::Refresh;
 use crate::oci::access::OciAccess;
 use crate::oci::access::error::{AccessError, AccessErrorKind};
+use crate::oci::annotations::mod_clients_from_annotations;
 use crate::oci::bundle::{BundleManifest, BundleMember};
 use crate::oci::features::check_required_features;
 use crate::oci::identifier::is_valid_oci_tag;
@@ -134,6 +135,8 @@ pub struct GraphNode {
     pub resolved_tag: bool,
     /// The version the pinned manifest's annotation names, when it names one.
     pub version: Option<Version>,
+    /// A mod's served clients, sorted; empty for every other kind.
+    pub clients: Vec<String>,
 }
 
 impl GraphNode {
@@ -369,6 +372,8 @@ struct Read {
     /// The version the manifest's annotation names; `None` for a read with no
     /// manifest behind it.
     annotated: Option<Version>,
+    /// A mod's served clients, from its manifest annotation or the carried lock row.
+    clients: Vec<String>,
     /// A line node's held pin whose manifest is gone: the judge decides whether
     /// the pin stays, and so exits 79 at the stop, or is released.
     gone: bool,
@@ -689,6 +694,7 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
                 bundle_source: None,
                 from_manifest: false,
                 annotated: None,
+                clients: Vec::new(),
                 gone: false,
             });
         }
@@ -704,6 +710,7 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
                 bundle_source,
                 from_manifest: false,
                 annotated: None,
+                clients: Vec::new(),
                 gone: true,
             });
         }
@@ -756,6 +763,11 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
         }
     };
 
+    let clients = if kind == ArtifactKind::Mod {
+        mod_clients_from_annotations(&manifest.annotations).map_err(|e| fail(ResolveErrorKind::InvalidMod(e)))?
+    } else {
+        Vec::new()
+    };
     let (bundle_source, bundle_pair) = job.bundle_identity();
     Ok(Read {
         id: Some(job.id.clone()),
@@ -767,6 +779,7 @@ async fn read_registry(job: &Job, access: &Arc<dyn OciAccess>) -> Result<Read, R
         bundle_source,
         from_manifest: true,
         annotated: annotated_version(&manifest.annotations),
+        clients,
         gone: false,
     })
 }
@@ -804,6 +817,7 @@ fn offline_read(job: &Job, published: Vec<BundleMember>) -> Result<Read, Resolve
         bundle_source,
         from_manifest: false,
         annotated: None,
+        clients: Vec::new(),
         gone: false,
     })
 }
@@ -850,6 +864,9 @@ pub struct Carry {
     pub pins: BTreeMap<NodeKey, CarriedPin>,
     /// A node's `requires` as locked, at the digest it was locked at.
     pub requires: BTreeMap<(NodeKey, Digest), Vec<BundleMember>>,
+    /// A mod's served clients as locked, at the digest it was locked at: what a
+    /// node the registry did not answer for (offline, a gone manifest) keeps.
+    pub clients: BTreeMap<(NodeKey, Digest), Vec<String>>,
     /// Under a proof, each node's digest in the previous lock, selected or not, or
     /// `None` for a key the proof and this run declare alike, with no pin to compare,
     /// that the run does not select.
@@ -1881,6 +1898,7 @@ impl Graph<'_> {
                             bundle_source: None,
                             from_manifest: false,
                             annotated: None,
+                            clients: Vec::new(),
                             gone: false,
                         },
                     ));
@@ -3789,6 +3807,15 @@ impl Graph<'_> {
                 (Some(id), Some(digest)) => PinnedIdentifier::try_from(id.clone_with_digest(digest.clone())).ok(),
                 _ => None,
             };
+            let clients = match (&pinned, read.clients.is_empty()) {
+                (Some(pin), true) if key.0 == ArtifactKind::Mod => self
+                    .carry
+                    .clients
+                    .get(&(key.clone(), pin.digest()))
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => read.clients.clone(),
+            };
             nodes.insert(
                 key.clone(),
                 GraphNode {
@@ -3803,6 +3830,7 @@ impl Graph<'_> {
                     bundle_source: read.bundle_source.clone(),
                     resolved_tag: self.resolved_tag(key, node),
                     version: read.annotated.clone(),
+                    clients,
                 },
             );
         }
@@ -4775,6 +4803,40 @@ mod tests {
         assert!(
             err.to_string().ends_with("; required by skill/a (ghcr.io/acme/a)"),
             "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_annotation_refuses_at_resolve() {
+        let fake = Fake::default();
+        let mut with = pubd(Mod, "ghcr.io/acme/served:1.0.0", &[]);
+        with.annotations = vec![("com.grimoire.mod.clients", "opencode,claude")];
+        fake.release_pub(with);
+        fake.release_pub(pubd(Mod, "ghcr.io/acme/bare:1.0.0", &[]));
+        let (_, access) = fake.arc();
+
+        let graph = run(&access, vec![direct(Mod, "served", "ghcr.io/acme/served:1")])
+            .await
+            .expect("positive control: the annotated mod resolves");
+        assert_eq!(graph.nodes[&k(Mod, "served")].clients, ["claude", "opencode"]);
+
+        let err = run(&access, vec![direct(Mod, "bare", "ghcr.io/acme/bare:1")])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.kind,
+                ResolveErrorKind::InvalidMod(crate::oci::mod_manifest::ModError::MissingClients)
+            ),
+            "{err}"
+        );
+        let class = crate::error::classify(&anyhow::Error::from(crate::error::Error::from(err)));
+        assert_eq!(
+            (class.exit, class.reason),
+            (
+                crate::cli::exit_code::ExitCode::DataError,
+                Some(crate::error::ErrorReason::InvalidMod)
+            )
         );
     }
 

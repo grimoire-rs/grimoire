@@ -356,6 +356,12 @@ const fn kind_words(kind: ArtifactKind) -> Option<KindWords> {
             coverage: "settings package",
             undone: "applied",
         }),
+        ArtifactKind::Mod => Some(KindWords {
+            inline: "mods",
+            gloss: "A mod changes your AI client's own interface or behaviour.",
+            coverage: "mod",
+            undone: "written",
+        }),
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
             None
         }

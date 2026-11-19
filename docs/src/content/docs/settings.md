@@ -48,8 +48,8 @@ consents. A repository's `grimoire.toml` is written by whoever committed it,
 so a declaration alone never changes a harness's settings. Global scope is
 always consented and writes no record.
 
-Consent shares the workspace record that hooks use, under keys of the form
-`settings:<binding>@<registry>/<repository>`. `grim hook allow` records
+Consent shares the workspace record that hooks use, under the unprefixed
+entries `<binding>@<registry>/<repository>`. `grim hook allow` records
 consent for the hooks and settings the workspace declares. `grim hook revoke`
 removes it and leaves every written value in place.
 
@@ -962,6 +962,12 @@ Some harnesses change or ignore a delivered value on their own:
   dialog for that folder. Before that it ignores the entry without a message,
   in a `-p` run too, as its [settings reference][claude-marketplaces] says.
 
+### Reserved marketplace names {#reserved-marketplace-prefix}
+
+A `<name>` under `/extraKnownMarketplaces/` that starts with `grim-mods` is
+refused at build and install. The [mod kind][mods] owns that namespace for its
+generated marketplace.
+
 ### Shadowing {#shadowing}
 
 - [Cursor][cursor]: a project `.cursor/cli.json` with a `permissions` block
@@ -1085,6 +1091,7 @@ manifest.
 [stability-unstable]: ./stability.md#unstable
 [config-experimental]: ./configuration.md#options-experimental
 [hooks-consent]: ./hooks.md#consent
+[mods]: ./mods.md
 [hooks-trust-flags]: ./hooks.md#trust-flags
 [artifacts-requires]: ./artifacts.md#requires
 [fields]: #fields

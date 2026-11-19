@@ -344,6 +344,7 @@ fn search_entry(source: SearchSource, r: CatalogRow) -> SearchEntry {
                 .collect(),
         }),
         status: r.badge,
+        serves: r.serves,
     }
 }
 
@@ -1072,6 +1073,7 @@ mod tests {
                 host: None,
             }),
             downloads: None,
+            serves: None,
             badge: StatusBadge::NotInstalled,
         };
         let source = SearchSource {

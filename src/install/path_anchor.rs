@@ -996,6 +996,14 @@ pub(crate) fn candidate_anchors(scope: ConfigScope, client: ClientTarget, kind: 
                 // state record carrying one degrades to `UnknownAnchor`.
                 (_, ArtifactKind::Bundle) => None,
 
+                // A mod lives under its host's own global config root: the
+                // Claude root, and OpenCode's config dir. Every other client
+                // declines the kind, so the guard above answers it first and a
+                // stray record degrades to `UnknownAnchor`.
+                (ClientTarget::Claude, ArtifactKind::Mod) => vendor_root(client),
+                (ClientTarget::OpenCode, ArtifactKind::Mod) => Some(PathAnchor::OpenCodeRoot),
+                (_, ArtifactKind::Mod) => None,
+
                 // A listing client's file sits under its own config root.
                 (ClientTarget::Claude, ArtifactKind::Settings)
                 | (ClientTarget::Codex, ArtifactKind::Settings)
@@ -1731,6 +1739,30 @@ mod tests {
         // whole point of the fix.
         assert_eq!(PathAnchor::OpenCodeSkills.to_string(), "open-code-skills");
         assert_eq!(PathAnchor::OpenCodeRoot.to_string(), "open-code-root");
+    }
+
+    /// A mod anchors at its host's global root: Claude's vendor root and
+    /// OpenCode's config dir. A client that declines the kind has no anchor,
+    /// and project scope stays at the workspace.
+    #[test]
+    fn mod_anchors_are_the_global_roots_of_the_two_hosts() {
+        let anchors = |scope, client| super::candidate_anchors(scope, client, ArtifactKind::Mod);
+        let claude = anchors(ConfigScope::Global, ClientTarget::Claude);
+        assert_eq!(claude.first(), Some(&PathAnchor::VendorRoot("claude")));
+        assert_eq!(claude.first().unwrap().to_string(), "claude-root");
+        let opencode = anchors(ConfigScope::Global, ClientTarget::OpenCode);
+        assert_eq!(opencode.first(), Some(&PathAnchor::OpenCodeRoot));
+        assert_eq!(opencode.first().unwrap().to_string(), "open-code-root");
+        for client in ClientTarget::ALL {
+            if !matches!(client, ClientTarget::Claude | ClientTarget::OpenCode) {
+                assert!(anchors(ConfigScope::Global, client).is_empty(), "{client}");
+            }
+            assert_eq!(
+                anchors(ConfigScope::Project, client),
+                vec![PathAnchor::Workspace],
+                "{client}"
+            );
+        }
     }
 
     /// No anchor reachable from `candidate_anchors` may carry a tag that is not
@@ -3665,6 +3697,7 @@ mod tests {
             // their entry anchors land with the vendor MCP writers.
             (_, _, ArtifactKind::Mcp) => unreachable!("mcp excluded from this loop"),
             (_, _, ArtifactKind::Settings) => unreachable!("settings excluded from this loop"),
+            (_, _, ArtifactKind::Mod) => unreachable!("mods excluded from this loop"),
             // Triples with no anchor never reach `from_target` — either the
             // vendor declines the kind outright, or (global Junie rules) it
             // hosts the kind but has no surface at that scope. Both yield an

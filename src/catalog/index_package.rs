@@ -129,6 +129,7 @@ impl IndexPackage {
             // afterwards.
             rating: None,
             downloads: None,
+            serves: None,
             fetched_at: fetched_at.to_string(),
         })
     }

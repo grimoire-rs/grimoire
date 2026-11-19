@@ -684,6 +684,7 @@ mod tests {
                 ErrorReason::UnsupportedArtifactFeature => "unsupported-artifact-feature",
                 ErrorReason::MajorDowngrade => "major-downgrade",
                 ErrorReason::SkillPluginManifest => "skill-plugin-manifest",
+                ErrorReason::InvalidMod => "invalid-mod",
             }
         }
         for code in [
@@ -714,6 +715,7 @@ mod tests {
             ErrorReason::UnsupportedArtifactFeature,
             ErrorReason::MajorDowngrade,
             ErrorReason::SkillPluginManifest,
+            ErrorReason::InvalidMod,
         ] {
             assert_eq!(literal(reason), reason.to_string(), "{reason:?}");
         }

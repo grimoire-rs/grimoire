@@ -516,6 +516,10 @@ pub enum ResolveErrorKind {
         found: ArtifactKind,
     },
 
+    /// A mod manifest's clients annotation is missing or malformed.
+    #[error("{0}")]
+    InvalidMod(crate::oci::mod_manifest::ModError),
+
     /// A local path source failed to validate or pack at lock time: the
     /// path does not exist, the artifact fails kind validation, or a
     /// tool-namespaced metadata literal is invalid.

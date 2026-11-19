@@ -49,6 +49,9 @@ const HOOK_SCHEMA_FILE: &str = "grim-hook.schema.json";
 /// Published filename of the settings package (`settings/<name>.toml`) schema.
 const SETTINGS_SCHEMA_FILE: &str = "grim-settings.schema.json";
 
+/// Published filename of the mod descriptor (`mod.toml`) schema.
+const MOD_SCHEMA_FILE: &str = "grim-mod.schema.json";
+
 /// Which author-facing TOML format to emit a JSON Schema for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SchemaKind {
@@ -66,6 +69,8 @@ pub enum SchemaKind {
     Hook,
     /// A settings package (`settings/<name>.toml`).
     Settings,
+    /// The mod descriptor (`mod.toml`).
+    Mod,
 }
 
 /// `grim schema` arguments.
@@ -86,6 +91,7 @@ impl SchemaKind {
             SchemaKind::Mcp => MCP_SCHEMA_FILE,
             SchemaKind::Hook => HOOK_SCHEMA_FILE,
             SchemaKind::Settings => SETTINGS_SCHEMA_FILE,
+            SchemaKind::Mod => MOD_SCHEMA_FILE,
         };
         format!("{SCHEMA_BASE_URL}/{file}")
     }
@@ -99,6 +105,7 @@ impl SchemaKind {
             SchemaKind::Mcp => "mcp/<name>.toml — Grimoire MCP server descriptor",
             SchemaKind::Hook => "hook.toml — Grimoire hook manifest",
             SchemaKind::Settings => "settings/<name>.toml — Grimoire settings package",
+            SchemaKind::Mod => "mod.toml — Grimoire mod descriptor",
         }
     }
 }
@@ -129,6 +136,10 @@ pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
         SchemaKind::Mcp => mcp_json_schema()?,
         SchemaKind::Hook => schemars::schema_for!(crate::oci::hook::HookManifest),
         SchemaKind::Settings => with_requires(crate::oci::settings::document_json_schema(), "package")?,
+        SchemaKind::Mod => with_requires(
+            serde_json::to_value(schemars::schema_for!(crate::oci::mod_manifest::ModManifest))?,
+            "mod",
+        )?,
     };
     decorate(&schema, &kind.id(), kind.title())
 }
@@ -156,9 +167,9 @@ fn with_requires(mut value: serde_json::Value, owner: &str) -> anyhow::Result<sc
     properties.insert(
         "requires".to_string(),
         serde_json::json!({
-            "description": format!("Artifacts this {owner} requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`), each mapping a binding name to a member reference. A version-shaped tag is a version claim: `2.1` accepts 2.1.0 and later below 3.0.0, `0.2` accepts 0.2.x, and no tag or `latest` accepts any version; any other tag names one manifest."),
+            "description": format!("Artifacts this {owner} requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`, `mods`), each mapping a binding name to a member reference. A version-shaped tag is a version claim: `2.1` accepts 2.1.0 and later below 3.0.0, `0.2` accepts 0.2.x, and no tag or `latest` accepts any version; any other tag names one manifest."),
             "type": "object",
-            "propertyNames": { "enum": ["skills", "rules", "agents", "mcp", "hooks", "bundles", "settings"] },
+            "propertyNames": { "enum": ["skills", "rules", "agents", "mcp", "hooks", "bundles", "settings", "mods"] },
             "additionalProperties": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
@@ -524,6 +535,22 @@ mod tests {
     fn settings_schema_stdout_is_byte_identical_to_the_golden() {
         let stdout = format!("{}\n", generate(SchemaKind::Settings).expect("generate"));
         assert_eq!(stdout, include_str!("testdata/settings.schema.json"));
+    }
+
+    /// The mod schema is a published contract. Golden is `grim schema --kind mod` stdout.
+    #[test]
+    fn mod_schema_stdout_is_byte_identical_to_the_golden() {
+        let stdout = format!("{}\n", generate(SchemaKind::Mod).expect("generate"));
+        assert_eq!(stdout, include_str!("testdata/mod.schema.json"));
+    }
+
+    #[test]
+    fn mod_schema_is_strict_and_declares_optional_requires() {
+        let v = parsed(SchemaKind::Mod);
+        assert_eq!(v["$id"], "https://grimoire.rs/schemas/grim-mod.schema.json");
+        assert_eq!(v["additionalProperties"], serde_json::Value::Bool(false));
+        assert_eq!(v["required"], serde_json::json!(["schema", "name", "description"]));
+        assert_eq!(v["properties"]["requires"]["type"], "object");
     }
 
     /// The hook schema is a published contract: its bytes must not move when the

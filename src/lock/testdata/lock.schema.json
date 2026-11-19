@@ -37,6 +37,11 @@
           "const": "settings",
           "description": "Harness settings: typed values for each client, merged key by key into\nthat client's own settings file. Never a materialized file of its own.",
           "type": "string"
+        },
+        {
+          "const": "mod",
+          "description": "A mod: a directory artifact carrying a client-side extension (a plugin\nfor each harness it serves). Declared and locked like any kind; no\nclient hosts it yet.",
+          "type": "string"
         }
       ]
     },
@@ -157,6 +162,14 @@
           "description": "Multi-provenance array: every declared bundle that contributed\nthis member. Mutually exclusive with the `bundle`/`bundle_tag` pair.",
           "items": {
             "$ref": "#/$defs/BundleProvenance"
+          },
+          "type": "array"
+        },
+        "clients": {
+          "default": [],
+          "description": "`[[mod]]` rows only: the clients the package serves.",
+          "items": {
+            "type": "string"
           },
           "type": "array"
         },
@@ -334,6 +347,13 @@
     "metadata": {
       "$ref": "#/$defs/LockMetadata",
       "description": "Metadata header (`[metadata]`)."
+    },
+    "mod": {
+      "description": "Locked mod packages (`[[mod]]`).",
+      "items": {
+        "$ref": "#/$defs/LockedArtifact"
+      },
+      "type": "array"
     },
     "rule": {
       "description": "Locked rules (`[[rule]]`).",

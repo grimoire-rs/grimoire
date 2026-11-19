@@ -33,6 +33,16 @@ use crate::oci::manifest::{LayerLayout, OciManifest};
 use crate::oci::mcp::McpDescriptor;
 use crate::store::{BlobStore, GrimPaths};
 
+/// Whether the generic output pipeline would write `kind`/`name` for `client`.
+///
+/// A mod is never written by that pipeline: only the mod phase writes one, and
+/// it reads the row's served clients, which no caller of this module holds. So
+/// a mod answers `false` here, whichever client is asked, and no generic caller
+/// can plan, record or report an output for one.
+fn generic_hosts(client: ClientTarget, kind: ArtifactKind, name: &str, target: &InstallTarget) -> bool {
+    kind != ArtifactKind::Mod && client_hosts(client, kind, name, &[], target.workspace(), target.scope())
+}
+
 /// The clients a pass over `kind` would produce output for: the target
 /// selection minus those whose vendor declines the kind at this scope.
 ///
@@ -45,7 +55,7 @@ pub fn expected_clients(kind: ArtifactKind, name: &str, target: &InstallTarget) 
         .clients()
         .iter()
         .copied()
-        .filter(|c| client_hosts(*c, kind, name, target.workspace(), target.scope()))
+        .filter(|c| generic_hosts(*c, kind, name, target))
         .collect()
 }
 
@@ -199,7 +209,7 @@ pub fn writes_output(
     roots: &AnchorRoots,
     mcp: Option<&McpDescriptor>,
 ) -> bool {
-    if !client_hosts(client, rec.kind, &rec.name, target.workspace(), target.scope()) {
+    if !generic_hosts(client, rec.kind, &rec.name, target) {
         return false;
     }
     if rec.kind != ArtifactKind::Mcp {
@@ -280,12 +290,12 @@ pub(crate) fn effective_clients(
         .clients()
         .iter()
         .copied()
-        .filter(|c| client_hosts(*c, kind, name, target.workspace(), target.scope()))
+        .filter(|c| generic_hosts(*c, kind, name, target))
         .collect();
     if let Some(rec) = recorded {
         for out in &rec.outputs {
             if let Ok(client) = out.client.parse::<ClientTarget>()
-                && client_hosts(client, kind, name, target.workspace(), target.scope())
+                && generic_hosts(client, kind, name, target)
                 && out.target.anchor.root(roots).is_some()
                 && !set.contains(&client)
             {
@@ -592,6 +602,25 @@ mod tests {
             pending[0].1,
             target.path_for(ClientTarget::Claude, ArtifactKind::Rule, "rust-style")
         );
+    }
+
+    /// A mod is written by the mod phase alone, so the generic seam plans,
+    /// expects and carries nothing for one, even for a client that hosts it.
+    #[test]
+    fn a_mod_has_no_generic_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::OpenCode],
+        );
+        assert!(
+            !expected_clients(ArtifactKind::Rule, "m", &target).is_empty(),
+            "positive control: the same target expects a rule"
+        );
+        assert!(expected_clients(ArtifactKind::Mod, "m", &target).is_empty());
+        assert!(pending_outputs(None, ArtifactKind::Mod, "m", &target, &roots(dir.path()), None).is_empty());
+        assert!(effective_clients(&target, ArtifactKind::Mod, "m", None, &roots(dir.path())).is_empty());
     }
 
     /// A vendor that declines the kind never records an output and can never

@@ -139,6 +139,8 @@ pub struct HookPolicy {
     /// [`NotArmedReason::NoTtyToAsk`]: "you said no" and "nobody could be asked"
     /// have different remedies, and a single message would name the wrong one.
     declined_now: bool,
+    /// The entries this run's gesture or accepted prompt added to the record.
+    added_now: BTreeSet<String>,
     /// The `grim` a hook's not-armed remedy names. [`Self::new`] knows only
     /// global from project, so a caller with a resolved scope sets it through
     /// [`Self::naming`] for a `--config` run.
@@ -187,6 +189,7 @@ impl HookPolicy {
             locked: None,
             granted_now: false,
             declined_now: false,
+            added_now: BTreeSet::new(),
             invocation: match scope {
                 ConfigScope::Global => Invocation::GLOBAL,
                 ConfigScope::Project => Invocation::WALKED,
@@ -306,6 +309,13 @@ impl HookPolicy {
         self.declined_now = true;
     }
 
+    /// Whether `binding` from `source` is covered by a record entry an earlier
+    /// run wrote: the entry exists and this run's gesture did not add it.
+    pub fn covered_by_earlier_entry(&self, binding: &str, source: &LockedSource) -> bool {
+        consent_key_for(self.kind, binding, source)
+            .is_some_and(|key| self.consented.contains(&key) && !self.added_now.contains(&key))
+    }
+
     /// Whether this artifact's pinned registry would be fetched over routable
     /// plain HTTP — the transport gate's input (W8 · S2-2 · T2).
     ///
@@ -334,7 +344,7 @@ impl HookPolicy {
         // A package answers for itself: a record that misses one package gates
         // that package while the covered ones converge. Hooks keep their
         // all-or-none answer, so one new hook gates the covered ones too.
-        let own_answer = (self.kind == ArtifactKind::Settings && covered).then_some(Consent::Granted);
+        let own_answer = (self.kind != ArtifactKind::Hook && covered).then_some(Consent::Granted);
         let base = super::trust::arming(&ArmingQuery {
             feature_enabled: self.feature_enabled,
             flag: self.flag,
@@ -347,12 +357,10 @@ impl HookPolicy {
         // it, so no rewrite may reach past `--trust-workspace` or the transport gate.
         Some(match base {
             Arming::ConsentRequired if self.declined_now => Arming::NotArmed(NotArmedReason::ConsentDeclined),
-            // A decline skips the whole settings phase, covered packages
+            // A decline skips the whole settings or mod phase, covered packages
             // included. A covered hook stays armed: disarming it would change a
             // file, and the prompt promises a decline changes none.
-            Arming::Armed(GrantSource::WorkspaceConsent)
-                if self.declined_now && self.kind == ArtifactKind::Settings =>
-            {
+            Arming::Armed(GrantSource::WorkspaceConsent) if self.declined_now && self.kind != ArtifactKind::Hook => {
                 Arming::NotArmed(NotArmedReason::ConsentDeclined)
             }
             // A grant reaches only what its record names: a record that does
@@ -391,6 +399,18 @@ impl HookPolicy {
     /// installer's skip warning.
     pub fn refusal_reason(&self, binding: &str, source: &LockedSource) -> Option<String> {
         let settings = self.kind == ArtifactKind::Settings;
+        if self.kind == ArtifactKind::Mod {
+            return match self.verdict(binding, source) {
+                Some(Arming::Armed(_)) => None,
+                Some(Arming::ConsentRequired) => Some(format!(
+                    "mods from '{}' have not been consented; run `{} consent allow`",
+                    self.workspace.display(),
+                    self.invocation
+                )),
+                Some(Arming::NotArmed(reason)) => Some(not_armed_message(self.kind, reason, &self.invocation)),
+                None => Some(format!("{PATH_MOD}; {PATH_REMEDY}")),
+            };
+        }
         match self.verdict(binding, source) {
             Some(Arming::Armed(_)) => None,
             Some(Arming::ConsentRequired) if settings => Some(format!(
@@ -412,6 +432,7 @@ impl HookPolicy {
 
 const PATH_HOOK: &str = "a path-sourced hook has no pinned registry and never arms";
 const PATH_SETTINGS: &str = "a path-sourced settings package has no pinned registry and never applies";
+const PATH_MOD: &str = "a path-sourced mod has no pinned registry and never writes";
 const PATH_REMEDY: &str = "publish it with `grim release` and declare it by its registry reference";
 
 /// The remedy sentence for one [`NotArmedReason`].
@@ -424,6 +445,9 @@ const PATH_REMEDY: &str = "publish it with `grim release` and declare it by its 
 pub fn not_armed_message(kind: ArtifactKind, reason: NotArmedReason, grim: &Invocation) -> String {
     if kind == ArtifactKind::Settings {
         return settings_not_applied_message(reason, grim);
+    }
+    if kind == ArtifactKind::Mod {
+        return mod_not_written_message(reason, grim);
     }
     match reason {
         NotArmedReason::FeatureOff => {
@@ -444,6 +468,34 @@ pub fn not_armed_message(kind: ArtifactKind, reason: NotArmedReason, grim: &Invo
         ),
         NotArmedReason::ConsentDeclined => format!(
             "hook consent for this workspace was declined; run `{grim} hook allow` or pass --trust-hooks to arm them"
+        ),
+    }
+}
+
+/// [`not_armed_message`] for a mod, which is written rather than armed and
+/// answers to the consent verb.
+fn mod_not_written_message(reason: NotArmedReason, grim: &Invocation) -> String {
+    match reason {
+        NotArmedReason::FeatureOff => {
+            format!("mods are gated; enable them with `{grim} config set options.experimental.mods true`")
+        }
+        NotArmedReason::FlagDenied => {
+            "--no-trust-workspace (alias --no-trust-hooks) was passed, so nothing is written for mods on this invocation"
+                .to_string()
+        }
+        NotArmedReason::InsecureTransport => "this mod's registry is reached over plain HTTP, so its digest pin \
+                                              cannot be trusted; serve it over HTTPS or pass --trust-workspace"
+            .to_string(),
+        NotArmedReason::ConsentDrifted => format!(
+            "this workspace declares mods it was not consented for; re-run `{grim} consent allow` to review them"
+        ),
+        NotArmedReason::NoTtyToAsk => format!(
+            "this workspace has not been consented for mods and there is no terminal to ask on; \
+             run `{grim} consent allow` or pass --trust-workspace"
+        ),
+        NotArmedReason::ConsentDeclined => format!(
+            "mod consent for this workspace was declined; \
+             run `{grim} consent allow` or pass --trust-workspace to write them"
         ),
     }
 }
@@ -478,15 +530,19 @@ fn settings_not_applied_message(reason: NotArmedReason, grim: &Invocation) -> St
     }
 }
 
-/// The policies of the two gated kinds, resolved together at the mutating
+/// The policies of the three gated kinds, resolved together at the mutating
 /// boundary and attached to an
 /// [`InstallTarget`](crate::install::target::InstallTarget) together.
 #[derive(Debug, Clone)]
 pub struct ConsentPolicies {
     /// Decides which hooks arm.
     pub hooks: HookPolicy,
+    /// Decides which mods write.
+    pub mods: HookPolicy,
     /// Decides which settings packages apply.
     pub settings: HookPolicy,
+    /// The entries this run's gesture or accepted prompt added to the record.
+    added: BTreeSet<String>,
 }
 
 /// What one invocation's two policies share.
@@ -517,6 +573,7 @@ impl ConsentPolicies {
         let record = record.filter(|r| r.workspace == inputs.workspace);
         let hook_keys = keys_of(declared, ArtifactKind::Hook);
         let settings_keys = keys_of(declared, ArtifactKind::Settings);
+        let mod_keys = keys_of(declared, ArtifactKind::Mod);
         let hooks = HookPolicy::new(
             inputs.flags.hooks_enabled(),
             inputs.flag,
@@ -535,25 +592,60 @@ impl ConsentPolicies {
             declared: settings_keys,
             ..hooks.clone()
         };
-        Self { hooks, settings }
+        let mods = HookPolicy {
+            feature_enabled: inputs.flags.mods_enabled(),
+            kind: ArtifactKind::Mod,
+            consent: consent::evaluate(record, inputs.workspace, &mod_keys),
+            declared: mod_keys,
+            ..hooks.clone()
+        };
+        Self {
+            hooks,
+            mods,
+            settings,
+            added: BTreeSet::new(),
+        }
     }
 
     /// Whether either kind's feature flag is on.
     pub fn any_feature_enabled(&self) -> bool {
-        self.hooks.feature_enabled() || self.settings.feature_enabled()
+        self.hooks.feature_enabled() || self.settings.feature_enabled() || self.mods.feature_enabled()
     }
 
     /// Fold an accepted answer into the kinds it added an entry for: `recorded` is
     /// the one record. A kind `added` holds no entry of stays as this run read it,
     /// because adding a package vouches for no hook, covered or not.
     pub fn adopt_consent(&mut self, added: &DeclaredKeys, recorded: BTreeSet<String>) {
+        let prior = self.mods.consented.clone();
+        self.note_added(added, &prior);
         let adds = |kind| added.get(&kind).is_some_and(|keys| !keys.is_empty());
         if adds(ArtifactKind::Settings) {
             self.settings.adopt_consent(recorded.clone());
         }
+        if adds(ArtifactKind::Mod) {
+            self.mods.adopt_consent(recorded.clone());
+        }
         if adds(ArtifactKind::Hook) {
             self.hooks.adopt_consent(recorded);
         }
+    }
+
+    /// Remember the entries this run's gesture added to the record: a key the
+    /// record held before the gesture (`prior`) is an earlier run's entry.
+    pub(crate) fn note_added(&mut self, added: &DeclaredKeys, prior: &BTreeSet<String>) {
+        let fresh: BTreeSet<String> = consent::all_keys(added).difference(prior).cloned().collect();
+        self.added.extend(fresh.iter().cloned());
+        self.mods.added_now.extend(fresh);
+    }
+
+    /// The entries this run's gesture or accepted prompt added to the record; a
+    /// mod written under any other entry was consented by an earlier run.
+    #[allow(
+        dead_code,
+        reason = "the mod disclosure lines read it once the mod install phase lands"
+    )]
+    pub fn gesture_added(&self) -> &BTreeSet<String> {
+        &self.added
     }
 
     /// Name `grim` in every remedy either policy prints.
@@ -561,6 +653,7 @@ impl ConsentPolicies {
     pub fn naming(mut self, grim: &Invocation) -> Self {
         self.hooks = self.hooks.naming(grim.clone());
         self.settings = self.settings.naming(grim.clone());
+        self.mods = self.mods.naming(grim.clone());
         self
     }
 
@@ -568,6 +661,7 @@ impl ConsentPolicies {
     pub fn record_decline(&mut self) {
         self.hooks.record_decline();
         self.settings.record_decline();
+        self.mods.record_decline();
     }
 
     /// Add the bindings each kind's lock declares; only these may arm.
@@ -649,6 +743,7 @@ mod tests {
             let flags = ExperimentalOptions {
                 hooks: self.hooks,
                 settings: self.settings,
+                ..Default::default()
             };
             let record = self.record.map(|keys| ConsentRecord {
                 v: consent::ConsentVersion::V2,
@@ -1064,6 +1159,7 @@ mod tests {
         let flags = ExperimentalOptions {
             hooks: true,
             settings: true,
+            ..Default::default()
         };
         let inputs = ConsentInputs {
             flags: &flags,
@@ -1451,6 +1547,269 @@ mod tests {
         assert_eq!(
             asking.settings.refusal_reason("team", &team()).as_deref(),
             Some("settings from '/w/proj' have not been consented; run `grim consent allow`")
+        );
+    }
+
+    const BAND: &str = "band@ghcr.io/acme/band";
+
+    fn band() -> LockedSource {
+        registry_source("ghcr.io", "acme/band")
+    }
+
+    /// One run's mods policy: the mods flag is a parameter, hooks and settings
+    /// stay on, so a flag a test turns off is only ever the mods one.
+    struct ModRun<'a> {
+        mods: bool,
+        flag: Option<bool>,
+        interactivity: Interactivity,
+        record: Option<&'a [&'a str]>,
+        record_workspace: &'a str,
+        declared_mods: &'a [&'a str],
+        registries: &'a [RegistryConfig],
+    }
+
+    impl Default for ModRun<'_> {
+        fn default() -> Self {
+            Self {
+                mods: true,
+                flag: None,
+                interactivity: Interactivity::NonInteractive,
+                record: None,
+                record_workspace: "/w/proj",
+                declared_mods: &[BAND],
+                registries: &[],
+            }
+        }
+    }
+
+    impl ModRun<'_> {
+        fn policies(&self) -> ConsentPolicies {
+            let workspace = Path::new("/w/proj");
+            let flags = ExperimentalOptions {
+                hooks: true,
+                settings: true,
+                mods: self.mods,
+            };
+            let record = self.record.map(|keys| ConsentRecord {
+                v: consent::ConsentVersion::V2,
+                workspace: Path::new(self.record_workspace).to_path_buf(),
+                sources: keys.iter().map(ToString::to_string).collect(),
+                consented_at: "2026-11-04T10:00:00Z".to_string(),
+            });
+            let inputs = ConsentInputs {
+                flags: &flags,
+                flag: self.flag,
+                interactivity: self.interactivity,
+                scope: ConfigScope::Project,
+                workspace,
+                registries: self.registries,
+            };
+            let declared = DeclaredKeys::from([(
+                ArtifactKind::Mod,
+                self.declared_mods.iter().map(ToString::to_string).collect(),
+            )]);
+            ConsentPolicies::new(&inputs, record.as_ref(), &declared)
+        }
+    }
+
+    const MOD_NOT_ASKED: Option<Arming> = Some(Arming::NotArmed(NotArmedReason::NoTtyToAsk));
+
+    #[test]
+    fn mods_absent_record_asks_or_refuses_by_interactivity() {
+        let quiet = ModRun::default().policies();
+        assert_eq!(quiet.mods.consent(), &Consent::Absent);
+        assert_eq!(quiet.mods.verdict("band", &band()), MOD_NOT_ASKED);
+        let asking = ModRun {
+            interactivity: Interactivity::Interactive,
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(asking.mods.verdict("band", &band()), Some(Arming::ConsentRequired));
+    }
+
+    #[test]
+    fn mods_granted_record_writes_the_covered_binding_only() {
+        let covering: &[&str] = &[BAND];
+        let run = ModRun {
+            record: Some(covering),
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(run.mods.consent(), &Consent::Granted);
+        assert_eq!(run.mods.verdict("band", &band()), WORKSPACE_GRANT);
+        let other = registry_source("ghcr.io", "acme/other");
+        // "other" is declared by nothing; the record is a Granted set, so only the
+        // coverage check separates it from "band".
+        assert_ne!(
+            run.mods.verdict("other", &other),
+            WORKSPACE_GRANT,
+            "a binding the record does not name is not granted"
+        );
+    }
+
+    #[test]
+    fn mods_drifted_record_still_answers_per_binding() {
+        let older: &[&str] = &[HOOK];
+        let run = ModRun {
+            record: Some(older),
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(run.mods.consent(), &Consent::Drifted([BAND.to_string()].into()));
+        assert_eq!(run.mods.verdict("band", &band()), NOT_ARMED_DRIFTED);
+        let partial: &[&str] = &[BAND];
+        let two = ModRun {
+            record: Some(partial),
+            declared_mods: &[BAND, EXTRA],
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(
+            two.mods.verdict("band", &band()),
+            WORKSPACE_GRANT,
+            "a covered mod keeps its own answer while another is new"
+        );
+        assert_eq!(two.mods.verdict("extra", &extra()), NOT_ARMED_DRIFTED);
+    }
+
+    #[test]
+    fn mods_record_of_another_workspace_reads_as_absent() {
+        let covering: &[&str] = &[BAND];
+        let run = ModRun {
+            record: Some(covering),
+            record_workspace: "/w/other",
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(run.mods.consent(), &Consent::Absent);
+        assert_eq!(run.mods.verdict("band", &band()), MOD_NOT_ASKED);
+    }
+
+    #[test]
+    fn mods_record_of_an_unknown_version_reads_as_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = Path::new("/w/proj");
+        let path = crate::install::hook_dispatch::consent_path(home.path(), ws);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = |v: u32| {
+            format!(r#"{{"v":{v},"workspace":"/w/proj","sources":["{BAND}"],"consented_at":"2026-11-04T10:00:00Z"}}"#)
+        };
+        std::fs::write(&path, body(2)).unwrap();
+        assert!(consent::load(home.path(), ws).is_some(), "positive control: v2 loads");
+        std::fs::write(&path, body(3)).unwrap();
+        assert!(consent::load(home.path(), ws).is_none());
+        let flags = ExperimentalOptions {
+            mods: true,
+            ..Default::default()
+        };
+        let inputs = ConsentInputs {
+            flags: &flags,
+            flag: None,
+            interactivity: Interactivity::NonInteractive,
+            scope: ConfigScope::Project,
+            workspace: ws,
+            registries: &[],
+        };
+        let declared = DeclaredKeys::from([(ArtifactKind::Mod, [BAND.to_string()].into())]);
+        let run = ConsentPolicies::new(&inputs, consent::load(home.path(), ws).as_ref(), &declared);
+        assert_eq!(run.mods.verdict("band", &band()), MOD_NOT_ASKED);
+    }
+
+    #[test]
+    fn the_mods_flag_off_stops_mods_and_nothing_else() {
+        let covering: &[&str] = &[BAND, HOOK];
+        for flag in [None, Some(true)] {
+            let run = ModRun {
+                mods: false,
+                flag,
+                record: Some(covering),
+                ..ModRun::default()
+            }
+            .policies();
+            assert_eq!(
+                run.mods.verdict("band", &band()),
+                Some(Arming::NotArmed(NotArmedReason::FeatureOff)),
+                "neither a record nor --trust-workspace reaches past the flag"
+            );
+            assert!(run.hooks.feature_enabled(), "the hooks flag is its own");
+            assert!(run.any_feature_enabled());
+        }
+        let on = ModRun::default().policies();
+        assert!(on.mods.feature_enabled(), "positive control");
+    }
+
+    #[test]
+    fn the_flag_pair_outranks_the_record_both_ways() {
+        let covering: &[&str] = &[BAND];
+        let denied = ModRun {
+            flag: Some(false),
+            record: Some(covering),
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(
+            denied.mods.verdict("band", &band()),
+            Some(Arming::NotArmed(NotArmedReason::FlagDenied)),
+            "a typed refusal beats a covering record"
+        );
+        let trusted = ModRun {
+            flag: Some(true),
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(
+            trusted.mods.verdict("band", &band()),
+            Some(Arming::Armed(GrantSource::TrustHooksFlag)),
+            "a typed grant beats an absent record"
+        );
+    }
+
+    #[test]
+    fn a_mod_over_plain_http_is_gated_even_with_a_record() {
+        let downgraded = RegistryConfig {
+            oci: Some("evil.dev".to_string()),
+            insecure: true,
+            ..RegistryConfig::default()
+        };
+        let covering: &[&str] = &["band@evil.dev/acme/band", BAND];
+        let run = ModRun {
+            record: Some(covering),
+            declared_mods: &["band@evil.dev/acme/band"],
+            registries: std::slice::from_ref(&downgraded),
+            ..ModRun::default()
+        }
+        .policies();
+        assert_eq!(
+            run.mods.verdict("band", &registry_source("evil.dev", "acme/band")),
+            Some(Arming::NotArmed(NotArmedReason::InsecureTransport))
+        );
+        assert_eq!(
+            run.mods.verdict("band", &band()),
+            WORKSPACE_GRANT,
+            "positive control: an HTTPS host under the same record writes"
+        );
+    }
+
+    #[test]
+    fn a_key_the_record_held_before_the_gesture_is_not_added() {
+        let mut run = ModRun::default().policies();
+        let added = DeclaredKeys::from([(ArtifactKind::Mod, [BAND.to_string()].into())]);
+        run.note_added(&added, &BTreeSet::from([BAND.to_string()]));
+        assert!(run.gesture_added().is_empty());
+        run.note_added(&added, &BTreeSet::new());
+        assert_eq!(run.gesture_added(), &BTreeSet::from([BAND.to_string()]));
+    }
+
+    #[test]
+    fn the_policy_exposes_what_the_gesture_added() {
+        let mut run = ModRun::default().policies();
+        assert!(run.gesture_added().is_empty());
+        let added = DeclaredKeys::from([(ArtifactKind::Mod, [BAND.to_string()].into())]);
+        run.adopt_consent(&added, [BAND.to_string()].into());
+        assert_eq!(run.gesture_added(), &BTreeSet::from([BAND.to_string()]));
+        assert_eq!(
+            run.mods.verdict("band", &band()),
+            Some(Arming::Armed(GrantSource::ConsentPrompt))
         );
     }
 }

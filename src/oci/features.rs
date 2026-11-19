@@ -15,7 +15,9 @@ use super::text::{escape_controls, registry_text};
 /// Manifest annotation listing the features a reader must understand.
 pub const REQUIRES_FEATURES_ANNOTATION: &str = "com.grimoire.requires-features";
 /// Features this grim understands. Membership is a two-way door; the key is not.
-pub const KNOWN_FEATURES: &[&str] = &["dependencies"];
+pub const KNOWN_FEATURES: &[&str] = &["dependencies", "mods"];
+/// Feature token a manifest carries when a bundle member or `requires` edge names a mod.
+pub const MODS_FEATURE: &str = "mods";
 /// Longest accepted annotation value.
 pub const MAX_FEATURES_ANNOTATION_BYTES: usize = 1024;
 /// Most feature names an annotation may list.
@@ -178,6 +180,18 @@ pub fn check_required_features(reference: &str, manifest: &OciManifest) -> Resul
     }
 }
 
+/// Stamp [`MODS_FEATURE`] on `annotations` when an edge (a bundle member or a
+/// `requires` entry) names a mod. A manifest that only coexists with mods
+/// stays unstamped, so an older grim keeps reading it.
+pub fn stamp_mods_feature(
+    annotations: &mut std::collections::BTreeMap<String, String>,
+    edges: &[super::bundle::BundleMember],
+) {
+    if edges.iter().any(|m| m.kind == super::ArtifactKind::Mod) {
+        annotations.insert(REQUIRES_FEATURES_ANNOTATION.to_string(), MODS_FEATURE.to_string());
+    }
+}
+
 /// `[a-z0-9]+(-[a-z0-9]+)*`.
 fn is_feature_name(name: &str) -> bool {
     name.split('-')
@@ -204,6 +218,28 @@ mod tests {
 
     fn check(value: Option<&str>) -> Result<(), ArtifactFeatureError> {
         check_required_features("ghcr.io/acme/x:1", &manifest_with(value))
+    }
+
+    #[test]
+    fn mods_token_is_stamped_only_on_a_mod_edge() {
+        use crate::oci::{ArtifactKind, bundle::BundleMember};
+        let edge = |kind| BundleMember {
+            kind,
+            name: "x".to_string(),
+            id: "ghcr.io/a/x:1".to_string(),
+        };
+        let stamped = |edges: &[BundleMember]| {
+            let mut a = std::collections::BTreeMap::new();
+            stamp_mods_feature(&mut a, edges);
+            a.get(REQUIRES_FEATURES_ANNOTATION).cloned()
+        };
+        assert_eq!(stamped(&[edge(ArtifactKind::Skill)]), None);
+        assert_eq!(stamped(&[]), None);
+        assert_eq!(
+            stamped(&[edge(ArtifactKind::Skill), edge(ArtifactKind::Mod)]).as_deref(),
+            Some("mods")
+        );
+        assert!(check(Some("mods")).is_ok());
     }
 
     #[test]

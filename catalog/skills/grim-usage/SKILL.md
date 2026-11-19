@@ -1,6 +1,6 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, settings packages, and bundles. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when adding, pinning, or exporting a plugin marketplace (marketplace.toml); when enabling opt-in telemetry; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, settings packages, bundles, and mods. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when adding, pinning, or exporting a plugin marketplace (marketplace.toml); when enabling opt-in telemetry; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.16
 metadata:
@@ -12,8 +12,8 @@ metadata:
 # Grim Usage
 
 Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
-It distributes seven artifact kinds — **skills**, **rules**, **agents**,
-**MCP servers**, **hooks**, **settings**, and **bundles** — through any standard OCI
+It distributes eight artifact kinds — **skills**, **rules**, **agents**,
+**MCP servers**, **hooks**, **settings**, **bundles**, and **mods** — through any standard OCI
 registry (GHCR, Docker Hub, a private Distribution), with lockfile-pinned
 installs into a growing fleet of AI clients plus a vendor-neutral `agents`
 target. The current names are listed in
@@ -163,9 +163,9 @@ accepted in `[skills]`, `[rules]`, `[agents]` and `[bundles]`, and as the
 argument of `grim add`, `grim install` and `grim export plugin`. A path
 given to `grim install` is a dev-install: it renders a local skill, rule or
 agent into your clients without declaring it, and that positional takes no
-registry reference (exit 64). `[mcp]`, `[hooks]` and `[settings]` take registry
+registry reference (exit 64). `[mcp]`, `[hooks]`, `[settings]` and `[mods]` take registry
 references only — a path value there is refused with exit 65, so an MCP
-server, a hook or a settings package always comes from a registry. See
+server, a hook, a settings package or a mod always comes from a registry. See
 [references/consume.md](references/consume.md#declaring) for how a path is
 declared and installed.
 

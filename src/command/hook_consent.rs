@@ -92,7 +92,7 @@ use super::scope_resolution::ResolvedScope;
 
 /// The kinds workspace consent gates. A new gated kind is one entry here and
 /// one arm in [`consent_flag_on`].
-const GATED_KINDS: [ArtifactKind; 2] = [ArtifactKind::Hook, ArtifactKind::Settings];
+const GATED_KINDS: [ArtifactKind; 3] = [ArtifactKind::Hook, ArtifactKind::Settings, ArtifactKind::Mod];
 
 /// Every consent entry `lock` declares, of every gated kind and whatever the
 /// flags say: what `grim hook allow` reviews, so turning a flag on later asks
@@ -105,6 +105,7 @@ pub fn reviewed_consent_keys(lock: &GrimoireLock) -> DeclaredKeys {
     let every_kind = ExperimentalOptions {
         hooks: true,
         settings: true,
+        mods: true,
     };
     declared_keys(lock, &every_kind)
 }
@@ -136,6 +137,7 @@ pub fn config_consent_keys(kind: ArtifactKind, set: &DesiredSet, flags: &Experim
     let table = match kind {
         ArtifactKind::Hook => &set.hooks,
         ArtifactKind::Settings => &set.settings,
+        ArtifactKind::Mod => &set.mods,
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
             return BTreeSet::new();
         }
@@ -162,6 +164,7 @@ fn consent_flag_on(kind: ArtifactKind, flags: &ExperimentalOptions) -> bool {
     match kind {
         ArtifactKind::Hook => flags.hooks_enabled(),
         ArtifactKind::Settings => flags.settings_enabled(),
+        ArtifactKind::Mod => flags.mods_enabled(),
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
             false
         }
@@ -311,6 +314,7 @@ fn prompt_noun(policies: &ConsentPolicies, lock: &GrimoireLock) -> Option<Consen
     let per_kind = [
         (ArtifactKind::Hook, &policies.hooks),
         (ArtifactKind::Settings, &policies.settings),
+        (ArtifactKind::Mod, &policies.mods),
     ];
     if !per_kind.iter().any(|(kind, policy)| asks(*kind, policy)) {
         return None;
@@ -343,14 +347,18 @@ fn prompt_entries(lock: &GrimoireLock, flags: &ExperimentalOptions) -> Vec<Promp
 /// What the record misses, across both kinds, so the question can say *what
 /// changed* on a drift. "Something changed" is not an actionable sentence.
 fn drifted_keys(policies: &ConsentPolicies) -> Vec<String> {
-    let drifted: BTreeSet<&String> = [policies.hooks.consent(), policies.settings.consent()]
-        .into_iter()
-        .filter_map(|answer| match answer {
-            Consent::Drifted(entries) => Some(entries),
-            Consent::Granted | Consent::Absent => None,
-        })
-        .flatten()
-        .collect();
+    let drifted: BTreeSet<&String> = [
+        policies.hooks.consent(),
+        policies.settings.consent(),
+        policies.mods.consent(),
+    ]
+    .into_iter()
+    .filter_map(|answer| match answer {
+        Consent::Drifted(entries) => Some(entries),
+        Consent::Granted | Consent::Absent => None,
+    })
+    .flatten()
+    .collect();
     drifted.into_iter().cloned().collect()
 }
 
@@ -376,11 +384,12 @@ impl<'a> ConsentSite<'a> {
         }
     }
 
-    /// This site as a gesture that consents to no settings package sees it:
-    /// `grim add --no-install` and the TUI's declaring Install record hooks only.
+    /// This site as a gesture that consents to no settings package and no mod
+    /// sees it: `grim add --no-install` records hooks only.
     #[must_use]
     pub fn hooks_only(mut self) -> Self {
         self.flags.settings = false;
+        self.flags.mods = false;
         self
     }
 
@@ -504,10 +513,14 @@ pub fn gesture(
     } else {
         record(site, &all, &noun_for(&consentable))
     };
-    if !consent::keys_of(&consentable, ArtifactKind::Settings).is_empty()
-        && let Some(covered) = &written
-    {
-        policies.settings.adopt_consent(covered.clone());
+    if let Some(covered) = &written {
+        if !consent::keys_of(&consentable, ArtifactKind::Settings).is_empty() {
+            policies.settings.adopt_consent(covered.clone());
+        }
+        if !consent::keys_of(&consentable, ArtifactKind::Mod).is_empty() {
+            policies.mods.adopt_consent(covered.clone());
+        }
+        policies.note_added(&consentable, &recorded);
     }
     let covered = written.unwrap_or(recorded);
     if policies.hooks.feature_enabled() && !covered.is_empty() {
@@ -674,7 +687,11 @@ fn scope_policies(
     declared: &DeclaredKeys,
 ) -> anyhow::Result<ConsentPolicies> {
     let flags = &scope.options.experimental;
-    let registries = policy_registries(ctx, scope, flags.hooks_enabled() || flags.settings_enabled())?;
+    let registries = policy_registries(
+        ctx,
+        scope,
+        flags.hooks_enabled() || flags.settings_enabled() || flags.mods_enabled(),
+    )?;
     let inputs = ConsentInputs {
         flags,
         flag,
@@ -773,6 +790,7 @@ fn disclose_transitive(lock: &GrimoireLock, policies: &ConsentPolicies) {
             "settings package",
             policies.settings.feature_enabled(),
         ),
+        (ArtifactKind::Mod, "mod", policies.mods.feature_enabled()),
     ];
     for (kind, noun, _) in gated.into_iter().filter(|(_, _, enabled)| *enabled) {
         disclose_kind(lock, kind, noun);
@@ -1253,6 +1271,7 @@ mod tests {
             ),
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -1296,6 +1315,65 @@ mod tests {
         );
     }
 
+    /// A mod's entry counts under the mods flag, from the lock and from the
+    /// config, and no other kind's flag reads it.
+    #[test]
+    fn mod_entries_count_under_the_mods_flag() {
+        let mut lock = mixed_lock();
+        lock.mods.push(locked("band", ArtifactKind::Mod));
+        let mods_on = ExperimentalOptions {
+            mods: true,
+            ..ExperimentalOptions::default()
+        };
+        let hooks_only = ExperimentalOptions {
+            hooks: true,
+            settings: true,
+            ..ExperimentalOptions::default()
+        };
+        let want = BTreeSet::from(["band@ghcr.io/acme/band".to_string()]);
+        assert_eq!(declared_consent_keys(ArtifactKind::Mod, &lock, &mods_on), want);
+        assert_eq!(
+            declared_consent_keys(ArtifactKind::Mod, &lock, &hooks_only),
+            BTreeSet::new()
+        );
+        assert!(consent::keys_of(&reviewed_consent_keys(&lock), ArtifactKind::Mod).eq(&want));
+
+        let mut set = DesiredSet::default();
+        set.mods.insert(
+            "band".to_string(),
+            crate::config::declaration::DeclaredSource::Registry("ghcr.io/acme/band:1".parse().unwrap()),
+        );
+        assert_eq!(config_consent_keys(ArtifactKind::Mod, &set, &mods_on), want);
+        assert_eq!(
+            config_consent_keys(ArtifactKind::Mod, &set, &hooks_only),
+            BTreeSet::new()
+        );
+    }
+
+    /// A site records a mod's key under the mods flag only, and a refusal stops it.
+    #[test]
+    fn add_would_record_reads_the_kinds_own_flag() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let invocation = Invocation::WALKED;
+        let site = |flags: ExperimentalOptions| ConsentSite {
+            grim_home: home.path(),
+            scope: ConfigScope::Project,
+            workspace: ws.path(),
+            flags,
+            invocation: &invocation,
+        };
+        let mods_on = site(ExperimentalOptions {
+            mods: true,
+            ..Default::default()
+        });
+        let key = "band@ghcr.io/acme/band";
+        assert!(add_would_record(&mods_on, ArtifactKind::Mod, key, None));
+        assert!(!add_would_record(&mods_on, ArtifactKind::Hook, key, None));
+        assert!(!add_would_record(&mods_on, ArtifactKind::Mod, key, Some(false)));
+        assert!(!add_would_record(&mods_on.hooks_only(), ArtifactKind::Mod, key, None));
+    }
+
     /// A hook key counts under the hook flag, and no other kind's key does.
     #[test]
     fn declared_consent_keys_reads_hooks_under_their_flag() {
@@ -1332,6 +1410,7 @@ mod tests {
             let flags = ExperimentalOptions {
                 hooks: flags.0,
                 settings: flags.1,
+                ..Default::default()
             };
             assert_eq!(
                 consent::all_keys(&config_keys(&set, &flags)),
@@ -1355,6 +1434,7 @@ mod tests {
             let flags = ExperimentalOptions {
                 hooks: flags.0,
                 settings: flags.1,
+                ..Default::default()
             };
             assert_eq!(
                 consent::all_keys(&declared_keys(&mixed_lock(), &flags)),
@@ -1414,7 +1494,11 @@ mod tests {
         let workspace = std::path::Path::new("/w/proj");
         let lock = mixed_lock();
         let noun = |hooks: bool, settings: bool, interactivity: Interactivity, keys: Option<&[&str]>| {
-            let flags = ExperimentalOptions { hooks, settings };
+            let flags = ExperimentalOptions {
+                hooks,
+                settings,
+                ..Default::default()
+            };
             let record = keys.map(|keys| consent::ConsentRecord {
                 v: consent::ConsentVersion::V2,
                 workspace: workspace.to_path_buf(),
@@ -1483,7 +1567,11 @@ mod tests {
         };
         let hook_at = |host: &str| Some(locked_at(host, "acme/guard", "guard", ArtifactKind::Hook));
         let noun = |lock: &GrimoireLock, hooks: bool, keys: Option<&[&str]>| {
-            let flags = ExperimentalOptions { hooks, settings: true };
+            let flags = ExperimentalOptions {
+                hooks,
+                settings: true,
+                ..Default::default()
+            };
             let record = keys.map(|keys| consent::ConsentRecord {
                 v: consent::ConsentVersion::V2,
                 workspace: workspace.to_path_buf(),
@@ -1607,6 +1695,7 @@ mod tests {
         let both = ExperimentalOptions {
             hooks: true,
             settings: true,
+            ..Default::default()
         };
 
         let on = policies(&both, &holds_guard);

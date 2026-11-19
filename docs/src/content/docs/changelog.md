@@ -12,15 +12,34 @@ new client, or a behavior worth knowing about. It links to the page that
 shows how. [`CHANGELOG.md`][changelog] has every change at commit
 granularity, including the refactors and internal work this page leaves out.
 
-## 0.17 — a skill refuses a plugin manifest {#v0-17}
+## 0.17 — mods, and a skill refuses a plugin manifest {#v0-17}
 
-0.17 closes one route for client-loaded code. A skill whose root carries a
-Claude plugin manifest directory is [refused](#v0-17-0-skill-plugin-manifest)
-at build, publish and install.
+0.17 adds the experimental [`mod` kind](#v0-17-0-mods) for client-loaded code.
+It also closes one route for it. A skill whose root carries a Claude plugin
+manifest directory is [refused](#v0-17-0-skill-plugin-manifest) at build,
+publish and install.
 
 ### 0.17.0 — unreleased {#v0-17-0}
 
-0.17.0 has one change, and it is [breaking](#v0-17-0-skill-plugin-manifest).
+0.17.0 adds [mods](#v0-17-0-mods) and one [breaking](#v0-17-0-skill-plugin-manifest) change.
+The workspace [consent record](#v0-17-0-consent-moved) also moved.
+
+#### Mods: publisher code a client loads (experimental) {#v0-17-0-mods}
+
+A mod is publisher code that Claude Code or OpenCode loads into its own
+process, such as a status band. It is a new artifact kind behind
+`[options.experimental] mods`. Grim writes it only after you consent to the
+workspace, and `grim status` reads `installed` once the files and the client
+registration exist. `serves` on `status`, `describe` and `search` reports which
+clients a mod serves. See the [Mod reference][mods] and [the upgrade
+note][up-mods].
+
+#### The consent record moved {#v0-17-0-consent-moved}
+
+The workspace consent record now lives at `$GRIM_HOME/consent/` and holds
+unprefixed entries for every gated kind. Each workspace asks for consent once
+again. A machine that runs grim non-interactively needs `--trust-workspace`
+once. See [the upgrade note][up-consent].
 
 #### A skill can no longer carry a Claude plugin manifest (breaking) {#v0-17-0-skill-plugin-manifest}
 
@@ -37,6 +56,10 @@ already installed keeps its files, but every install-type run fails with `65`
 until `grim update` reaches a clean version or `grim uninstall` removes it. A
 grim before 0.17.0 still builds and installs such a skill. See [the upgrade
 note][up-skill-plugin-manifest].
+
+The refusal also covers an installed record whose output sits under a client
+outside `--client`. A dev install that carries the entry makes `grim install`
+and `grim update` exit `65`, while `grim status` keeps exit `0`.
 
 ## 0.16 — dependencies, harness settings, and a lock that holds still {#v0-16}
 
@@ -1118,6 +1141,9 @@ the full commit-level record back to the first tagged release.
 [telemetry-config-keys]: ./telemetry.md#config-file-keys
 [vendor-claude-agent]: ./vendor-metadata.md#claude-agent-registry
 [vendor-copilot-agent]: ./vendor-metadata.md#copilot-agent-registry
+[mods]: ./mods.md
+[up-mods]: ./upgrading.md#upgrade-mods
+[up-consent]: ./upgrading.md#consent-reask
 [up-skill-plugin-manifest]: ./upgrading.md#skill-plugin-manifest
 [up-dependencies]: ./upgrading.md#dependencies-need-new-grim
 [up-lock-pins]: ./upgrading.md#lock-keeps-pins

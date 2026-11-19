@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
+use crate::oci::ArtifactKind;
 use crate::oci::hook::{HookCommand, HookRegistration, HookShell, HookSurface};
 use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
@@ -25,8 +26,8 @@ use super::vendor::MergeClass::{Map, Scalar, Set};
 use super::vendor::SettingsScopes::Both;
 use super::vendor::SettingsValueType as Ty;
 use super::vendor::{
-    FieldType, HOOK_MARKER_KEY, HOOK_MARKER_VALUE, HookSpliceShape, KnownField, SettingsField, SplicedHandler, Vendor,
-    env_dir, home_dir,
+    FieldType, HOOK_MARKER_KEY, HOOK_MARKER_VALUE, HookSpliceShape, KindSupport, KnownField, SettingsField,
+    SplicedHandler, Vendor, env_dir, home_dir,
 };
 
 /// Claude Code.
@@ -289,6 +290,11 @@ impl Vendor for ClaudeVendor {
 
     fn root_dir(&self) -> &'static str {
         ".claude"
+    }
+
+    /// Claude hosts every kind, a mod included.
+    fn kind_support(&self, _kind: ArtifactKind) -> KindSupport {
+        KindSupport::Native
     }
 
     fn skill_fields(&self) -> &'static [KnownField] {

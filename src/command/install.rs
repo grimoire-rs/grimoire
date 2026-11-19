@@ -23,6 +23,7 @@ use crate::install::installer::{
     ArtifactInstall, InstallIntent, InstallOutcome, InstallRun, SettingsOutcome, SettingsRun, install_and_persist,
 };
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::mod_phase::ModReach;
 use crate::install::settings_phase;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
@@ -100,7 +101,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let target = install_target(&scope, &args.client, &global)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     say_clients(ctx, &target);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
@@ -138,6 +140,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
             crate::install::vendor::SyncAdds::Every,
             progress.as_ref(),
             SettingsRun::Full(&lock),
+            declared_mod_reach(),
         )
         .await,
     )?;
@@ -145,6 +148,16 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     record_changed(ctx, &run.items, &scope.set);
     let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
     finish(run, &armed)
+}
+
+/// The mod reach of a bare `grim install`: the whole lock.
+const fn declared_mod_reach() -> ModReach<'static> {
+    ModReach::Full
+}
+
+/// The mod reach of a dev install: mods have no path source, so none is written or disarmed.
+const fn dev_mod_reach() -> ModReach<'static> {
+    ModReach::Skip
 }
 
 /// The target `grim install` renders into: `--client`, else the project's
@@ -291,7 +304,7 @@ async fn dev_install(
         ArtifactKind::Rule => scope.set.rules.contains_key(&name),
         ArtifactKind::Agent => scope.set.agents.contains_key(&name),
         // Path sources never produce these kinds (shape/--kind gate above).
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings | ArtifactKind::Mod => {
             unreachable!("dev-install is limited to skill/rule/agent")
         }
     };
@@ -367,6 +380,7 @@ async fn dev_install(
         },
         bundles: Vec::new(),
         requires: Vec::new(),
+        clients: Vec::new(),
     };
     let mut synth = crate::lock::grimoire_lock::GrimoireLock {
         hooks: vec![],
@@ -383,6 +397,7 @@ async fn dev_install(
         agents: Vec::new(),
         mcp: Vec::new(),
         bundles: Vec::new(),
+        mods: Vec::new(),
     };
     match kind {
         // Second half of the same decision recorded above (hooks are not
@@ -394,7 +409,7 @@ async fn dev_install(
         ArtifactKind::Rule => synth.rules.push(entry),
         ArtifactKind::Agent => synth.agents.push(entry),
         // Path sources never produce these kinds (shape/--kind gate above).
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings | ArtifactKind::Mod => {
             unreachable!("dev-install is limited to skill/rule/agent")
         }
     }
@@ -408,7 +423,8 @@ async fn dev_install(
     let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let target = install_target(scope, &args.client, &global)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     say_clients(ctx, &target);
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::read_state(scope).map_err(|e| state_io(&scope.state_path, e)))?
@@ -432,6 +448,7 @@ async fn dev_install(
             crate::install::vendor::SyncAdds::Every,
             progress.as_ref(),
             SettingsRun::Skip,
+            dev_mod_reach(),
         )
         .await,
     )?;
@@ -697,6 +714,12 @@ pub(crate) fn refusal_error(reference: ArtifactRef, outcome: InstallOutcome) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_install_reaches_every_mod_and_dev_install_none() {
+        assert_eq!(declared_mod_reach(), ModReach::Full);
+        assert_eq!(dev_mod_reach(), ModReach::Skip);
+    }
     use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece, SettingsChange, SettingsChangeAction};
     use crate::install::install_error::{InstallError, InstallErrorKind};
     use crate::oci::reference::ArtifactRef;

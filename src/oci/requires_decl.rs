@@ -28,8 +28,10 @@ pub enum RequiresDeclError {
     #[error("requires key '{key}' must be grim.requires.<table>.<name>")]
     MalformedKey { key: String },
 
-    /// The table is not one of the seven requires tables.
-    #[error("requires table '{table}' in '{key}' is not one of skills, rules, agents, mcp, hooks, bundles, settings")]
+    /// The table is not one of the eight requires tables.
+    #[error(
+        "requires table '{table}' in '{key}' is not one of skills, rules, agents, mcp, hooks, bundles, settings, mods"
+    )]
     UnknownTable { key: String, table: String },
 
     /// The binding name fails [`SkillName::parse`].

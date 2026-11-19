@@ -34,8 +34,8 @@ use super::status::find_locked;
 /// `grim why` arguments.
 #[derive(Debug, Args)]
 pub struct WhyArgs {
-    /// `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, or `settings`.
-    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
+    /// `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, `settings`, or `mod`.
+    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings", "mod"])]
     pub kind: String,
 
     /// The binding name to explain.

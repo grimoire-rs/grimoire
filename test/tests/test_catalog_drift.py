@@ -25,7 +25,16 @@ _USAGE_ERROR = 64  # the command does not take this kind of argument
 _DATA_ERROR = 65  # DataError (EX_DATAERR): the parser refused the value
 
 _DIGEST = "sha256:" + "a" * 64
-_ALL_TABLES = ("skills", "rules", "agents", "bundles", "mcp", "hooks", "settings")
+_ALL_TABLES = (
+    "skills",
+    "rules",
+    "agents",
+    "bundles",
+    "mcp",
+    "hooks",
+    "settings",
+    "mods",
+)
 
 _ALIAS, _ALIAS_OCI = "acme", "ghcr.io/acme"
 _REGISTRY_ALIAS = f'[[registries]]\nalias = "{_ALIAS}"\noci = "{_ALIAS_OCI}"\n\n'
@@ -128,7 +137,11 @@ def _path_forms(tmp_path: Path) -> dict[str, str]:
 def _context(grim_at, project_dir: Path, table: str, value: str):
     # JSON escapes quotes, backslashes and C0 controls as TOML does; TOML also bans a raw DEL.
     quoted = json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
-    (project_dir / "grimoire.toml").write_text(f"{_REGISTRY_ALIAS}[{table}]\nbinding = {quoted}\n", encoding="utf-8", newline="\n")
+    (project_dir / "grimoire.toml").write_text(
+        f"{_REGISTRY_ALIAS}[{table}]\nbinding = {quoted}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     return grim_at(project_dir).run("context", check=False)
 
 
@@ -190,7 +203,9 @@ def _skill_path(project_dir: Path, tmp_path: Path, form: str) -> str:
         "absolute": (tmp_path / "abs" / "x", str(tmp_path / "abs" / "x")),
     }[form]
     target.mkdir(parents=True)
-    (target / "SKILL.md").write_text("---\nname: x\ndescription: X.\n---\n# X\n", encoding="utf-8", newline="\n")
+    (target / "SKILL.md").write_text(
+        "---\nname: x\ndescription: X.\n---\n# X\n", encoding="utf-8", newline="\n"
+    )
     return argument
 
 

@@ -120,7 +120,7 @@ fn parse(bytes: &[u8], workspace: &Path) -> Result<Vec<InstallRecord>, &'static 
 }
 
 /// The one slot for a file this grim could not use.
-fn unusable_path(path: &Path) -> PathBuf {
+pub(crate) fn unusable_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".unusable");
     PathBuf::from(name)
@@ -128,7 +128,7 @@ fn unusable_path(path: &Path) -> PathBuf {
 
 /// Create the directory holding `path` owner-only, narrowing one left wider.
 /// `$GRIM_HOME` itself keeps the ordinary umask.
-fn ensure_store_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn ensure_store_dir(path: &Path) -> io::Result<()> {
     let Some(dir) = path.parent() else { return Ok(()) };
     #[cfg(not(unix))]
     std::fs::create_dir_all(dir)?;
@@ -151,7 +151,7 @@ fn ensure_store_dir(path: &Path) -> io::Result<()> {
 }
 
 /// Replace `path` with `bytes`, owner-only.
-fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
     crate::store::atomic_write(path, bytes)?;
     // `atomic_write` keeps a mode it finds, so a file once left at 0644 would
     // otherwise stay readable by other local users.
@@ -564,6 +564,26 @@ mod tests {
         save(&file, workspace(), &[&settings_record("new")]).unwrap();
 
         assert_eq!(mode(&slot(&file)), 0o600);
+    }
+
+    /// The settings envelope is a frozen layout: the mod store sits beside it and
+    /// must never change its bytes, its key order or its key set.
+    #[test]
+    fn settings_store_envelope_is_unchanged() {
+        let empty = serde_json::to_string(&SettingsRecordFile {
+            v: SettingsRecordVersion::V1,
+            workspace: PathBuf::from("/w"),
+            records: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(empty, r#"{"v":1,"workspace":"/w","records":[]}"#);
+
+        let full: serde_json::Value = serde_json::from_slice(&envelope(WORKSPACE, "deny-rm")).unwrap();
+        let keys: Vec<&str> = full.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["records", "v", "workspace"]);
+        assert_eq!(full["v"], 1);
+        assert_eq!(full["workspace"], WORKSPACE);
+        assert_eq!(full["records"][0]["kind"], "settings");
     }
 
     /// An older grim stops at a file it cannot read rather than drop a field

@@ -57,6 +57,7 @@ use crate::install::installer::{
     ForceScope, InstallIntent, InstallOutcome, SettingsOutcome, SettingsRun, install_and_persist, persist_and_converge,
 };
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::mod_phase::ModReach;
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::progress::{InstallProgress, SilentProgress};
 use crate::install::prune::{PruneError, prune_orphans_off_runtime};
@@ -2269,7 +2270,7 @@ fn refresh_member_states(
 }
 
 /// The set of `(kind, registry/repository)` an active scope declares **directly**
-/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`/`[bundles]`) — the key by which the via-bundle badge
+/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`/`[mods]`/`[bundles]`) — the key by which the via-bundle badge
 /// decides whether a present member is also a standalone install.
 fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(ArtifactKind, String)> {
     let mut out = std::collections::BTreeSet::new();
@@ -2280,6 +2281,7 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
         (ArtifactKind::Mcp, &set.mcp),
         (ArtifactKind::Hook, &set.hooks),
         (ArtifactKind::Settings, &set.settings),
+        (ArtifactKind::Mod, &set.mods),
         (ArtifactKind::Bundle, &set.bundles),
     ] {
         for source in map.values() {
@@ -4210,6 +4212,18 @@ fn row_settings<'a>(
     }
 }
 
+/// How far an action's mod phase reaches, as [`row_settings`] does for settings:
+/// Update stops at its closure and prunes only `prune`, Install plans the whole lock.
+fn row_mod_reach<'a>(op: BatchOp, closure: &'a BTreeSet<NodeKey>, prune: &'a BTreeSet<NodeKey>) -> ModReach<'a> {
+    match op {
+        BatchOp::Update => ModReach::Closure {
+            install: closure,
+            prune,
+        },
+        BatchOp::Install | BatchOp::Uninstall => ModReach::Full,
+    }
+}
+
 /// What one row's action installs, may overwrite and may prune. Update is
 /// `grim update <binding>`, so it takes that command's [`NamedScope`]: one closure
 /// for the install, the integrity gate, settings and vendor sync, the binding's
@@ -4360,7 +4374,8 @@ async fn install_row(
 ) -> anyhow::Result<(Vec<crate::install::installer::ArtifactInstall>, Vec<NodeKey>)> {
     let target = action_target(ctx)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     let mut install_state = read_state(ctx)
         .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
         .exempt(Exempt::InstallGate);
@@ -4395,6 +4410,7 @@ async fn install_row(
         row_adds(op, &scope.closure),
         progress,
         row_settings(op, lock, &scope.closure, &scope.prune),
+        row_mod_reach(op, &scope.closure, &scope.prune),
     )
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -5048,6 +5064,7 @@ async fn perform_local_dev(
         },
         bundles: Vec::new(),
         requires: Vec::new(),
+        clients: Vec::new(),
     };
     let mut synth = GrimoireLock {
         metadata: crate::lock::grimoire_lock::LockMetadata {
@@ -5064,6 +5081,7 @@ async fn perform_local_dev(
         hooks: Vec::new(),
         settings: Vec::new(),
         bundles: Vec::new(),
+        mods: Vec::new(),
     };
     match kind {
         ArtifactKind::Skill => synth.skills.push(entry),
@@ -5071,7 +5089,7 @@ async fn perform_local_dev(
         ArtifactKind::Agent => synth.agents.push(entry),
         // A dev record is only ever a skill/rule/agent (dev-install rejects the
         // rest); this arm is defensive.
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod => {
             return Err(anyhow::anyhow!(
                 "dev-install is limited to skill/rule/agent, not {kind}"
             ));
@@ -5092,7 +5110,8 @@ async fn perform_local_dev(
     )
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
     .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
+    .with_settings_policy(policies.settings)
+    .with_mod_policy(policies.mods);
     let mut install_state = read_state(ctx)
         .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
         .exempt(Exempt::InstallGate);
@@ -5117,6 +5136,7 @@ async fn perform_local_dev(
         row_adds(op, &closure),
         progress,
         SettingsRun::Skip,
+        ModReach::Skip,
     )
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -6362,6 +6382,16 @@ async fn delete_targets(
     let hook_policy = tui_hook_policy(ctx, None).hooks;
     // The install a remedy names reads the lock's hooks and the config's, which the delete's does not.
     let install_hooks = tui_policy_over(ctx, lock.as_ref(), true).hooks;
+    let locked_mods: Option<std::collections::BTreeSet<String>> =
+        lock.as_ref().map(|l| l.mods.iter().map(|m| m.name.clone()).collect());
+    let mod_proofs = crate::install::mod_phase::uninstall_proofs(
+        &ctx.roots,
+        ctx.scope,
+        &ctx.workspace,
+        targets,
+        locked_mods.as_ref(),
+    )
+    .await;
     let deletion = delete_nodes(
         install_state,
         targets,
@@ -6374,6 +6404,8 @@ async fn delete_targets(
             hook_policy: &hook_policy,
             install_hooks: &install_hooks,
             grim: &ctx.invocation,
+            locked_mods: locked_mods.as_ref(),
+            mod_proofs: &mod_proofs,
         },
     );
     // Before the failure: what the nodes ahead of it changed stays changed.
@@ -7227,6 +7259,35 @@ mod tests {
     use super::*;
     use crate::lock::closure::{bundle_members_lock, single_entry_lock};
 
+    #[test]
+    fn row_mod_reach_is_full_for_install_and_the_closures_for_update() {
+        let closure = BTreeSet::from([(ArtifactKind::Mod, "a".to_string())]);
+        let prune = BTreeSet::from([(ArtifactKind::Mod, "b".to_string())]);
+        assert_eq!(row_mod_reach(BatchOp::Install, &closure, &prune), ModReach::Full);
+        assert_eq!(
+            row_mod_reach(BatchOp::Update, &closure, &prune),
+            ModReach::Closure {
+                install: &closure,
+                prune: &prune
+            }
+        );
+    }
+
+    /// The TUI's consent site is hooks-only: a declaring Install records no mod, so
+    /// the next `grim install` asks about it.
+    #[test]
+    fn tui_site_does_not_record_mods() {
+        use crate::command::hook_consent::add_would_record;
+        let ctx = ctx_with_registries(Vec::new(), "ghcr.io/acme");
+        let site = consent_site(&ctx, true);
+        let key = "band@ghcr.io/acme/mods/band";
+        assert!(!add_would_record(&site, ArtifactKind::Mod, key, None));
+        assert!(
+            add_would_record(&site, ArtifactKind::Hook, "guard@ghcr.io/acme/guard", None),
+            "positive control: the same site records a hook"
+        );
+    }
+
     /// The action, for a test that does not read its settings list.
     async fn perform(
         ctx: &TuiContext,
@@ -7384,6 +7445,7 @@ mod tests {
                 version: Some("1.2.3".to_string()),
                 rating: None,
                 downloads: None,
+                serves: None,
                 badge: StatusBadge::NotInstalled,
             }],
         };
@@ -7673,6 +7735,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -7843,6 +7906,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -7998,6 +8062,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
         let registry_entry = locked("a", ArtifactKind::Skill, '1');
         let lock = lock_fixture(vec![path_entry, registry_entry], Vec::new());
@@ -8406,6 +8471,7 @@ mod tests {
                     version: None,
                     rating: None,
                     downloads: None,
+                    serves: None,
                     badge: StatusBadge::NotInstalled,
                 })
                 .collect(),
@@ -15535,6 +15601,7 @@ mod tests {
                 source: crate::lock::locked_source::LockedSource::Registry(PinnedIdentifier::try_from(id).unwrap()),
                 bundles: Vec::new(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }
         }
 
@@ -18629,6 +18696,7 @@ mod tests {
             source: crate::lock::locked_source::LockedSource::Registry(pin),
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }];
         lock.bundles = vec![LockedBundle {
             name: "pack".to_string(),
@@ -20410,6 +20478,7 @@ mod tests {
                 source,
                 bundles: Vec::new(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }
         }
 

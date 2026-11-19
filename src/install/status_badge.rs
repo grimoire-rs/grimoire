@@ -306,6 +306,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -338,6 +339,7 @@ mod tests {
                 crate::oci::ArtifactKind::Mcp => lock.mcp.push(artifact),
                 crate::oci::ArtifactKind::Hook => lock.hooks.push(artifact),
                 crate::oci::ArtifactKind::Settings => lock.settings.push(artifact),
+                crate::oci::ArtifactKind::Mod => lock.mods.push(artifact),
                 crate::oci::ArtifactKind::Bundle => unreachable!("skipped above"),
             }
             assert!(
@@ -719,6 +721,7 @@ mod tests {
             agents: vec![LockedArtifact::direct("my-agent".to_string(), ArtifactKind::Agent, p)],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
 
         let roots = roots(ws);
@@ -795,6 +798,7 @@ mod tests {
             agents: vec![],
             mcp: vec![LockedArtifact::direct("grim".to_string(), ArtifactKind::Mcp, p)],
             bundles: vec![],
+            mods: Vec::new(),
         };
 
         assert_eq!(

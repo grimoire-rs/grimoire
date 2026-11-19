@@ -92,6 +92,12 @@ pub struct InstallTarget {
     /// plans nothing. Attached like [`Self::hook_policy`], and for the same
     /// reason never by [`Self::parse`].
     settings_policy: Option<crate::hook::policy::HookPolicy>,
+    /// The resolved mods policy. `None` fails closed: the mod phase plans no
+    /// write. Attached like [`Self::settings_policy`], never by [`Self::parse`].
+    mod_policy: Option<crate::hook::policy::HookPolicy>,
+    /// The resolved scope's `[options.vendors.opencode].plugin_api`, the one
+    /// host declaration a mod write reads. Set by [`Self::parse`] only.
+    plugin_api: Option<String>,
     /// `$GRIM_HOME`, the one input a hook destination needs that a client
     /// layout does not (C-106): a hook payload is machine-local at both scopes
     /// (invariant I1), so [`Self::path_for`] routes `Hook` under it.
@@ -135,6 +141,8 @@ impl InstallTarget {
             configured: None,
             hook_policy: None,
             settings_policy: None,
+            mod_policy: None,
+            plugin_api: None,
             grim_home: crate::env::grim_home(),
         }
     }
@@ -267,6 +275,8 @@ impl InstallTarget {
             configured,
             hook_policy: None,
             settings_policy: None,
+            mod_policy: None,
+            plugin_api: super::mod_phase::plugin_api(vendors).map(str::to_owned),
             grim_home: crate::env::grim_home(),
         })
     }
@@ -297,6 +307,19 @@ impl InstallTarget {
         self.settings_policy.as_ref()
     }
 
+    /// Attach the resolved mods policy. Only a mutating command does.
+    #[must_use]
+    pub fn with_mod_policy(mut self, policy: crate::hook::policy::HookPolicy) -> Self {
+        self.mod_policy = Some(policy);
+        self
+    }
+
+    /// The resolved mods policy, or `None` when no mutating boundary attached
+    /// one.
+    pub fn mod_policy(&self) -> Option<&crate::hook::policy::HookPolicy> {
+        self.mod_policy.as_ref()
+    }
+
     /// The `grim` a remedy names. Every command that installs attaches a
     /// policy; a target that holds none (the settings uninstall pass) names its
     /// scope's flag-only form, as an unnamed policy does.
@@ -309,6 +332,7 @@ impl InstallTarget {
         self.hook_policy
             .as_ref()
             .or(self.settings_policy.as_ref())
+            .or(self.mod_policy.as_ref())
             .map_or(by_scope, crate::hook::policy::HookPolicy::invocation)
     }
 
@@ -325,6 +349,11 @@ impl InstallTarget {
     pub fn with_grim_home(mut self, grim_home: &Path) -> Self {
         self.grim_home = grim_home.to_path_buf();
         self
+    }
+
+    /// The scope's declared OpenCode `plugin_api`, if any.
+    pub fn plugin_api(&self) -> Option<&str> {
+        self.plugin_api.as_deref()
     }
 
     /// The client targets, in declared order (deduplicated).
@@ -900,6 +929,7 @@ mod tests {
                     c.as_str().to_string(),
                     VendorOptions {
                         shared_skills: Some(true),
+                        ..Default::default()
                     },
                 )
             })
@@ -1024,6 +1054,7 @@ mod tests {
                     (*n).to_string(),
                     VendorOptions {
                         shared_skills: Some(true),
+                        ..Default::default()
                     },
                 )
             })
@@ -1071,6 +1102,7 @@ mod tests {
                 "cursor".to_string(),
                 VendorOptions {
                     shared_skills: Some(false),
+                    ..Default::default()
                 },
             )]
             .into_iter()
@@ -1291,6 +1323,7 @@ mod tests {
                     (*n).to_string(),
                     VendorOptions {
                         shared_skills: Some(*v),
+                        ..Default::default()
                     },
                 )
             })

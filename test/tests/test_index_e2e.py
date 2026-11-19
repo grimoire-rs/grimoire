@@ -231,6 +231,8 @@ def test_the_built_grim_lists_the_same_rows_with_clean_stderr(
     expected, _ = _list_rows(G0_COMMAND, published, tmp_path / "g0")
     rows, stderr = _list_rows(str(grim_binary), published, tmp_path / "built")
     assert stderr == "", "a default-config index warns about nothing"
+    # `serves` is the mod kind's additive search key, which 0.14.3 predates.
+    assert [row.pop("serves") for row in rows] == [None] * len(rows)
     assert rows == expected, "the built grim must list what grim 0.14.3 lists"
 
 
