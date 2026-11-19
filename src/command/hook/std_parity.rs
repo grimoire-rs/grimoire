@@ -89,11 +89,17 @@ fn std_glob_agrees_with_globset_over_the_allowed_matcher_charset() {
     assert!(matched > 10_000, "the sweep stopped exercising matches: {matched}");
 }
 
-fn chrono_fmt(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .expect("in chrono's range")
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
+fn time_fmt(secs: i64) -> String {
+    let t = time::OffsetDateTime::from_unix_timestamp(secs).expect("in the time crate's range");
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
+    )
 }
 
 fn std_fmt(secs: i64) -> String {
@@ -106,15 +112,14 @@ fn std_fmt(secs: i64) -> String {
 }
 
 #[test]
-fn std_rfc3339_agrees_with_chrono_on_boundaries_and_sweeps() {
+fn std_rfc3339_agrees_with_time_on_boundaries_and_sweeps() {
     // Leap days, century rules, year ends, 1900-03-01 (pre-epoch, non-leap century).
     let at = |y, m, d| {
-        chrono::NaiveDate::from_ymd_opt(y, m, d)
+        time::Date::from_calendar_date(y, time::Month::try_from(m).unwrap(), d)
             .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp()
+            .midnight()
+            .assume_utc()
+            .unix_timestamp()
     };
     let mut points = vec![0, -1, 1, 86_399, 86_400];
     for (y, m, d) in [
@@ -134,27 +139,27 @@ fn std_rfc3339_agrees_with_chrono_on_boundaries_and_sweeps() {
         points.extend([base - 1, base, base + 1, base + 86_399]);
     }
     for p in &points {
-        assert_eq!(std_fmt(*p), chrono_fmt(*p), "secs {p}");
+        assert_eq!(std_fmt(*p), time_fmt(*p), "secs {p}");
     }
 
     // +-10^9 s around now, and a coarse stride over the whole year 0001..=9999 range.
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     let mut swept = 0_u32;
     for p in ((now - 1_000_000_000)..=(now + 1_000_000_000)).step_by(3607) {
-        assert_eq!(std_fmt(p), chrono_fmt(p), "secs {p}");
+        assert_eq!(std_fmt(p), time_fmt(p), "secs {p}");
         swept += 1;
     }
     let (lo, hi) = (at(1, 1, 1), at(9999, 12, 31) + 86_399);
     for p in (lo..=hi).step_by(86_400 * 7 + 3601) {
-        assert_eq!(std_fmt(p), chrono_fmt(p), "secs {p}");
+        assert_eq!(std_fmt(p), time_fmt(p), "secs {p}");
         swept += 1;
     }
     assert!(swept > 500_000, "the sweep shrank: {swept}");
 }
 
 #[test]
-fn std_rfc3339_floors_a_pre_epoch_sub_second_like_chrono() {
+fn std_rfc3339_floors_a_pre_epoch_sub_second() {
     let t = UNIX_EPOCH - Duration::from_millis(1);
-    let secs = chrono::DateTime::<chrono::Utc>::from(t);
-    assert_eq!(rfc3339_utc(t), secs.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    let floor = time::OffsetDateTime::from(t).unix_timestamp();
+    assert_eq!(rfc3339_utc(t), time_fmt(floor));
 }

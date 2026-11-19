@@ -10,10 +10,10 @@ use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 use reqwest::Url;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
+use time::OffsetDateTime;
 
 use crate::catalog::catalog_error::CatalogError;
 use crate::catalog::index_http::{
@@ -126,7 +126,7 @@ struct Reply {
 
 impl Reply {
     /// The wait a throttling answer (429, 503) asks for.
-    fn retry_after(&self, now: DateTime<Utc>) -> Option<RetryAfter> {
+    fn retry_after(&self, now: OffsetDateTime) -> Option<RetryAfter> {
         if !matches!(
             self.status,
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
@@ -195,7 +195,7 @@ pub async fn refresh(
     state: Option<SyncState>,
     previous: Option<&mut BTreeMap<String, CatalogEntry>>,
     refresh: Refresh,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> SyncOutcome {
     let state = state.unwrap_or_else(|| SyncState::unbound(ctx.locator));
     let deadline = Deadline::new(REFRESH_DEADLINE);
@@ -216,7 +216,7 @@ pub async fn refresh(
 
 /// A git index has no root and no sidecar documents: every refresh clones and
 /// commits.
-async fn sync_git(ctx: &SyncContext<'_>, mut state: SyncState, deadline: Deadline, now: DateTime<Utc>) -> SyncOutcome {
+async fn sync_git(ctx: &SyncContext<'_>, mut state: SyncState, deadline: Deadline, now: OffsetDateTime) -> SyncOutcome {
     match fetch_git_entries(ctx.locator, ctx.git_dir, ctx.cache_path, ctx.fetched_at, deadline).await {
         Ok(entries) => {
             state.layout = Some(Layout::Flat);
@@ -234,7 +234,7 @@ async fn sync_git(ctx: &SyncContext<'_>, mut state: SyncState, deadline: Deadlin
 struct Pass<'a> {
     prior: Prior<'a>,
     refresh: Refresh,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 }
 
 /// The cache a pass may reuse, and what is left of it once a changed document
@@ -305,7 +305,7 @@ async fn sync_http(
     mut state: SyncState,
     previous: Option<&mut BTreeMap<String, CatalogEntry>>,
     refresh: Refresh,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> SyncOutcome {
     let mut pass = Pass {
         prior: Prior::new(previous),
@@ -329,13 +329,13 @@ async fn sync_http(
 }
 
 /// GETs the root once, unconditionally, and classifies the answer.
-async fn probe(net: &Net, dir: &Url, now: DateTime<Utc>) -> ProbeClass {
+async fn probe(net: &Net, dir: &Url, now: OffsetDateTime) -> ProbeClass {
     let url = root_url(dir);
     let answer = net.get(url.as_str(), net.probe_timeout, ROOT_LIMIT).await;
     classify(answer, now)
 }
 
-fn classify(answer: Result<Reply, GetError>, now: DateTime<Utc>) -> ProbeClass {
+fn classify(answer: Result<Reply, GetError>, now: OffsetDateTime) -> ProbeClass {
     let reply = match answer {
         Ok(reply) => reply,
         // A body that cannot be used says the host answered with something
@@ -610,7 +610,7 @@ async fn flat_blob_entries(
     dir: &Url,
     flat: &BlobRef,
     prior: &mut Prior<'_>,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> Result<BTreeMap<String, CatalogEntry>, BlobMiss> {
     let bytes = fetch_blob(net, &blob_target(dir, flat)?, flat, now).await?;
     prior.release();
@@ -626,7 +626,7 @@ async fn fetch_stats_blob(
     net: &Net,
     dir: &Url,
     blob: &BlobRef,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> Result<BTreeMap<String, IndexStats>, BlobMiss> {
     let url = blob_target(dir, blob)?;
     let bytes = fetch_blob(net, &url, blob, now).await?;
@@ -649,7 +649,7 @@ fn blob_target(dir: &Url, blob: &BlobRef) -> Result<Url, BlobMiss> {
 }
 
 /// GETs a blob and returns its inflated bytes, verified against `expected`.
-async fn fetch_blob(net: &Net, url: &Url, expected: &BlobRef, now: DateTime<Utc>) -> Result<Vec<u8>, BlobMiss> {
+async fn fetch_blob(net: &Net, url: &Url, expected: &BlobRef, now: OffsetDateTime) -> Result<Vec<u8>, BlobMiss> {
     let reply = match net
         .get(url.as_str(), INDEX_TOTAL_TIMEOUT, blob_wire_limit(expected))
         .await
@@ -760,7 +760,7 @@ async fn observe_stats(net: &Net, locator: &str) -> Option<BTreeMap<String, Inde
 /// A request that produced no answer. A refused body is logged here, because
 /// the error text names only the locator and the cause would otherwise be
 /// invisible at every log level.
-fn fail_get(ctx: &SyncContext<'_>, state: SyncState, now: DateTime<Utc>, error: GetError) -> SyncOutcome {
+fn fail_get(ctx: &SyncContext<'_>, state: SyncState, now: OffsetDateTime, error: GetError) -> SyncOutcome {
     if let GetError::Body(body) = &error
         && !matches!(body, BodyError::Transport(_))
     {
@@ -776,7 +776,7 @@ fn fail_get(ctx: &SyncContext<'_>, state: SyncState, now: DateTime<Utc>, error: 
 fn fail(
     ctx: &SyncContext<'_>,
     state: SyncState,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
     retry_after: Option<RetryAfter>,
     cause: impl Into<Box<dyn Error + Send + Sync>>,
 ) -> SyncOutcome {
@@ -791,7 +791,7 @@ fn fail(
 /// Counts `error` against the source and hands it back with the backoff.
 fn refuse(
     mut state: SyncState,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
     retry_after: Option<RetryAfter>,
     error: CatalogError,
 ) -> SyncOutcome {
@@ -848,8 +848,9 @@ mod tests {
         }
     }
 
-    fn now() -> DateTime<Utc> {
-        "2026-10-22T09:00:00Z".parse().expect("a valid time")
+    fn now() -> OffsetDateTime {
+        OffsetDateTime::parse("2026-10-22T09:00:00Z", &time::format_description::well_known::Rfc3339)
+            .expect("a valid time")
     }
 
     // ── scripted index host ──
@@ -1337,10 +1338,12 @@ mod tests {
             .collect()
     }
 
-    fn deferred_for(state: &SyncState) -> chrono::TimeDelta {
-        let until = DateTime::parse_from_rfc3339(state.retry_after.as_deref().expect("a retry schedule"))
-            .expect("an RFC 3339 time")
-            .with_timezone(&Utc);
+    fn deferred_for(state: &SyncState) -> time::Duration {
+        let until = OffsetDateTime::parse(
+            state.retry_after.as_deref().expect("a retry schedule"),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("an RFC 3339 time");
         until - now()
     }
 
@@ -1365,7 +1368,7 @@ mod tests {
             .await,
         );
 
-        assert!(deferred_for(&state) >= chrono::TimeDelta::seconds(120), "{state:?}");
+        assert!(deferred_for(&state) >= time::Duration::seconds(120), "{state:?}");
         let warned = warnings(&capture);
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(warned[0].contains(&format!("127.0.0.1:{port}")), "{}", warned[0]);
@@ -1394,7 +1397,7 @@ mod tests {
             .await,
         );
 
-        assert!(deferred_for(&state) >= chrono::TimeDelta::seconds(120), "{state:?}");
+        assert!(deferred_for(&state) >= time::Duration::seconds(120), "{state:?}");
         let warned = warnings(&capture);
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert!(warned[0].contains(&format!("127.0.0.1:{port}")), "{}", warned[0]);
@@ -1767,7 +1770,7 @@ mod tests {
             );
             assert_eq!(state.root, adopted().root, "{name}: the adopted root stays");
             assert!(
-                deferred_for(&state) >= chrono::TimeDelta::seconds(waits),
+                deferred_for(&state) >= time::Duration::seconds(waits),
                 "{name}: {state:?}"
             );
         }

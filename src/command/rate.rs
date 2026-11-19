@@ -348,7 +348,7 @@ async fn record_local_vote(
     };
     let store = VoteStore::at(ctx.paths().votes_file());
     let identity = VoteIdentity::new(provider, viewer.account_id);
-    if let Err(err) = store.record(&identity, reference, voted, chrono::Utc::now()) {
+    if let Err(err) = store.record(&identity, reference, voted, time::OffsetDateTime::now_utc()) {
         tracing::debug!("leaving the local vote record unknown; it could not be written: {err}");
     }
 }

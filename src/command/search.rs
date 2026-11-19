@@ -1325,7 +1325,7 @@ mod tests {
             "registry": "ghcr.io",
             "scope": "",
             "truncated": true,
-            "built_at": chrono::Utc::now().to_rfc3339(),
+            "built_at": grimoire_hook_core::time::rfc3339_utc(std::time::SystemTime::now()),
             "entries": entries,
         });
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();

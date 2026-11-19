@@ -601,7 +601,8 @@ mod tests {
             cache_path,
             fetched_at: "2026-10-22T00:00:00Z",
         };
-        match crate::catalog::index_sync::refresh(&ctx, None, None, Refresh::No, chrono::Utc::now()).await {
+        match crate::catalog::index_sync::refresh(&ctx, None, None, Refresh::No, time::OffsetDateTime::now_utc()).await
+        {
             SyncOutcome::Commit { entries, .. } => Ok(entries),
             SyncOutcome::Fail { error, .. } => Err(error),
             SyncOutcome::Restamp { .. } => unreachable!("a refresh with no catalog never restamps"),

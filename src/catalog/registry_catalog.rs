@@ -503,7 +503,7 @@ impl Catalog {
     /// Whether the catalog is within the freshness window relative to
     /// `now` (an RFC3339 instant). An unparseable timestamp is treated as
     /// stale so a corrupt clock cannot pin a cache forever.
-    pub fn is_fresh(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+    pub fn is_fresh(&self, now: time::OffsetDateTime) -> bool {
         is_fresh_at(&self.built_at, now)
     }
 
@@ -511,7 +511,7 @@ impl Catalog {
     /// sidecar beside `path`. A quiet refresh restamps the sidecar and leaves
     /// this file alone, so its own build time alone reads stale on every run
     /// after the first hour.
-    fn is_fresh_or_confirmed(&self, path: &Path, now: chrono::DateTime<chrono::Utc>) -> bool {
+    fn is_fresh_or_confirmed(&self, path: &Path, now: time::OffsetDateTime) -> bool {
         self.is_fresh(now)
             || sync_state::confirmed_at(path, &self.registry, &self.built_at).is_some_and(|at| is_fresh_at(&at, now))
     }
@@ -705,7 +705,7 @@ impl Catalog {
         if !force
             && let Some(c) = &cached
             && c.scope == scope
-            && c.is_fresh(chrono::Utc::now())
+            && c.is_fresh(time::OffsetDateTime::now_utc())
         {
             return Ok(cached.unwrap_or_else(|| Self::empty(registry)));
         }
@@ -799,7 +799,7 @@ impl Catalog {
             PreFlight::Rebuild { guard, previous, sync } => (guard, previous, sync),
         };
 
-        let now = chrono::Utc::now();
+        let now = time::OffsetDateTime::now_utc();
         let fetched_at = sync_state::rfc3339(now);
         let ctx = SyncContext {
             locator,
@@ -856,7 +856,9 @@ impl Catalog {
         run_blocking(path.clone(), move || {
             let mut loaded = Catalog::load_cold_with_bytes(&path, &key, offline)?;
             let reusable = |c: &Catalog| {
-                !(bypass_ttl || c.truncated) && c.scope == scope && c.is_fresh_or_confirmed(&path, chrono::Utc::now())
+                !(bypass_ttl || c.truncated)
+                    && c.scope == scope
+                    && c.is_fresh_or_confirmed(&path, time::OffsetDateTime::now_utc())
             };
 
             // Offline: serve whatever is cached (any scope), never lock or
@@ -955,7 +957,7 @@ impl Catalog {
         let previous = current.or(cached);
         if !force
             && let Some(state) = &sync
-            && let Gate::Deferred(until) = state.gate(chrono::Utc::now())
+            && let Gate::Deferred(until) = state.gate(time::OffsetDateTime::now_utc())
         {
             return Ok(PreFlight::Serve(Self::deferred(
                 previous,
@@ -1066,7 +1068,7 @@ impl Catalog {
             .filter(|state| state.catalog_sha256 == binding.digest)
             .unwrap_or_else(|| SyncState::unbound(key));
         binding.bind(&mut state);
-        state.on_failure(chrono::Utc::now(), None, message);
+        state.on_failure(time::OffsetDateTime::now_utc(), None, message);
         Self::store_sidecar(path, &state);
     }
 
@@ -1137,7 +1139,7 @@ impl Catalog {
         guard: Option<AdvisoryFileLock>,
         previous: Option<Self>,
         outcome: SyncOutcome,
-        now: chrono::DateTime<chrono::Utc>,
+        now: time::OffsetDateTime,
     ) -> Result<Self, CatalogError> {
         match outcome {
             SyncOutcome::Commit { entries, mut state } => {
@@ -1344,7 +1346,7 @@ impl Catalog {
         resume: bool,
     ) -> CatalogEntry {
         // A resumed build trusts a row fetched within the TTL: no network.
-        if resume && let Some(fresh) = prior.take_if(|p| is_fresh_at(&p.fetched_at, chrono::Utc::now())) {
+        if resume && let Some(fresh) = prior.take_if(|p| is_fresh_at(&p.fetched_at, time::OffsetDateTime::now_utc())) {
             return fresh;
         }
         let fetched_at = now_rfc3339();
@@ -1598,11 +1600,11 @@ pub fn pick_highest_version(tags: &[String]) -> Option<String> {
 
 /// Whether an RFC3339 `built_at` is within [`CATALOG_TTL_SECONDS`] of
 /// `now`. An unparseable timestamp is stale (fail closed).
-pub fn is_fresh_at(built_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
-    match chrono::DateTime::parse_from_rfc3339(built_at) {
+pub fn is_fresh_at(built_at: &str, now: time::OffsetDateTime) -> bool {
+    match time::OffsetDateTime::parse(built_at, &time::format_description::well_known::Rfc3339) {
         Ok(t) => {
-            let age = now.signed_duration_since(t.with_timezone(&chrono::Utc));
-            age.num_seconds() >= 0 && age.num_seconds() < CATALOG_TTL_SECONDS
+            let age = now - t;
+            age.whole_seconds() >= 0 && age.whole_seconds() < CATALOG_TTL_SECONDS
         }
         Err(_) => false,
     }
@@ -1611,7 +1613,7 @@ pub fn is_fresh_at(built_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
 /// Current UTC time as an RFC3339 string (`%Y-%m-%dT%H:%M:%SZ`), matching
 /// the lock layer's timestamp format for consistency on disk.
 fn now_rfc3339() -> String {
-    sync_state::rfc3339(chrono::Utc::now())
+    sync_state::rfc3339(time::OffsetDateTime::now_utc())
 }
 
 /// The cache file as it is now, which a sidecar must describe.
@@ -1701,7 +1703,7 @@ impl Catalog {
         cache_path: &Path,
         previous: Option<&BTreeMap<String, CatalogEntry>>,
     ) -> Result<Self, CatalogError> {
-        let now = chrono::Utc::now();
+        let now = time::OffsetDateTime::now_utc();
         let fetched_at = sync_state::rfc3339(now);
         let ctx = SyncContext {
             locator,
@@ -1736,9 +1738,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn ts(offset_secs: i64) -> String {
-        (chrono::Utc::now() - chrono::Duration::seconds(offset_secs))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string()
+        sync_state::rfc3339(time::OffsetDateTime::now_utc() - time::Duration::seconds(offset_secs))
     }
 
     // ── pick_latest_tag ──────────────────────────────────────────────
@@ -1808,7 +1808,7 @@ mod tests {
 
     #[test]
     fn fresh_within_ttl_stale_after() {
-        let now = chrono::Utc::now();
+        let now = time::OffsetDateTime::now_utc();
         assert!(is_fresh_at(&ts(60), now), "60s old is fresh");
         assert!(!is_fresh_at(&ts(CATALOG_TTL_SECONDS + 5), now), "over TTL is stale");
         assert!(!is_fresh_at("not-a-timestamp", now), "unparseable is stale");
@@ -1816,9 +1816,8 @@ mod tests {
 
     #[test]
     fn is_fresh_at_forms_are_pinned() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-21T09:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now = time::OffsetDateTime::parse("2026-10-21T09:00:00Z", &time::format_description::well_known::Rfc3339)
+            .unwrap();
         let cases = [
             ("2026-10-21T08:59:00Z", true),
             ("2026-10-21T08:59:00+00:00", true),
@@ -1838,7 +1837,8 @@ mod tests {
             // lenient forms
             ("2026-10-21t08:59:00z", true),
             ("2026-10-21 08:59:00Z", true),
-            ("2026-10-21T08:59:60Z", true),
+            // a leap second `:60` is rejected, so the stamp reads stale
+            ("2026-10-21T08:59:60Z", false),
         ];
         for (built_at, fresh) in cases {
             assert_eq!(is_fresh_at(built_at, now), fresh, "{built_at:?}");
@@ -1848,10 +1848,8 @@ mod tests {
     #[test]
     fn future_timestamp_is_stale() {
         // A built_at in the future (clock skew) must not pin the cache.
-        let now = chrono::Utc::now();
-        let future = (now + chrono::Duration::seconds(120))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let now = time::OffsetDateTime::now_utc();
+        let future = sync_state::rfc3339(now + time::Duration::seconds(120));
         assert!(!is_fresh_at(&future, now));
     }
 
@@ -2888,7 +2886,7 @@ mod tests {
         state.checked_at = Some(checked.clone());
         let previous = Catalog::load(&path, key).unwrap();
         let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
-        let now = chrono::Utc::now();
+        let now = time::OffsetDateTime::now_utc();
 
         let served = Catalog::persist_outcome(
             &path,
@@ -2952,7 +2950,7 @@ mod tests {
             None,
             previous,
             SyncOutcome::Restamp { state },
-            chrono::Utc::now(),
+            time::OffsetDateTime::now_utc(),
         )
         .await
         .unwrap();
@@ -2974,7 +2972,7 @@ mod tests {
         state.checked_at = Some(checked.clone());
         let previous = Catalog::load(&path, key).unwrap();
         let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
-        let now = chrono::Utc::now();
+        let now = time::OffsetDateTime::now_utc();
         let entries = BTreeMap::from([("acme/x".to_string(), entry_for(key, "acme/x", Some(2)))]);
 
         let served = Catalog::persist_outcome(
@@ -2997,7 +2995,7 @@ mod tests {
         assert_eq!(bound.checked_at.as_deref(), Some(checked.as_str()));
         assert_eq!(bound.failures, 0, "a successful refresh ends the backoff");
         assert_eq!(bound.catalog_built_at.as_deref(), Some(served.built_at()));
-        assert_eq!(served.built_at(), now.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        assert_eq!(served.built_at(), sync_state::rfc3339(now));
 
         let offline = Catalog::load_or_refresh_index_coordinated(
             &path,
@@ -3043,7 +3041,7 @@ mod tests {
             Some(guard),
             None,
             SyncOutcome::Commit { entries, state },
-            chrono::Utc::now(),
+            time::OffsetDateTime::now_utc(),
         )
         .await;
 
@@ -3071,7 +3069,7 @@ mod tests {
                 entries,
                 state: SyncState::unbound(key),
             },
-            chrono::Utc::now(),
+            time::OffsetDateTime::now_utc(),
         )
         .await
         .unwrap();
@@ -3092,7 +3090,7 @@ mod tests {
         let before = rated_cache(&path, key, 1, 'a');
         let mut state = bound_state(&path, key);
         state.on_failure(
-            chrono::Utc::now(),
+            time::OffsetDateTime::now_utc(),
             Some(sync_state::RetryAfter(std::time::Duration::from_secs(900))),
             "package index fetch failed",
         );
@@ -3108,7 +3106,7 @@ mod tests {
             Some(guard),
             previous,
             SyncOutcome::Fail { state, error },
-            chrono::Utc::now(),
+            time::OffsetDateTime::now_utc(),
         )
         .await
         .expect("the cache is served");
@@ -3131,7 +3129,7 @@ mod tests {
         let path = dir.path().join("catalog.json");
         let key = "localhost:5000";
         let mut state = SyncState::unbound(key);
-        state.on_failure(chrono::Utc::now(), None, "package index fetch failed");
+        state.on_failure(time::OffsetDateTime::now_utc(), None, "package index fetch failed");
         let guard = AdvisoryFileLock::try_acquire(&path).unwrap();
         let error = CatalogError::index_fetch(&path, key, "boom");
 
@@ -3142,7 +3140,7 @@ mod tests {
             Some(guard),
             None,
             SyncOutcome::Fail { state, error },
-            chrono::Utc::now(),
+            time::OffsetDateTime::now_utc(),
         )
         .await;
 
@@ -3162,7 +3160,7 @@ mod tests {
             sha256: "c".repeat(64),
             generation: 7,
         });
-        state.on_failure(chrono::Utc::now(), None, "package index fetch failed");
+        state.on_failure(time::OffsetDateTime::now_utc(), None, "package index fetch failed");
         let rewritten = rated_cache(&path, key, 9, 'd');
         assert_ne!(read, rewritten);
         let previous = Catalog::load(&path, key).unwrap();
@@ -3176,7 +3174,7 @@ mod tests {
             Some(guard),
             previous,
             SyncOutcome::Fail { state, error },
-            chrono::Utc::now(),
+            time::OffsetDateTime::now_utc(),
         )
         .await
         .unwrap();
@@ -3928,7 +3926,10 @@ mod tests {
             .collect();
         capped.truncated = true;
         capped.save(&cache).unwrap();
-        assert!(capped.is_fresh(chrono::Utc::now()), "the capped cache is fresh by TTL");
+        assert!(
+            capped.is_fresh(time::OffsetDateTime::now_utc()),
+            "the capped cache is fresh by TTL"
+        );
 
         let cat = Catalog::load_or_refresh_index_coordinated(&cache, &base, kind, "", &git_dir, false, false)
             .await
@@ -3953,7 +3954,7 @@ mod tests {
             .unwrap();
         assert!(first.truncated());
         assert!(
-            first.is_fresh(chrono::Utc::now()),
+            first.is_fresh(time::OffsetDateTime::now_utc()),
             "the truncated cache is fresh by TTL"
         );
 

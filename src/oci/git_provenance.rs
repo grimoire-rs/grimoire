@@ -287,11 +287,8 @@ fn source_date_epoch() -> Option<String> {
 /// process-global state.
 fn epoch_to_rfc3339(raw: &str) -> Option<String> {
     let seconds: i64 = raw.trim().parse().ok()?;
-    Some(
-        chrono::DateTime::from_timestamp(seconds, 0)?
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string(),
-    )
+    let at = time::OffsetDateTime::from_unix_timestamp(seconds).ok()?;
+    Some(grimoire_hook_core::time::rfc3339_utc(at.into()))
 }
 
 /// The directory to run `git` in for `path`: the path itself when it is a

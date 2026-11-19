@@ -14,9 +14,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use serde::Deserialize;
+use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 
 use crate::catalog::catalog_service::Refresh;
@@ -292,7 +292,8 @@ async fn cold_sync(files: Vec<(String, Vec<u8>)>, fetched_at: &str) -> (BTreeMap
         cache_path: Path::new("cache.json"),
         fetched_at,
     };
-    let now: DateTime<Utc> = "2026-10-22T09:00:00Z".parse().expect("a valid time");
+    let now = OffsetDateTime::parse("2026-10-22T09:00:00Z", &time::format_description::well_known::Rfc3339)
+        .expect("a valid time");
     match refresh(&ctx, None, None, Refresh::No, now).await {
         SyncOutcome::Commit { entries, state } => (entries, state),
         other => panic!("expected a commit, got {other:?}"),

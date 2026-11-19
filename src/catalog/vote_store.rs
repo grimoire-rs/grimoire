@@ -40,13 +40,10 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use grimoire_hook_core::time::rfc3339_utc;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-
-/// The timestamp format written into `observed_at`, matching the catalog
-/// cache's `built_at` so both sides of the TTL comparison agree on shape.
-const OBSERVED_AT_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
+use time::OffsetDateTime;
 
 /// What grim knows about this account's own vote on one artifact.
 ///
@@ -124,12 +121,12 @@ impl VoteStore {
 
     /// What is known about `identity`'s vote on `reference` as of `now`.
     ///
-    /// `now` is a parameter rather than a `Utc::now()` call so the TTL
+    /// `now` is a parameter rather than a `now_utc()` call so the TTL
     /// boundary is testable. Every failure mode — absent file, unreadable
     /// file, unparseable JSON, unknown schema version, missing entry,
     /// expired entry — answers [`VoteState::Unknown`] and raises nothing.
     #[allow(dead_code)]
-    pub fn read(&self, identity: &VoteIdentity, reference: &str, now: DateTime<Utc>) -> VoteState {
+    pub fn read(&self, identity: &VoteIdentity, reference: &str, now: OffsetDateTime) -> VoteState {
         let Some(file) = self.load() else {
             return VoteState::Unknown;
         };
@@ -172,7 +169,7 @@ impl VoteStore {
         identity: &VoteIdentity,
         reference: &str,
         voted: Option<bool>,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> io::Result<()> {
         let Some(voted) = voted else {
             // The forge said nothing, so there is nothing to cache. Not
@@ -187,7 +184,9 @@ impl VoteStore {
             identity.key_for(reference),
             VoteRecord {
                 voted,
-                observed_at: now.format(OBSERVED_AT_FORMAT).to_string(),
+                // Same shape as the catalog cache's `built_at`, so both sides of the
+                // TTL comparison agree.
+                observed_at: rfc3339_utc(now.into()),
             },
         );
         let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
@@ -251,8 +250,8 @@ mod tests {
 
     /// A fixed instant plus `offset` seconds, so every TTL assertion is
     /// stated against one clock the test owns.
-    fn clock(offset: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_800_000_000 + offset, 0).expect("a valid test timestamp")
+    fn clock(offset: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_800_000_000 + offset).expect("a valid test timestamp")
     }
 
     fn store() -> (tempfile::TempDir, VoteStore) {
@@ -290,7 +289,7 @@ mod tests {
     #[test]
     fn observed_at_is_written_as_second_precision_utc() {
         let (dir, store) = store();
-        let at = DateTime::from_timestamp(1_800_000_000, 999_999_999).expect("a valid test timestamp");
+        let at = clock(0) + time::Duration::nanoseconds(999_999_999);
         store
             .record(&account(), REFERENCE, Some(true), at)
             .expect("the record is written");
