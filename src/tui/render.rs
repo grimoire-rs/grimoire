@@ -1286,6 +1286,7 @@ fn filter_popup_view(state: &TuiState) -> ListPopupView {
         hint: "space toggle · esc close".to_string(),
         notes: Vec::new(),
         message: None,
+        reserve_message: 0,
         centered: None,
         buttons: Vec::new(),
         button_cursor: None,
@@ -1968,30 +1969,40 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 }
 
 /// Every browse-mode keybinding shown in the `?` help overlay, as
-/// `(keys, description)` rows. A free function so a unit test can assert the
-/// overlay documents every action the event loop handles.
-fn help_entries() -> [(&'static str, &'static str); 10] {
-    [
-        ("↑ / ↓", "move the selection"),
-        ("home / end", "jump to the first / last row"),
-        ("j / k", "scroll the detail pane — line, or pgup/pgdn by page"),
-        ("space", "mark / unmark — a marks all visible, c clears"),
-        ("i / u / d", "install / update / uninstall (marked set or selection)"),
-        // `v` and `o` share a row, like `tab` below: the overlay must fit an
-        // 80×24 terminal, and an eleventh row overflows it.
-        ("v · o", "pick a version for the row · open its repository URL"),
-        (
-            "g · t · s · f",
-            "scope · tree / flat · sort (S flips) · kind · F filter & sort popup",
-        ),
-        ("→ / ←", "expand / collapse group; z folds all (tree mode)"),
-        // `tab` shares this row rather than taking its own: the overlay is
-        // sized to fit an 80×24 terminal, and an eleventh row overflows it.
-        ("(shift) tab", "switch detail panel — overview / readme / changelog"),
-        (
-            "h · r · C · ?",
-            "deprecated on/off · refresh · config · this help — q quits",
-        ),
+/// `(keys, description)` rows, one key per row (a mirrored pair such as
+/// `↑ / ↓` shares one). Left column first, then right. A free function so a
+/// unit test can assert the overlay documents every key `handle_browse` binds.
+fn help_entries() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("↑ / ↓", "move selection"),
+        ("home / end", "first / last row"),
+        ("pgup/pgdn", "page detail"),
+        ("j / k", "scroll detail"),
+        ("enter", "open detail / fold"),
+        ("(shift) tab", "switch detail panel"),
+        ("→ / ←", "expand / collapse"),
+        ("z", "fold / unfold all"),
+        ("/", "search"),
+        ("space", "mark / unmark"),
+        ("a", "mark all visible"),
+        ("c", "clear marks"),
+        ("q", "quit"),
+        ("esc", "quit"),
+        ("?", "this help"),
+        ("i", "install"),
+        ("u", "update"),
+        ("d", "uninstall"),
+        ("v", "pick a version"),
+        ("o", "open repository URL"),
+        ("g", "switch scope"),
+        ("t", "tree / flat"),
+        ("s", "cycle sort"),
+        ("S", "flip sort direction"),
+        ("f", "cycle kind filter"),
+        ("F", "filter & sort popup"),
+        ("h", "toggle deprecated"),
+        ("r", "refresh catalog"),
+        ("C", "config popup"),
     ]
 }
 
@@ -2044,27 +2055,79 @@ fn settings_legend_entries(grim: &Invocation) -> [(ArtifactState, String); 3] {
     ]
 }
 
-/// The content lines of the `?` help overlay: a "Keybindings" header, one row
-/// per [`help_entries`] item, then a "Status column" legend. The count must
-/// equal [`crate::tui::state::HELP_BODY_LINES`] (the scroll-clamp source of
-/// truth) — guarded by `tests::help_body_line_count_matches_state`. The settings
-/// legend names `grim`.
+/// Overlay width, as a percentage of the terminal: at 80 columns it holds
+/// two key columns, and the legend's `grim --global …` spelling still runs
+/// past its border there, so the 80-column frame stays one shape.
+const HELP_WIDTH_PCT: u16 = 85;
+const HELP_INDENT: usize = 2;
+const HELP_GAP: usize = 3;
+
+/// `text` padded with spaces to `width` display columns.
+fn help_pad(text: &str, width: usize) -> String {
+    format!("{text}{}", " ".repeat(width.saturating_sub(text.width())))
+}
+
+/// The widest key (plus a two-cell gutter) and widest description of a column.
+fn help_column(entries: &[(&str, &str)]) -> (usize, usize) {
+    let key = entries.iter().map(|(k, _)| k.width()).max().unwrap_or(0) + 2;
+    let desc = entries.iter().map(|(_, d)| d.width()).max().unwrap_or(0);
+    (key, desc)
+}
+
+/// The key rows: two key/description pairs per line when `inner` columns hold
+/// them, else one pair per line.
+fn help_key_lines(inner: usize) -> Vec<Line<'static>> {
+    let t = theme::current();
+    let entries = help_entries();
+    let rows = entries.len().div_ceil(2);
+    let (left, right) = entries.split_at(rows);
+    let (left_key, left_desc) = help_column(left);
+    let (right_key, right_desc) = help_column(right);
+    if HELP_INDENT + left_key + left_desc + HELP_GAP + right_key + right_desc > inner {
+        let (key_w, _) = help_column(entries);
+        return entries
+            .iter()
+            .map(|(k, d)| {
+                Line::from(vec![
+                    Span::styled(format!("  {}", help_pad(k, key_w)), t.accent),
+                    Span::styled(*d, t.text),
+                ])
+            })
+            .collect();
+    }
+    left.iter()
+        .enumerate()
+        .map(|(i, (k, d))| {
+            let mut spans = vec![Span::styled(format!("  {}", help_pad(k, left_key)), t.accent)];
+            match right.get(i) {
+                Some((rk, rd)) => {
+                    spans.push(Span::styled(help_pad(d, left_desc + HELP_GAP), t.text));
+                    spans.push(Span::styled(help_pad(rk, right_key), t.accent));
+                    spans.push(Span::styled(*rd, t.text));
+                }
+                None => spans.push(Span::styled(*d, t.text)),
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The help body at full width (two key columns). The count must equal
+/// [`crate::tui::state::HELP_BODY_LINES`], guarded by
+/// `tests::help_body_line_count_matches_state`.
+#[cfg(test)]
 fn help_lines(grim: &Invocation) -> Vec<Line<'static>> {
-    // No blank separators: a blank row here pushes the last legend entry below
-    // the fold of an 80×24 terminal
-    // (`help_overlay_fits_all_entries_on_standard_terminal`).
+    help_lines_for(grim, usize::MAX)
+}
+
+/// The content lines of the `?` help overlay for `inner` columns: a
+/// "Keybindings" header, the key rows, then a "Status column" legend. The
+/// settings legend names `grim`.
+fn help_lines_for(grim: &Invocation, inner: usize) -> Vec<Line<'static>> {
+    // No blank separators: each one costs a row a short terminal does not have.
     let t = theme::current();
     let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled("Keybindings", t.title))];
-    // Both columns are sized to their widest key plus a two-cell gutter:
-    // a fixed width silently ran the longest key (`(shift) tab`,
-    // `integrity-missing`) straight into its description.
-    let key_w = help_entries().iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0) + 2;
-    for (k, d) in help_entries() {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<key_w$}"), t.accent),
-            Span::styled(d, t.text),
-        ]));
-    }
+    lines.extend(help_key_lines(inner));
     lines.push(Line::from(Span::styled("Status column", t.title)));
     let legend = || {
         let lifecycle = legend_entries()
@@ -2090,6 +2153,25 @@ fn help_lines(grim: &Invocation) -> Vec<Line<'static>> {
     lines
 }
 
+/// Columns inside the help overlay's border on a `term_width` terminal.
+fn help_inner_width(term_width: u16) -> usize {
+    let area = centered_area_rows(Rect::new(0, 0, term_width, 1), HELP_WIDTH_PCT, 1);
+    usize::from(area.width.saturating_sub(2))
+}
+
+/// Body lines of the help overlay on a `term_width` terminal, for the scroll
+/// clamp: the full-width count while two key columns fit, else one key per row.
+pub(crate) fn help_body_lines(term_width: u16) -> u16 {
+    let inner = help_inner_width(term_width);
+    let wide = help_lines_for(&Invocation::WALKED, usize::MAX).len();
+    let lines = help_lines_for(&Invocation::WALKED, inner).len();
+    if lines == wide {
+        crate::tui::state::HELP_BODY_LINES
+    } else {
+        u16::try_from(lines).unwrap_or(u16::MAX)
+    }
+}
+
 /// Height (rows) for the help overlay: `content_lines` body rows plus the top
 /// and bottom border, clamped to the available terminal height so the box
 /// never exceeds the screen. Sized to content so the full key map shows on a
@@ -2106,10 +2188,10 @@ fn help_overlay_height(content_lines: usize, term_height: u16) -> u16 {
 /// when the terminal is too short to fit it all.
 fn draw_help(f: &mut Frame, scroll: u16, grim: &Invocation) {
     let t = theme::current();
-    let lines = help_lines(grim);
     let full = f.area();
+    let lines = help_lines_for(grim, help_inner_width(full.width));
     let height = help_overlay_height(lines.len(), full.height);
-    let area = centered_area_rows(full, 60, height);
+    let area = centered_area_rows(full, HELP_WIDTH_PCT, height);
     f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).scroll((scroll, 0)).block(
@@ -2840,7 +2922,11 @@ mod tests {
         let s = config_state(80, 24, true, "/g/grimoire.toml");
         let out = screen(&draw_sized(&s, 80, 24));
         assert!(out.contains("Config · global"), "{out}");
-        assert!(out.contains("enter edit · space toggle · x reset · esc close"), "{out}");
+        assert!(
+            out.contains("enter edit · space toggle · x reset · tab buttons · esc close"),
+            "{out}"
+        );
+        assert!(out.contains("[ Reset all ]"), "{out}");
         assert!(out.contains("options."), "{out}");
     }
 
@@ -2916,6 +3002,108 @@ mod tests {
         assert!(gap_l >= usize::from(confirm::PAD), "touches the border");
     }
 
+    /// The config popup's top and bottom border rows in the drawn cells.
+    fn config_bounds(buf: &ratatui::buffer::Buffer) -> (usize, usize) {
+        let rows = cell_rows(buf);
+        let top = rows
+            .iter()
+            .position(|r| r.concat().contains("Config ·"))
+            .unwrap_or_else(|| panic!("no popup:\n{}", screen(buf)));
+        let title_at = rows[top].concat().find("Config ·").unwrap();
+        let left = (0..title_at).rev().find(|&x| rows[top][x] == "┌").expect("corner");
+        let bottom = (top + 1..rows.len())
+            .find(|&y| rows[y][left] == "└")
+            .unwrap_or_else(|| panic!("no bottom border:\n{}", screen(buf)));
+        (top, bottom)
+    }
+
+    #[test]
+    fn config_dialog_is_as_tall_as_its_content_on_a_large_terminal() {
+        let s = config_state(160, 70, true, "/g/grimoire.toml");
+        let model = frame(&s);
+        let rows = model.list_popup.as_ref().expect("popup").rows.len();
+        // list rows, 3 note lines, 3 message lines, one button row, borders and padding
+        let needed = rows + 3 + 3 + 1 + 2 + 2 * usize::from(confirm::PAD_ROWS);
+        let (top, bottom) = config_bounds(&draw_sized(&s, 160, 70));
+        assert_eq!(bottom - top + 1, needed);
+        assert!(bottom < 66, "well above the screen bottom: {bottom}");
+    }
+
+    #[test]
+    fn config_dialog_height_is_stable_across_cursor_moves_and_messages() {
+        use crate::tui::event::TuiInput;
+        let mut s = config_state(100, 50, true, "/g/grimoire.toml");
+        let before = config_bounds(&draw_sized(&s, 100, 50));
+        for _ in 0..4 {
+            press_config(&mut s, &[TuiInput::Down]);
+            assert_eq!(config_bounds(&draw_sized(&s, 100, 50)), before);
+        }
+        // A message, and the plugin-only refusal's long wording, add no rows.
+        press_config(&mut s, &[TuiInput::Char('A')]);
+        assert!(dialog_has_message(&s));
+        assert_eq!(config_bounds(&draw_sized(&s, 100, 50)), before);
+        press_config(&mut s, &[TuiInput::End]);
+        assert_eq!(
+            config_bounds(&draw_sized(&s, 100, 50)),
+            before,
+            "the add row has no note"
+        );
+    }
+
+    fn dialog_has_message(s: &TuiState) -> bool {
+        s.config.as_ref().unwrap().view(s.term_size).message.is_some()
+    }
+
+    #[test]
+    fn config_dialog_keeps_its_size_when_a_pick_list_opens() {
+        use crate::tui::event::TuiInput;
+        let mut s = config_state(100, 50, true, "/g/grimoire.toml");
+        let before = config_bounds(&draw_sized(&s, 100, 50));
+        let rows = frame(&s).list_popup.unwrap().rows;
+        let target = rows
+            .iter()
+            .position(|r| r.label == "options.tui.theme")
+            .expect("theme row");
+        let downs = rows[..target].iter().filter(|r| !r.header).count();
+        press_config(&mut s, &vec![TuiInput::Down; downs]);
+        press_config(&mut s, &[TuiInput::Enter]);
+        let open = frame(&s).list_popup.unwrap();
+        assert!(
+            open.rows[0].header && open.rows[0].label == "options.tui.theme",
+            "pick list is open"
+        );
+        assert_eq!(config_bounds(&draw_sized(&s, 100, 50)), before);
+        press_config(&mut s, &[TuiInput::Esc]);
+        assert_eq!(config_bounds(&draw_sized(&s, 100, 50)), before);
+        // The registry form is a view too.
+        let mut s = registry_state(100, 50);
+        let before = config_bounds(&draw_sized(&s, 100, 50));
+        press_config(&mut s, &[TuiInput::End, TuiInput::Enter]);
+        assert_eq!(config_bounds(&draw_sized(&s, 100, 50)), before);
+    }
+
+    #[test]
+    fn config_dialog_buttons_are_centered() {
+        let s = config_state(100, 40, true, "/g/grimoire.toml");
+        let buf = draw_sized(&s, 100, 40);
+        let rows = cell_rows(&buf);
+        let row = rows
+            .iter()
+            .find(|r| r.concat().contains("[ Reset all ]"))
+            .unwrap_or_else(|| panic!("no buttons:\n{}", screen(&buf)));
+        let text = row.concat();
+        assert!(text.contains("[ Reset ]") && text.contains("[ Close ]"), "{text}");
+        let top = rows.iter().find(|r| r.concat().contains("Config ·")).unwrap();
+        let title_at = top.concat().find("Config ·").unwrap();
+        let left = (0..title_at).rev().find(|&x| top[x] == "┌").expect("corner");
+        let right = (title_at..top.len()).find(|&x| top[x] == "┐").expect("corner");
+        let first = (left + 1..right).find(|&x| row[x] != " ").unwrap();
+        let last = (left + 1..right).rev().find(|&x| row[x] != " ").unwrap();
+        let (gap_l, gap_r) = (first - left - 1, right - last - 1);
+        assert!(gap_l.abs_diff(gap_r) <= 2, "{gap_l} vs {gap_r}:\n{}", screen(&buf));
+        assert!(gap_l >= usize::from(confirm::PAD), "touches the border");
+    }
+
     #[test]
     fn registry_form_pads_rows_inside_border() {
         let s = add_form_state(100, 30, 0);
@@ -2948,7 +3136,7 @@ mod tests {
         assert!(out.contains("Registries"), "{out}");
         assert!(out.contains("idx"), "{out}");
         assert!(out.contains("+ add registry"), "{out}");
-        assert!(out.contains("enter add · esc close"), "{out}");
+        assert!(out.contains("enter add · tab buttons · esc close"), "{out}");
     }
 
     #[test]
@@ -3062,20 +3250,123 @@ mod tests {
         assert!(frame(&s).show_help);
     }
 
-    // Regression: the `?` help overlay must be tall enough to show EVERY
-    // body line on a standard 80×24 terminal. The previous fixed 50%-height
-    // box (`centered_rect(60, 50)`) gave ~10 content rows and clipped ~7 of
-    // the entries.
+    // The `?` help overlay is sized to its content: every body line plus the
+    // border shows once the terminal has the rows (two key columns need 29 of
+    // them), and a shorter terminal scrolls (`help_body_lines` clamps it).
     #[test]
-    fn help_overlay_fits_all_entries_on_standard_terminal() {
+    fn help_overlay_is_content_sized_and_never_taller_than_the_terminal() {
         let lines = help_lines(&Invocation::WALKED).len();
-        let h = help_overlay_height(lines, 24);
-        // every body line + top/bottom border must fit.
+        assert_eq!(help_overlay_height(lines, 40), lines as u16 + 2, "fits whole");
+        assert_eq!(help_overlay_height(lines, 24), 24, "clamps and scrolls");
+    }
+
+    #[test]
+    fn help_fits_without_scrolling_once_the_terminal_has_29_rows() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
+        s.enter_help();
+        let buf = draw_sized(&s, 80, 29);
+        let text = screen(&buf);
         assert!(
-            h >= lines as u16 + 2,
-            "overlay (h={h}) must be tall enough for all {lines} body lines + borders at 80×24"
+            text.contains("Keybindings") && text.contains("integrity-missing"),
+            "{text}"
         );
-        assert!(h <= 24, "overlay must never exceed the terminal height");
+        s.set_term_size((80, 29));
+        s.scroll_help(100);
+        assert_eq!(s.help_scroll, 0, "nothing left to scroll at 29 rows");
+        s.set_term_size((80, 24));
+        s.scroll_help(100);
+        assert_eq!(s.help_scroll, 5, "27 body lines in a 22-row viewport");
+    }
+
+    /// Every key `handle_browse` binds, one per row of the key column.
+    const BROWSE_KEYS: [&str; 34] = [
+        "↑", "↓", "home", "end", "pgup", "pgdn", "j", "k", "enter", "tab", "→", "←", "z", "/", "space", "a", "c", "q",
+        "esc", "?", "i", "u", "d", "v", "o", "g", "t", "s", "S", "f", "F", "h", "r", "C",
+    ];
+
+    /// The keys one help row names: `↑ / ↓` and `pgup/pgdn` carry two.
+    fn help_row_keys(key: &str) -> Vec<String> {
+        let key = key.replace("(shift) ", "");
+        if key == "/" {
+            return vec![key];
+        }
+        key.split('/').map(|k| k.trim().to_string()).collect()
+    }
+
+    #[test]
+    fn help_lists_every_browse_key() {
+        let named: Vec<String> = help_entries().iter().flat_map(|(k, _)| help_row_keys(k)).collect();
+        for key in BROWSE_KEYS {
+            assert!(
+                named.iter().any(|k| k == key),
+                "{key} has no key-column entry: {named:?}"
+            );
+        }
+        for (key, desc) in help_entries() {
+            assert!(!desc.is_empty(), "{key} has no description");
+        }
+        let mut s = named_rows(&["alpha"]);
+        s.enter_help();
+        let text = screen(&draw_sized(&s, 80, 24));
+        for (key, desc) in help_entries() {
+            assert!(
+                text.contains(key) && text.contains(desc),
+                "{key} {desc} not drawn at 80x24:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_draws_two_key_columns_at_80_columns() {
+        let lines = help_lines_for(&Invocation::WALKED, help_inner_width(80));
+        assert_eq!(lines.len(), usize::from(crate::tui::state::HELP_BODY_LINES));
+        let keys = lines[1]
+            .spans
+            .iter()
+            .filter(|sp| sp.style == theme::current().accent)
+            .count();
+        assert_eq!(keys, 2, "two key/description pairs on the first key row");
+        let mut s = named_rows(&["alpha"]);
+        s.enter_help();
+        for (w, h) in [(80, 24), (200, 60)] {
+            let rows = cell_rows(&draw_sized(&s, w, h));
+            let overlay: Vec<String> = rows.iter().map(|r| r.concat()).collect();
+            let first = overlay
+                .iter()
+                .position(|r| r.contains("move selection"))
+                .expect("first key row");
+            assert!(
+                overlay[first].contains("install"),
+                "second column shares the row: {}",
+                overlay[first]
+            );
+        }
+    }
+
+    #[test]
+    fn help_falls_back_to_one_column_when_narrow() {
+        let entries = help_entries().len();
+        let lines = help_lines_for(&Invocation::WALKED, 40);
+        assert_eq!(lines.len(), 1 + entries + 1 + 10);
+        assert!(
+            lines[1..=entries].iter().all(|l| l.spans.len() == 2),
+            "one pair per row"
+        );
+        assert_eq!(usize::from(help_body_lines(60)), lines.len());
+        assert_eq!(help_body_lines(80), crate::tui::state::HELP_BODY_LINES);
+        let mut s = named_rows(&["alpha"]);
+        s.enter_help();
+        for (w, h) in [(60, 24), (45, 12), (20, 6)] {
+            draw_sized(&s, w, h);
+        }
+        s.set_term_size((60, 24));
+        s.scroll_help(100);
+        assert_eq!(
+            usize::from(s.help_scroll),
+            lines.len() - 22,
+            "scrolls to the one-column bottom"
+        );
     }
 
     // The overlay must never grow past a short terminal (it clamps and scrolls;
@@ -3332,27 +3623,26 @@ mod tests {
     #[test]
     fn help_columns_keep_a_gutter_before_every_description() {
         let plain = |line: &Line<'_>| -> Vec<String> { line.spans.iter().map(|s| s.content.to_string()).collect() };
-        let rows: Vec<Vec<String>> = help_lines(&Invocation::WALKED)
-            .iter()
-            .map(plain)
-            .filter(|s| s.len() == 2)
-            .collect();
-        assert!(rows.len() >= help_entries().len() + legend_entries().len());
-        for row in rows {
-            assert!(
-                row[0].ends_with("  "),
-                "the label column must end in a two-cell gutter: {row:?}"
-            );
+        for inner in [usize::MAX, 40] {
+            let rows: Vec<Vec<String>> = help_lines_for(&Invocation::WALKED, inner)
+                .iter()
+                .map(plain)
+                .filter(|s| s.len() >= 2)
+                .collect();
+            assert!(rows.len() >= help_entries().len().div_ceil(2) + legend_entries().len());
+            for row in &rows {
+                for key in row.iter().step_by(2) {
+                    assert!(
+                        key.ends_with("  "),
+                        "a key column must end in a two-cell gutter: {row:?}"
+                    );
+                }
+            }
+            // Every first column within one section is the same width, so the
+            // descriptions line up.
+            let widths: std::collections::BTreeSet<usize> = rows.iter().map(|s| s[0].width()).collect();
+            assert_eq!(widths.len(), 2, "one width per section (keys, legend): {widths:?}");
         }
-        // And every label column within one section is the same width, so the
-        // descriptions line up.
-        let widths: std::collections::BTreeSet<usize> = help_lines(&Invocation::WALKED)
-            .iter()
-            .map(plain)
-            .filter(|s| s.len() == 2)
-            .map(|s| s[0].chars().count())
-            .collect();
-        assert_eq!(widths.len(), 2, "one width per section (keys, legend): {widths:?}");
     }
 
     // The scroll-clamp source of truth (`state::HELP_BODY_LINES`) must match the

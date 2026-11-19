@@ -11,17 +11,23 @@ use crate::api::config_report::{ConfigEntry, ConfigSection, ValueType};
 use crate::command::config::{RegistryDraft, RegistryEdit};
 use crate::config::declaration::RegistryConfig;
 
-use super::confirm::{PAD, wrap};
+use super::confirm::{PAD, PAD_ROWS, wrap};
 use super::event::TuiInput;
-use super::list_popup::{ListPopupView, Mark, PopupRow};
+use super::list_popup::{ListPopupView, MAX_MESSAGE_LINES, Mark, PopupRow};
 use super::registry_form::{FormStep, RegistryForm, registry_value};
 
 const MIN_COLS: u16 = 44;
 const MIN_ROWS: u16 = 12;
 const MAX_WIDTH: u16 = 96;
 const MAX_NOTE_LINES: usize = 3;
+const MESSAGE_ROWS: u16 = MAX_MESSAGE_LINES as u16;
 const CARET: &str = "▌";
 const TOO_SMALL: &str = "enlarge the terminal to edit settings";
+const BUTTONS: [&str; 3] = ["Reset", "Reset all", "Close"];
+const RESET: usize = 0;
+const RESET_ALL: usize = 1;
+const CLOSE: usize = 2;
+const RESET_NOT_HERE: &str = "reset applies to settings; x removes a registry";
 
 /// One block of the list. The `registry.*` entries are not a block: the
 /// Registries block is drawn from the declared `[[registries]]`.
@@ -90,11 +96,6 @@ pub fn too_small(term: (u16, u16)) -> bool {
     term.0 < MIN_COLS || term.1 < MIN_ROWS
 }
 
-/// The popup's `(width, height)` on a `term`-sized screen.
-pub fn popup_size(term: (u16, u16)) -> (u16, u16) {
-    (term.0.saturating_sub(4).min(MAX_WIDTH), term.1.saturating_sub(2))
-}
-
 /// One change for the app to write through the `grim config set|unset` path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigEdit {
@@ -111,6 +112,15 @@ pub enum ConfigEdit {
         alias: String,
         edit: RegistryEdit,
     },
+    /// Unset every setting that is set; registries and `[plugin]` stay.
+    ResetAll,
+}
+
+/// What the next `Enter` carries out; any other key drops it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Armed {
+    RemoveRegistry(String),
+    ResetAll,
 }
 
 /// What a key press asks of the app.
@@ -152,8 +162,9 @@ pub struct ConfigDialog {
     advanced: bool,
     view: View,
     message: Option<(String, bool)>,
-    /// A registry whose removal waits for an Enter.
-    armed: Option<String>,
+    armed: Option<Armed>,
+    /// The focused button; `None` leaves the focus on the list, whose cursor is kept.
+    button: Option<usize>,
 }
 
 impl ConfigDialog {
@@ -175,7 +186,43 @@ impl ConfigDialog {
             view: View::List,
             message: None,
             armed: None,
+            button: None,
         }
+    }
+
+    /// The popup's `(width, height)`: as tall as the list view needs, at most
+    /// the screen less a margin. Every view shares it, so opening one does not
+    /// resize the popup.
+    pub fn size(&self, term: (u16, u16)) -> (u16, u16) {
+        let width = term.0.saturating_sub(4).min(MAX_WIDTH);
+        let body = self.list_row_count() + MAX_NOTE_LINES + MAX_MESSAGE_LINES + 1;
+        let frame = 2 + 2 * usize::from(PAD_ROWS);
+        let height = u16::try_from(body + frame).unwrap_or(u16::MAX);
+        (width, height.min(term.1.saturating_sub(2)))
+    }
+
+    /// Rows of the list view: the selectable ones and their headers.
+    fn list_row_count(&self) -> usize {
+        let items = self.items();
+        let headers = BLOCKS
+            .iter()
+            .filter(|block| match block {
+                Block::Section(section, _) => items
+                    .iter()
+                    .any(|item| matches!(item, Item::Setting(i) if self.entries[*i].section == *section)),
+                Block::Registries => true,
+            })
+            .count();
+        items.len() + headers
+    }
+
+    /// The keys of the settings that are set, registries and plugin rows left out.
+    pub fn set_settings(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .filter(|e| e.set && !e.key.starts_with("registry.") && e.section != ConfigSection::Plugin)
+            .map(|e| e.key.as_str())
+            .collect()
     }
 
     /// The selectable rows on screen, in block order.
@@ -251,13 +298,22 @@ impl ConfigDialog {
     }
 
     fn list_key(&mut self, input: TuiInput) -> DialogStep {
-        if let Some(alias) = self.armed.take() {
-            return match input {
-                TuiInput::Enter => DialogStep::Write(ConfigEdit::Unset {
+        if let Some(armed) = self.armed.take() {
+            return match (armed, input) {
+                (Armed::RemoveRegistry(alias), TuiInput::Enter) => DialogStep::Write(ConfigEdit::Unset {
                     key: format!("registry.{alias}"),
                 }),
+                (Armed::ResetAll, TuiInput::Enter) => DialogStep::Write(ConfigEdit::ResetAll),
                 _ => DialogStep::Stay,
             };
+        }
+        if let Some(button) = self.button {
+            return self.button_key(button, input);
+        }
+        let last = self.items().len().saturating_sub(1);
+        if matches!(input, TuiInput::Down | TuiInput::Char('j')) && self.cursor >= last {
+            self.button = Some(RESET);
+            return DialogStep::Stay;
         }
         let handled = match self.item() {
             Some(Item::Registry(i)) => self.registry_key(i, input),
@@ -275,6 +331,8 @@ impl ConfigDialog {
             TuiInput::Esc | TuiInput::Char('C') => return DialogStep::Close,
             TuiInput::Char('A') => self.toggle_advanced(),
             TuiInput::Char('x') => return self.unset_selected(),
+            TuiInput::Char('X') => self.arm_reset_all(),
+            TuiInput::NextTab | TuiInput::PrevTab => self.button = Some(RESET),
             TuiInput::Char(' ') | TuiInput::Mark => return self.space_on_selected(),
             TuiInput::Enter => return self.enter_on_selected(),
             TuiInput::Collapse => return self.step_enum(-1),
@@ -282,6 +340,50 @@ impl ConfigDialog {
             _ => {}
         }
         DialogStep::Stay
+    }
+
+    fn button_key(&mut self, button: usize, input: TuiInput) -> DialogStep {
+        match input {
+            TuiInput::Up | TuiInput::Char('k') | TuiInput::NextTab | TuiInput::PrevTab => self.button = None,
+            TuiInput::Collapse => self.button = Some((button + BUTTONS.len() - 1) % BUTTONS.len()),
+            TuiInput::Expand => self.button = Some((button + 1) % BUTTONS.len()),
+            TuiInput::Esc | TuiInput::Char('C') => return DialogStep::Close,
+            TuiInput::Char('X') => self.arm_reset_all(),
+            TuiInput::Enter | TuiInput::Char(' ') | TuiInput::Mark => match button {
+                RESET => return self.reset_remembered(),
+                RESET_ALL => self.arm_reset_all(),
+                CLOSE => return DialogStep::Close,
+                _ => {}
+            },
+            _ => {}
+        }
+        DialogStep::Stay
+    }
+
+    /// `Reset`: what `x` does on the remembered row.
+    fn reset_remembered(&mut self) -> DialogStep {
+        if matches!(self.item(), Some(Item::Registry(_) | Item::AddRegistry)) {
+            self.message = Some((RESET_NOT_HERE.to_string(), false));
+            return DialogStep::Stay;
+        }
+        self.unset_selected()
+    }
+
+    fn arm_reset_all(&mut self) {
+        let n = self.set_settings().len();
+        self.message = Some(if n == 0 {
+            ("nothing to reset".to_string(), false)
+        } else {
+            self.armed = Some(Armed::ResetAll);
+            let noun = if n == 1 { "setting" } else { "settings" };
+            (
+                format!(
+                    "reset {n} {noun} in {} to their defaults? enter resets · any other key keeps",
+                    self.scope
+                ),
+                false,
+            )
+        });
     }
 
     fn toggle_advanced(&mut self) {
@@ -317,7 +419,7 @@ impl ConfigDialog {
             })),
             TuiInput::Char('x') => {
                 self.message = Some((format!("remove {alias}? enter removes · any other key keeps"), false));
-                self.armed = Some(alias);
+                self.armed = Some(Armed::RemoveRegistry(alias));
                 Some(DialogStep::Stay)
             }
             TuiInput::Collapse | TuiInput::Expand => Some(DialogStep::Stay),
@@ -459,6 +561,7 @@ impl ConfigDialog {
             TuiInput::Home => *cursor = 0,
             TuiInput::End => *cursor = last,
             TuiInput::Esc => self.view = View::List,
+            TuiInput::Char('x') if !*single => picked.fill(false),
             TuiInput::Char(' ') | TuiInput::Mark if !*single => picked[*cursor] = !picked[*cursor],
             TuiInput::Char(' ') | TuiInput::Mark | TuiInput::Enter if *single => {
                 return DialogStep::Write(ConfigEdit::Set {
@@ -567,7 +670,7 @@ impl ConfigDialog {
 
     /// The popup as the list widget draws it.
     pub fn view(&self, term_size: (u16, u16)) -> ListPopupView {
-        let size = popup_size(term_size);
+        let size = self.size(term_size);
         if too_small(term_size) {
             return ListPopupView {
                 title: "Config".to_string(),
@@ -576,6 +679,7 @@ impl ConfigDialog {
                 hint: "esc close".to_string(),
                 notes: Vec::new(),
                 message: None,
+                reserve_message: 0,
                 centered: Some(size),
                 buttons: Vec::new(),
                 button_cursor: None,
@@ -585,7 +689,7 @@ impl ConfigDialog {
         if let View::Registry(form) = &self.view {
             let shown = form.view(inner_w);
             let mut notes = wrap(&shown.note, inner_w.max(1));
-            notes.truncate(MAX_NOTE_LINES);
+            notes.resize(MAX_NOTE_LINES, String::new());
             return ListPopupView {
                 title: self.title(size.0),
                 rows: shown.rows,
@@ -593,6 +697,7 @@ impl ConfigDialog {
                 hint: self.hint().to_string(),
                 notes,
                 message: self.message.clone(),
+                reserve_message: MESSAGE_ROWS,
                 centered: Some(size),
                 buttons: shown.buttons,
                 button_cursor: shown.button_cursor,
@@ -665,10 +770,15 @@ impl ConfigDialog {
             hint: self.hint().to_string(),
             notes: self.notes(inner_w),
             message: self.message.clone(),
+            reserve_message: MESSAGE_ROWS,
             centered: Some(size),
             buttons: Vec::new(),
             button_cursor: None,
         };
+        if matches!(self.view, View::List) {
+            view.buttons = BUTTONS.map(str::to_string).to_vec();
+            view.button_cursor = self.button;
+        }
         if let View::Pick {
             key,
             values,
@@ -707,27 +817,28 @@ impl ConfigDialog {
 
     fn hint(&self) -> &'static str {
         match &self.view {
-            View::List if self.item() == Some(Item::AddRegistry) => "enter add · esc close",
+            View::List if self.button.is_some() => "← → choose · enter run · tab list · esc close",
+            View::List if self.item() == Some(Item::AddRegistry) => "enter add · tab buttons · esc close",
             View::List if matches!(self.item(), Some(Item::Registry(_))) => {
-                "enter edit · space default · x remove · esc close"
+                "enter edit · space default · x remove · tab buttons · esc close"
             }
             View::Registry(form) => form.hint(),
             View::List if self.entries.iter().any(|e| e.advanced) => {
-                "enter edit · space toggle · x reset · A plugin · esc close"
+                "enter edit · space toggle · x reset · A plugin · tab buttons · esc close"
             }
-            View::List => "enter edit · space toggle · x reset · esc close",
+            View::List => "enter edit · space toggle · x reset · tab buttons · esc close",
             View::Text { .. } => "enter save · esc cancel",
             View::Pick { single: true, .. } => "enter pick · esc cancel",
-            View::Pick { single: false, .. } => "space toggle · enter save · esc cancel",
+            View::Pick { single: false, .. } => "space toggle · x clear · enter save · esc cancel",
         }
     }
 
     fn notes(&self, width: usize) -> Vec<String> {
-        let Some(e) = self.selected() else {
-            return Vec::new();
-        };
-        let mut lines = wrap(&format!("{}: {}", e.title, e.description), width.max(1));
-        lines.truncate(MAX_NOTE_LINES);
+        let mut lines = self
+            .selected()
+            .map(|e| wrap(&format!("{}: {}", e.title, e.description), width.max(1)))
+            .unwrap_or_default();
+        lines.resize(MAX_NOTE_LINES, String::new());
         lines
     }
 
@@ -1307,5 +1418,182 @@ mod tests {
         goto_registry(&mut d, 1);
         d.saved(d.entries.clone(), vec![reg("a", false)], true, None);
         assert_eq!(d.item(), Some(Item::AddRegistry));
+    }
+
+    fn goto_last(d: &mut ConfigDialog) {
+        d.cursor = d.items().len() - 1;
+    }
+
+    fn message(d: &ConfigDialog) -> Option<String> {
+        d.view(BIG).message.map(|(m, _)| m)
+    }
+
+    #[test]
+    fn tab_moves_focus_to_the_buttons_and_back() {
+        let mut d = dialog();
+        goto(&mut d, "options.show_deprecated");
+        let at = d.cursor;
+        assert_eq!(press(&mut d, TuiInput::NextTab), DialogStep::Stay);
+        assert_eq!(d.view(BIG).button_cursor, Some(RESET));
+        assert_eq!(d.view(BIG).buttons, ["Reset", "Reset all", "Close"]);
+        assert_eq!(press(&mut d, TuiInput::Expand), DialogStep::Stay);
+        assert_eq!(d.view(BIG).button_cursor, Some(RESET_ALL));
+        assert_eq!(press(&mut d, TuiInput::Collapse), DialogStep::Stay);
+        assert_eq!(d.view(BIG).button_cursor, Some(RESET));
+        press(&mut d, TuiInput::PrevTab);
+        assert_eq!(d.view(BIG).button_cursor, None);
+        assert_eq!(d.cursor, at, "the list cursor is remembered");
+    }
+
+    #[test]
+    fn down_from_the_last_row_reaches_the_buttons() {
+        let mut d = dialog();
+        goto_last(&mut d);
+        press(&mut d, TuiInput::Down);
+        assert_eq!(d.view(BIG).button_cursor, Some(RESET));
+        assert_eq!(d.item(), Some(Item::AddRegistry));
+        press(&mut d, TuiInput::Up);
+        assert_eq!(d.view(BIG).button_cursor, None);
+        assert_eq!(d.item(), Some(Item::AddRegistry));
+    }
+
+    #[test]
+    fn reset_button_unsets_the_remembered_row() {
+        let mut d = dialog();
+        goto(&mut d, "options.show_deprecated");
+        press(&mut d, TuiInput::NextTab);
+        assert_eq!(
+            press(&mut d, TuiInput::Enter),
+            DialogStep::Stay,
+            "an unset row has nothing to reset"
+        );
+        mark_set(&mut d, "options.show_deprecated", "true");
+        assert_eq!(press(&mut d, TuiInput::Char(' ')), unset("options.show_deprecated"));
+    }
+
+    #[test]
+    fn reset_button_on_a_registry_row_explains_instead_of_writing() {
+        let mut d = with_registries(vec![reg("a", false)]);
+        for goto_row in [goto_registry as fn(&mut ConfigDialog, usize), |d, _| goto_add(d)] {
+            goto_row(&mut d, 0);
+            press(&mut d, TuiInput::NextTab);
+            assert_eq!(press(&mut d, TuiInput::Enter), DialogStep::Stay);
+            assert_eq!(message(&d).as_deref(), Some(RESET_NOT_HERE));
+            press(&mut d, TuiInput::NextTab);
+        }
+    }
+
+    fn with_set(keys: &[&str]) -> ConfigDialog {
+        let mut d = dialog();
+        for key in keys {
+            mark_set(&mut d, key, "true");
+        }
+        d
+    }
+
+    #[test]
+    fn reset_all_arms_then_enter_emits_reset_all() {
+        let mut d = with_set(&["options.show_deprecated", "options.tui.group_by_type"]);
+        d.scope = "global".to_string();
+        press(&mut d, TuiInput::NextTab);
+        press(&mut d, TuiInput::Expand);
+        assert_eq!(press(&mut d, TuiInput::Enter), DialogStep::Stay);
+        assert_eq!(
+            message(&d).as_deref(),
+            Some("reset 2 settings in global to their defaults? enter resets · any other key keeps")
+        );
+        assert_eq!(press(&mut d, TuiInput::Enter), DialogStep::Write(ConfigEdit::ResetAll));
+    }
+
+    #[test]
+    fn reset_all_then_other_key_keeps() {
+        let mut d = with_set(&["options.show_deprecated"]);
+        press(&mut d, TuiInput::Char('X'));
+        assert_eq!(press(&mut d, TuiInput::Down), DialogStep::Stay);
+        assert_eq!(message(&d), None);
+        assert_eq!(d.armed, None);
+        assert_ne!(press(&mut d, TuiInput::Enter), DialogStep::Write(ConfigEdit::ResetAll));
+    }
+
+    #[test]
+    fn reset_all_with_nothing_set_says_so() {
+        let mut d = dialog();
+        mark_set(&mut d, "plugin.name", "team");
+        press(&mut d, TuiInput::Char('X'));
+        assert_eq!(
+            message(&d).as_deref(),
+            Some("nothing to reset"),
+            "plugin rows do not count"
+        );
+        assert_eq!(d.armed, None);
+        assert_ne!(press(&mut d, TuiInput::Enter), DialogStep::Write(ConfigEdit::ResetAll));
+    }
+
+    #[test]
+    fn shift_x_arms_reset_all() {
+        let mut d = with_set(&["options.show_deprecated"]);
+        press(&mut d, TuiInput::Char('X'));
+        assert_eq!(d.armed, Some(Armed::ResetAll));
+        assert!(message(&d).unwrap().starts_with("reset 1 setting in project"));
+        assert_eq!(press(&mut d, TuiInput::Enter), DialogStep::Write(ConfigEdit::ResetAll));
+    }
+
+    #[test]
+    fn arming_reset_all_disarms_a_pending_registry_removal() {
+        let mut d = with_registries(vec![reg("a", false)]);
+        mark_set(&mut d, "options.show_deprecated", "true");
+        goto_registry(&mut d, 0);
+        press(&mut d, TuiInput::Char('x'));
+        assert_eq!(d.armed, Some(Armed::RemoveRegistry("a".to_string())));
+        press(&mut d, TuiInput::Char('X'));
+        assert_eq!(d.armed, None, "one thing is armed at a time");
+        assert_ne!(press(&mut d, TuiInput::Enter), unset("registry.a"));
+        // And the reverse: a pending reset-all does not survive an x.
+        let mut d = with_registries(vec![reg("a", false)]);
+        mark_set(&mut d, "options.show_deprecated", "true");
+        goto_registry(&mut d, 0);
+        press(&mut d, TuiInput::Char('X'));
+        assert_eq!(d.armed, Some(Armed::ResetAll));
+        press(&mut d, TuiInput::Char('x'));
+        assert_eq!(d.armed, None);
+        assert_ne!(press(&mut d, TuiInput::Enter), DialogStep::Write(ConfigEdit::ResetAll));
+    }
+
+    #[test]
+    fn close_button_closes() {
+        let mut d = dialog();
+        press(&mut d, TuiInput::NextTab);
+        press(&mut d, TuiInput::Collapse);
+        assert_eq!(d.view(BIG).button_cursor, Some(CLOSE), "wraps to the last button");
+        assert_eq!(press(&mut d, TuiInput::Enter), DialogStep::Close);
+    }
+
+    #[test]
+    fn x_in_a_checklist_unchecks_everything() {
+        let mut d = dialog();
+        goto(&mut d, "options.clients");
+        press(&mut d, TuiInput::Char(' '));
+        press(&mut d, TuiInput::Char(' '));
+        press(&mut d, TuiInput::Down);
+        press(&mut d, TuiInput::Char(' '));
+        assert!(matches!(&d.view, View::Pick { picked, .. } if picked.iter().any(|p| *p)));
+        assert_eq!(press(&mut d, TuiInput::Char('x')), DialogStep::Stay);
+        assert!(matches!(&d.view, View::Pick { picked, .. } if picked.iter().all(|p| !*p)));
+        assert_eq!(
+            press(&mut d, TuiInput::Enter),
+            DialogStep::Stay,
+            "nothing set: back to the list"
+        );
+        assert_eq!(d.view, View::List);
+    }
+
+    #[test]
+    fn x_in_a_single_pick_does_nothing() {
+        let mut d = dialog();
+        goto(&mut d, "options.tui.theme");
+        press(&mut d, TuiInput::Enter);
+        let before = d.view.clone();
+        assert_eq!(press(&mut d, TuiInput::Char('x')), DialogStep::Stay);
+        assert_eq!(d.view, before);
     }
 }
