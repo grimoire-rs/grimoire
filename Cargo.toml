@@ -28,20 +28,20 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
-clap_complete = "4.6.2"
+clap_complete = "4.6.12"
 colored_json = "5"
-anyhow = "1.0.101"
+anyhow = "1.0.104"
 grimoire-hook-core = { path = "crates/grimoire-hook-core", features = ["schema"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = [
+tracing-subscriber = { version = "0.3.23", features = [
     "env-filter",
     "std",
     "fmt",
     "json",
     "registry",
 ] }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 schemars = "1"
 serde_repr = "0.1"
@@ -59,7 +59,7 @@ hmac = "0.13"
 # point of the token, so a non-cryptographic source is not an option.
 getrandom = "0.4"
 hex = "0.4"
-toml = "1.1"
+toml = "1.2"
 # Span-preserving TOML edits for Codex's `config.toml` MCP registration —
 # the `toml` crate above only round-trips through a full parse/reserialize,
 # which would reorder keys and drop comments (see src/install/toml_splice.rs,
@@ -95,8 +95,9 @@ crossterm = "0.29"
 base64 = "0.23"
 secrecy = "0.10"
 rpassword = "7"
-rmcp = { version = "3.0.0", features = ["schemars", "transport-io"] }
-unicode-width = "0.2"
+rmcp = { version = "3.11.0", features = ["schemars", "transport-io"] }
+# 0.2.3 counts the halfwidth sound marks (U+FF9E, U+FF9F) that ratatui-core 0.1.2 adds a column for, so a mark is counted twice and tui::confirm wraps wrong; lift when ratatui-core drops its +1.
+unicode-width = ">=0.2.0, <0.2.3"
 # Per-registry browse `include`/`exclude` glob filters (registry_filter.rs).
 # The de-facto standard glob engine in the Rust ecosystem (ripgrep, fd,
 # Cargo's own gitignore-style matching); costs exactly one net-new crate,
