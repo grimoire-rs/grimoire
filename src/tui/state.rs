@@ -775,12 +775,14 @@ enum SelectionAnchor {
     None,
 }
 
-/// Body line count of the `?` help overlay: the "Keybindings" header and one
-/// row per keybinding entry, then the "Status column" header and one row per
-/// legend entry. Single source for help-scroll clamping; the entry text lives
+/// Body line count of the `?` help overlay at full width: the "Keybindings"
+/// header, the key rows (two entries per line), then the "Status column"
+/// header and one row per legend entry. A narrower overlay lists one entry
+/// per line, which `render::help_body_lines` counts. Single source for the
+/// full-width scroll clamp; the entry text lives
 /// in [`super::render::help_entries`] / [`super::render::legend_entries`] and
 /// `render::tests::help_body_line_count_matches_state` guards it against drift.
-pub(crate) const HELP_BODY_LINES: u16 = 22;
+pub(crate) const HELP_BODY_LINES: u16 = 27;
 
 /// The bare-state default for `tree_separators`, used only by
 /// [`TuiState::default`] — a state that was never seeded from config (unit
@@ -2225,9 +2227,10 @@ impl TuiState {
     pub fn scroll_help(&mut self, delta: i64) {
         // Inner viewport = box height (body + 2 borders, capped to the
         // screen) minus the 2 borders.
-        let box_h = HELP_BODY_LINES.saturating_add(2).min(self.term_size.1.max(1));
+        let body = super::render::help_body_lines(self.term_size.0);
+        let box_h = body.saturating_add(2).min(self.term_size.1.max(1));
         let viewport = box_h.saturating_sub(2);
-        let max = HELP_BODY_LINES.saturating_sub(viewport);
+        let max = body.saturating_sub(viewport);
         let next = (i64::from(self.help_scroll) + delta).clamp(0, i64::from(max));
         self.help_scroll = u16::try_from(next).unwrap_or(0);
     }

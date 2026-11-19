@@ -84,7 +84,8 @@ background and its selection bar, and only bold remains.
 ## Key map
 
 This key map belongs to `grim tui` alone, and pressing `?` shows it inside the
-app. The website and the VS Code extension have no key map.
+app. The help lists every key below in two columns and scrolls on a short
+terminal. The website and the VS Code extension have no key map.
 
 | Key | What it does |
 |---|---|
@@ -154,11 +155,24 @@ says what each key means.
 |---|---|
 | Boolean | `space` or `enter` toggles it |
 | Enum | `←` and `→` step through the values; `enter` opens a pick list |
-| `options.clients` | `enter` opens a checklist: `space` toggles, `enter` saves, and nothing checked clears the key |
+| `options.clients` | `enter` opens a checklist: `space` toggles, `x` unchecks everything, `enter` saves, and nothing checked clears the key |
 | Text or number | `enter` opens a one-line field: `enter` saves, an empty value clears the key, `esc` cancels. Typing appends and `backspace` deletes; there is no cursor movement or paste |
 | Any set key | `x` resets it to its default |
 
-`esc` or `C` closes the popup. `q` does nothing inside it.
+**Reset buttons.** A row of three buttons sits under the list: **Reset**,
+**Reset all** and **Close**. `tab` or `shift-tab` moves focus between the list
+and the buttons, and `↓` on the last row reaches them too. `←` and `→` choose a
+button, `↑` returns to the list, and `enter` or `space` runs it. While a button
+has focus, the list keeps its place but highlights no row.
+
+**Reset** does what `x` does on the row the list kept. A registry row or the
+add row only says that reset applies to settings. **Reset all**, or `X` in the
+list, counts the settings that are set and asks first. `enter` unsets them
+all in one save, and any other key keeps them. Registries and plugin rows stay.
+**Close** does what `esc` does.
+
+`esc` or `C` closes the popup. `q` does nothing inside it. The popup is as tall
+as its rows need, up to the screen, and keeps that size in every view.
 
 **Registries.** The Registries group has one row per declared registry, with
 the default marked. `enter` opens an edit form, `space` makes the registry the

@@ -3166,6 +3166,7 @@ fn apply_config_edit(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) 
         ConfigEdit::Unset { key } => (key.as_str(), None),
         ConfigEdit::AddRegistry(draft) => return apply_registry_add(ctx, draft),
         ConfigEdit::EditRegistry { alias, edit } => return apply_registry_edit(ctx, alias, edit),
+        ConfigEdit::ResetAll => return apply_reset_all(ctx),
     };
     let _guard = config_guard(ctx)?;
     if let Some(field) = PluginField::parse(key) {
@@ -3206,6 +3207,26 @@ fn apply_config_edit(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) 
     Ok(note)
 }
 
+/// Unset every setting the file sets, in one write. Registries, `[plugin]`
+/// and the rest of the file stay. The note is the hooks-disarm advice when
+/// the hooks flag was on.
+fn apply_reset_all(ctx: &TuiContext) -> anyhow::Result<Option<String>> {
+    use crate::command::config::{apply_unset, collect_entries, commit_config, disarm_note, parse_key};
+    let _guard = config_guard(ctx)?;
+    let (mut options, mut registries, set) = load_scope_declaration(ctx)?;
+    let hooks_on = options.experimental.hooks;
+    let keys: Vec<String> = collect_entries(false, &options, &registries)
+        .into_iter()
+        .map(|e| e.key)
+        .filter(|k| !k.starts_with("registry."))
+        .collect();
+    for key in &keys {
+        apply_unset(&parse_key(key)?, &mut options, &mut registries, &ctx.invocation)?;
+    }
+    commit_config(&ctx.config_path, &set, &options, &registries)?;
+    Ok(hooks_on.then(|| disarm_note("unset options.experimental.hooks", &ctx.invocation)))
+}
+
 /// `grim config registry add`, under the config lock over a fresh read.
 fn apply_registry_add(
     ctx: &TuiContext,
@@ -3244,6 +3265,7 @@ fn comma_note<'a>(mut patterns: impl Iterator<Item = &'a String>) -> Option<Stri
 }
 
 const NEXT_START_NOTE: &str = "saved · applies when grim tui starts again";
+const RESET_ALL_START_NOTE: &str = "saved · some settings apply when grim tui starts again";
 
 /// What a registry edit says beyond "saved": the plain-HTTP host set is fixed
 /// when the browser starts, and `--registry` fixes the browse set.
@@ -3256,6 +3278,7 @@ fn registry_note(ctx: &TuiContext, edit: &super::config_dialog::ConfigEdit) -> O
             key.starts_with("registry."),
             key.starts_with("registry.") && key.ends_with(".insecure"),
         ),
+        ConfigEdit::ResetAll => (false, false),
     };
     match (registry, insecure) {
         (false, _) => None,
@@ -3324,10 +3347,26 @@ fn finish_config_write(
         // the dialog's own message is untouched.
         after_scope_swap(ctx, state, on.checker, on.bundle_checker, on.adoption);
     }
-    let launch = matches!(edit, ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key } if launch_only(key));
-    let note = note
-        .or_else(|| registry_note(ctx, edit))
-        .or_else(|| launch.then(|| NEXT_START_NOTE.to_string()));
+    let launch = match edit {
+        ConfigEdit::Set { key, .. } | ConfigEdit::Unset { key } => launch_only(key),
+        // What the dialog showed as set is what the reset cleared.
+        ConfigEdit::ResetAll => state
+            .config
+            .as_ref()
+            .is_some_and(|d| d.set_settings().into_iter().any(launch_only)),
+        ConfigEdit::AddRegistry(_) | ConfigEdit::EditRegistry { .. } => false,
+    };
+    let reset_all = matches!(edit, ConfigEdit::ResetAll);
+    let note = note.or_else(|| registry_note(ctx, edit)).or_else(|| {
+        launch.then(|| {
+            if reset_all {
+                RESET_ALL_START_NOTE
+            } else {
+                NEXT_START_NOTE
+            }
+            .to_string()
+        })
+    });
     match config_rows(ctx) {
         Ok((rows, registries, exists)) => {
             if let Some(dialog) = state.config.as_mut() {
@@ -9529,6 +9568,77 @@ mod tests {
         let regs = declared_registries(&ctx);
         assert_eq!(regs.len(), 1);
         assert_eq!(regs[0].alias.as_deref(), Some("b"));
+    }
+
+    fn reset_all_edit() -> super::super::config_dialog::ConfigEdit {
+        super::super::config_dialog::ConfigEdit::ResetAll
+    }
+
+    /// A global file with comments, settings and a registry, written to `ctx`.
+    fn seed_reset_file(ctx: &TuiContext, extra_options: &str) {
+        let body = format!(
+            "# keep this comment\n[options]\nshow_deprecated = true\nsearch_min_relevance = 30\n{extra_options}\n\
+             [options.tui]\ntheme = \"{}\"\n\n[[registries]]\nalias = \"a\"\noci = \"ghcr.io/a\"\ndefault = true\n",
+            ctx_first_theme()
+        );
+        std::fs::write(&ctx.config_path, body).unwrap();
+    }
+
+    #[test]
+    fn reset_all_clears_every_set_setting_and_keeps_registries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        seed_reset_file(&ctx, "");
+        assert_eq!(apply_config_edit(&ctx, &reset_all_edit()).unwrap(), None);
+        let body = std::fs::read_to_string(&ctx.config_path).unwrap();
+        assert!(
+            !body.contains("show_deprecated") && !body.contains("search_min_relevance"),
+            "{body}"
+        );
+        assert!(!body.contains("theme"), "{body}");
+        assert!(body.contains("# keep this comment"), "{body}");
+        let (rows, regs, _) = config_rows(&ctx).unwrap();
+        assert!(rows.iter().all(|r| r.key.starts_with("registry.") || !r.set), "{body}");
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].alias.as_deref(), Some("a"));
+        assert!(regs[0].default, "the registry is untouched");
+    }
+
+    #[test]
+    fn reset_all_carries_the_disarm_note_when_hooks_was_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = global_config_ctx(tmp.path());
+        seed_reset_file(&ctx, "");
+        assert_eq!(
+            apply_config_edit(&ctx, &reset_all_edit()).unwrap(),
+            None,
+            "hooks was off"
+        );
+        seed_reset_file(&ctx, "\n[options.experimental]\nhooks = true\n");
+        let note = apply_config_edit(&ctx, &reset_all_edit()).unwrap().expect("a note");
+        assert!(note.contains("config unset options.experimental.hooks"), "{note}");
+        assert!(note.contains("grim install"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn reset_all_with_a_launch_only_key_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = global_config_ctx(tmp.path());
+        seed_reset_file(&ctx, "");
+        let mut state = TuiState::new();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        apply_config_edit(&ctx, &reset_all_edit()).unwrap();
+        finish_with(&mut ctx, &mut state, &swap_from_file, &reset_all_edit()).await;
+        assert_eq!(
+            dialog_message(&state).unwrap().0,
+            "saved · some settings apply when grim tui starts again"
+        );
+        // Only a live setting was set: nothing waits for a restart.
+        std::fs::write(&ctx.config_path, "[options]\nsearch_min_relevance = 30\n").unwrap();
+        state.open_config(open_config_dialog(&ctx).unwrap());
+        apply_config_edit(&ctx, &reset_all_edit()).unwrap();
+        finish_with(&mut ctx, &mut state, &swap_from_file, &reset_all_edit()).await;
+        assert_eq!(dialog_message(&state), Some(("saved".to_string(), false)));
     }
 
     #[test]

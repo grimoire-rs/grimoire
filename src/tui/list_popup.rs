@@ -13,7 +13,7 @@ use super::confirm::{HINT_INSET, PAD, PAD_ROWS, button_label, wrap};
 use super::render::ColorKey;
 use super::theme;
 
-const MAX_MESSAGE_LINES: usize = 3;
+pub const MAX_MESSAGE_LINES: usize = 3;
 
 /// The marker in front of a row's label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,9 @@ pub struct ListPopupView {
     pub notes: Vec<String>,
     /// Up to three wrapped lines under the notes; `true` draws it as an error.
     pub message: Option<(String, bool)>,
+    /// Message rows kept blank when there is no message, so the popup does
+    /// not change height as one comes and goes.
+    pub reserve_message: u16,
     /// `Some((width, height))` centers the popup on the screen; `None`
     /// anchors it to a pane.
     pub centered: Option<(u16, u16)>,
@@ -135,6 +138,7 @@ pub fn draw(f: &mut Frame, area: Rect, view: &ListPopupView) {
         .collect();
     let msg_h = u16::try_from(msg_lines.len())
         .unwrap_or(u16::MAX)
+        .max(view.reserve_message)
         .min(inner.height.saturating_sub(note_h + 1));
     let button_h = u16::from(!view.buttons.is_empty()).min(inner.height.saturating_sub(note_h + msg_h + 1));
     let parts = Layout::vertical([
@@ -230,6 +234,7 @@ mod tests {
             hint: String::new(),
             notes: Vec::new(),
             message: Some(("alpha beta gamma delta epsilon zeta eta theta".to_string(), true)),
+            reserve_message: 0,
             centered: None,
             buttons: Vec::new(),
             button_cursor: None,
