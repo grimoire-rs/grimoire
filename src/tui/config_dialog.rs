@@ -27,6 +27,12 @@ const BUTTONS: [&str; 3] = ["Reset", "Reset all", "Close"];
 const RESET: usize = 0;
 const RESET_ALL: usize = 1;
 const CLOSE: usize = 2;
+const PREVIEW_KEYS: [&str; 4] = [
+    "options.tui.theme",
+    "options.tui.default_view",
+    "options.tui.sort",
+    "options.tui.sort_order",
+];
 const RESET_NOT_HERE: &str = "reset applies to settings; x removes a registry";
 
 /// One block of the list. The `registry.*` entries are not a block: the
@@ -510,6 +516,24 @@ impl ConfigDialog {
         })
     }
 
+    /// The key and highlighted value of an open single pick the browser can
+    /// show before it is saved; `None` in every other view.
+    pub fn preview(&self) -> Option<(&str, &str)> {
+        let View::Pick {
+            key,
+            values,
+            cursor,
+            single: true,
+            ..
+        } = &self.view
+        else {
+            return None;
+        };
+        PREVIEW_KEYS
+            .contains(&key.as_str())
+            .then(|| (key.as_str(), values[*cursor].as_str()))
+    }
+
     fn open_pick(&mut self, single: bool) {
         let Some(e) = self.selected() else { return };
         let Some(values) = e.values.filter(|v| !v.is_empty()) else {
@@ -891,6 +915,18 @@ fn value_text(e: &ConfigEntry) -> String {
 }
 
 #[cfg(test)]
+impl ConfigDialog {
+    /// Put the cursor on the setting `key`, for tests outside this module.
+    pub(super) fn select_key(&mut self, key: &str) {
+        self.cursor = self
+            .items()
+            .iter()
+            .position(|item| matches!(item, Item::Setting(i) if self.entries[*i].key == key))
+            .expect("key on screen");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1164,6 +1200,53 @@ mod tests {
         assert!(matches!(&d.view, View::Text { buf, .. } if buf == "101"));
         let shown = d.view(BIG).rows.iter().any(|r| r.value == format!("101{CARET}"));
         assert!(shown);
+    }
+
+    #[test]
+    fn preview_names_the_highlighted_value_in_a_single_pick() {
+        let mut d = dialog();
+        goto(&mut d, "options.tui.sort");
+        press(&mut d, TuiInput::Enter);
+        let first = d.preview().map(|(k, v)| (k.to_string(), v.to_string()));
+        assert_eq!(first, Some(("options.tui.sort".to_string(), "name".to_string())));
+    }
+
+    #[test]
+    fn preview_is_none_outside_a_previewable_pick() {
+        let mut d = dialog();
+        assert_eq!(d.preview(), None, "list view");
+        goto(&mut d, "options.clients");
+        press(&mut d, TuiInput::Enter);
+        assert_eq!(d.preview(), None, "checklist");
+        press(&mut d, TuiInput::Esc);
+        goto(&mut d, "options.search_min_relevance");
+        press(&mut d, TuiInput::Enter);
+        assert_eq!(d.preview(), None, "text field");
+        press(&mut d, TuiInput::Esc);
+        // Every shipped enum key previews, so a single pick over any other key stands in.
+        d.view = View::Pick {
+            key: "options.search_min_relevance".to_string(),
+            values: vec!["a".to_string()],
+            picked: vec![false],
+            cursor: 0,
+            single: true,
+        };
+        assert_eq!(d.preview(), None, "a single pick of another key");
+    }
+
+    #[test]
+    fn preview_follows_the_cursor() {
+        let mut d = dialog();
+        goto(&mut d, "options.tui.theme");
+        press(&mut d, TuiInput::Enter);
+        let at = |d: &ConfigDialog| d.preview().map(|(_, v)| v.to_string());
+        let start = at(&d);
+        press(&mut d, TuiInput::Down);
+        assert_ne!(at(&d), start);
+        press(&mut d, TuiInput::End);
+        assert_eq!(at(&d).as_deref(), Some("dracula"));
+        press(&mut d, TuiInput::Esc);
+        assert_eq!(d.preview(), None);
     }
 
     #[test]

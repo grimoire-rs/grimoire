@@ -1969,40 +1969,32 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 }
 
 /// Every browse-mode keybinding shown in the `?` help overlay, as
-/// `(keys, description)` rows, one key per row (a mirrored pair such as
-/// `↑ / ↓` shares one). Left column first, then right. A free function so a
-/// unit test can assert the overlay documents every key `handle_browse` binds.
+/// `(keys, description)` rows. Sibling keys share a row (`i / u / d`) and the
+/// description names each. Left column first, then right: ten rows each, so
+/// the overlay fits 80×24. A free function so a unit test can assert the
+/// overlay documents every key `handle_browse` binds.
 fn help_entries() -> &'static [(&'static str, &'static str)] {
     &[
         ("↑ / ↓", "move selection"),
-        ("home / end", "first / last row"),
-        ("pgup/pgdn", "page detail"),
         ("j / k", "scroll detail"),
-        ("enter", "open detail / fold"),
-        ("(shift) tab", "switch detail panel"),
+        ("enter", "open / fold"),
         ("→ / ←", "expand / collapse"),
         ("z", "fold / unfold all"),
         ("/", "search"),
         ("space", "mark / unmark"),
-        ("a", "mark all visible"),
-        ("c", "clear marks"),
-        ("q", "quit"),
-        ("esc", "quit"),
+        ("a / c", "mark all / clear"),
         ("?", "this help"),
-        ("i", "install"),
-        ("u", "update"),
-        ("d", "uninstall"),
-        ("v", "pick a version"),
-        ("o", "open repository URL"),
-        ("g", "switch scope"),
-        ("t", "tree / flat"),
-        ("s", "cycle sort"),
-        ("S", "flip sort direction"),
-        ("f", "cycle kind filter"),
-        ("F", "filter & sort popup"),
-        ("h", "toggle deprecated"),
-        ("r", "refresh catalog"),
         ("C", "config popup"),
+        ("home / end", "first / last row"),
+        ("pgup/pgdn", "page detail"),
+        ("(shift) tab", "switch detail panel"),
+        ("q / esc", "quit"),
+        ("i / u / d", "install/update/uninstall"),
+        ("v / o", "pick version / open repo"),
+        ("g / t", "scope / tree-flat"),
+        ("s / S", "cycle sort / flip order"),
+        ("f / F", "kind / filter popup"),
+        ("h / r", "deprecated / refresh"),
     ]
 }
 
@@ -3251,8 +3243,7 @@ mod tests {
     }
 
     // The `?` help overlay is sized to its content: every body line plus the
-    // border shows once the terminal has the rows (two key columns need 29 of
-    // them), and a shorter terminal scrolls (`help_body_lines` clamps it).
+    // border shows once the terminal has the rows , and a shorter terminal scrolls (`help_body_lines` clamps it).
     #[test]
     fn help_overlay_is_content_sized_and_never_taller_than_the_terminal() {
         let lines = help_lines(&Invocation::WALKED).len();
@@ -3261,22 +3252,27 @@ mod tests {
     }
 
     #[test]
-    fn help_fits_without_scrolling_once_the_terminal_has_29_rows() {
+    fn help_fits_80x24_without_scrolling() {
         let mut s = TuiState::new();
         s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         s.enter_help();
-        let buf = draw_sized(&s, 80, 29);
-        let text = screen(&buf);
+        let text = screen(&draw_sized(&s, 80, 24));
         assert!(
-            text.contains("Keybindings") && text.contains("integrity-missing"),
-            "{text}"
+            text.contains("Keybindings") && text.contains("integrity-missing") && text.contains("stale"),
+            "the last legend row is on screen at scroll 0:\n{text}"
         );
-        s.set_term_size((80, 29));
-        s.scroll_help(100);
-        assert_eq!(s.help_scroll, 0, "nothing left to scroll at 29 rows");
         s.set_term_size((80, 24));
         s.scroll_help(100);
-        assert_eq!(s.help_scroll, 5, "27 body lines in a 22-row viewport");
+        assert_eq!(s.help_scroll, 0, "nothing left to scroll at 24 rows");
+    }
+
+    #[test]
+    fn help_scrolls_on_a_shorter_terminal() {
+        let mut s = TuiState::new();
+        s.enter_help();
+        s.set_term_size((80, 20));
+        s.scroll_help(100);
+        assert_eq!(s.help_scroll, 4, "22 body lines in an 18-row viewport");
     }
 
     /// Every key `handle_browse` binds, one per row of the key column.
@@ -3337,7 +3333,7 @@ mod tests {
                 .position(|r| r.contains("move selection"))
                 .expect("first key row");
             assert!(
-                overlay[first].contains("install"),
+                overlay[first].contains("first / last row"),
                 "second column shares the row: {}",
                 overlay[first]
             );
@@ -3467,7 +3463,7 @@ mod tests {
             ("h", "deprecated toggle"),
             ("r", "catalog refresh"),
             ("q", "quit"),
-            ("filter & sort popup", "F filter & sort popup"),
+            ("filter popup", "F filter popup"),
         ] {
             assert!(text.contains(needle), "{what} must be documented; overlay text: {text}");
         }

@@ -93,6 +93,15 @@ pub enum ViewMode {
     Tree,
 }
 
+impl From<crate::config::declaration::DefaultView> for ViewMode {
+    fn from(view: crate::config::declaration::DefaultView) -> Self {
+        match view {
+            crate::config::declaration::DefaultView::Flat => ViewMode::Flat,
+            crate::config::declaration::DefaultView::Tree => ViewMode::Tree,
+        }
+    }
+}
+
 /// Which interaction mode the screen is in.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
@@ -782,7 +791,7 @@ enum SelectionAnchor {
 /// full-width scroll clamp; the entry text lives
 /// in [`super::render::help_entries`] / [`super::render::legend_entries`] and
 /// `render::tests::help_body_line_count_matches_state` guards it against drift.
-pub(crate) const HELP_BODY_LINES: u16 = 27;
+pub(crate) const HELP_BODY_LINES: u16 = 22;
 
 /// The bare-state default for `tree_separators`, used only by
 /// [`TuiState::default`] — a state that was never seeded from config (unit
@@ -1351,6 +1360,17 @@ impl TuiState {
         self.resort();
     }
 
+    /// Show the browse order `sort` running `order`, as the live keys would.
+    pub fn apply_sort(&mut self, sort: Option<SortMode>, order: SortOrder) {
+        // A re-sort sends the cursor to the top; skip it when nothing changes.
+        if self.sort == sort && self.sort_direction() == order {
+            return;
+        }
+        self.sort = sort;
+        self.set_sort_order(order);
+        self.resort();
+    }
+
     /// The `S` key: run the active order the other way.
     pub fn toggle_sort_direction(&mut self) {
         self.sort_reversed = !self.sort_reversed;
@@ -1809,10 +1829,14 @@ impl TuiState {
     /// unset-fallback to **Tree** happens there, not here; this setter only
     /// maps the resolved variant onto [`ViewMode`]).
     pub fn set_view_mode_from_config(&mut self, default_view: crate::config::declaration::DefaultView) {
-        self.view_mode = match default_view {
-            crate::config::declaration::DefaultView::Flat => ViewMode::Flat,
-            crate::config::declaration::DefaultView::Tree => ViewMode::Tree,
-        };
+        self.view_mode = default_view.into();
+    }
+
+    /// Show `mode` as the `t` key would: the selection follows its artifact.
+    pub fn set_view(&mut self, mode: ViewMode) {
+        if self.view_mode != mode {
+            self.toggle_view_mode();
+        }
     }
 
     /// Seed the tree build options from already-resolved config values (see

@@ -1238,7 +1238,7 @@ fn vendor_key_error(reason: crate::config::project_config::ClientsInvalid) -> an
     }
 }
 
-fn parse_default_view(s: &str) -> anyhow::Result<DefaultView> {
+pub(crate) fn parse_default_view(s: &str) -> anyhow::Result<DefaultView> {
     DefaultView::ALL.into_iter().find(|v| v.as_str() == s).ok_or_else(|| {
         super::config_value(format!(
             "invalid value for options.tui.default_view: '{s}'; valid values: {}",
@@ -1247,7 +1247,7 @@ fn parse_default_view(s: &str) -> anyhow::Result<DefaultView> {
     })
 }
 
-fn parse_sort(s: &str) -> anyhow::Result<crate::catalog::SortMode> {
+pub(crate) fn parse_sort(s: &str) -> anyhow::Result<crate::catalog::SortMode> {
     use crate::catalog::SortMode;
     SortMode::ALL.into_iter().find(|m| m.as_str() == s).ok_or_else(|| {
         super::config_value(format!(
@@ -1257,7 +1257,7 @@ fn parse_sort(s: &str) -> anyhow::Result<crate::catalog::SortMode> {
     })
 }
 
-fn parse_sort_order(s: &str) -> anyhow::Result<crate::catalog::SortOrder> {
+pub(crate) fn parse_sort_order(s: &str) -> anyhow::Result<crate::catalog::SortOrder> {
     use crate::catalog::SortOrder;
     SortOrder::ALL.into_iter().find(|o| o.as_str() == s).ok_or_else(|| {
         super::config_value(format!(
@@ -1267,7 +1267,7 @@ fn parse_sort_order(s: &str) -> anyhow::Result<crate::catalog::SortOrder> {
     })
 }
 
-fn parse_theme(s: &str) -> anyhow::Result<crate::config::declaration::TuiTheme> {
+pub(crate) fn parse_theme(s: &str) -> anyhow::Result<crate::config::declaration::TuiTheme> {
     use crate::config::declaration::TuiTheme;
     TuiTheme::ALL.into_iter().find(|t| t.as_str() == s).ok_or_else(|| {
         super::config_value(format!(
