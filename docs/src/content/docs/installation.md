@@ -45,6 +45,45 @@ ocx --global update
 
 The [grim package page][ocx-grim] lists every published version.
 
+## Verify the package {#verify-ocx-package}
+
+From 0.16.1, every platform of `ocx.sh/grimoire/cli` carries a keyless
+[Sigstore][sigstore] signature and a signed [CycloneDX][cyclonedx] SBOM
+attestation. Both come from the release workflow
+`release-ocx.yml` on the `main` branch, and the release publishes the
+floating tags only after it has checked both for every platform.
+
+The signature sits on each platform manifest, not on the image index, so name
+a platform with `-p`. Check the signature:
+
+<!-- doc-norun: needs network and a published signed release -->
+```sh
+ocx package verify \
+  -p linux/amd64 \
+  --certificate-identity https://github.com/grimoire-rs/grimoire/.github/workflows/release-ocx.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ocx.sh/grimoire/cli:0.16.1
+```
+<!-- /doc-norun -->
+
+Check the SBOM attestation the same way:
+
+<!-- doc-norun: needs network and a published signed release -->
+```sh
+ocx package verify \
+  -p linux/amd64 \
+  --attestation --type cyclonedx \
+  --certificate-identity https://github.com/grimoire-rs/grimoire/.github/workflows/release-ocx.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ocx.sh/grimoire/cli:0.16.1
+```
+<!-- /doc-norun -->
+
+A match exits 0. Versions before 0.16.1 are unsigned until a backfill signs
+them. Until then ocx installs them without a check, because the index does not
+yet require signatures. The GitHub release archives carry build provenance
+attestations instead. See [pre-built binaries][binaries].
+
 ## Install script
 
 If you would rather not adopt ocx, the Grimoire site hosts a one-line
@@ -186,6 +225,7 @@ If the command prints a version string, you are ready for the
 [releases]: https://github.com/grimoire-rs/grimoire/releases
 [rustup]: https://rustup.rs
 [setup-grimoire]: https://github.com/grimoire-rs/setup-grimoire
+[sigstore]: https://www.sigstore.dev
 
 <!-- internal -->
 [binaries]: #pre-built-binaries
