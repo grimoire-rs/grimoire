@@ -88,7 +88,7 @@ jobs:
         # Activates the root ocx.toml, putting the suite's zot registry on PATH.
         uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
-          version: "0.6.3"
+          version: "0.6.8"
           groups: default
       - name: Run Acceptance Shard
         env:

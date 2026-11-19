@@ -139,7 +139,7 @@ jobs:
         # Activates the root ocx.toml, putting the suite's zot registry on PATH.
         uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
-          version: "0.6.3"
+          version: "0.6.8"
           groups: default
       - name: Run Windows hook suite
         shell: bash
@@ -214,7 +214,7 @@ jobs:
         # Activates the root ocx.toml, putting the suite's zot registry on PATH.
         uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
-          version: "0.6.3"
+          version: "0.6.8"
           groups: default
       - name: Run Platform Check
         shell: bash
@@ -274,7 +274,7 @@ jobs:
         # p9_diff runs its scenarios against the root ocx.toml's zot.
         uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
-          version: "0.6.3"
+          version: "0.6.8"
           groups: default
       - name: Golden fixtures (required)
         working-directory: test
@@ -433,7 +433,7 @@ jobs:
         # and g1 (0.15.0) joins once ocx.toml declares it.
         uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
-          version: "0.6.3"
+          version: "0.6.8"
           groups: ${{ steps.ocx-groups.outputs.groups }}
       - name: Index end-to-end (required)
         run: task test:index-e2e -- --junit-xml=results/junit.xml
