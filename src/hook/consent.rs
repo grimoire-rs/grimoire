@@ -621,6 +621,19 @@ mod tests {
         assert_eq!(load(grim_home, workspace), None);
     }
 
+    #[test]
+    fn a_written_record_stamps_second_precision_utc() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Path::new("/w/proj");
+        record(dir.path(), ConfigScope::Project, workspace, &set(["fmt@r/x"])).unwrap();
+        let stamp = load(dir.path(), workspace).expect("the record reads back").consented_at;
+        let shape: String = stamp
+            .chars()
+            .map(|c| if c.is_ascii_digit() { 'd' } else { c })
+            .collect();
+        assert_eq!(shape, "dddd-dd-ddTdd:dd:ddZ", "{stamp}");
+    }
+
     /// **Consent in one workspace does not arm another** — the direnv property,
     /// executed against the real on-disk layout rather than asserted about the
     /// predicate alone.

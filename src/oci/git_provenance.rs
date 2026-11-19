@@ -729,6 +729,19 @@ mod tests {
     }
 
     #[test]
+    fn epoch_range_edges_are_pinned() {
+        assert_eq!(
+            epoch_to_rfc3339("253402300799").as_deref(),
+            Some("9999-12-31T23:59:59Z")
+        );
+        assert_eq!(epoch_to_rfc3339("-1").as_deref(), Some("1969-12-31T23:59:59Z"));
+        assert_eq!(
+            epoch_to_rfc3339("-62135596800").as_deref(),
+            Some("0001-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
     fn malformed_epoch_degrades_to_none() {
         // Never a publish failure: an unparseable value means "no timestamp".
         for raw in ["", "   ", "not-a-number", "1782000000.5", "99999999999999999999"] {

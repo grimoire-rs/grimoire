@@ -652,6 +652,40 @@ mod tests {
         assert_eq!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:01Z");
     }
 
+    #[test]
+    fn now_rfc3339_is_second_precision_utc() {
+        let stamp = now_rfc3339();
+        let shape: Vec<char> = stamp
+            .chars()
+            .map(|c| if c.is_ascii_digit() { 'd' } else { c })
+            .collect();
+        assert_eq!(shape.iter().collect::<String>(), "dddd-dd-ddTdd:dd:ddZ", "{stamp}");
+        assert_eq!(stamp.len(), 20);
+    }
+
+    #[test]
+    fn bump_one_second_normalizes_offsets_and_rejects_non_rfc3339() {
+        assert_eq!(
+            bump_one_second("2026-01-01T02:00:00+02:00").as_deref(),
+            Some("2026-01-01T00:00:01Z")
+        );
+        assert_eq!(
+            bump_one_second("2026-01-01T00:00:00Z").as_deref(),
+            Some("2026-01-01T00:00:01Z")
+        );
+        assert_eq!(
+            bump_one_second("2026-12-31T23:59:59Z").as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            bump_one_second("2026-01-01T00:00:00.9Z").as_deref(),
+            Some("2026-01-01T00:00:01Z"),
+            "a fraction is dropped from the bumped stamp"
+        );
+        assert_eq!(bump_one_second("not a timestamp"), None);
+        assert_eq!(bump_one_second(""), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_preserves_original_on_write_failure() {

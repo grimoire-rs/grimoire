@@ -356,6 +356,37 @@ mod tests {
     }
 
     #[test]
+    fn epoch_millis_forms_are_pinned() {
+        let cases: [(&str, Option<i64>); 13] = [
+            ("1970-01-01T00:00:00Z", Some(0)),
+            ("2026-01-01T00:00:00Z", Some(1_767_225_600_000)),
+            ("2026-01-01T00:00:00+00:00", Some(1_767_225_600_000)),
+            ("2026-01-01T00:30:00+02:00", Some(1_767_220_200_000)),
+            ("2026-01-01T00:00:00.123Z", Some(1_767_225_600_123)),
+            ("2026-01-01T00:00:00.123456789Z", Some(1_767_225_600_123)),
+            ("2026-01-01T00:00:00.9999999Z", Some(1_767_225_600_999)),
+            ("1969-12-31T23:59:59.999Z", Some(-1)),
+            ("1969-12-31T23:59:59.9995Z", Some(-1)),
+            ("", None),
+            ("2026-06-01", None),
+            ("2026-01-01T00:00:00", None),
+            ("2026-01-01T00:00:00+0200", None),
+        ];
+        for (created, millis) in cases {
+            assert_eq!(epoch_millis(created), millis, "{created:?}");
+        }
+        // lenient forms
+        let lenient = [
+            ("2026-01-01t00:00:00z", Some(1_767_225_600_000)),
+            ("2026-01-01 00:00:00Z", Some(1_767_225_600_000)),
+            ("2026-01-01T00:00:60Z", Some(1_767_225_660_000)),
+        ];
+        for (created, millis) in lenient {
+            assert_eq!(epoch_millis(created), millis, "{created:?}");
+        }
+    }
+
+    #[test]
     fn an_unparseable_created_is_undated_not_a_hard_error() {
         // `created` reaches grim from an OCI annotation a publisher controls.
         // Anything that is not RFC3339 — empty, a bare date, prose — is the

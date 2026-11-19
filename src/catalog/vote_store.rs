@@ -288,6 +288,17 @@ mod tests {
     }
 
     #[test]
+    fn observed_at_is_written_as_second_precision_utc() {
+        let (dir, store) = store();
+        let at = DateTime::from_timestamp(1_800_000_000, 999_999_999).expect("a valid test timestamp");
+        store
+            .record(&account(), REFERENCE, Some(true), at)
+            .expect("the record is written");
+        let text = std::fs::read_to_string(dir.path().join("state/votes.json")).expect("the file");
+        assert!(text.contains(r#""observed_at": "2027-01-15T08:00:00Z""#), "{text}");
+    }
+
+    #[test]
     fn an_interrupted_mutation_leaves_an_existing_entry_untouched() {
         let (_dir, store) = store();
         store
