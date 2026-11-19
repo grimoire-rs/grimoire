@@ -44,7 +44,7 @@ Mechanism + metadata proven before any CI change.
 |------|------|--------|
 | musl targets | `dist-workspace.toml` | add `x86_64`/`aarch64-unknown-linux-musl` |
 | hook | `dist-workspace.toml` | `post-announce-jobs = ["./publish-ocx"]` |
-| pipeline | `.github/workflows/publish-ocx.yml` | new (test matrix + publish) |
+| pipeline | `.github/workflows/publish-ocx.yml` | new (test matrix + publish); now `release-ocx.yml` |
 | metadata | `packaging/grim/metadata.json` | bundle v1 (DONE) |
 | catalog | `CATALOG.md` | frontmatter + body |
 | logo | `assets/logo.png` | new (keep); remove `assets/logo.svg` |

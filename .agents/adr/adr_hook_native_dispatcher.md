@@ -142,7 +142,7 @@ are conditional on WP-0.**
 - **B4** makes dev builds and release builds take different paths.
 - **B5, unscored:** a second `[[bin]]` shipped in the dist archive and found via `current_exe().parent()`.
   It is **excluded** because it violates O1 (embed). It also cannot meet O7: per-package profile overrides
-  cannot set `lto` or `panic`, so the budget is unreachable. Installers and `publish-ocx.yml:150-169` (one
+  cannot set `lto` or `panic`, so the budget is unreachable. Installers and `publish-ocx.yml:150-169` (now `release-ocx.yml`) (one
   `grim` per archive) would carry two files, and the two binaries could drift in version at runtime.
 
 ### H2 — Replacing the launcher at a fixed registered path

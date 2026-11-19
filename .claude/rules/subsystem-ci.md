@@ -85,6 +85,8 @@ Build binary **once** in smoke job, upload with `compression-level: 0` and `rete
 - **OIDC for cloud auth** — not static credentials
 - **No self-hosted runners for public repos**
 
+Elevated `id-token: write` (keyless Sigstore signing) lives in two workflows only: `release-ocx.yml` (called from the dispatched `release.yml`, signing in the `release-ocx` composite action) and `backfill.yml`. Both refuse any ref but `refs/heads/main`, because the certificate identity names it; `backfill.yml` also sits behind the `release-backfill` environment. Add no third signer without a new, documented identity ([workflow-release.md](./workflow-release.md)).
+
 ### 6. Concurrency
 
 Every workflow:

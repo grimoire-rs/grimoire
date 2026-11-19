@@ -31,7 +31,8 @@ Worker briefs, ready to fill in: [references/briefs.md](./references/briefs.md).
   `catalog/publish.toml`, the regenerated `CHANGELOG.md`, and the new section
   on `docs/src/content/docs/changelog.md`.
 - **Never**: the `release:` commit, a tag, a push, or a dispatch of
-  `release.yml` or `publish-catalog.yml`.
+  `release.yml` or `publish-catalog.yml`. A release is `release.yml`
+  dispatched from `main`; the workflow creates the tag.
 
 ## Procedure
 
@@ -123,7 +124,7 @@ Leave the step 5 and step 6 changes uncommitted: they are the human's
 3. drift fixed (counts, plus the commits), and any gap left open;
 4. the commands the human runs, as `task release:prepare` printed them.
 
-The `CHANGELOG.md` date is the day step 5 ran. When the tag lands on a later
+The `CHANGELOG.md` date is the day step 5 ran. When the release dispatches on a later
 day, rerun `task release:prepare BUMP=auto VERSION=$NEXT` and correct the date
 in the page's `### $NEXT` heading.
 

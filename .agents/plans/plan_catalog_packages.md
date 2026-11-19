@@ -57,7 +57,7 @@ Layout: `catalog/{README.md,publish.toml,scripts/publish.py,taskfile.yml}`, pack
 - `catalog/taskfile.yml`: `.ensure-grim` (deps `:rust:build`, SKIP_BUILD status), `verify` (grim build over `skills/*/` + `bundles/*.toml`, GRIM_COMMAND override), `release` (wraps `scripts/publish.py`). Root taskfile: include + `catalog:verify` in `.verify:build-test` after `rust:build`.
 - `catalog/scripts/publish.py` (PEP 723, stdlib): parse publish.toml, skills before bundles, `grim release <path> <ref>`, `--dry-run`/`--force` passthrough. Versions per package in publish.toml, no git tags (cliff tag_pattern unanchored).
 - CI validate: one step in verify-basic.yml smoke job: `task catalog:verify`.
-- `.github/workflows/publish-catalog.yml`: workflow_dispatch only (dry_run/force/grim_version), `environment: grim.ocx.sh` (REGISTRY_USER/REGISTRY_TOKEN via env intermediary), DOCKER_CONFIG=$RUNNER_TEMP/docker, install released grim via gh release download, `grim login --password-stdin --allow-insecure-store`, always dry-run smoke, publish gated, `grim logout` if always(). Pattern: publish-ocx.yml + docs/src/authentication.md CI recipe.
+- `.github/workflows/publish-catalog.yml`: workflow_dispatch only (dry_run/force/grim_version), `environment: grim.ocx.sh` (REGISTRY_USER/REGISTRY_TOKEN via env intermediary), DOCKER_CONFIG=$RUNNER_TEMP/docker, install released grim via gh release download, `grim login --password-stdin --allow-insecure-store`, always dry-run smoke, publish gated, `grim logout` if always(). Pattern: publish-ocx.yml (now release-ocx.yml) + docs/src/authentication.md CI recipe.
 
 ### Phase 4 — Repo integration
 

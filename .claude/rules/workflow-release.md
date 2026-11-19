@@ -82,9 +82,9 @@ Release ceremony is a human-driven process with tooling support:
 task release:prepare    # run verify, bump Cargo.toml and catalog/publish.toml (git-cliff --bumped-version), regenerate CHANGELOG.md
 /changelog              # write the release up on the site changelog (docs/src/content/docs/changelog.md)
 # Human reviews the changes
-git add -A && git commit -m "release: vX.Y.Z"
-git tag vX.Y.Z
-git push --atomic origin main vX.Y.Z   # human-run — never auto-push
+git add -A && git commit -s -m "release: vX.Y.Z"
+git push origin main                                     # human-run — never auto-push
+gh workflow run release.yml --ref main -f tag=vX.Y.Z     # human-run; never from another branch
 ```
 
 `CHANGELOG.md` is the commit-level record; the site page `/changelog.html`
@@ -94,14 +94,71 @@ same `release: vX.Y.Z` commit. **An AI performing a release (rare) runs
 `/changelog` before the release commit — the release is incomplete without
 it.**
 
-The final push is always the human's call; `release:prepare` only prints
-it. After the tag is pushed, CI takes over: build → test → GitHub Release,
-then the post-announce jobs.
+The push and the dispatch are always the human's call; `release:prepare` only
+prints them. After the dispatch, CI takes over: build → test → GitHub Release
+(and the git tag), then the post-announce jobs.
 
 `/prepare-release <major|minor|patch>` covers the first two lines plus what
 precedes them: an inventory of every change since the last tag, a drift review
 of the shipped `catalog/` packages and of the docs pages, then the bump and the
 changelog page. It stops before the release commit.
+
+### Dispatch Release: Stable Signing Identity
+
+`dist-workspace.toml` sets `dispatch-releases = true`: a release is
+`release.yml` dispatched from `main` with input `tag` (`vX.Y.Z`; the default
+`dry-run` plans and builds without publishing). Pushing a tag does not release.
+Why: the OCX package is signed keylessly, and the Sigstore certificate names
+the workflow ref. A tag-push run would sign as `…@refs/tags/vX.Y.Z`, a new
+identity per release; a dispatch from `main` signs as
+`https://github.com/grimoire-rs/grimoire/.github/workflows/release-ocx.yml@refs/heads/main`
+(issuer `https://token.actions.githubusercontent.com`), one identity consumers
+can pin.
+
+- **The workflow creates the tag.** cargo-dist tags the dispatched commit
+  together with the GitHub Release. Never create or push a tag by hand.
+- **Dispatch only from `main`.** The generated `release.yml` does not block
+  another ref: a real-tag dispatch from a branch can create the tag and the
+  GitHub Release before `release-ocx.yml` refuses to sign (its first step
+  requires `refs/heads/main`), leaving a half-released version. A generated
+  guard (`plan-jobs`) was tried and dropped: cargo-dist wires a plan job only
+  into `build-local-artifacts`' `needs`, and `host` runs with `always()` when
+  builds are skipped, so it does not reliably stop the release. The gap stays.
+  Mitigations: operator discipline (`--ref main`) or a repository ruleset that
+  limits who may dispatch from which ref. Editing `release.yml` by hand is
+  ruled out.
+- **Each platform of `ocx.sh/grimoire/cli` is signed** and carries a signed
+  CycloneDX SBOM attestation, verified before any floating tag moves. Only
+  platform manifests are signed, not the image index: a manual
+  `ocx package verify` needs `-p <platform>`.
+- **Structure.** `release-ocx.yml` is a called workflow of the generated
+  `release.yml` (`post-announce-jobs = ["./release-ocx", "./publish-catalog"]`,
+  `id-token: write` granted via `github-custom-job-permissions`) and is also
+  dispatchable with a `tag` input, so a failed publish is repaired from `main`
+  under the same identity. It guards `refs/heads/main`, checks out, and runs
+  the composite action `.github/actions/release-ocx` (repackage, sign and
+  attest, verify, describe, cascade, announce). The two files' header comments
+  are the source of truth; `.claude/tests/test_workflows.py` pins the guard.
+- **Custom signing lives in a called workflow precisely so `release.yml` stays
+  generated** (see "Generated Workflows" above): the certificate names the
+  file that defines the signing job, and cargo-dist owns `release.yml`.
+
+### Backfill and Publisher Declaration
+
+`.github/workflows/backfill.yml` (dispatch-only, `scripts/backfill_release.py`)
+signs and attests already-published versions (0.11.1 to 0.16.0 have a
+package; v0.11.0 and older have none). It signs as a second identity,
+`…/backfill.yml@refs/heads/main`. `dry_run` defaults to true, and the job sits
+behind the owner-only `release-backfill` environment (required reviewer).
+
+Order matters. A consumer's `ocx` verifies on install only when the index
+entry in `ocx-sh/index` declares `publishers` (or the user sets a trust
+policy); signing alone changes nothing for users. Once `publishers` is
+declared, an unsigned version fails to install with exit 79. So:
+
+1. signed release (the first dispatch release, with `release-ocx.yml` signing);
+2. backfill every older version;
+3. only then a `publishers` PR on `ocx-sh/index` naming both identities.
 
 ### Catalog Publish
 
