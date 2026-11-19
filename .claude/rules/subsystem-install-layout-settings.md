@@ -101,8 +101,8 @@ kinds do not take the fence. Recorded edges (dotfiles false positive, another
 repository, a repository-set `HOME`, no `.git`): `arch-threat-model.md` T3.
 
 **Consent and hygiene.** Project scope applies only past the flag and the
-workspace consent record, which holds `settings:<binding>@<registry>/<repository>`
-keys beside the hook keys (same file, same write seams). `.claude/settings.local.json`
+workspace consent record, which holds unprefixed entries (`adr_mod_artifact_kind.md` D6)
+entries beside the hook entries (same file, same write seams). `.claude/settings.local.json`
 goes into the repository's **common** `info/exclude`
 (`ensure_settings_local_excluded`), dropped only when neither hooks nor
 settings use the file — hygiene, not a control.

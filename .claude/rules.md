@@ -78,6 +78,7 @@ Catalog = single source of truth — `AGENTS.md` may summarize or reference by p
 | Install layout: MCP servers, agents | [subsystem-install-layout-agents-mcp.md](./rules/subsystem-install-layout-agents-mcp.md) | `src/install/{mcp_config,json_splice,toml_splice,cline_lock,vendor_agents}.rs` |
 | Install layout: hooks | [subsystem-install-layout-hooks.md](./rules/subsystem-install-layout-hooks.md) | `src/hook/**`, `src/install/hook_*.rs`, `src/install/launcher.rs`, `crates/grim-hook/**`, `crates/grimoire-hook-core/**` |
 | Install layout: settings | [subsystem-install-layout-settings.md](./rules/subsystem-install-layout-settings.md) | `src/install/settings_*.rs` |
+| Install layout: mods | [subsystem-install-layout-mods.md](./rules/subsystem-install-layout-mods.md) | `src/install/mod_*.rs` |
 | Vendor paths (global-scope roots, env overrides) | [subsystem-vendor-paths.md](./rules/subsystem-vendor-paths.md) | `src/install/vendor.rs`, `src/install/vendor_*.rs`, `src/install/{prune,claude_config,opencode_config,managed_config}.rs` |
 | Client detection | [subsystem-client-detection.md](./rules/subsystem-client-detection.md) | `src/install/target.rs`, `src/install/client_target.rs` |
 | Install state and path containment | [subsystem-install-state.md](./rules/subsystem-install-state.md) | `src/install/install_state.rs`, `src/path_safety.rs` |
@@ -95,7 +96,7 @@ The four `src/**`+`crates/**`-scoped subsystem rules (`subsystem-cli.md`,
 `subsystem-file-structure.md`) co-fire while the workspace's crates are
 provisional; the coupling is intended (declared below).
 `subsystem-file-structure.md` is the core and index of the file-structure family;
-the eight parts above carry narrower globs, so each loads only with the code it
+the nine parts above carry narrower globs, so each loads only with the code it
 describes. One part shares a glob string: `subsystem-vendor-paths.md` and
 `vendor-capability-watchlist.md` both list `src/install/vendor_*.rs`, a declared
 group below. No other part needs one.
@@ -111,6 +112,7 @@ group below. No other part needs one.
 | `src/install/{materializer,expected_outputs,render,installer}.rs` | + [subsystem-install-layout-skills-rules.md](./rules/subsystem-install-layout-skills-rules.md) |
 | `src/install/{mcp_config,json_splice,toml_splice,cline_lock,vendor_agents}.rs` | + [subsystem-install-layout-agents-mcp.md](./rules/subsystem-install-layout-agents-mcp.md) |
 | `src/install/settings_*.rs` | + [subsystem-install-layout-settings.md](./rules/subsystem-install-layout-settings.md) |
+| `src/install/mod_*.rs` | + [subsystem-install-layout-mods.md](./rules/subsystem-install-layout-mods.md) |
 | `src/install/vendor.rs`, `src/install/vendor_*.rs`, `src/install/{prune,claude_config,opencode_config,managed_config}.rs` | + [subsystem-vendor-paths.md](./rules/subsystem-vendor-paths.md) |
 | `src/install/target.rs`, `src/install/client_target.rs` | + [subsystem-client-detection.md](./rules/subsystem-client-detection.md) |
 | `src/install/install_state.rs`, `src/path_safety.rs` | + [subsystem-install-state.md](./rules/subsystem-install-state.md) |

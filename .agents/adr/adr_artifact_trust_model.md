@@ -11,7 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` (no new dependency; documents existing behavior)
 **Domain Tags:** security
 **Supersedes:** N/A
-**Superseded By:** N/A (decision 2 amended 2026-08-28 by [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) — one scoped exception — and 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — a second scoped exception; see the boxes under Decision. A narrowing of decision 1 for hook and settings consent is proposed, awaiting the owner; see the block under decision 1)
+**Superseded By:** N/A (decision 2 amended 2026-11-19 by [`adr_mod_artifact_kind.md`](./adr_mod_artifact_kind.md) D15 — one owner-authorised refusal on a shipped kind, see the AMENDED line after decision 2; decision 2 amended 2026-08-28 by [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) — one scoped exception — and 2026-11-04 by [`adr_settings_artifact_kind.md`](./adr_settings_artifact_kind.md) — a second scoped exception — and 2026-11-19 by [`adr_mod_artifact_kind.md`](./adr_mod_artifact_kind.md) — a third, the mods; see the boxes under Decision. A narrowing of decision 1 for hook and settings consent is proposed, awaiting the owner; see the block under decision 1)
 
 ## Context
 
@@ -65,6 +65,12 @@ from bundles, no "this kind is more dangerous" carve-out. A gate on one
 kind while the others reach equally far is theatre: it trains
 click-through and stops nothing.
 
+> **AMENDED (2026-11-19): one owner-authorised exception to equal trust.** A
+> shipped kind refuses content that reaches client-loaded code, at build and
+> publish and at install ([`adr_mod_artifact_kind.md`](./adr_mod_artifact_kind.md)
+> D15). It is a Principle 9 exception, as `adr_rule_support_dir_removal.md` was;
+> client-loaded code ships as the consent-gated `mod` kind.
+
 > ### ⛔ AMENDED 2026-08-28 — decision 2 carries one scoped exception: **hooks**
 >
 > [`adr_hook_workspace_consent.md`](./adr_hook_workspace_consent.md) gates hook
@@ -83,7 +89,7 @@ click-through and stops nothing.
 >
 > The consequence, stated so it is not mistaken for a licence: **this is not
 > an invitation to gate the next kind.** A gate on a shipped kind stays
-> prohibited. The record's format is deliberately **kind-agnostic** — it
+> prohibited, except the refusal of `adr_mod_artifact_kind.md` D15. The record's format is deliberately **kind-agnostic** — it
 > stores `<binding>@<registry>/<repository>` entries with no kind field — so
 > if the boundary is ever widened (most plausibly when signatures arrive and
 > § *When signatures arrive* is revisited), the exception widens without a
@@ -106,7 +112,8 @@ click-through and stops nothing.
 > stands. Settings are not exempted for reaching further than a skill that ships
 > a script. The honest statement is the same one: **this kind has never
 > shipped**, so it can ship gated and break nothing under Principle 9. **A gate
-> on a shipped kind stays prohibited.**
+> on a shipped kind stays prohibited, except the refusal of
+> `adr_mod_artifact_kind.md` D15.**
 >
 > The exception widened the way the box above predicted. The record stayed
 > kind-agnostic: settings bindings sit in it with no format change. There is one
@@ -115,6 +122,15 @@ click-through and stops nothing.
 > Decision 1 still holds in full. `grim add` is the gesture, a package arriving
 > through a bundle or a `requires` edge inherits it, and global scope is
 > consented, as for hooks.
+
+> ### ⛔ AMENDED 2026-11-19 — decision 2 carries a third scoped exception: **mods**
+>
+> [`adr_mod_artifact_kind.md`](./adr_mod_artifact_kind.md) gates the experimental
+> `mod` kind on the same per-workspace consent record. The reason is release
+> history again: the kind has never shipped. One record, one prompt, one
+> answer; global scope is consented. The hook box's "it stores
+> `<binding>@<registry>/<repository>` entries with no kind field" stays
+> (option B).
 
 **3. Until signatures exist, an artifact is treated as if signed by a
 trusted authority.** The trust anchors grim actually has are registry
@@ -166,7 +182,9 @@ above holds.
   (forward compatibility of the member-kind enum, aggregate reporting of
   per-client declines), not trust ones.
 - **Reviewers:** "kind X is executable, therefore gate it" is not a
-  finding — cite this ADR and move on. Findings that remain valid:
+  finding — cite this ADR and move on. D15 is an owner-authorised refusal,
+  recorded as such, and no precedent for gating a kind because it is
+  executable. Findings that remain valid:
   clobbering user content, containment escape, unbounded resource use,
   a credential reaching an unintended destination, or a bypass of the
   integrity checks above.
@@ -186,3 +204,5 @@ above holds.
 | 2026-11-05 | Claude (/hex-execute RF3) | Decision 1 narrowed for hook consent in its body, with no owner decision and no changelog row |
 | 2026-11-06 | Claude (/hex-execute RF4) | The settings box's "Decision 1 still holds in full" rewritten to the same narrowing, with no owner decision |
 | 2026-11-06 | Claude (/hex-execute RF5) | Decision 1 and the settings box restored to the owner's accepted text. The narrowing moved to a block under decision 1 marked Proposed, awaiting the owner (goal-loop decisions RD-3, RD3-6 and RB-4). The shipped code follows the block |
+| 2026-11-19 | Claude (owner ruling, via `adr_mod_artifact_kind.md` D15) | Decision 2 gains one owner-authorised exception: a shipped kind refuses content that reaches client-loaded code, at build, publish and install. The owner ruled "refuse, at publish and consume" and authorised the Principle 9 exception on 2026-11-19. The two "stays prohibited" statements and the Consequences line carry the matching clause |
+| 2026-11-19 | Claude (/hex-execute) | Decision 2 gains the mods box, the third scoped exception, on the owner ruling of 2026-11-18 (consent option B, one record for every gated kind); `adr_mod_artifact_kind.md` D6 |
