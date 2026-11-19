@@ -4436,6 +4436,8 @@ with `65` when the directory beside it sharing its stem (`rules/<name>/`,
 the same way. See [Rules ship one file][ref-publishing-md-rule-support-dir] and
 [Agents ship one file][ref-publishing-md-agent-companions].
 
+Since grim 0.17.0 `build` also refuses a skill whose root holds a `.claude-plugin` entry. See [Skills refuse a plugin manifest][ref-publishing-md-skill-plugin-manifest].
+
 ## grim release {#release}
 
 `grim release <path> <reference>` validates, packs, and pushes an artifact.
@@ -4832,3 +4834,4 @@ registers the same entry — in every detected client, not just Claude Code
 [ref-build]: #build
 [ref-publishing-md-rule-support-dir]: ./publishing.md#rule-support-dir
 [ref-publishing-md-agent-companions]: ./publishing.md#agent-companions
+[ref-publishing-md-skill-plugin-manifest]: ./publishing.md#skill-plugin-manifest

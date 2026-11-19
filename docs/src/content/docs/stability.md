@@ -249,6 +249,11 @@ list an undeclared member at different references.
 unchanged pin. No report's `pinned` value changed, because the tag stays in the
 lock file.
 
+The error document gained the reason `skill-plugin-manifest`, paired with
+`data` / 65 and neither forceable nor retryable. The literal is new in 0.17.0.
+The refusal it names is the [documented exception](#promise-skill-plugin-manifest)
+to this policy.
+
 Thirteen changes are not additive. Each fixes a shipped path, and each is named here
 for anyone upgrading:
 
@@ -755,6 +760,24 @@ while update's own prune and client-reap passes already gated the same class
 of destruction behind `--force`. One command gave two opposite answers about
 one file, and only the silent one lost data. Code depending on the old
 behaviour was depending on a defect, not on a contract.
+
+### A skill with a plugin manifest is refused {#promise-skill-plugin-manifest}
+
+Since grim 0.17.0 a skill whose root carries a Claude plugin manifest
+directory, `.claude-plugin`, no longer builds, publishes or installs. It exits
+`65` with the reason `skill-plugin-manifest`. This is a breaking change to a
+shipped path, and it is the one exception to the freeze that the owner
+authorised, by ruling on 2026-11-19. The reason is that a skill must not carry
+code a client loads. That code ships as the consent-gated `mod` kind.
+The commands affected and the fix are in [the upgrade note](./upgrading.md#skill-plugin-manifest).
+
+Two limits are part of the promise. A grim before 0.17.0 still builds and
+installs such a skill, and this change cannot reach it. On a machine where an
+earlier grim already installed one, grim keeps the files and refuses every
+install-type run. The files stay until `grim update` reaches a version without
+the entry or `grim uninstall` removes the skill. [`grim status`][status] still
+reads that row `installed` with its JSON unchanged, and names the skill once on
+stderr.
 
 ## Known limitations {#limitations}
 

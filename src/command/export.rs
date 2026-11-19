@@ -683,6 +683,7 @@ mod tests {
                 ErrorReason::NoLock => "no-lock",
                 ErrorReason::UnsupportedArtifactFeature => "unsupported-artifact-feature",
                 ErrorReason::MajorDowngrade => "major-downgrade",
+                ErrorReason::SkillPluginManifest => "skill-plugin-manifest",
             }
         }
         for code in [
@@ -712,6 +713,7 @@ mod tests {
             ErrorReason::NoLock,
             ErrorReason::UnsupportedArtifactFeature,
             ErrorReason::MajorDowngrade,
+            ErrorReason::SkillPluginManifest,
         ] {
             assert_eq!(literal(reason), reason.to_string(), "{reason:?}");
         }

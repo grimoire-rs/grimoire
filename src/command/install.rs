@@ -107,6 +107,10 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::read_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?
         .exempt(Exempt::InstallGate);
+    super::grim(
+        crate::install::installer::refuse_installed_dev_plugin_manifest(&state, &scope.roots, None)
+            .map_err(|e| e.naming(target.grim())),
+    )?;
     let materializer = DefaultMaterializer;
 
     // Progress rides stderr, never stdout, so the structured report (and

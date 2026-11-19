@@ -54,6 +54,13 @@ covers the common cases, so `.grimignore` is only for exceptions. See
 and semantics. A rule or agent directory reads no `.grimignore`; one there is
 a stray file.
 
+**A skill root may not hold a `.claude-plugin` entry** (grim 0.17.0 and later).
+`build`, `release`, `publish` (nothing pushed) and every install path exit 65
+with reason `skill-plugin-manifest`; an entry `.grimignore` excludes is not
+refused. Fix: ship client-loaded code as a `mod`, the plugin through a
+marketplace, or list the entry in `.grimignore`. See
+`https://grimoire.rs/upgrading.html#skill-plugin-manifest`.
+
 **A rule or agent is its `.md` alone** (grim 0.16.0 and later). The directory
 beside it (`rules/<name>/`, `agents/<name>/`) may hold only `README.md`,
 `logo.png` and `logo.svg`, none of them packed; any other file makes `grim

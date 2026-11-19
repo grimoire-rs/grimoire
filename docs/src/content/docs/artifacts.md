@@ -160,6 +160,8 @@ single [tar layer](#layers) and installed verbatim, except files excluded by
 [`.grimignore`](#grimignore) — only `SKILL.md` itself is ever re-rendered,
 and only when it carries vendor-namespaced metadata keys.
 
+Since grim 0.17.0 a skill whose root holds a `.claude-plugin` entry is refused with exit `65`. See [the upgrade note][ref-upgrading-md-skill-plugin-manifest].
+
 The frontmatter follows the [agentskills specification][agentskills-spec].
 Parsing is forward-compatible: unknown top-level keys are preserved
 round-trip rather than rejected.
@@ -973,5 +975,6 @@ updated without re-releasing every published version.
 [ref-publishing-md-description-entry-readme]: ./publishing.md#description-entry-readme
 [ref-publishing-md-rule-support-dir]: ./publishing.md#rule-support-dir
 [ref-requires]: #requires
+[ref-upgrading-md-skill-plugin-manifest]: ./upgrading.md#skill-plugin-manifest
 [ref-guides-dependencies-md-rule-with-lookup-data]: ./guides/dependencies.md#rule-with-lookup-data
 [ref-well-known-assets]: #well-known-assets

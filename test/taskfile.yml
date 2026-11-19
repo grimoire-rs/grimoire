@@ -110,6 +110,7 @@ tasks:
         tests/test_old_grim_marketplace_pins.py
         tests/test_old_grim_remove_unread.py
         tests/test_old_grim_settings.py
+        tests/test_old_grim_skill_plugin_manifest.py
         tests/test_old_grim_unwalked_requires.py
         tests/test_old_grim_version_claims.py
         tests/test_old_grim_record_cache.py

@@ -252,6 +252,17 @@ Ask the publisher of the named repository to move them into a required skill.
 It prints once per such rule, only when grim writes files, not on a no-op
 install.
 
+## A Skill With a Plugin Manifest
+
+Exit 65 with reason `skill-plugin-manifest` (grim 0.17.0 and later) means a
+skill's root holds a `.claude-plugin` entry. It is refused at build, publish,
+install, add, update, lock and export. A skill an older grim already installed
+keeps its files, and every install-type run fails until `grim update` reaches
+a version without the entry or `grim uninstall skill <name>` removes it; `grim
+status` still reads `installed` and names the skill on stderr. Publisher fix:
+ship it as a `mod`, ship the plugin through a marketplace, or list the entry in
+`.grimignore`. Link: `https://grimoire.rs/upgrading.html#skill-plugin-manifest`.
+
 ## A Held-Back Request
 
 A warning that `skill/x is requested by skill/p as <ref>, but your declaration

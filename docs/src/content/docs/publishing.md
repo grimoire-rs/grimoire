@@ -84,6 +84,10 @@ data][ref-guides-dependencies-md-rule-with-lookup-data].
 A rule republished unchanged from a tree with `rules/my-rule/README.md` gets a
 new digest, because the README no longer rides the package.
 
+### Skills refuse a plugin manifest {#skill-plugin-manifest}
+
+Since grim 0.17.0 `build`, `release` and `publish` refuse with `65` a skill whose root holds a `.claude-plugin` entry, unless [`.grimignore`][ref-artifacts-md-grimignore] excludes it. See the [upgrade note][ref-upgrading-md-skill-plugin-manifest].
+
 ### Agents ship one file {#agent-companions}
 
 An [agent][ref-agents-md] packs to exactly its `.md` file. A directory beside it
@@ -1702,6 +1706,7 @@ example with `docker login` against
 [ref-agents-md]: ./agents.md
 [ref-description-entry-readme]: #description-entry-readme
 [ref-upgrading-md-agent-companions]: ./upgrading.md#agent-companions
+[ref-upgrading-md-skill-plugin-manifest]: ./upgrading.md#skill-plugin-manifest
 [ref-description-companion]: #description-companion
 [ref-description-precedence]: #description-precedence
 [ref-upgrading-md-package-readme-companion]: ./upgrading.md#package-readme-companion

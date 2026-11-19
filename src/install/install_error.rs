@@ -94,6 +94,19 @@ impl std::fmt::Display for InstallError {
                 r.kind,
                 grim.uninstall("", r.kind, &r.name)
             ),
+            (InstallErrorKind::SkillPluginManifest { name, installed, .. }, _) => {
+                let remove = if *installed {
+                    grim.uninstall("", crate::oci::ArtifactKind::Skill, name)
+                } else {
+                    grim.remove(crate::oci::ArtifactKind::Skill, name)
+                };
+                let fix = if *installed {
+                    format!("`{}`", grim.update(name))
+                } else {
+                    "a version without the entry".to_string()
+                };
+                write!(f, "; use {fix}, or run `{remove}`")
+            }
             _ => Ok(()),
         }
     }
@@ -289,6 +302,21 @@ pub enum InstallErrorKind {
     /// the remedy.
     #[error("this name is already installed from a declared source")]
     HeldByLock,
+
+    /// A skill's root carries a Claude plugin manifest entry, so grim will not
+    /// install it. `installed` is true when the skill was installed by an older
+    /// grim and the entry sits in its outputs. [`InstallError`] prints the fixes.
+    #[error(
+        "this {} skill carries a Claude plugin manifest entry ({}) that grim no longer installs since 0.17.0 \
+         (see https://grimoire.rs/upgrading.html#skill-plugin-manifest)",
+        if *.installed { "installed" } else { "published" },
+        escape_controls(.entry)
+    )]
+    SkillPluginManifest {
+        name: String,
+        entry: String,
+        installed: bool,
+    },
 }
 
 /// What a value refused for its content is: true whether grim never wrote it
