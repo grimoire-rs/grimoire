@@ -1,14 +1,15 @@
 [metadata]
-lock_version = 3
+lock_version = 4
 declaration_hash_version = 1
-declaration_hash = "sha256:185a9628c68087563cb8342cfc0d3b95c197c4897057ead4536b4484be870355"
-generated_by = "ocx 0.6.5"
-generated_at = "2026-11-05T06:31:38Z"
+declaration_hash = "sha256:ee13c82968f518bfe8fb7838d1aa99ebf3edf968c111204d85cd768bc8a268d5"
+generated_by = "ocx 0.6.8"
+generated_at = "2026-11-19T15:26:22Z"
 
 [[tool]]
 name = "cargo-deny"
 group = "default"
 repository = "ocx.sh/embarkstudios/cargo-deny"
+declared = "ocx.sh/embarkstudios/cargo-deny:0.20"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:e8beb3afbbd0ada472ed172077cc7d1fd1296e4cc63bb1045200d825a5b9033a"
@@ -18,9 +19,24 @@ repository = "ocx.sh/embarkstudios/cargo-deny"
 "windows/amd64" = "sha256:a904a2543363de3ded76566ab7b41a29f4b439c11aceb11b65a8ce7cb3558ab5"
 
 [[tool]]
+name = "git-cliff"
+group = "default"
+repository = "ocx.sh/git-cliff/git-cliff"
+declared = "ocx.sh/git-cliff/git-cliff:latest"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:a00b3362112420302cc991973b09f3bea506f774ebf56395c63701540b0e1ad7"
+"darwin/arm64" = "sha256:0d1c7c08e229abd1291a10f4f12ac0a89a4de384252911280d2666b3fb25aa11"
+"linux/amd64" = "sha256:361c6e4b9f04a141283b54c7ff6bd9e78c7e2b84fa886b1d7e90ef0c1e5b6006"
+"linux/arm64" = "sha256:0ef5b24785e0c82e9e71b6695908c74c0d80b3273080ba10efdd8c416f23cbe4"
+"windows/amd64" = "sha256:a60055c818e4dc5856f76d5e3419bbbf4cba33f25ba9b70a6f3f81bacb5f5b43"
+"windows/arm64" = "sha256:2a6cd5be4e38a61f1295871321487f1e2e2fd4d9f3dea2368898625f7a5b1f9a"
+
+[[tool]]
 name = "hawkeye"
 group = "default"
 repository = "ocx.sh/hawkeye/hawkeye"
+declared = "ocx.sh/hawkeye/hawkeye:7"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:eec388d4cb7c4ae32a4ebacb8b71602a34fea47ad88b14aaa69618e6c856b786"
@@ -33,6 +49,7 @@ repository = "ocx.sh/hawkeye/hawkeye"
 name = "lychee"
 group = "default"
 repository = "ocx.sh/lychee/lychee"
+declared = "ocx.sh/lychee/lychee:0.24"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:69d2e005250872a67fc687cb88423baf25a496d5f2017aaacce7337d8dd4ef41"
@@ -45,6 +62,7 @@ repository = "ocx.sh/lychee/lychee"
 name = "node"
 group = "default"
 repository = "ocx.sh/nodejs/node"
+declared = "ocx.sh/nodejs/node:24"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:6eeb00b315b7b6a08327d036d816fd2f7ad753851fae7c796f5b5e2de047c862"
@@ -58,6 +76,7 @@ repository = "ocx.sh/nodejs/node"
 name = "ruff"
 group = "default"
 repository = "ocx.sh/astral-sh/ruff"
+declared = "ocx.sh/astral-sh/ruff:0.17"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:84eb8b48c56461e83441ff785eeb7559e96a8e281b281d73dbcb628e9b0919fd"
@@ -73,6 +92,7 @@ repository = "ocx.sh/astral-sh/ruff"
 name = "shellcheck"
 group = "default"
 repository = "ocx.sh/shellcheck/shellcheck"
+declared = "ocx.sh/shellcheck/shellcheck:0.11"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:3f609d1f8981b9b62804a788fc78c90ec7e8fac8d6a24b5e76b18be14964e08a"
@@ -85,6 +105,7 @@ repository = "ocx.sh/shellcheck/shellcheck"
 name = "shfmt"
 group = "default"
 repository = "ocx.sh/shfmt/shfmt"
+declared = "ocx.sh/shfmt/shfmt:3"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:4c0682bda360d9b93602f7cac0c0ba943e0eb6a10888c00883ef43f03cbc4b04"
@@ -97,6 +118,7 @@ repository = "ocx.sh/shfmt/shfmt"
 name = "uv"
 group = "default"
 repository = "ocx.sh/astral-sh/uv"
+declared = "ocx.sh/astral-sh/uv:0.13"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:21a3dd610feb51da4759dda7b7f83d325293b1d469aaf16ffe5cc4d2ab1ffdd3"
@@ -112,6 +134,7 @@ repository = "ocx.sh/astral-sh/uv"
 name = "zot"
 group = "default"
 repository = "ocx.sh/project-zot/zot"
+declared = "ocx.sh/project-zot/zot:2"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:af8435fae824ef08bc812e25d27775c022b53e66acecd29ccfdd7837965db717"
@@ -125,6 +148,7 @@ repository = "ocx.sh/project-zot/zot"
 name = "grim"
 group = "g0"
 repository = "ocx.sh/grimoire/cli"
+declared = "ocx.sh/grimoire/cli:0.14.3"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:4500862653390bbebd11ed5f6f70ec6d60b8a14a82b8a144156f36ca6f20f55f"
