@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-11-19
+
+### Added
+
+- Filter the catalog by several kinds *(tui)*
+- Open a filter and sort popup with F *(tui)*
+- Edit settings from a config dialog *(tui)*
+- Apply config dialog edits to the running browser *(tui)*
+- Manage registries from the config dialog *(tui)*
+- Size the config dialog to its content and add reset buttons *(tui)*
+- Preview and apply config dialog settings live *(tui)*
+
+### Changed
+
+- Expose the config edit seam to the TUI *(config)*
+
+### Documentation
+
+- Document the filter and sort popup *(tui)*
+- Document the config dialog *(tui)*
+- Describe the dependency and nested bundle fixes
+- Explain how to verify the OCX package
+
+### Fixed
+
+- Refuse stale edges of installed entries *(install)*
+- Refuse a repository republished as another kind *(resolve)*
+- Store install record pins without the tag *(install)*
+- Refuse before the first delete *(uninstall)*
+- Warn when an edited dependency file is removed *(uninstall)*
+- Name the real holder of a kept artifact *(uninstall)*
+- Judge a bundle by its nested members *(tui)*
+- Show a dependency-only artifact as via-dependency *(tui)*
+- Take the kind of a kindless row from the lock *(tui)*
+- Install a bundle member of a namespaced registry *(tui)*
+- Mark bundle-provided and dependency rows outdated *(tui)*
+- Keep the cursor, parent label and pending count in nested views *(tui)*
+- List nested bundles in pulled_in *(add)*
+- Warn about a dependency hook that stays armed *(remove)*
+- Derive a bundle badge from its members *(search)*
+- Stop promising an update that update can refuse *(status)*
+- Report overrides and redundancy for a declared bundle *(why)*
+- Arm nothing on add while a declared hook lacks consent *(hooks)*
+
 ## [0.16.0] - 2026-11-17
 
 ### Added
@@ -1108,6 +1152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.16.1]: https://github.com/grimoire-rs/grimoire/compare/v0.16.0..v0.16.1
 [0.16.0]: https://github.com/grimoire-rs/grimoire/compare/v0.15.1..v0.16.0
 [0.15.1]: https://github.com/grimoire-rs/grimoire/compare/v0.15.0..v0.15.1
 [0.15.0]: https://github.com/grimoire-rs/grimoire/compare/v0.14.3..v0.15.0

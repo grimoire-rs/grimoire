@@ -21,6 +21,91 @@ and lets you ask [why something is installed](#v0-16-0-dependencies). It adds
 action from publishers: [rules lose their support
 directory](#v0-16-0-rule-support-dir) and [an SVG logo beats a
 PNG](#v0-16-0-svg-logo).
+0.16.1 adds a [filter and sort popup](#v0-16-1-filter-sort) and a [config
+dialog](#v0-16-1-config-dialog) to the TUI.
+
+### 0.16.1 — 2026-11-19 {#v0-16-1}
+
+0.16.1 adds a [filter and sort popup](#v0-16-1-filter-sort) and a [config
+dialog](#v0-16-1-config-dialog) to the TUI. [Fixes](#v0-16-1-fixes) make
+`install`, `uninstall`, `add`, `status`, `why` and the TUI treat dependencies
+and nested bundles correctly. The `ocx.sh/grimoire/cli` package is now
+[signed](#v0-16-1-more).
+
+#### Pick several kinds and a sort order in one popup {#v0-16-1-filter-sort}
+
+The TUI kind filter held one kind, so you could not see skills and rules
+together. The `f` and `s` keys also cycled blindly through their values.
+
+Press `F` to open the **Filter & sort** popup. It holds a checkbox per kind,
+the sort modes, the order and a `hide deprecated` toggle. Each change applies
+to the catalog behind the popup at once, and `esc` closes it. `f`, `s` and `S`
+still work and act on the same state.
+
+The Catalog title names up to three checked kinds and counts more. See [the
+filter and sort popup][browse-filter-sort].
+
+#### Edit settings and registries without leaving the TUI {#v0-16-1-config-dialog}
+
+Changing a theme, a sort order or a registry filter meant leaving the browser
+for `grim config` or editing `grimoire.toml` by hand.
+
+Press `C` to open the **Config** popup. It lists every key of `grim config
+list --all` for the scope the browser is on, project or global. Each save goes through the code behind `grim config set`, so validation matches the
+command line and comments in the file survive. The Registries group adds,
+edits, removes and re-defaults a registry in a form.
+
+Edits apply to the running browser. Theme, default view, sort order and
+direction preview while you move through the pick list, and leaving without
+saving puts the old value back. A changed registry list reloads the catalog.
+Only a registry's `insecure` flag waits for the next start.
+
+`x` resets a key, and `X` resets all of them after a confirm. See [change
+settings in the browser][tui-config].
+
+#### Smaller improvements {#v0-16-1-more}
+
+- The `ocx.sh/grimoire/cli` package is signed and carries a signed SBOM, so
+  you can [verify who published it][verify-ocx-package].
+
+#### Fixes {#v0-16-1-fixes}
+
+- `grim install` now refuses a lock whose `requires` rows were removed, even
+  for entries it already installed, with exit `65`. The check reads the local
+  store, so an unchanged install still sends no request
+  ([`grim install`][install]).
+- A repository republished as a different kind than you declared now exits
+  `65` before grim writes the lock. It used to lock the old kind, and every
+  later install failed ([`grim add` exit codes][add-exit-codes]).
+- `state.json` no longer changes bytes between `add`, `update`, the TUI and
+  `install` when nothing really changed ([records that follow the
+  disk][status-adoption]).
+- [`grim uninstall`][uninstall] judges every refusal before it deletes the
+  first file. A dependency's hand-edited MCP entry now stops the run before
+  anything is removed, not halfway through.
+- `grim uninstall` warns when it removes a hand-edited file of a dependency or
+  bundle member. When it keeps an artifact, the stderr line now names the
+  requiring artifact or bundle that holds it ([`grim uninstall`][uninstall]).
+- [`grim remove`][remove] warns about each dependency hook the edit drops from
+  the lock, since it stays armed until `grim install` or `grim uninstall`
+  ([hooks after remove][hooks-remove-armed]).
+- [`grim add`][add] lists a bundle the target nests or requires in `pulled_in`
+  ([JSON shapes][json-single]).
+- `grim add` arms no hook while the consent record misses a declared hook,
+  as `grim install` does. It warns and names `grim hook allow` ([workspace
+  consent][hooks-consent]).
+- [`grim search`][search] and the MCP `grim_search` tool show a bundle's badge
+  from its members, nested bundles included.
+- [`grim status --check`][status-check] no longer promises an update that
+  `grim update` then refuses. Its note now says `grim update` moves the pin, or
+  says why it cannot.
+- [`grim why`][why] reports overrides and redundancy for a declared bundle that
+  another artifact also requires.
+- TUI: a bundle's state follows its nested members, and a dependency-only
+  artifact reads `via-dependency`. A row with no kind takes it from the lock,
+  and a bundle member of a namespaced registry installs. Bundle-provided and
+  dependency rows now read `outdated` when an update is available. Nested
+  views keep the cursor, the parent label and the pending count ([TUI][tui]).
 
 ### 0.16.0 — 2026-11-17 {#v0-16-0}
 
@@ -422,9 +507,9 @@ zip. A team wants an address instead: add it once, receive updates.
 
 [`grim export marketplace`][export-marketplace] regenerates a git repository
 from the plugins a `marketplace.toml` declares. It writes one marketplace
-file per client (Claude Code, Copilot, Codex, Qoder and Cursor), one plugin
-tree per plugin and client, and a root README that tells visitors how to add
-the marketplace. You commit the result, and a consumer adds the repository
+file per client (Claude Code, Copilot, Codex, Qoder and Cursor) and one plugin
+tree per plugin and client. A root README tells visitors how to add the
+marketplace. You commit the result, and a consumer adds the repository
 with their client's own commands, with no grim installed.
 
 ```sh
@@ -435,7 +520,7 @@ Each plugin can now carry an author, licence, links and keywords, and grim
 writes them into every client's files ([plugin metadata][plugin-metadata]).
 Qoder joins [`grim export plugin`][export-plugin], and Cursor trees get a
 `.cursor-plugin/plugin.json`. [Host a plugin marketplace][host-marketplace]
-covers the scheduled regenerate job and the required check, and [Use a plugin
+covers the scheduled regenerate job and the required check. [Use a plugin
 marketplace without grim][use-marketplace] is the page to send your users.
 
 Two things change for existing exports. A plugin's version suffix now hashes
@@ -492,15 +577,16 @@ The MCP `grim_search` tool takes the same `limit` and `offset`. See [paging
 `search` results][search-paging], and [browse filters][browse-filters] for
 what a filter does and does not narrow. A refresh of an HTTP package index
 also starts with a root probe and backs off from a source that keeps failing
-([upgrade note][index-sync]), and [`grim context`][context] reports each
-source's last sync.
+([upgrade note][index-sync]). [`grim context`][context] reports each source's
+last sync.
 
 #### Send anonymous usage telemetry to your own collector {#v0-15-0-telemetry}
 
 You can now see how grim is used across a team without a vendor in the
 middle. Set `GRIM_TELEMETRY` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at an
-OpenTelemetry collector you run. grim sends one record per command there. It
-is off by default, and `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline mode
+OpenTelemetry collector you run. grim sends one record per command there.
+
+It is off by default, and `DO_NOT_TRACK`, `OTEL_SDK_DISABLED` and offline mode
 switch it off again. There is no default endpoint, and nothing leaves the
 machine for any other address. [Telemetry][telemetry] lists every field, what
 is never collected, and how to audit the bytes. The surface is [unstable until
@@ -1022,3 +1108,11 @@ the full commit-level record back to the first tagged release.
 [build]: ./commands.md#build
 [mcp]: ./commands.md#mcp
 [publish-validation]: ./publishing.md#batch-publish-validation
+[browse-filter-sort]: ./browse.md#filter-sort
+[tui-config]: ./browse.md#tui-config
+[verify-ocx-package]: ./installation.md#verify-ocx-package
+[status-check]: ./commands.md#status-check
+[add-exit-codes]: ./commands.md#add-exit-codes
+[json-single]: ./json-interface.md#shapes-single
+[hooks-consent]: ./hooks.md#consent
+[hooks-remove-armed]: ./hooks.md#remove-stays-armed
