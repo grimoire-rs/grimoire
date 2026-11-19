@@ -198,6 +198,7 @@ Nine rules under `.claude/rules/` come from upstream bundles: their prose is **n
 | Ticket to approved fix plan (RCA, then regression-test-first plan) | `fix` |
 | Planning a feature (multi-agent) | `/hex-plan` (hex bundle) |
 | Executing a feature (multi-agent) | `/hex-execute` (hex bundle) |
+| Reviewing a fork or outside-contributor pull request (security-first, CI and comment gated) | `outside-pr-review` |
 | Adversarial review | `/hex-review` (hex bundle; cross-model adversary configured in `.agents/memory/hex.md`) |
 | Preparing a release (change inventory, catalog and docs drift, bump, site changelog) | `prepare-release` — ceremony in [workflow-release.md](./rules/workflow-release.md) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |

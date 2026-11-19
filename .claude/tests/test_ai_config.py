@@ -1056,6 +1056,8 @@ class TestAiConfigOverhaulPhase2:
         # approved plan.
         "rca": False,
         "fix": False,
+        # Starts fork CI and posts a review: explicit invocation only.
+        "outside-pr-review": True,
         "code-check": False,
         # Vendored (grimoire-lore); edits comments, never commits.
         "code-docs-cleanup": False,
@@ -1184,15 +1186,23 @@ class TestAiConfigOverhaulPhase2:
         human needs to see. Trimming them is upstream's call and a local edit
         would be reverted by the next sync; installing fewer bundles is the
         lever here, not editing the ones installed.
+
+        A `disable-model-invocation: true` skill is reported but not capped:
+        Claude Code keeps its description out of the session's skill listing,
+        so it spends none of the budget this cap protects.
         """
         total = 0
         vendored_total = 0
+        manual_total = 0
         per_skill: list[tuple[str, int]] = []
         for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
             fm = self._parse_frontmatter(skill_md)
             desc = fm.get("description", "")
             if is_vendored(skill_md):
                 vendored_total += len(desc)
+                continue
+            if fm.get("disable-model-invocation", "false").lower() == "true":
+                manual_total += len(desc)
                 continue
             total += len(desc)
             per_skill.append((skill_md.parent.name, len(desc)))
@@ -1201,6 +1211,7 @@ class TestAiConfigOverhaulPhase2:
             reporter.write_line(
                 f"skill description budget: authored={total} (cap 4000), "
                 f"vendored={vendored_total} (uncapped), "
+                f"manual-only={manual_total} (not loaded), "
                 f"context load={total + vendored_total}"
             )
         assert total <= 4000, (
