@@ -30,7 +30,7 @@ jobs:
         with:
           target: ${{ matrix.job.target }}
       - name: Install nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-nextest
       - name: Test
@@ -132,12 +132,12 @@ jobs:
         shell: bash
         run: mv test/bin/grim-x86_64-pc-windows-msvc.exe test/bin/grim.exe
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       - name: Setup OCX
         # Activates the root ocx.toml, putting the suite's zot registry on PATH.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.3"
           groups: default
@@ -207,12 +207,12 @@ jobs:
         shell: bash
         run: mv test/bin/grim-x86_64-pc-windows-msvc.exe test/bin/grim.exe
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       - name: Setup OCX
         # Activates the root ocx.toml, putting the suite's zot registry on PATH.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.3"
           groups: default
@@ -267,12 +267,12 @@ jobs:
           mv test/bin/grim-x86_64-unknown-linux-gnu test/bin/grim
           chmod +x test/bin/grim
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       - name: Setup OCX
         # p9_diff runs its scenarios against the root ocx.toml's zot.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.3"
           groups: default
@@ -418,7 +418,7 @@ jobs:
           mv test/bin/grim-x86_64-unknown-linux-gnu test/bin/grim
           chmod +x test/bin/grim
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       - name: Resolve ocx groups
@@ -431,7 +431,7 @@ jobs:
         # The root ocx.toml supplies node (the indexer build) and zot (the suite)
         # in the default group; g0 (grim 0.14.3) is pulled here and nowhere else,
         # and g1 (0.15.0) joins once ocx.toml declares it.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.3"
           groups: ${{ steps.ocx-groups.outputs.groups }}
@@ -523,7 +523,7 @@ jobs:
           pattern: deep-*
           path: artifacts
       - name: Publish Test Results
-        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
+        uses: EnricoMi/publish-unit-test-result-action@da5b7be67623cd59bbbd1a0ce4f022050a55605f # v2.26.0
         with:
           files: "artifacts/**/junit.xml"
           check_name: "Deep Test Results"
