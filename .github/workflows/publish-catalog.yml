@@ -131,17 +131,20 @@ jobs:
 
       - name: Derive catalog version
         # Catalog packages publish at grim's release version (issue #29's
-        # --version feature): the tag ref on a workflow_call from the
-        # release pipeline, else a vX.Y.Z grim_version dispatch input.
+        # --version feature): the plan's announcement tag on a workflow_call
+        # from the release pipeline (`github.ref_name` is `main` there, the
+        # release being a dispatch), else a vX.Y.Z grim_version dispatch input.
         # Empty ⇒ the top-level `version` in catalog/publish.toml applies.
         env:
-          REF_NAME: ${{ github.ref_name }}
+          # `plan` is set only when cargo-dist calls this workflow; a
+          # `||` short-circuit keeps fromJson off the dispatch path.
+          PLAN_TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
           GRIM_VERSION: ${{ inputs.grim_version }}
         run: |
           set -euo pipefail
           version=""
-          if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            version="$REF_NAME"
+          if [[ "$PLAN_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="$PLAN_TAG"
           elif [[ "${GRIM_VERSION:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             version="$GRIM_VERSION"
           fi

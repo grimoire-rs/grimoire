@@ -20,14 +20,20 @@ unix-archive = ".tar.gz"
 windows-archive = ".zip"
 # Which actions to run on pull requests
 pr-run-mode = "skip"
-# Post-announce jobs: publish the freshly built archives to the OCX registry,
-# then republish the first-party catalog with the freshly released grim
-# (idempotent when catalog versions are unchanged).
-post-announce-jobs = ["./publish-ocx", "./publish-catalog"]
+# Post-announce jobs: sign and publish the OCX package (`release-ocx.yml`), then
+# republish the first-party catalog with the freshly released grim (idempotent
+# when catalog versions are unchanged).
+post-announce-jobs = ["./release-ocx", "./publish-catalog"]
 # Both custom jobs push to GHCR — the called workflows declare
 # `packages: write`, which the caller must grant (a reusable workflow can only
-# downscope the caller's permissions).
-github-custom-job-permissions = { "publish-ocx" = { contents = "read", packages = "write" }, "publish-catalog" = { contents = "read", packages = "write" } }
+# downscope the caller's permissions). `release-ocx` also signs and attests
+# keyless, which needs the OIDC token: `id-token: write`.
+github-custom-job-permissions = { "release-ocx" = { contents = "read", packages = "write", id-token = "write" }, "publish-catalog" = { contents = "read", packages = "write" } }
+# Release by manual dispatch from main, not by tag push: a tag-push run would put
+# `@refs/tags/vX.Y.Z` in every signing certificate, a different identity each release.
+# `release.yml` stays pure generator output; the signing job is the called workflow
+# `release-ocx.yml`, whose certificate identity is that file at `refs/heads/main`.
+dispatch-releases = true
 # Generate and dist a source tarball
 source-tarball = false
 # Whether to embed dependency information using cargo-auditable

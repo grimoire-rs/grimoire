@@ -1,0 +1,87 @@
+name: Release OCX package
+
+# cargo-dist post-announce job (also manually dispatchable): after the GitHub
+# Release is published, repackage the released archives as OCX packages, push,
+# sign, attest and verify every platform, move the floating tags, and announce
+# into `ocx-sh/index`. The steps live in .github/actions/release-ocx.
+#
+# Signing identity. Every signature and attestation of
+# `ghcr.io/grimoire-rs/grimoire/cli` is made under ONE identity:
+#   https://github.com/grimoire-rs/grimoire/.github/workflows/release-ocx.yml@refs/heads/main
+# issued by https://token.actions.githubusercontent.com. The certificate names
+# the workflow file that defines the signing job, which is this file. It is a
+# called workflow of the generated `release.yml` (cargo-dist owns that file, so
+# the job cannot live there) and a direct dispatch from main mints the same
+# identity, so a failed publish is repaired by dispatching this file again.
+# The `@refs/heads/main` half is pinned by the first step, which refuses any
+# other ref; `release.yml` is dispatched, never tag-triggered, so the ref is
+# `main` rather than a different `refs/tags/vX.Y.Z` per release.
+#
+# Order guarantee: no floating tag (`X.Y.Z`, `X.Y`, `X`, `latest`) moves before
+# every platform is pushed, signed, attested and verified (details in the action).
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        # Forwarded by cargo-dist (the dist plan JSON); the release tag is its
+        # `announcement_tag`, because `github.ref_name` is `main` in a dispatched release.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to (re)publish, e.g. v0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  # The GHCR push authenticates as the job token. A called workflow can only
+  # narrow what its caller grants, so `release.yml` has to grant this too —
+  # via `github-custom-job-permissions` in dist-workspace.toml.
+  packages: write
+  # Keyless signing and the SBOM attestation authenticate with the job's OIDC
+  # token (Fulcio certificate). The caller must grant it too — via
+  # `github-custom-job-permissions` in dist-workspace.toml.
+  id-token: write
+
+concurrency:
+  # Serialize publishes per tag — never cancel a half-finished registry push.
+  group: release-ocx-${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
+  cancel-in-progress: false
+
+jobs:
+  release-ocx:
+    # A pre-release tag (contains `-`) skips when cargo-dist calls this workflow;
+    # a direct dispatch (`inputs.tag` set) always runs. `github.event_name` cannot
+    # tell the two apart: it is the caller's event, `workflow_dispatch`, in both.
+    if: ${{ inputs.tag || !contains(fromJson(inputs.plan).announcement_tag, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      # Signing from any other ref would mint a different certificate identity
+      # than the one consumers verify against. Holds for both entry paths.
+      - name: Require the main branch
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::release-ocx must run from refs/heads/main (got '$REF'): the signing identity names @refs/heads/main"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Release the OCX package
+        uses: ./.github/actions/release-ocx
+        with:
+          # Called by cargo-dist: the tag comes from the plan; dispatched directly: the `tag` input.
+          tag: ${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          announce-token: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
