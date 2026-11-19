@@ -219,7 +219,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         // (main's uninstall never read it). Fail closed instead: converge with
         // the feature forced off, which reaps this root's registrations rather
         // than leaving them armed.
-        let no_declared = std::collections::BTreeSet::new();
+        let no_declared = crate::hook::consent::DeclaredKeys::new();
         let hook_policy = match super::hook_consent::resolve_without_consent(ctx, &scope, None, &no_declared) {
             Ok(policy) => policy,
             Err(e) => {
@@ -237,9 +237,11 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         };
         // The lock on disk may trail the config, so the config's own hooks count too.
         let flags = &scope.options.experimental;
-        let mut declared = super::hook_consent::config_consent_keys(&scope.set, flags);
+        let mut declared = super::hook_consent::config_keys(&scope.set, flags);
         if let Some(lock) = &lock {
-            declared.extend(super::hook_consent::declared_consent_keys(lock, flags));
+            for (kind, keys) in super::hook_consent::declared_keys(lock, flags) {
+                declared.entry(kind).or_default().extend(keys);
+            }
         }
         let install_hooks = match super::hook_consent::resolve_without_consent(ctx, &scope, None, &declared) {
             Ok(policy) => policy,

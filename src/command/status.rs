@@ -2310,8 +2310,9 @@ impl HookArmingInputs {
         // declared set, so the report cannot answer a different question than
         // the install would.
         let declared = lock
-            .map(|lock| super::hook_consent::declared_consent_keys(lock, &scope.options.experimental))
-            .map(|declared| consent::split_by_kind(&declared).0)
+            .map(|lock| {
+                super::hook_consent::declared_consent_keys(ArtifactKind::Hook, lock, &scope.options.experimental)
+            })
             .unwrap_or_default();
         let record = consent::load(ctx.grim_home(), &scope.workspace);
 
@@ -2589,7 +2590,7 @@ impl SettingsGates {
             None
         };
         let declared = lock
-            .map(|lock| super::hook_consent::declared_consent_keys(lock, at.flags))
+            .map(|lock| super::hook_consent::declared_keys(lock, at.flags))
             .unwrap_or_default();
         let inputs = ConsentInputs {
             flags: at.flags,
@@ -7552,7 +7553,7 @@ mod tests {
             registries,
         };
         SettingsArmingInputs {
-            policy: ConsentPolicies::new(&inputs, None, &BTreeSet::new()).settings,
+            policy: ConsentPolicies::new(&inputs, None, &Default::default()).settings,
             records_refusal: home_refusal.map(|cause| (cause, cause.message(&Invocation::WALKED))),
             surfaces: vec![(ClientTarget::Claude, Ok(workspace.join(CLAUDE_LOCAL_SETTINGS)))],
             fence: RootFence::default(),
@@ -7780,7 +7781,7 @@ mod tests {
             registries: &[],
         };
         SettingsArmingInputs {
-            policy: ConsentPolicies::new(&inputs, None, &BTreeSet::new())
+            policy: ConsentPolicies::new(&inputs, None, &Default::default())
                 .naming(grim)
                 .settings,
             records_refusal: None,
@@ -8029,7 +8030,7 @@ mod tests {
             registries: &[],
         };
         SettingsArmingInputs {
-            policy: ConsentPolicies::new(&inputs, None, &BTreeSet::new()).settings,
+            policy: ConsentPolicies::new(&inputs, None, &Default::default()).settings,
             records_refusal: None,
             surfaces,
             fence,

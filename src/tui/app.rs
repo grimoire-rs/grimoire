@@ -49,6 +49,7 @@ use crate::config::registry_resolve::RowSource;
 use crate::config::scope::ConfigScope;
 use crate::config::{ResolvedOptions, ResolvedRegistry};
 use crate::env::grim_home;
+use crate::hook::consent::DeclaredKeys;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_error::{InstallError, InstallErrorKind, settings_refusal_heading};
 use crate::install::install_state::{ClientOutput, Exempt, InstallState, Unadopted, active_outputs};
@@ -3976,7 +3977,7 @@ async fn perform(
         )
         .await
     } else {
-        BTreeSet::new()
+        DeclaredKeys::new()
     };
     let mut pins = relocked.pins;
     let installed = match RowScope::of(op, &relocked.lock, previous.as_ref(), &key, pruned_ahead) {
@@ -4313,7 +4314,7 @@ async fn materialize_row(
     progress: &dyn InstallProgress,
     force: &ForceScope,
     ledger: &mut SettingsLedger,
-    consentable: &BTreeSet<String>,
+    consentable: &DeclaredKeys,
 ) -> anyhow::Result<InstallSummary> {
     let policies = row_hook_policy(ctx, Some(lock), consentable);
     let consented = if policies.hooks.feature_enabled() {
@@ -4476,14 +4477,15 @@ fn prune_error(error: PruneError) -> anyhow::Error {
 
 /// The hooks `single` holds that `consentable` names and the record now covers:
 /// what the action consented to, whatever became of each one's install.
-fn consented_hooks(ctx: &TuiContext, single: &GrimoireLock, consentable: &BTreeSet<String>) -> Vec<String> {
+fn consented_hooks(ctx: &TuiContext, single: &GrimoireLock, consentable: &DeclaredKeys) -> Vec<String> {
     let recorded = crate::command::hook_consent::recorded_hooks(&consent_site(ctx, true));
     single
         .hooks
         .iter()
         .filter(|hook| {
-            crate::hook::consent::consent_key(&hook.name, &hook.source)
-                .is_some_and(|key| consentable.contains(&key) && recorded.contains(&key))
+            crate::hook::consent::consent_key(&hook.name, &hook.source).is_some_and(|key| {
+                crate::hook::consent::keys_of(consentable, ArtifactKind::Hook).contains(&key) && recorded.contains(&key)
+            })
         })
         .map(|hook| hook.name.clone())
         .collect()
@@ -4987,7 +4989,7 @@ async fn perform_local_declared(
                 progress,
                 force,
                 ledger,
-                &BTreeSet::new(),
+                &DeclaredKeys::new(),
             )
             .await
         }
@@ -5079,7 +5081,7 @@ async fn perform_local_dev(
     // A dev record is never a hook, but convergence re-arms every hook the
     // on-disk lock declares, so it keeps what the record covers armed.
     let on_disk = lock_io::load(&ctx.lock_path).ok();
-    let policies = row_hook_policy(ctx, on_disk.as_ref(), &BTreeSet::new());
+    let policies = row_hook_policy(ctx, on_disk.as_ref(), &DeclaredKeys::new());
     let target = InstallTarget::parse_with_global(
         &ctx.workspace,
         ctx.scope,
@@ -6274,12 +6276,14 @@ fn tui_policy_over(
         });
     let (flags, registries, set) = loaded.unwrap_or_default();
     let mut declared = if config_too {
-        crate::command::hook_consent::config_consent_keys(&set, &flags)
+        crate::command::hook_consent::config_keys(&set, &flags)
     } else {
-        BTreeSet::new()
+        DeclaredKeys::new()
     };
     if let Some(lock) = lock {
-        declared.extend(crate::command::hook_consent::declared_consent_keys(lock, &flags));
+        for (kind, keys) in crate::command::hook_consent::declared_keys(lock, &flags) {
+            declared.entry(kind).or_default().extend(keys);
+        }
     }
     crate::command::hook_consent::policies_without_consent(
         &ctx.roots.grim_home,
@@ -6301,7 +6305,7 @@ fn tui_policy_over(
 fn row_hook_policy(
     ctx: &TuiContext,
     lock: Option<&GrimoireLock>,
-    consentable: &BTreeSet<String>,
+    consentable: &DeclaredKeys,
 ) -> crate::hook::policy::ConsentPolicies {
     let policies = tui_hook_policy(ctx, lock);
     let site = consent_site(ctx, policies.hooks.feature_enabled());
@@ -20009,7 +20013,7 @@ mod tests {
             crate::hook::consent::load(&ctx.roots.grim_home, &ctx.workspace)
                 .map(|record| {
                     record
-                        .hooks
+                        .sources
                         .iter()
                         .map(|key| key.split('@').next().unwrap().to_string())
                         .collect()
@@ -20314,7 +20318,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         const REPO: &str = "localhost:5050/acme/team";
-        const CONSENT_KEY: &str = "settings:team@localhost:5050/acme/team";
+        const CONSENT_KEY: &str = "team@localhost:5050/acme/team";
 
         /// A declared package, or only the flag when `declared` is false.
         fn config(flag: bool, declared: bool) -> String {
@@ -21003,10 +21007,7 @@ mod tests {
         async fn an_update_leaves_an_edit_outside_its_row() {
             let other = "other = \"localhost:5050/acme/other:1\"\n";
             let project = Project::new(&format!("{}{other}", config(true, true)));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:other@localhost:5050/acme/other".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "other@localhost:5050/acme/other".to_string()]);
             let (home, workspace) = (project.home.path(), project.workspace.path());
             consent::record(home, ConfigScope::Project, workspace, &keys).unwrap();
             let reg = MemoryRegistry::new();
@@ -21042,8 +21043,8 @@ mod tests {
                  [settings]\nm = \"localhost:5050/acme/mfork:1\"\n\n[bundles]\nouter = \"localhost:5050/acme/outer:1\"\n",
             );
             let keys = BTreeSet::from([
-                "settings:m@localhost:5050/acme/mfork".to_string(),
-                "settings:m@localhost:5050/acme/m".to_string(),
+                "m@localhost:5050/acme/mfork".to_string(),
+                "m@localhost:5050/acme/m".to_string(),
             ]);
             consent::record(
                 project.home.path(),
@@ -21092,10 +21093,7 @@ mod tests {
         #[tokio::test]
         async fn an_update_keeps_a_value_an_armed_package_outside_it_declares() {
             let project = Project::new(&config(true, true));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:other@localhost:5050/acme/other".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "other@localhost:5050/acme/other".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -21150,8 +21148,8 @@ mod tests {
                  [bundles]\npack = \"localhost:5050/acme/pack:1\"\n",
             );
             let keys = BTreeSet::from([
-                "settings:x@localhost:5050/acme/x".to_string(),
-                "settings:y@localhost:5050/acme/y".to_string(),
+                "x@localhost:5050/acme/x".to_string(),
+                "y@localhost:5050/acme/y".to_string(),
             ]);
             consent::record(
                 project.home.path(),
@@ -21603,10 +21601,7 @@ mod tests {
         /// `pack` installed, holding the settings packages `team` (`/model`) and
         /// `zeta` (`/language`), both consented, and the MCP server `srv`.
         async fn installed_pack_of_three(project: &Project) -> (TuiContext, TuiState) {
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:zeta@localhost:5050/acme/zeta".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "zeta@localhost:5050/acme/zeta".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -21919,10 +21914,7 @@ mod tests {
         #[tokio::test]
         async fn a_tui_update_refuses_a_settings_conflict_before_saving_its_lock() {
             let project = Project::new(&config(true, false));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:rival@localhost:5050/acme/rival".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "rival@localhost:5050/acme/rival".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -21956,10 +21948,7 @@ mod tests {
         #[tokio::test]
         async fn a_delete_refuses_a_settings_conflict_its_relock_finds() {
             let project = Project::new(&config(true, true));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:rival@localhost:5050/acme/rival".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "rival@localhost:5050/acme/rival".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -22048,10 +22037,7 @@ mod tests {
                 "[options]\nclients = [\"claude\"]\n\n[options.experimental]\nsettings = true\n\n\
                  [bundles]\npack = \"localhost:5050/acme/pack:1\"\n",
             );
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:zeta@localhost:5050/acme/zeta".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "zeta@localhost:5050/acme/zeta".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,

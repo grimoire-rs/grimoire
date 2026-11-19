@@ -169,7 +169,7 @@ def test_remove_keeps_a_pin_a_remaining_range_claim_holds_and_leaves_the_lock_fr
     assert "c" not in _declared(project_dir)
     assert _pins(project_dir)["c"].endswith(f"@{v230.digest}")
     assert _relock_offline(runner, project_dir), "the remove left the lock stale"
-    assert not (grim_home / "hooks" / "consent").exists()
+    assert not (grim_home / "consent").exists()
 
 
 def test_an_offline_remove_with_a_complete_store_relocks_without_the_network(

@@ -43,6 +43,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::config::scope::Invocation;
 use crate::context::Context;
+use crate::hook::consent::DeclaredKeys;
 use crate::hook::policy::HookPolicy;
 use crate::install::install_state::{Exempt, SettingsStore};
 use crate::install::installer::{ForceScope, InstallIntent, SettingsRun, install_and_persist};
@@ -1478,11 +1479,11 @@ pub(crate) async fn gesture_consent(
     target: &NodeKey,
     access: &Arc<dyn OciAccess>,
     offline: bool,
-) -> BTreeSet<String> {
+) -> DeclaredKeys {
     let added = Added::new(declared, previous, lock, target.0, &target.1);
     match &added.projection {
         Some(single) => consentable_keys(site, offline, &added, single, access, None).await,
-        None => BTreeSet::new(),
+        None => DeclaredKeys::new(),
     }
 }
 
@@ -1506,13 +1507,13 @@ async fn consentable_keys(
     single: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
     flag: Option<bool>,
-) -> BTreeSet<String> {
+) -> DeclaredKeys {
     let reached = if offline {
         stored_reach(access, &added.reach).await
     } else {
         added.reach.nodes(|_| true)
     };
-    let mut keys = BTreeSet::new();
+    let mut keys = DeclaredKeys::new();
     for artifact in single.iter_artifacts() {
         let node = (artifact.kind, artifact.name.clone());
         if !added.consents_to(&node, &reached) {
@@ -1522,8 +1523,9 @@ async fn consentable_keys(
         let Some(key) = crate::hook::consent::consent_key_for(artifact.kind, &artifact.name, &artifact.source) else {
             continue;
         };
-        let held_to_its_repository =
-            added.target_carried && node == added.target && super::hook_consent::add_would_record(site, &key, flag);
+        let held_to_its_repository = added.target_carried
+            && node == added.target
+            && super::hook_consent::add_would_record(site, artifact.kind, &key, flag);
         if held_to_its_repository {
             let check = match artifact.source.pinned() {
                 Some(_) if offline => PinCheck::Offline,
@@ -1540,7 +1542,7 @@ async fn consentable_keys(
                 continue;
             }
         }
-        keys.insert(key);
+        keys.entry(artifact.kind).or_default().insert(key);
     }
     keys
 }
@@ -2924,7 +2926,7 @@ mod tests {
         /// `consentable_keys` over a carried `kind` target `t` whose tag names another
         /// digest than its pin: what it consents to, and what it logs. `refused` is a
         /// pin the relock kept although the manifest its tag names refuses.
-        async fn consent_over_a_moved_tag(kind: ArtifactKind, refused: bool) -> (BTreeSet<String>, String) {
+        async fn consent_over_a_moved_tag(kind: ArtifactKind, refused: bool) -> (DeclaredKeys, String) {
             use crate::catalog::test_hosts::LogCapture;
             use crate::command::hook_consent::ConsentSite;
             use crate::config::declaration::ExperimentalOptions;

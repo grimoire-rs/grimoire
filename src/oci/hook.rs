@@ -2214,6 +2214,16 @@ payload = "stdin"
     }
 
     #[test]
+    fn consent_is_a_reserved_binding_name() {
+        assert!(RESERVED_ARTIFACT_NAMES.contains(&"consent"));
+        assert!(is_reserved_binding_name("consent"));
+        assert!(
+            !is_reserved_binding_name("consents"),
+            "positive control: only the exact name"
+        );
+    }
+
+    #[test]
     fn launcher_namespace_names_are_reserved() {
         // A payload materialized over `$GRIM_HOME/hooks/bin` or
         // `.../dispatch.json` arms or disarms the dispatcher itself (T1, I1).

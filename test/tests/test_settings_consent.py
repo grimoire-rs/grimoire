@@ -2,9 +2,9 @@
 # Copyright 2026 The Grimoire Authors
 """Workspace consent for the ``settings`` kind: one record, one question, two kinds.
 
-``settings`` keys share the hook consent record under a ``settings:`` prefix
-(``adr_settings_artifact_kind.md``), so the record an older grim left is a
-record that covers hooks and no package. These tests drive the question itself,
+``settings`` keys share the one consent record with hooks, in the same
+``<binding>@<registry>/<repository>`` shape and with no kind prefix, so a
+record that covers a hook names no package unless the binding matches. These tests drive the question itself,
 which needs a terminal on stdin and stderr, so ``_on_a_terminal`` gives the
 child a pseudo-terminal. Every "no prompt" and "nothing was written" assertion
 sits beside a run where the prompt does appear or the file does change.
@@ -103,7 +103,7 @@ def _applied(workspace: Path) -> str | None:
 
 def _consent_files(runner) -> list[Path]:
     """Every consent record on this machine."""
-    return sorted((Path(runner.grim_home) / "hooks" / "consent").glob("*.json"))
+    return sorted((Path(runner.grim_home) / "consent").glob("*.json"))
 
 
 def _seed_record(runner, workspace: Path, keys: list[str]) -> Path:
@@ -114,10 +114,10 @@ def _seed_record(runner, workspace: Path, keys: list[str]) -> Path:
     what an older one leaves.
     """
     key = hashlib.sha256(str(workspace).encode()).hexdigest()
-    path = Path(runner.grim_home) / "hooks" / "consent" / f"{key}.json"
+    path = Path(runner.grim_home) / "consent" / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"v": 1, "workspace": str(workspace), "hooks": keys, "consented_at": "2026-08-28T10:00:00Z"}),
+        json.dumps({"v": 2, "workspace": str(workspace), "sources": keys, "consented_at": "2026-08-28T10:00:00Z"}),
         encoding="utf-8",
         newline="\n",
     )
@@ -211,7 +211,7 @@ def test_record_without_settings_keys_re_prompts(
     runner.run("lock")
 
     hook_key = f"shell-guard@{REGISTRY_HOST}/{unique_repo}/shell-guard"
-    settings_key = f"settings:team@{REGISTRY_HOST}/{unique_repo}/team"
+    settings_key = f"team@{REGISTRY_HOST}/{unique_repo}/team"
     record = _seed_record(runner, project_dir, [hook_key])
 
     # Positive control: the seed is a real record, and flag off it covers all
@@ -242,7 +242,7 @@ def test_record_without_settings_keys_re_prompts(
     code, shown = _on_a_terminal(runner, "install", answer="y")
     assert code == 0, shown
     assert PROMPT in shown
-    assert set(json.loads(record.read_text(encoding="utf-8"))["hooks"]) == {hook_key, settings_key}
+    assert set(json.loads(record.read_text(encoding="utf-8"))["sources"]) == {hook_key, settings_key}
     assert len(_rows(runner)) == 1
     assert _applied(project_dir) == "sonnet", "an accepted answer applies"
 
@@ -265,7 +265,7 @@ def test_prompt_names_settings(grim_at, project_dir: Path, tmp_path: Path, uniqu
     write_config(project_dir, hooks={"shell-guard": hook.fq}, settings={"team": package.fq})
     runner.run("lock")
     hook_key = f"shell-guard@{REGISTRY_HOST}/{unique_repo}/shell-guard"
-    settings_key = f"settings:team@{REGISTRY_HOST}/{unique_repo}/team"
+    settings_key = f"team@{REGISTRY_HOST}/{unique_repo}/team"
 
     runner.run("config", "set", "options.experimental.hooks", "true")
     code, hooks_only = _on_a_terminal(runner, "install", answer="n")
@@ -301,7 +301,7 @@ def test_prompt_names_settings(grim_at, project_dir: Path, tmp_path: Path, uniqu
     code, both = _on_a_terminal(runner, "install", answer="y")
     assert code == 0, both
     [record] = _consent_files(runner)
-    assert set(json.loads(record.read_text(encoding="utf-8"))["hooks"]) == {hook_key, settings_key}
+    assert set(json.loads(record.read_text(encoding="utf-8"))["sources"]) == {hook_key, settings_key}
     assert _applied(project_dir) == "sonnet", "the answer that records applies"
 
     # A drift names the kind that moved, and only that kind.
@@ -329,7 +329,7 @@ def test_an_unrecorded_answer_names_what_it_asked(grim_at, project_dir: Path, tm
     runner.run("lock")
     # A directory at the record's path: the write's rename onto it fails, and a read finds no record.
     key = hashlib.sha256(str(project_dir).encode()).hexdigest()
-    blocker = Path(runner.grim_home) / "hooks" / "consent" / f"{key}.json"
+    blocker = Path(runner.grim_home) / "consent" / f"{key}.json"
     (blocker / "occupied").mkdir(parents=True)
 
     runner.run("config", "set", "options.experimental.settings", "true")
@@ -485,12 +485,12 @@ def test_allow_records_both_kinds(
     runner.run("lock")
     _seed_record(runner, project_dir, [f"gone@{REGISTRY_HOST}/{unique_repo}/gone"])
 
-    keys = sorted([f"shell-guard@{REGISTRY_HOST}/{hook.repo}", f"settings:team@{REGISTRY_HOST}/{team.repo}"])
+    keys = sorted([f"shell-guard@{REGISTRY_HOST}/{hook.repo}", f"team@{REGISTRY_HOST}/{team.repo}"])
     report = runner.json("consent", "allow")
     assert report["action"] == "consented"
-    assert report["hooks"] == keys, "the report keeps its shape and carries the prefixed entries"
+    assert report["hooks"] == keys, "the report keeps its shape and carries every kind's entries"
     [record] = _consent_files(runner)
-    assert json.loads(record.read_text(encoding="utf-8"))["hooks"] == keys, "a dropped key does not linger"
+    assert json.loads(record.read_text(encoding="utf-8"))["sources"] == keys, "a dropped key does not linger"
 
     assert runner.json("consent", "revoke")["action"] == "revoked"
     assert _consent_files(runner) == [], "one record, so both kinds go"
@@ -521,7 +521,7 @@ def test_add_is_the_gesture(grim_at, project_dir: Path, tmp_path: Path, unique_r
 
     runner.run("add", "--kind", "settings", second.fq)
     [record] = _consent_files(runner)
-    assert json.loads(record.read_text(encoding="utf-8"))["hooks"] == [f"settings:second@{REGISTRY_HOST}/{second.repo}"]
+    assert json.loads(record.read_text(encoding="utf-8"))["sources"] == [f"second@{REGISTRY_HOST}/{second.repo}"]
     assert _applied(project_dir) == "sonnet", "the gesture applies what it brought"
 
     off_dir = tmp_path / "flag-off"
@@ -581,48 +581,48 @@ def test_transitive_package_is_disclosed(
     shown = armed.run("add", parent.fq).stderr
     assert line in shown, shown
     [record] = _consent_files(armed)
-    assert json.loads(record.read_text(encoding="utf-8"))["hooks"] == [f"settings:team@{REGISTRY_HOST}/{team.repo}"]
+    assert json.loads(record.read_text(encoding="utf-8"))["sources"] == [f"team@{REGISTRY_HOST}/{team.repo}"]
     assert _applied(workspace) == "sonnet", "the gesture reaches what it pulled in"
     later = armed.run("install").stderr
     assert line in later, later
 
 
-def test_hook_binding_mints_no_settings_key(grim_at, project_dir: Path, tmp_path: Path, unique_repo: str) -> None:
-    """A hook bound under the settings prefix consents to no package of that name.
+def test_a_package_under_another_binding_of_a_consented_repository_is_asked(grim_at, project_dir: Path, tmp_path: Path, unique_repo: str) -> None:
+    """A hook entry covers a package of the same repository only under the same binding.
 
-    A repository picks the binding, and the name grammar runs after the key is
-    minted, so the key itself refuses the prefix. The valid binding beside it
-    proves the review records hook keys at all, and the later accepted answer
-    proves the package was asked about because it was unconsented.
+    The entry names the binding, so a package bound under another name is a new
+    entry and is asked about. The recorded hook entry proves the review records
+    keys at all, and the later accepted answer proves the package was asked
+    about because it was unconsented.
     """
     hook = _publish_hook(unique_repo)
     package = make_settings(hook.repo, "2", DOCUMENT)
-    bindings = {"guard": hook.fq, '"settings:shell-guard"': hook.fq}
+    bindings = {"guard": hook.fq}
     write_config(project_dir, hooks=bindings)
     runner = grim_at(project_dir)
     runner.env.update(settings_sandbox(tmp_path / "sandbox", runner.home)[0])
     _enable(runner, "hooks")
     runner.run("lock")
     guard_key = f"guard@{REGISTRY_HOST}/{hook.repo}"
-    settings_key = f"settings:shell-guard@{REGISTRY_HOST}/{hook.repo}"
+    settings_key = f"shell-guard@{REGISTRY_HOST}/{hook.repo}"
 
     assert runner.json("hook", "allow")["hooks"] == [guard_key]
     [record] = _consent_files(runner)
-    assert json.loads(record.read_text(encoding="utf-8"))["hooks"] == [guard_key]
+    assert json.loads(record.read_text(encoding="utf-8"))["sources"] == [guard_key]
 
     write_config(project_dir, hooks=bindings, settings={"shell-guard": package.fq})
     _enable(runner, "hooks", "settings")
     runner.run("lock")
     code, shown = _on_a_terminal(runner, "install", answer="n")
     assert code == 0, shown
-    assert PROMPT in shown, "the package was never consented, whatever the hook's binding spells"
+    assert PROMPT in shown, "the package was never consented, under another binding than the hook's"
     assert f"new: {settings_key}" in shown
     assert _applied(project_dir) is None, "a decline writes no setting"
 
     code, shown = _on_a_terminal(runner, "install", answer="y")
     assert code == 0, shown
     assert PROMPT in shown
-    assert set(json.loads(record.read_text(encoding="utf-8"))["hooks"]) == {guard_key, settings_key}
+    assert set(json.loads(record.read_text(encoding="utf-8"))["sources"]) == {guard_key, settings_key}
     assert _applied(project_dir) == "sonnet", "the accepted answer applies"
 
 
