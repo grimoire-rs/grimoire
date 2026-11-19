@@ -160,6 +160,7 @@ All hard errors exit 65 (DataError) at `grim build` / `grim release`.
 | Malformed YAML; `name` or `description` absent | Hard error — frontmatter parse |
 | Frontmatter `name` ≠ directory name | Hard error — name mismatch |
 | Directory name violates the name charset | Hard error — invalid name |
+| A `.claude-plugin` entry at the skill root (any case; grim 0.17.0 and later) | Hard error, reason `skill-plugin-manifest`, also at install. Ship client-loaded code as a `mod`, the plugin through a marketplace, or list the entry in `.grimignore`. Upgrade note: `https://grimoire.rs/upgrading.html#skill-plugin-manifest` |
 | `description` empty/whitespace or > 1024 chars | Hard error — rejected at parse |
 | `metadata.repository` not `https://` | Hard error — invalid repository URL |
 | `keywords` written as a YAML list | Not accepted — must be one comma string |

@@ -2608,7 +2608,7 @@ impl TuiState {
     /// search` apply identical semantics: whitespace-split AND-of-terms,
     /// **fuzzy**-matched over the repo leaf name, keywords, and kind, by
     /// **word prefix** over summary / description / namespace, plus bare
-    /// kind keywords (skill, rule, agent, bundle, mcp, hook, settings,
+    /// kind keywords (skill, rule, agent, bundle, mcp, hook, settings, mod,
     /// singular or plural) that filter by kind; with the `f` kind filter set
     /// every query word is text. The query is parsed once, then every row is
     /// scored against it.

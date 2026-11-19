@@ -58,7 +58,7 @@ pub struct ReleaseArgs {
     //
     // `hook` appended, never inserted — widening an accepted value set is the
     // additive direction on a frozen CLI surface (Principle 9).
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings", "mod"])]
     pub kind: Option<String>,
 
     /// Print the push plan (tags + digest) without pushing.
@@ -265,7 +265,8 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         ArtifactKind::Settings => {
             return release_settings(ctx, args, &id, &repo, &version, &tags, &source, push.as_ref()).await;
         }
-        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook => {}
+        // A mod is a directory tree in one tar layer, like a hook.
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Hook | ArtifactKind::Mod => {}
     }
 
     // Derive provenance once before packing. Under `--git` a non-git path
@@ -331,7 +332,11 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
         layers: std::iter::once(layer)
             .chain(requires_layer.as_ref().map(|(_, d)| d.clone()))
             .collect(),
-        annotations: packed.annotations.clone(),
+        annotations: {
+            let mut annotations = packed.annotations.clone();
+            crate::oci::features::stamp_mods_feature(&mut annotations, &requires);
+            annotations
+        },
     };
 
     if args.dry_run {
@@ -442,7 +447,7 @@ async fn release_bundle(
     let layer_digest = Algorithm::Sha256.hash(&layer);
     // An authored `repository` URL wins over a git remote, then the release-ref
     // fallback, inside `annotations_for_bundle`.
-    let annotations = annotations_for_bundle(
+    let mut annotations = annotations_for_bundle(
         &name,
         version,
         manifest.members.len(),
@@ -451,6 +456,7 @@ async fn release_bundle(
         git.as_ref(),
         &args.metadata.defaults(),
     );
+    crate::oci::features::stamp_mods_feature(&mut annotations, &manifest.members);
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
@@ -534,7 +540,7 @@ async fn release_mcp(
         .to_layer_bytes()
         .map_err(|e| anyhow::anyhow!("failed to serialize MCP layer: {e}"))?;
     let layer_digest = Algorithm::Sha256.hash(&layer);
-    let annotations = annotations_for_mcp(
+    let mut annotations = annotations_for_mcp(
         &name,
         &descriptor,
         version,
@@ -542,6 +548,7 @@ async fn release_mcp(
         git.as_ref(),
         &args.metadata.defaults(),
     );
+    crate::oci::features::stamp_mods_feature(&mut annotations, &requires);
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
@@ -625,7 +632,7 @@ async fn release_settings(
         super::grim(pin_members(&access, &mut requires, repo, push).await)?;
     }
     let requires_layer = requires_layer(&requires)?;
-    let annotations = annotations_for_settings(
+    let mut annotations = annotations_for_settings(
         &name,
         &document,
         version,
@@ -633,6 +640,7 @@ async fn release_settings(
         git.as_ref(),
         &args.metadata.defaults(),
     );
+    crate::oci::features::stamp_mods_feature(&mut annotations, &requires);
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
@@ -699,6 +707,19 @@ pub(crate) fn declared_requires(path: &std::path::Path, kind: ArtifactKind) -> a
         ArtifactKind::Mcp => Ok(read_mcp_source(path)?.2),
         ArtifactKind::Bundle => Ok(read_bundle_members(path)?.1),
         ArtifactKind::Settings => Ok(read_settings_source(path)?.2),
+        ArtifactKind::Mod => {
+            let manifest_path = path.join("mod.toml");
+            let source = std::fs::read_to_string(&manifest_path)
+                .map_err(|e| crate::error::Error::from(SkillError::new(&manifest_path, SkillErrorKind::Io(e))))?;
+            let stem = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            super::grim(
+                super::grim(crate::oci::mod_manifest::ModManifest::from_build_toml(&source, &stem))?
+                    .declared_requires(),
+            )
+        }
         ArtifactKind::Hook => {
             let manifest_path = path.join(crate::oci::hook::HOOK_MANIFEST_FILE);
             let source = std::fs::read_to_string(&manifest_path)

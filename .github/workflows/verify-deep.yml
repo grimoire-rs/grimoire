@@ -235,8 +235,8 @@ jobs:
   # the modules skip there. Here they run alone, required: a skip fails, and
   # the JUnit report must show every golden test passed. Then `p9:diff` runs the differ's self-test
   # (its own first step, so no gate can diff with an unproven differ), builds origin/main's grim and
-  # byte-compares it against this branch's over the hook-free scenarios. Last, the released 0.15.1
-  # binary runs the interop modules beside this branch's grim, where a skip is a failure.
+  # byte-compares it against this branch's over the hook-free scenarios. Last, the released 0.15.1 and 0.16.0
+  # binaries run the interop modules beside this branch's grim, where a skip is a failure.
   principle-9:
     name: Principle 9 (golden + p9 diff)
     needs: [build]
@@ -278,7 +278,7 @@ jobs:
           groups: default
       - name: Golden fixtures (required)
         working-directory: test
-        run: uv run pytest tests/test_golden_pre_hooks.py tests/test_golden_pre_dependencies.py tests/test_golden_pre_settings.py tests/test_dependencies_contract.py -n 0 -v --junit-xml=results/junit.xml
+        run: uv run pytest tests/test_golden_pre_hooks.py tests/test_golden_pre_dependencies.py tests/test_golden_pre_settings.py tests/test_golden_pre_mods.py tests/test_dependencies_contract.py -n 0 -v --junit-xml=results/junit.xml
         env:
           GRIM_TEST_REGISTRY_HOST: localhost:5000
           GRIM_REQUIRE_GOLDEN: "1"
@@ -292,9 +292,9 @@ jobs:
           outcomes = [next((c.tag for c in case if c.tag in bad), "passed") for case in cases]
           passed, skipped = outcomes.count("passed"), outcomes.count("skipped")
           print(f"golden: {passed} passed, {skipped} skipped, {len(outcomes)} total")
-          # 2 pre-hooks + 7 pre-dependencies + 11 pre-settings + 4 dependency contract tests.
-          if (passed, skipped, len(outcomes)) != (24, 0, 24):
-              raise SystemExit("expected exactly 24 passed and 0 skipped golden tests")
+          # 2 pre-hooks + 7 pre-dependencies + 11 pre-settings + 8 pre-mods + 4 dependency contract tests.
+          if (passed, skipped, len(outcomes)) != (32, 0, 32):
+              raise SystemExit("expected exactly 32 passed and 0 skipped golden tests")
           EOF
       - name: Upload Golden Results
         if: ${{ !cancelled() }}
@@ -348,12 +348,39 @@ jobs:
           tar -xzf "$archive" -C "$OLD_GRIM_DIR" --strip-components=1 grimoire-x86_64-unknown-linux-gnu/grim
           rm -rf "$download"
           "$OLD_GRIM_DIR/grim" --version
+      - name: Fetch grim 0.16.0
+        id: old-grim-0-16-0
+        if: ${{ !cancelled() }}
+        env:
+          OLD_GRIM_URL: https://github.com/grimoire-rs/grimoire/releases/download/v0.16.0/grimoire-x86_64-unknown-linux-gnu.tar.gz
+          OLD_GRIM_SHA256: e55f7d40271418f6fe64fa4ef6d557a1a622d4fc240885d8687bff7a3ba8644f
+          OLD_GRIM_DIR: ${{ runner.temp }}/grim-0.16.0
+        run: |
+          set -euo pipefail
+          download="$(mktemp -d)"
+          for asset in "$OLD_GRIM_URL" "$OLD_GRIM_URL.sha256"; do
+            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+              --retry 3 --retry-delay 5 --retry-all-errors \
+              --output "$download/${asset##*/}" "$asset"
+          done
+          archive="$download/${OLD_GRIM_URL##*/}"
+          echo "$OLD_GRIM_SHA256  $archive" | sha256sum --check --strict
+          read -r published _ < "$archive.sha256"
+          if [[ "$published" != "$OLD_GRIM_SHA256" ]]; then
+            echo "::error::the release's .sha256 asset does not match the pinned SHA-256"
+            exit 1
+          fi
+          mkdir -p "$OLD_GRIM_DIR"
+          tar -xzf "$archive" -C "$OLD_GRIM_DIR" --strip-components=1 grimoire-x86_64-unknown-linux-gnu/grim
+          rm -rf "$download"
+          "$OLD_GRIM_DIR/grim" --version
       - name: Old grim interop (required)
-        if: ${{ !cancelled() && steps.old-grim.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.old-grim.outcome == 'success' && steps.old-grim-0-16-0.outcome == 'success' }}
         run: task test:old-grim
         env:
           SKIP_BUILD: "true"
           GRIM_OLD_BIN: ${{ runner.temp }}/grim-0.15.1/grim
+          GRIM_OLD_BIN_0_16_0: ${{ runner.temp }}/grim-0.16.0/grim
       - name: Upload Old Grim Results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -510,6 +537,71 @@ jobs:
             test/results/junit.xml
             test/results/matrix/junit.xml
             test/results/bench/junit.xml
+
+  # Churn detector for the experimental mod kind: installs the latest Claude
+  # Code and OpenCode CLIs into a scratch prefix and runs the real-client load
+  # probe against them. A red run says a client changed how it loads mods; it
+  # gates nothing, so the job is `continue-on-error` and stays out of
+  # `test-results.needs`. Dispatch only: there is deliberately no `schedule:`.
+  # No secret is in this job's environment; the clients never log in, and the
+  # probe builds its own child environment from an allowlist.
+  mod-load-probe:
+    name: Mod load probe (real clients)
+    needs: [build]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      registry:
+        image: registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 # registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job runs branch-built code; nothing here needs the token.
+          persist-credentials: false
+      - name: Download Binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: grim-x86_64-unknown-linux-gnu
+          path: test/bin
+      - name: Prepare Binary
+        run: |
+          mv test/bin/grim-x86_64-unknown-linux-gnu test/bin/grim
+          chmod +x test/bin/grim
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Install the clients
+        # Lifecycle scripts stay off and the npm cache is thrown away with the
+        # runner temp dir, so nothing from the install outlives the job.
+        run: |
+          prefix="$RUNNER_TEMP/mod-probe-clients"
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$prefix" --cache "$RUNNER_TEMP/mod-probe-npm-cache" @anthropic-ai/claude-code@latest @opencode/cli@latest
+          claude_version="$(node -p "require('$prefix/node_modules/@anthropic-ai/claude-code/package.json').version")"
+          opencode_version="$(node -p "require('$prefix/node_modules/@opencode/cli/package.json').version")"
+          echo "mod-load-probe clients: claude ${claude_version}, opencode ${opencode_version}"
+          # With scripts off, `.bin/<client>` is still the installer's placeholder, which
+          # does not execute. The real binary ships in the platform package.
+          claude_bin="$prefix/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+          opencode_bin="$prefix/node_modules/@opencode/cli-linux-x64/bin/opencode"
+          test -x "$claude_bin" && test -x "$opencode_bin"
+          echo "GRIM_REAL_CLAUDE_BIN=$claude_bin" >> "$GITHUB_ENV"
+          echo "GRIM_REAL_OPENCODE_BIN=$opencode_bin" >> "$GITHUB_ENV"
+      - name: Load probe
+        working-directory: test
+        run: uv run pytest tests/test_mod_load_probe.py -n 0 -v -rs --junit-xml=results/mod-probe/junit.xml
+        env:
+          GRIM_TEST_REGISTRY_HOST: localhost:5000
+      - name: Upload Test Results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deep-mod-probe
+          path: test/results/mod-probe/junit.xml
 
   test-results:
     name: Publish Deep Test Results

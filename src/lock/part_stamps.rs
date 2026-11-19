@@ -132,6 +132,7 @@ mod tests {
             source: LockedSource::Registry(PinnedIdentifier::try_from(id).unwrap()),
             bundles: vec![BundleProvenance::new(PACK, format!("1@{digest}"))],
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -151,6 +152,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: Vec::new(),
+            mods: Vec::new(),
         }
     }
 

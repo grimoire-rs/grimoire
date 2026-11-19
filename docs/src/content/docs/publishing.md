@@ -84,6 +84,10 @@ data][ref-guides-dependencies-md-rule-with-lookup-data].
 A rule republished unchanged from a tree with `rules/my-rule/README.md` gets a
 new digest, because the README no longer rides the package.
 
+### Skills refuse a plugin manifest {#skill-plugin-manifest}
+
+Since grim 0.17.0 `build`, `release` and `publish` refuse with `65` a skill whose root holds a `.claude-plugin` entry, unless [`.grimignore`][ref-artifacts-md-grimignore] excludes it. See the [upgrade note][ref-upgrading-md-skill-plugin-manifest].
+
 ### Agents ship one file {#agent-companions}
 
 An [agent][ref-agents-md] packs to exactly its `.md` file. A directory beside it
@@ -682,6 +686,9 @@ A [settings][settings-publish] document needs `--kind settings`. The kind is
 experimental, new in grim 0.16.0, and [unstable][stability-unstable] until
 1.0.
 
+A [mod][mods] directory is inferred from its `mod.toml`, and `--kind mod` is
+accepted. A symlink in a mod directory is refused at build.
+
 ## Release
 
 [`grim release`](./commands.md#release) validates, packs, and pushes to a
@@ -1054,7 +1061,7 @@ releases each entry in a fixed order.
 
 ### The publish.toml format {#batch-publish-manifest}
 
-A manifest has one required top-level field, `registry`, and up to seven
+A manifest has one required top-level field, `registry`, and up to eight
 kind tables. Each table entry is a sub-table keyed by name with a
 `version` field.
 
@@ -1081,6 +1088,9 @@ version = "0.1.0"
 version = "1.0.0"
 
 [settings.team-defaults]           # experimental: settings/team-defaults.toml
+version = "0.1.0"
+
+[mods.status-band]                 # experimental: mods/status-band/
 version = "0.1.0"
 
 [bundles.grim-essentials]
@@ -1465,6 +1475,7 @@ kind, relative to the manifest's directory:
 | mcp | `mcp/{name}.toml` |
 | hook | `hooks/{name}/` (experimental — see [Hooks](./hooks.md)) |
 | settings | `settings/{name}.toml` (experimental, see [Settings][settings-publish]) |
+| mod | `mods/{name}/` (experimental, see [Mods][mods]) |
 | bundle | `bundles/{name}.toml` |
 
 The `path` field overrides this convention for entries whose source lives
@@ -1472,9 +1483,10 @@ elsewhere.
 
 ### Kind ordering {#batch-publish-ordering}
 
-Entries publish in a fixed kind order: skills, then rules, then agents,
-then [MCP servers](./mcp-servers.md), then [hooks](./hooks.md) (experimental),
-then [settings][settings-publish] (experimental), then bundles. Ordering is
+Entries publish in a fixed kind order. Skills come first, then rules, agents,
+[MCP servers](./mcp-servers.md), [hooks](./hooks.md) (experimental),
+[settings][settings-publish] (experimental) and [mods][mods] (experimental).
+Bundles come last. Ordering is
 alphabetical within each kind. An entry that
 [requires](#requires-publish-order) another entry of the same manifest moves
 after it, whatever its kind. Hooks were
@@ -1689,6 +1701,7 @@ example with `docker login` against
 [global-options]: ./commands.md#global-options
 [upgrading-compression]: ./upgrading.md#compressed-layers-need-new-grim
 [settings-publish]: ./settings.md#publish
+[mods]: ./mods.md
 [stability-unstable]: ./stability.md#unstable
 [compression-section]: #compression
 
@@ -1702,6 +1715,7 @@ example with `docker login` against
 [ref-agents-md]: ./agents.md
 [ref-description-entry-readme]: #description-entry-readme
 [ref-upgrading-md-agent-companions]: ./upgrading.md#agent-companions
+[ref-upgrading-md-skill-plugin-manifest]: ./upgrading.md#skill-plugin-manifest
 [ref-description-companion]: #description-companion
 [ref-description-precedence]: #description-precedence
 [ref-upgrading-md-package-readme-companion]: ./upgrading.md#package-readme-companion

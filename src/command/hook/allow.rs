@@ -32,7 +32,6 @@
 //! a **usage error** (64) naming the reason — the same shape `ocx shell allow`
 //! uses for its own always-consented tier.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -45,6 +44,7 @@ use crate::context::Context;
 use crate::hook::consent::{self, Recorded};
 use crate::install::hook_dispatch;
 use crate::lock::lock_io;
+use crate::oci::ArtifactKind;
 
 /// `grim hook allow` arguments.
 #[derive(Debug, Args)]
@@ -83,10 +83,13 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
         Err(e) if e.is_not_found() => None,
         Err(e) => return Err(crate::error::Error::from(e).into()),
     };
-    let keys = lock
+    let declared = lock
         .as_ref()
         .map(hook_consent::reviewed_consent_keys)
         .unwrap_or_default();
+    let keys = consent::all_keys(&declared);
+    let has_settings = !consent::keys_of(&declared, ArtifactKind::Settings).is_empty()
+        || !consent::keys_of(&declared, ArtifactKind::Mod).is_empty();
 
     // Replace, not union: this is the reviewing gesture, so the set the user was
     // shown is the set that lands. An artifact that dropped out of the declaration
@@ -97,10 +100,10 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
             // re-derives the dispatch table — see the module doc. Say so, or a
             // user who runs no further command reasonably expects the hooks
             // to already be live.
-            let next_step = if consent::split_by_kind(&keys).1.is_empty() {
-                "arm these hooks"
-            } else {
+            let next_step = if has_settings {
                 "apply what it covers"
+            } else {
+                "arm these hooks"
             };
             tracing::warn!("consent recorded; run `{} install` to {next_step}", scope.invocation);
             Ok((
@@ -116,14 +119,16 @@ pub async fn run(ctx: &Context, args: &AllowArgs) -> anyhow::Result<(HookConsent
         // Not a write failure: the global toolchain is always consented, so
         // declining to record it is the correct outcome. Saying so beats
         // reporting a record that was never written.
-        Recorded::GlobalNeedsNoRecord => Err(crate::command::hook_consent_usage(global_refusal(&keys))),
+        Recorded::GlobalNeedsNoRecord => Err(crate::command::hook_consent_usage(global_refusal(&declared))),
     }
 }
 
 /// The refusal for a scope that carries no record. A scope with no settings
 /// keeps its shipped sentence, which also reaches the JSON error document.
-fn global_refusal(keys: &BTreeSet<String>) -> &'static str {
-    if consent::split_by_kind(keys).1.is_empty() {
+fn global_refusal(declared: &consent::DeclaredKeys) -> &'static str {
+    if consent::keys_of(declared, ArtifactKind::Settings).is_empty()
+        && consent::keys_of(declared, ArtifactKind::Mod).is_empty()
+    {
         "the global scope is always consented for hooks and carries no consent record; \
          run `grim hook allow` inside a workspace instead"
     } else {
@@ -134,6 +139,8 @@ fn global_refusal(keys: &BTreeSet<String>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     /// The refusal also lands in the JSON error document, so a scope with no
@@ -142,13 +149,22 @@ mod tests {
     fn the_global_refusal_is_worded_for_what_the_scope_declares() {
         const HOOKS_ONLY: &str = "the global scope is always consented for hooks and carries no consent record; \
                                   run `grim hook allow` inside a workspace instead";
-        let hook = BTreeSet::from(["guard@ghcr.io/acme/guard".to_string()]);
-        let both = BTreeSet::from([
-            "guard@ghcr.io/acme/guard".to_string(),
-            "settings:team@ghcr.io/acme/team".to_string(),
+        let hook = consent::DeclaredKeys::from([(
+            ArtifactKind::Hook,
+            BTreeSet::from(["guard@ghcr.io/acme/guard".to_string()]),
+        )]);
+        let both = consent::DeclaredKeys::from([
+            (
+                ArtifactKind::Hook,
+                BTreeSet::from(["guard@ghcr.io/acme/guard".to_string()]),
+            ),
+            (
+                ArtifactKind::Settings,
+                BTreeSet::from(["team@ghcr.io/acme/team".to_string()]),
+            ),
         ]);
 
-        assert_eq!(global_refusal(&BTreeSet::new()), HOOKS_ONLY);
+        assert_eq!(global_refusal(&consent::DeclaredKeys::new()), HOOKS_ONLY);
         assert_eq!(global_refusal(&hook), HOOKS_ONLY);
         assert_eq!(
             global_refusal(&both),

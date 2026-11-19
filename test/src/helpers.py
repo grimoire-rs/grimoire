@@ -71,6 +71,9 @@ def write_config(
     options: dict[str, str] | None = None,
     settings: dict[str, str] | None = None,
     experimental_settings: bool | None = None,
+    mods: dict[str, str] | None = None,
+    experimental_mods: bool | None = None,
+    vendors: dict[str, list[str]] | None = None,
 ) -> Path:
     """Write a ``grimoire.toml`` with the given skill/rule/bundle/agent/hook refs.
 
@@ -90,6 +93,13 @@ def write_config(
     ``experimental_settings`` writes ``settings = <bool>`` under
     ``[options.experimental]``; ``None`` writes nothing, which is the
     flag-unset state.
+
+    ``mods`` is emitted like ``settings``, after it. ``experimental_mods``
+    writes ``mods = <bool>`` under ``[options.experimental]`` beside the
+    settings flag. ``vendors`` maps a vendor name to raw ``key = value`` lines
+    written under ``[options.vendors.<name>]`` (e.g.
+    ``{"opencode": ['plugin_api = "v2"']}``). All three write nothing when
+    unused, so existing fixtures keep their bytes.
     """
     lines: list[str] = []
     if bundles:
@@ -113,13 +123,23 @@ def write_config(
         lines.append("[settings]")
         for name, ref in settings.items():
             lines.append(f'{name} = "{ref}"')
+    if mods:
+        lines.append("[mods]")
+        for name, ref in mods.items():
+            lines.append(f'{name} = "{ref}"')
     if options:
         lines.append("[options]")
         for key, value in options.items():
             lines.append(f"{key} = {value}")
-    if experimental_settings is not None:
+    if experimental_settings is not None or experimental_mods is not None:
         lines.append("[options.experimental]")
-        lines.append(f"settings = {str(experimental_settings).lower()}")
+        if experimental_settings is not None:
+            lines.append(f"settings = {str(experimental_settings).lower()}")
+        if experimental_mods is not None:
+            lines.append(f"mods = {str(experimental_mods).lower()}")
+    for vendor, vendor_lines in (vendors or {}).items():
+        lines.append(f"[options.vendors.{vendor}]")
+        lines.extend(vendor_lines)
     cfg = project_dir / "grimoire.toml"
     cfg.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return cfg
@@ -156,7 +176,7 @@ _MCP_LAYER_MEDIA_TYPE = "application/vnd.grimoire.mcp.v1+json"
 # `ArtifactKind` declaration order (src/oci/artifact_kind.rs): grim sorts members
 # by the enum, not by the kind's text; a text sort puts mcp before skill and
 # changes the layer digest.
-_KIND_ORDER = ("skill", "rule", "agent", "bundle", "mcp", "hook", "settings")
+_KIND_ORDER = ("skill", "rule", "agent", "bundle", "mcp", "hook", "settings", "mod")
 
 
 def members_layer(members: list[tuple[str, str, str]]) -> bytes:
@@ -488,6 +508,121 @@ def settings_sandbox(base: Path, home: Path | None = None) -> tuple[dict[str, st
     # Warp is detected by `~/.warp`, which holds its settings on macOS only.
     (home / ".warp").mkdir(exist_ok=True)
     return env, roots
+
+
+MOD_CLIENTS_ANNOTATION = "com.grimoire.mod.clients"
+
+
+def _mod_manifest(name: str) -> str:
+    return (
+        "schema      = 1\n"
+        f'name        = "{name}"\n'
+        f'description = "test mod {name}"\n'
+        "\n"
+        "[claude]\n"
+        'entry = "index.js"\n'
+        "\n"
+        "[opencode]\n"
+        'entry = "index.ts"\n'
+    )
+
+
+def make_mod(
+    repo: str,
+    tag: str,
+    files: dict[str, str | bytes | None] | None = None,
+    *,
+    clients: str = "claude,opencode",
+    mod_toml: str | None = None,
+    requires: list[tuple[str, str, str]] | None = None,
+    annotations: dict[str, str] | None = None,
+) -> PublishedArtifact:
+    """Build and push a ``mod`` artifact, never through grim.
+
+    A mod is a **directory** artifact: the tar is rooted at ``<name>/`` (the
+    last segment of ``repo``) and carries ``mod.toml`` plus the harness
+    directories. ``files`` maps paths *relative to the root* and is merged over
+    the default tree (``mod.toml``, ``claude/index.js``, ``opencode/index.ts``);
+    A ``None`` value drops that default file. ``mod_toml`` replaces the default manifest text. ``clients`` becomes the
+    ``com.grimoire.mod.clients`` annotation, written verbatim so a test can
+    publish a value the reader must refuse; ``annotations`` overrides any
+    annotation. ``requires`` appends a requires layer.
+    """
+    name = repo.rsplit("/", 1)[-1]
+    tree: dict[str, str | bytes] = {
+        "mod.toml": mod_toml if mod_toml is not None else _mod_manifest(name),
+        "claude/index.js": "export default {};\n",
+        "opencode/index.ts": "export default {};\n",
+    }
+    tree.update(files or {})
+    tree = {path: content for path, content in tree.items() if content is not None}
+    tar_bytes = tar_of({f"{name}/{path}": content for path, content in tree.items()})
+    merged = {MOD_CLIENTS_ANNOTATION: clients, **(annotations or {})}
+    if requires:
+        layers = [
+            (LAYER_MEDIA_TYPE, tar_bytes),
+            (_REQUIRES_LAYER_MEDIA_TYPE, members_layer(requires)),
+        ]
+        digest = push_manifest(
+            repo,
+            tag,
+            layers,
+            {"com.grimoire.kind": "mod", **merged},
+            artifact_type="application/vnd.grimoire.mod.v1",
+        )
+        return PublishedArtifact(repo=repo, tag=tag, digest=digest, kind="mod")
+    return push_artifact(repo, tag, tar_bytes, "mod", merged)
+
+
+def make_raw_mod(
+    repo: str,
+    tag: str,
+    layers: list[tuple[str, bytes]],
+    annotations: dict[str, str] | None = None,
+    *,
+    clients: str | None = "claude,opencode",
+) -> PublishedArtifact:
+    """Push a ``mod`` manifest over raw ``(media_type, bytes)`` layers.
+
+    For hostile fixtures (a hand-built tar, a wrong layer type, extra layers)
+    that :func:`make_mod` would normalise away. ``clients=None`` omits the
+    clients annotation entirely.
+    """
+    merged: dict[str, str] = {"com.grimoire.kind": "mod"}
+    if clients is not None:
+        merged[MOD_CLIENTS_ANNOTATION] = clients
+    merged.update(annotations or {})
+    digest = push_manifest(
+        repo, tag, layers, merged, artifact_type="application/vnd.grimoire.mod.v1"
+    )
+    return PublishedArtifact(repo=repo, tag=tag, digest=digest, kind="mod")
+
+
+def mod_sandbox(
+    base: Path, home: Path | None = None
+) -> tuple[dict[str, str], dict[str, Path]]:
+    """Seed the Claude and OpenCode roots a mod can reach under ``base``.
+
+    Returns ``(env, roots)`` like :func:`settings_sandbox`: ``env`` redirects
+    ``CLAUDE_CONFIG_DIR``, ``OPENCODE_CONFIG_DIR`` and ``XDG_CONFIG_HOME`` (all
+    inside ``base``) for a ``GrimRunner.env``; ``roots`` maps ``claude`` and
+    ``opencode`` to their created directories. ``home``, when given, is created
+    too so a global-scope run detects both clients there.
+    """
+    claude = base / "claude"
+    opencode = base / "opencode"
+    xdg = base / "xdg"
+    for root in (claude, opencode, xdg):
+        root.mkdir(parents=True, exist_ok=True)
+    if home is not None:
+        (home / ".claude").mkdir(parents=True, exist_ok=True)
+        (home / ".config" / "opencode").mkdir(parents=True, exist_ok=True)
+    env = {
+        "CLAUDE_CONFIG_DIR": str(claude),
+        "OPENCODE_CONFIG_DIR": str(opencode),
+        "XDG_CONFIG_HOME": str(xdg),
+    }
+    return env, {"claude": claude, "opencode": opencode}
 
 
 def make_description(repo: str, files: dict[str, str | bytes]) -> PublishedArtifact:

@@ -1,0 +1,26 @@
+[options.experimental]
+hooks = true
+settings = true
+
+[bundles]
+local-bundle = "./bundles/local-bundle.toml"
+reg-bundle = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-bundle:1.0.0"
+
+[skills]
+local-skill = "./skills/local-skill"
+reg-skill = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-skill:1.0.0"
+
+[rules]
+reg-rule = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-rule:1.0.0"
+
+[agents]
+reg-agent = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-agent:1.0.0"
+
+[hooks]
+reg-hook = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-hook:1.0.0"
+
+[mcp]
+reg-mcp = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-mcp:1.0.0"
+
+[settings]
+reg-settings = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-settings:1.0.0"

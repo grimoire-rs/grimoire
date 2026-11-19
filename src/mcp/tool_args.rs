@@ -62,14 +62,14 @@ pub struct SearchToolArgs {
     /// Results come back ranked by relevance, best match first, and hits
     /// scoring below `options.search_min_relevance` percent of the best
     /// (default 50) are dropped. A bare kind keyword
-    /// (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular or plural)
+    /// (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`/`mod`, singular or plural)
     /// filters by kind, unless `kind` is given. Omit to list the whole catalog,
     /// unranked, in registry order.
     #[serde(default)]
     pub query: Option<String>,
 
     /// Return only these kinds (`skill`, `rule`, `agent`, `bundle`, `mcp`,
-    /// `hook`, `settings`). With `kind`, every word of `query` matches as text.
+    /// `hook`, `settings`, `mod`). With `kind`, every word of `query` matches as text.
     #[serde(default)]
     pub kind: Option<Vec<ArtifactKind>>,
 
@@ -325,7 +325,7 @@ mod tests {
     fn search_args_schema_lists_every_kind() {
         let schema = serde_json::to_value(schemars::schema_for!(SearchToolArgs)).unwrap();
         let text = schema.to_string();
-        for k in ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"] {
+        for k in ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings", "mod"] {
             assert!(text.contains(&format!("\"{k}\"")), "schema lacks kind {k}: {text}");
         }
     }

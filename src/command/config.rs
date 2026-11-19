@@ -31,7 +31,10 @@ use crate::install::client_target::ClientTarget;
 use crate::lock::file_lock::ConfigFileLock;
 
 use super::add::{read_plugin_table, write_config_with_plugin};
-use super::config_keys::{ConfigKey, KeySpec, PluginField, RegistryField, VENDOR_FIELD_NAME, VENDOR_SHARED_SKILLS};
+use super::config_keys::{
+    ConfigKey, KeySpec, PluginField, RegistryField, VENDOR_FIELD_NAME, VENDOR_PLUGIN_API, VENDOR_PLUGIN_API_FIELD_NAME,
+    VENDOR_SHARED_SKILLS,
+};
 use super::scope_resolution::{self, lockable_config_path};
 
 /// `grim config` arguments.
@@ -311,6 +314,8 @@ pub(crate) enum ParsedKey {
     RegistryAliasField { alias: String, field: RegistryField },
     /// `options.vendors.<name>.shared_skills` — the dynamic per-vendor key.
     VendorField { vendor: String },
+    /// `options.vendors.<name>.plugin_api`, the host declaration.
+    VendorPluginApi { vendor: String },
 }
 
 pub(crate) fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
@@ -327,13 +332,13 @@ pub(crate) fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
         // vector, the same one `ClientsInvalid::ControlChar` guards against.
         let Some((vendor, field)) = rest.rsplit_once('.') else {
             return Err(super::config_usage(format!(
-                "no vendor field specified for '{}'; use options.vendors.<name>.{VENDOR_FIELD_NAME}",
+                "no vendor field specified for '{}'; use options.vendors.<name>.{VENDOR_FIELD_NAME} or options.vendors.<name>.{VENDOR_PLUGIN_API_FIELD_NAME}",
                 rest.escape_debug()
             )));
         };
-        if field != VENDOR_FIELD_NAME {
+        if field != VENDOR_FIELD_NAME && field != VENDOR_PLUGIN_API_FIELD_NAME {
             return Err(super::config_usage(format!(
-                "unknown vendor field '{}'; valid fields: {VENDOR_FIELD_NAME}",
+                "unknown vendor field '{}'; valid fields: {VENDOR_FIELD_NAME}, {VENDOR_PLUGIN_API_FIELD_NAME}",
                 field.escape_debug()
             )));
         }
@@ -341,8 +346,11 @@ pub(crate) fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
         // key (exit 64) — not a bad value. Shares its accepted set with
         // load-time validation via `check_vendor_name`.
         crate::config::project_config::check_vendor_name(vendor).map_err(vendor_key_error)?;
-        return Ok(ParsedKey::VendorField {
-            vendor: vendor.to_string(),
+        let vendor = vendor.to_string();
+        return Ok(if field == VENDOR_FIELD_NAME {
+            ParsedKey::VendorField { vendor }
+        } else {
+            ParsedKey::VendorPluginApi { vendor }
         });
     }
     if let Some(rest) = key.strip_prefix("registry.") {
@@ -463,6 +471,7 @@ fn fixed_value(key: ConfigKey, options: &ConfigOptions) -> Option<String> {
             }
         }
         ConfigKey::ExperimentalSettings => options.experimental.settings.then(|| "true".to_string()),
+        ConfigKey::ExperimentalMods => options.experimental.mods.then(|| "true".to_string()),
     }
 }
 
@@ -478,6 +487,10 @@ fn vendor_value(vendor: &str, options: &ConfigOptions) -> Option<String> {
         .map(|v| v.to_string())
 }
 
+fn vendor_plugin_api_value(vendor: &str, options: &ConfigOptions) -> Option<String> {
+    options.vendors.get(vendor).and_then(|v| v.plugin_api.clone())
+}
+
 fn get_value(
     parsed: &ParsedKey,
     options: &ConfigOptions,
@@ -487,6 +500,7 @@ fn get_value(
     Ok(match parsed {
         ParsedKey::Fixed(k) => fixed_value(*k, options),
         ParsedKey::VendorField { vendor } => vendor_value(vendor, options),
+        ParsedKey::VendorPluginApi { vendor } => vendor_plugin_api_value(vendor, options),
         ParsedKey::RegistryAlias { alias } => {
             return Err(super::config_usage(format!(
                 "no registry field specified for '{alias}'; use registry.{alias}.<field>, one of: {}",
@@ -844,6 +858,10 @@ pub(crate) fn apply_set(
                 options.experimental.settings = parse_bool(value_str, "options.experimental.settings")?;
                 Ok(value_str.to_string())
             }
+            ConfigKey::ExperimentalMods => {
+                options.experimental.mods = parse_bool(value_str, "options.experimental.mods")?;
+                Ok(value_str.to_string())
+            }
         },
         ParsedKey::VendorField { vendor } => {
             let enabled = parse_bool(value_str, &format!("options.vendors.{vendor}.{VENDOR_FIELD_NAME}"))?;
@@ -858,6 +876,13 @@ pub(crate) fn apply_set(
             // `false` is stored, not collapsed: it opts the client out of
             // joining a pool another client writes, which unset does not.
             options.vendors.entry(vendor.clone()).or_default().shared_skills = Some(enabled);
+            Ok(value_str.to_string())
+        }
+        ParsedKey::VendorPluginApi { vendor } => {
+            // The client name is part of the KEY (valid by `parse_key`); an
+            // unsupported client or value is a bad VALUE, exit 65.
+            crate::config::project_config::check_plugin_api(vendor, value_str).map_err(super::config_value)?;
+            options.vendors.entry(vendor.clone()).or_default().plugin_api = Some(value_str.to_string());
             Ok(value_str.to_string())
         }
         ParsedKey::RegistryAlias { alias } => Err(super::config_usage(format!(
@@ -1007,13 +1032,28 @@ pub(crate) fn apply_unset(
                     options.experimental.hooks = false;
                 }
                 ConfigKey::ExperimentalSettings => options.experimental.settings = false,
+                ConfigKey::ExperimentalMods => options.experimental.mods = false,
             }
             Ok(())
         }
         ParsedKey::VendorField { vendor } => {
-            // Single-field `VendorOptions`: removing the entry clears the
-            // field, returning the client to the automatic pool layout.
-            options.vendors.remove(vendor);
+            // Clearing the field returns the client to the automatic pool
+            // layout; an entry left with no field is dropped.
+            if let Some(entry) = options.vendors.get_mut(vendor) {
+                entry.shared_skills = None;
+                if *entry == crate::config::declaration::VendorOptions::default() {
+                    options.vendors.remove(vendor);
+                }
+            }
+            Ok(())
+        }
+        ParsedKey::VendorPluginApi { vendor } => {
+            if let Some(entry) = options.vendors.get_mut(vendor) {
+                entry.plugin_api = None;
+                if *entry == crate::config::declaration::VendorOptions::default() {
+                    options.vendors.remove(vendor);
+                }
+            }
             Ok(())
         }
         ParsedKey::RegistryAlias { alias } => {
@@ -1160,6 +1200,14 @@ pub(crate) fn collect_entries(all: bool, options: &ConfigOptions, registries: &[
                 format!("options.vendors.{name}.{VENDOR_FIELD_NAME}"),
                 value,
                 &VENDOR_SHARED_SKILLS,
+            ));
+        }
+        let api = vendor_plugin_api_value(name, options);
+        if api.is_some() || all {
+            entries.push(entry(
+                format!("options.vendors.{name}.{VENDOR_PLUGIN_API_FIELD_NAME}"),
+                api,
+                &VENDOR_PLUGIN_API,
             ));
         }
     }
@@ -2847,8 +2895,8 @@ mod tests {
         let with_all = collect_entries(true, &options, &registries);
         assert_eq!(
             with_all.len(),
-            13,
-            "--all on empty config must emit exactly the 13 fixed keys"
+            14,
+            "--all on empty config must emit exactly the 14 fixed keys"
         );
         for e in &with_all {
             assert_eq!(
@@ -3353,6 +3401,49 @@ mod tests {
             msg.contains("options.vendors.<name>.shared_skills"),
             "the unknown-key message must advertise the vendor pattern; got: {msg}"
         );
+    }
+
+    #[test]
+    fn plugin_api_set_get_unset_round_trip() {
+        let key = parse_key("options.vendors.opencode.plugin_api").unwrap();
+        let mut options = fresh_options();
+        let mut registries: Vec<RegistryConfig> = vec![];
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            None
+        );
+        apply_set(&key, "v2", &mut options, &mut registries, &Invocation::WALKED).unwrap();
+        assert_eq!(options.vendors["opencode"].plugin_api.as_deref(), Some("v2"));
+        assert!(
+            collect_entries(false, &options, &registries)
+                .iter()
+                .any(|e| e.key == "options.vendors.opencode.plugin_api" && e.value.as_deref() == Some("v2"))
+        );
+        apply_set(&key, "v3", &mut options, &mut registries, &Invocation::WALKED).expect_err("v3 is outside the set");
+        let wrong_client = parse_key("options.vendors.claude.plugin_api").unwrap();
+        apply_set(&wrong_client, "v2", &mut options, &mut registries, &Invocation::WALKED)
+            .expect_err("only opencode accepts plugin_api");
+        apply_unset(&key, &mut options, &mut registries, &Invocation::WALKED).unwrap();
+        assert!(options.vendors.is_empty(), "an emptied entry is dropped");
+    }
+
+    #[test]
+    fn experimental_mods_set_get_unset_round_trip() {
+        let key = parse_key("options.experimental.mods").unwrap();
+        let mut options = fresh_options();
+        let mut registries: Vec<RegistryConfig> = vec![];
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            None
+        );
+        apply_set(&key, "true", &mut options, &mut registries, &Invocation::WALKED).unwrap();
+        assert!(options.experimental.mods_enabled());
+        assert_eq!(
+            get_value(&key, &options, &registries, &Invocation::WALKED).unwrap(),
+            Some("true".to_string())
+        );
+        apply_unset(&key, &mut options, &mut registries, &Invocation::WALKED).unwrap();
+        assert!(!options.experimental.mods_enabled());
     }
 
     #[test]

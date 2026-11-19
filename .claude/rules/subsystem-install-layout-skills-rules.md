@@ -24,6 +24,8 @@ marked `generated: true`. A plain skill with no tool-namespaced keys takes
 the fast path and installs byte-identical. See `arch-principles.md` ADR
 index → `adr_tool_namespaced_metadata_rendering.md`.
 
+Since 0.17.0 a skill whose root holds a Claude plugin manifest entry is refused (65, `skill-plugin-manifest`, `adr_mod_artifact_kind.md` D15) at two seams: the packed entry list at build and publish (`pack_skill_dir`, the `grim publish` pre-pass), and the staged directory plus the installed output root at install (`stage_locked_artifact_within`, `grim_render`, the `AlreadyInstalled` path). Any new path that packs or stages a skill goes through one of them.
+
 ### Rules
 
 A **rule** materializes as the index `<name>.md` under `rules/`, and —

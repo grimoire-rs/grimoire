@@ -53,6 +53,7 @@ use crate::install::installer::{
     install_all_before_reap, install_all_with_progress, persist_and_converge,
 };
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::mod_phase::ModReach;
 use crate::install::prune::{
     PruneOutcome, PrunedArtifact, ReapedClients, prune_orphans_off_runtime, reap_dropped_clients,
 };
@@ -203,12 +204,22 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // answers about one file.
     let target = super::install::install_target(&scope, &args.client, &global)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     // Read ahead of the save, which destroys the previous lock: a client set or
     // state that fails here leaves the lock as it was found.
     let mut state = scope_resolution::read_state(&scope)
         .map_err(|e| state_io(&scope.state_path, e))?
         .adopt();
+    // Before the lock is saved: a refusal leaves lock and state as found.
+    super::grim(
+        crate::install::installer::refuse_installed_dev_plugin_manifest(
+            &state,
+            &scope.roots,
+            named.as_ref().map(|n| &n.install),
+        )
+        .map_err(|e| e.naming(target.grim())),
+    )?;
     let prepass = match &previous {
         Some(evidence) => Some(prove_previous(&mut state, evidence, named.as_ref(), &target, &scope, &access).await?),
         None => None,
@@ -260,6 +271,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // package that left the lock only inside the previous closure, as the prune
     // below does.
     let install_lock = named.as_ref().map(|n| project_lock(&new_lock, &n.install));
+    let install_force = force_scope(named.as_ref(), args.force);
     let InstallRun {
         items: mut outcomes,
         mut settings,
@@ -275,7 +287,7 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &mut state,
         &scope.roots,
         scope.config_dir(),
-        force_scope(named.as_ref(), args.force),
+        install_force.clone(),
         InstallIntent::Declared,
         progress.as_ref(),
         named
@@ -412,6 +424,18 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         )
         .map_err(|e| keep_settings(&settings)(e.into())),
     )?;
+    crate::install::mod_phase::converge(
+        &target,
+        &new_lock,
+        &access,
+        &scope.roots,
+        scope.scope,
+        &scope.workspace,
+        mod_reach(named.as_ref()),
+        &install_force,
+    )
+    .await
+    .apply_to(&mut outcomes);
 
     // Build the report before surfacing any failure so it reflects the new
     // lock.
@@ -928,6 +952,14 @@ pub(crate) struct NamedScope {
     /// The closure of the names in the previous lock, the only records a named
     /// run may prune. Empty with no previous lock.
     pub(crate) prune: BTreeSet<NodeKey>,
+}
+
+/// The mod reach of `grim update`: the whole lock when bare, the closures when named.
+pub(crate) fn mod_reach(named: Option<&NamedScope>) -> ModReach<'_> {
+    named.map_or(ModReach::Full, |n| ModReach::Closure {
+        install: &n.install,
+        prune: &n.prune,
+    })
 }
 
 impl NamedScope {
@@ -1546,6 +1578,7 @@ async fn refresh_dev_installs(
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: Vec::new(),
+            mods: Vec::new(),
         };
         let entry = LockedArtifact {
             name: rec.name.clone(),
@@ -1556,12 +1589,17 @@ async fn refresh_dev_installs(
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
         match rec.kind {
             ArtifactKind::Skill => synth.skills.push(entry),
             ArtifactKind::Rule => synth.rules.push(entry),
             ArtifactKind::Agent => synth.agents.push(entry),
-            ArtifactKind::Mcp | ArtifactKind::Bundle | ArtifactKind::Hook | ArtifactKind::Settings => continue,
+            ArtifactKind::Mcp
+            | ArtifactKind::Bundle
+            | ArtifactKind::Hook
+            | ArtifactKind::Settings
+            | ArtifactKind::Mod => continue,
         }
         let outcomes = install_all_with_progress(
             &synth,
@@ -1684,6 +1722,22 @@ fn build_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_reach_is_full_bare_and_the_closures_when_named() {
+        assert_eq!(mod_reach(None), ModReach::Full);
+        let named = NamedScope {
+            install: BTreeSet::from([(ArtifactKind::Mod, "a".to_string())]),
+            prune: BTreeSet::from([(ArtifactKind::Mod, "b".to_string())]),
+        };
+        assert_eq!(
+            mod_reach(Some(&named)),
+            ModReach::Closure {
+                install: &named.install,
+                prune: &named.prune
+            }
+        );
+    }
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
     use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
@@ -1728,6 +1782,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 

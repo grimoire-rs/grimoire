@@ -239,7 +239,12 @@ pub fn prune_orphans(
         // A dev-install record (`grim install <path>`) is intentionally
         // undeclared — never an orphan. A settings record names values inside
         // a shared file, so deleting it as a footprint would take the user's file.
-        .filter(|r| !r.dev && r.kind != ArtifactKind::Settings && !declared.contains(&(r.kind, r.name.clone())))
+        // A mod lives in its own store and goes only through the mod phase's disarm.
+        .filter(|r| {
+            !r.dev
+                && !matches!(r.kind, ArtifactKind::Settings | ArtifactKind::Mod)
+                && !declared.contains(&(r.kind, r.name.clone()))
+        })
         .filter(|r| only.is_none_or(|nodes| nodes.contains(&(r.kind, r.name.clone()))))
         .map(|r| Orphan {
             kind: r.kind,
@@ -497,7 +502,7 @@ pub fn reap_dropped_clients(
     // A settings output addresses a value in a shared file, not a footprint.
     let records: Vec<(ArtifactKind, String, Vec<ClientOutput>)> = state
         .iter_records()
-        .filter(|r| !r.dev && r.kind != ArtifactKind::Settings)
+        .filter(|r| !r.dev && !matches!(r.kind, ArtifactKind::Settings | ArtifactKind::Mod))
         .map(|r| (r.kind, r.name.clone(), r.outputs.clone()))
         .collect();
 
@@ -975,6 +980,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -1299,6 +1305,22 @@ mod tests {
             "the payload survives a multi-client drop that keeps one"
         );
         assert!(payload.join("hook.toml").is_file(), "and its contents are untouched");
+    }
+
+    #[test]
+    fn the_generic_prune_never_touches_a_mod_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let kept = install_of_kind(&mut state, ws, ArtifactKind::Mod, "tidy");
+        let dropped = install_rule(&mut state, ws, "drop");
+
+        let acted = prune_orphans(&mut state, &lock_of(Vec::new()), &roots(ws), None, false).unwrap();
+
+        assert_eq!(acted.len(), 1, "the control rule is pruned");
+        assert!(!dropped.exists(), "positive control: an undeclared rule goes");
+        assert!(kept.exists(), "the undeclared mod record's file stays");
+        assert!(state.get(ArtifactKind::Mod, "tidy").is_some());
     }
 
     #[test]

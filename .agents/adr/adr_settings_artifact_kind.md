@@ -512,6 +512,8 @@ downgrades after a global settings install.
 
 ### Decision 7: consent (one-way door for key prefix, flag pair, verb)
 
+> ⛔ **AMENDED (2026-11-19, `adr_mod_artifact_kind.md`):** the key is the unprefixed entry of `adr_mod_artifact_kind.md` D6, shared by every gated kind: `<binding>@<registry>/<repository>`. The text below is the original wording.
+
 **Key.** `settings:<binding>@<registry>/<repository>`, built by `consent_key_for(kind, binding,
 source)`. Hook keys are unchanged. A settings binding passes `SkillName`, which holds no `:`, and a
 hook key for a valid binding cannot start `settings:`, so the namespaces cannot meet.
@@ -1047,6 +1049,7 @@ extension work on the kind; a paired extension release.
 | 2026-11-06 | Claude (lock pin stability, RF5) | Amendment as landed, superseding the RF4 row's residual (plan RD4-14 and the RF5 pass). Rule row 6 gains a holder on a named run: a piece that only leaving records hold, which an armed package outside the closure declares, gets no verdict. The value stays, the leaving record keeps it on its previous pin, and a warning names `grim install`, which hands it over. This holds for a package the run prunes too, and for a lone armed package, whose layer the run reads store first since the conflict check reads none. Only a package consent leaves out, or a layer that does not load, protects nothing. A named `--force` reaches the closure and its prune, the file prune's own reach, and a refused value of a pruned package names `grim uninstall --force settings <name>`. Gesture (Decision 7): a carried settings target consents only while its pin checks out, as a hook's does (`kept_pin_check`, plan RB-4). The amendment blocks after the rule table and after Gesture carry this text. |
 | 2026-11-07 | Claude (lock pin stability, RF5 fix round) | Both amendment blocks gain the fix round. An armed package outside a named closure whose layer cannot be read now stops the pass and keeps the value, exiting with the read's code (`81` offline), as c5e3824 does; this replaces the RF5 row's "a layer that does not load protects nothing". The kept-value remedy repeats `--trust-workspace` when only the flag armed the declarer. A pruned package's refusal names its forced uninstall and the value it also removes. The kept-pin warning names `grim consent allow`. |
 | 2026-11-07 | Claude (lock pin stability, RF6) | The amendment to Gesture is marked Proposed, awaiting the owner: it is goal-loop decision RB-4, part of the trust narrowing the trust ADR's Proposed block lists, and the Accepted text stays the decision until the owner ratifies it. No behaviour changed. |
+| 2026-11-19 | Claude (records pass) | Decision 7's key and Appendix A's `/extraKnownMarketplaces/<name>` row amended by `adr_mod_artifact_kind.md` (amendment 3) |
 
 ---
 
@@ -1074,7 +1077,7 @@ project scope (JSON). Codex `$CODEX_HOME/config.toml` (TOML). Copilot `$COPILOT_
 | claude | `/permissions/ask` | string list | set | both | on |
 | claude | `/permissions/defaultMode` | enum `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`, `manual`; project: first three | scalar | both | on |
 | claude | `/sandbox/enabled` | bool | scalar | both | on |
-| claude | `/extraKnownMarketplaces/<name>` | atomic `{source: {source: "github", repo, ref?}}` | map | both | on |
+| claude | `/extraKnownMarketplaces/<name>` | atomic `{source: {source: "github", repo, ref?}}` | map | both | on; AMENDED (2026-11-19, `adr_mod_artifact_kind.md`): a `<name>` that starts with `grim-mods` is refused at build and install; the mod kind owns that namespace |
 | codex | `/model` | string | scalar | global | on |
 | codex | `/model_reasoning_effort` | string, not enumerated | scalar | global | on |
 | codex | `/approval_policy` | enum `on-request`, `never` | scalar | global | on |

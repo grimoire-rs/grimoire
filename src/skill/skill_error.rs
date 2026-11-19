@@ -116,6 +116,13 @@ pub enum SkillErrorKind {
     )]
     RuleSupportDir { dir: PathBuf, files: Vec<String> },
 
+    /// A skill's root carries a Claude plugin manifest entry.
+    #[error(
+        "a skill can no longer ship a Claude plugin manifest (since grim 0.17.0)\n  found in {dir}/: {entry}\n  why: a skill package must not carry code a client loads; that code ships as the consent-gated `mod` kind\n  fix: publish it as a mod, ship the plugin through a marketplace, or list {entry} in .grimignore\n  see https://grimoire.rs/upgrading.html#skill-plugin-manifest",
+        dir = dir.display(),
+    )]
+    SkillPluginManifest { dir: PathBuf, entry: String },
+
     /// An agent's stem directory holds files other than the catalog companions.
     #[error(
         "an agent's directory may hold only README.md, logo.png and logo.svg (since grim 0.16.0)\n  found in {dir}/: {files}\n  why: an agent package is the .md file alone, and grim no longer skips other files there silently\n  fix: delete these files or move them out of {dir}/; files an agent needs at run time belong in a skill it requires\n  see https://grimoire.rs/upgrading.html#agent-companions",

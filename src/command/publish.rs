@@ -628,6 +628,12 @@ pub struct PublishManifest {
     #[serde(default)]
     pub settings: BTreeMap<String, PublishEntrySpec>,
 
+    /// Mod entries, keyed by name; the source is a directory holding `mod.toml`
+    /// (conventionally `mods/<name>/`). Additive optional table, ungated like
+    /// `hooks`: publishing applies nothing on this machine.
+    #[serde(default)]
+    pub mods: BTreeMap<String, PublishEntrySpec>,
+
     /// Announcement defaults for `--announce` (target index repository,
     /// namespace, owner id).
     #[serde(default)]
@@ -888,6 +894,7 @@ fn resolve_versions(
         &mut manifest.mcp,
         &mut manifest.hooks,
         &mut manifest.settings,
+        &mut manifest.mods,
     ];
     for table in tables {
         for (name, spec) in table.iter_mut() {
@@ -1173,6 +1180,14 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                 &planned.path,
                 planned.kind,
             ))?;
+        }
+    }
+
+    // A skill carrying a plugin manifest entry is refused at pack time; check
+    // every skill here so no earlier entry is pushed before the refusal.
+    for planned in &entries {
+        if planned.kind == ArtifactKind::Skill {
+            super::grim(crate::skill::skill_package::refuse_skill_plugin_manifest(&planned.path))?;
         }
     }
 
@@ -1625,6 +1640,7 @@ fn kind_str(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Bundle => "bundle",
         ArtifactKind::Mcp => "mcp",
         ArtifactKind::Settings => "settings",
+        ArtifactKind::Mod => "mod",
     }
 }
 
@@ -1820,7 +1836,8 @@ fn validate_manifest(
         + manifest.bundles.len()
         + manifest.mcp.len()
         + manifest.hooks.len()
-        + manifest.settings.len();
+        + manifest.settings.len()
+        + manifest.mods.len();
     if total_entries == 0 {
         return Err(data_error_at(manifest_path, "no packages declared in manifest"));
     }
@@ -1836,6 +1853,7 @@ fn validate_manifest(
         .chain(manifest.mcp.keys())
         .chain(manifest.hooks.keys())
         .chain(manifest.settings.keys())
+        .chain(manifest.mods.keys())
         .map(String::as_str)
         .collect();
 
@@ -1885,6 +1903,9 @@ fn validate_manifest(
     }
     for (name, spec) in &manifest.settings {
         validate_entry(name, spec, ArtifactKind::Settings, manifest_dir, manifest_path)?;
+    }
+    for (name, spec) in &manifest.mods {
+        validate_entry(name, spec, ArtifactKind::Mod, manifest_dir, manifest_path)?;
     }
 
     Ok(())
@@ -2012,6 +2033,8 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
         ArtifactKind::Bundle => manifest_dir.join("bundles").join(format!("{name}.toml")),
         ArtifactKind::Mcp => manifest_dir.join("mcp").join(format!("{name}.toml")),
         ArtifactKind::Settings => manifest_dir.join("settings").join(format!("{name}.toml")),
+        // A directory, like a skill: `mod.toml` at its root.
+        ArtifactKind::Mod => manifest_dir.join("mods").join(name),
     }
 }
 
@@ -2171,6 +2194,9 @@ fn plan_entries(
     // After hooks and before bundles: a bundle may name a settings member, and
     // appending here moves no existing kind.
     add_kind!(manifest.settings, ArtifactKind::Settings);
+    // After settings and before bundles: a bundle may name a mod member, and
+    // appending here moves no existing kind.
+    add_kind!(manifest.mods, ArtifactKind::Mod);
     add_kind!(manifest.bundles, ArtifactKind::Bundle);
 
     entries
@@ -2364,6 +2390,7 @@ fn entry_description<'a>(
         ArtifactKind::Bundle => &manifest.bundles,
         ArtifactKind::Mcp => &manifest.mcp,
         ArtifactKind::Settings => &manifest.settings,
+        ArtifactKind::Mod => &manifest.mods,
     };
     table.get(name).and_then(|s| s.description.as_ref())
 }
@@ -2389,6 +2416,7 @@ fn entry_metadata_defaults(
         ArtifactKind::Bundle => &manifest.bundles,
         ArtifactKind::Mcp => &manifest.mcp,
         ArtifactKind::Settings => &manifest.settings,
+        ArtifactKind::Mod => &manifest.mods,
     };
     let flags = args.metadata.defaults();
     let with_entry = match table.get(name).and_then(|s| s.metadata.as_ref()) {
@@ -4627,6 +4655,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_prepass_refuses_before_push() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        for dry_run in [false, true] {
+            // The refused skill sorts both before and after the clean one.
+            for refused in ["a-refused", "z-refused"] {
+                let tmp = tempfile::tempdir().unwrap();
+                let dir = tmp.path();
+                make_test_manifest_sources(dir);
+                write(
+                    &dir.join(format!("skills/{refused}/SKILL.md")),
+                    &format!("---\nname: {refused}\ndescription: d\n---\nbody\n"),
+                );
+                write(&dir.join(format!("skills/{refused}/.claude-plugin/plugin.json")), "{}");
+                let manifest_path = dir.join("publish.toml");
+                std::fs::write(
+                    &manifest_path,
+                    format!(
+                        "registry = \"localhost:5000\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n\n[skills.{refused}]\nversion = \"0.1.0\"\n"
+                    ),
+                )
+                .unwrap();
+                let registry = MemoryRegistry::new();
+                let ctx = Context::with_access(dir.to_path_buf(), registry.clone());
+                let args = make_publish_args(manifest_path.clone(), vec![], None, dry_run, false);
+                let err = run(&ctx, &args).await.expect_err("refused skill");
+                let c = crate::error::classify(&err);
+                assert_eq!(c.exit, crate::cli::exit_code::ExitCode::DataError);
+                assert_eq!(c.reason, Some(crate::error::ErrorReason::SkillPluginManifest));
+
+                // Positive control: without the entry the same batch pushes.
+                std::fs::remove_dir_all(dir.join(format!("skills/{refused}/.claude-plugin"))).unwrap();
+                let (report, _) = run(&ctx, &make_publish_args(manifest_path, vec![], None, dry_run, false))
+                    .await
+                    .expect("clean batch");
+                assert_eq!(report.items().len(), 2);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn run_dry_run_pushes_nothing() {
         // --dry-run: run() returns dry-run statuses; nothing written to registry.
         use crate::api::publish_report::PublishStatus;
@@ -5570,6 +5639,7 @@ mod tests {
             ArtifactKind::Mcp => "mcp",
             ArtifactKind::Bundle => "bundles",
             ArtifactKind::Settings => "settings",
+            ArtifactKind::Mod => "mods",
         };
         let toml = format!("{ROOT_TOML}{extra}[{table}.{name}]\nversion=\"1.0.0\"\n");
         let planned = plan(&toml, &[entry_at(dir, kind, name, rel)], dir).unwrap();

@@ -261,7 +261,7 @@ def test_c152b_flag_off_reaps_registrations_and_keeps_payload_launcher_consent(
         GLOBAL_SURFACE[c] for c in expected
     } <= set(armed), armed
     launcher = grim_home / "hooks" / LAUNCHER
-    consent = sorted((grim_home / "hooks" / "consent").glob("*.json"))
+    consent = sorted((grim_home / "consent").glob("*.json"))
     payloads = sorted(grim_home.glob("hooks/**/shell-guard/hook.toml"))
     assert launcher.is_file() and len(consent) == 1 and len(payloads) == 2, (
         launcher,
@@ -279,7 +279,7 @@ def test_c152b_flag_off_reaps_registrations_and_keeps_payload_launcher_consent(
         "every registration element must go"
     )
     assert launcher.is_file(), "the launcher is retained"
-    assert sorted((grim_home / "hooks" / "consent").glob("*.json")) == consent, (
+    assert sorted((grim_home / "consent").glob("*.json")) == consent, (
         "consent is retained"
     )
     assert sorted(grim_home.glob("hooks/**/shell-guard/hook.toml")) == payloads, (
@@ -340,7 +340,7 @@ MAIN_UPDATE_ROW_KEYS = {
 }
 MAIN_ADD_KEYS = {"kind", "name", "pinned", "status"}
 # Fields the dependency release added to every report, additively.
-DEPENDENCY_STATUS_KEYS = {"direct", "required_by", "moved_nested_bundles"}
+DEPENDENCY_STATUS_KEYS = {"direct", "required_by", "moved_nested_bundles", "serves"}
 DEPENDENCY_ADD_KEYS = {"dropped", "moved", "pulled_in"}
 # The settings kind's change list, always present and `[]` for every other kind.
 SETTINGS_ADD_KEYS = {"settings_changes"}

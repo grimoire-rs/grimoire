@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use crate::api::settings_report::{RefusedPiece, SettingsChange};
 use crate::config::scope::ConfigScope;
+use crate::install::mod_phase::{self, ModReach};
 use crate::lock::effective_set::NodeKey;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -495,7 +496,8 @@ async fn install_pass<M: ArtifactMaterializer>(
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            if !declined.is_empty() {
+            // The mod phase says why a client does not host a mod, once per client.
+            if !declined.is_empty() && kind != ArtifactKind::Mod {
                 tracing::warn!(
                     "{declined} cannot host {kind} '{}': no native target for {kind}; recording no output",
                     artifact.name
@@ -776,6 +778,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
     adds: SyncAdds<'_>,
     progress: &dyn InstallProgress,
     settings: SettingsRun<'_>,
+    mods: ModReach<'_>,
 ) -> Result<InstallRun, InstallFailure> {
     // C-101: once every mutating seam attaches a policy, a missing one here is
     // a seam that forgot to — caught in tests, skipped (C-101 step 2) in release.
@@ -813,7 +816,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
 
     // Path sources resolve against the config file's directory.
     let anchor = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let run = install_all_with_progress(
+    let mut run = install_all_with_progress(
         lock,
         access,
         materializer,
@@ -821,7 +824,7 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
         state,
         roots,
         anchor,
-        force,
+        force.clone(),
         intent,
         progress,
         settings,
@@ -848,6 +851,11 @@ pub async fn install_and_persist<M: ArtifactMaterializer>(
             settings: run.settings,
         });
     }
+
+    // Before the caller decides the exit, so a failed row never skips the mod disarm.
+    mod_phase::converge(target, lock, access, roots, scope, workspace, mods, &force)
+        .await
+        .apply_to(&mut run.items);
 
     Ok(run)
 }
@@ -1056,16 +1064,21 @@ async fn install_one<M: ArtifactMaterializer>(
     // narrowed `--client` selection happens to name only kind-declining
     // clients — see that function's doc comment.
     // The same peer set decides a skill's pool destination below, so the
-    // materialize loop and `status` agree on where each client lands.
+    // materialize loop and `status` agree on where each client lands. A mod has
+    // no peer here, whatever its vendor answers: only the mod phase writes one,
+    // so this path records nothing and writes nothing.
     let peers = effective_clients(target, kind, &artifact.name, recorded.as_ref(), roots);
     if peers.is_empty() {
-        state.record(InstallRecord {
-            kind,
-            name: artifact.name.clone(),
-            source: tagless(&artifact.source),
-            dev: intent.is_dev(),
-            outputs: Vec::new(),
-        });
+        // A mod's record lives in the mod store only; a state file never carries one.
+        if kind != ArtifactKind::Mod {
+            state.record(InstallRecord {
+                kind,
+                name: artifact.name.clone(),
+                source: tagless(&artifact.source),
+                dev: intent.is_dev(),
+                outputs: Vec::new(),
+            });
+        }
         return Ok(InstallOutcome::Skipped(skipped_reason(target, kind, &artifact.name)));
     }
 
@@ -1739,6 +1752,10 @@ async fn install_one<M: ArtifactMaterializer>(
 ///
 /// A kind is otherwise hosted unless `kind_support` returns
 /// [`KindSupport::Declined`](crate::install::vendor::KindSupport::Declined).
+/// A mod takes that route: its vendor hosts it (Claude and OpenCode do, the
+/// rest decline) at this scope. Whether the row lists the client, and whether
+/// OpenCode's `plugin_api` is declared, are the row's half, answered by
+/// [`client_hosts`] and `mod_phase::mod_hosting`.
 ///
 /// Shared with the report side (`status`'s configured-vs-recorded client
 /// drift), which must not count a client that was never going to record an
@@ -1801,14 +1818,22 @@ fn kind_is_permanently_declined(client: crate::install::client_target::ClientTar
 /// per-artifact support decision (materialize set, fetch-before-gate,
 /// expected outputs, `status` drift) asks this one, so a name the client
 /// rejects is a skip everywhere rather than drift nothing can clear.
+///
+/// `served` is the clients a `[[mod]]` row lists, and only a mod reads it: a
+/// mod is hosted by a client its row names. A caller without a row passes
+/// `&[]`, which answers `false` for a mod. OpenCode's `plugin_api` needs the
+/// scope's config, so it is `mod_phase::mod_hosting`'s to judge.
 pub fn client_hosts(
     client: crate::install::client_target::ClientTarget,
     kind: ArtifactKind,
     name: &str,
+    served: &[String],
     workspace: &Path,
     scope: ConfigScope,
 ) -> bool {
-    client_supports_kind(client, kind, workspace, scope) && name_fits(client, kind, name)
+    client_supports_kind(client, kind, workspace, scope)
+        && name_fits(client, kind, name)
+        && (kind != ArtifactKind::Mod || served.iter().any(|s| s == client.as_str()))
 }
 
 /// Whether `name` fits `client`'s agent-name grammar. Only agents are
@@ -2032,7 +2057,75 @@ async fn gate_after_proof(
         recorded = state.get(artifact.kind, &artifact.name).cloned();
         gate = integrity_gate(recorded.as_ref(), &artifact.source, target, roots, force, None)?;
     }
+    if matches!(gate, Some(InstallOutcome::AlreadyInstalled))
+        && let Some(rec) = recorded.as_ref()
+        && let Some(entry) = installed_plugin_manifest(rec, roots)
+    {
+        return Err(InstallError::with_reference(
+            ArtifactRef {
+                kind: ArtifactKind::Skill,
+                name: artifact.name.clone(),
+                source: artifact.source.to_declared(),
+            },
+            InstallErrorKind::SkillPluginManifest {
+                name: artifact.name.clone(),
+                entry,
+                installed: true,
+            },
+        )
+        .into());
+    }
     Ok((gate, recorded))
+}
+
+/// Refuse a run while a dev-install record (`only` narrows it to a named
+/// closure) still carries the manifest entry: the install pass never visits a
+/// dev record and its refresh only warns, so without this check the refused
+/// entry stays installed. The remedy is the registry-sourced case's.
+pub(crate) fn refuse_installed_dev_plugin_manifest(
+    state: &InstallState,
+    roots: &AnchorRoots,
+    only: Option<&BTreeSet<NodeKey>>,
+) -> Result<(), InstallError> {
+    for rec in state
+        .iter_records()
+        .filter(|r| r.dev && only.is_none_or(|nodes| nodes.contains(&(r.kind, r.name.clone()))))
+    {
+        if let Some(entry) = installed_plugin_manifest(rec, roots) {
+            return Err(InstallError::with_reference(
+                ArtifactRef {
+                    kind: ArtifactKind::Skill,
+                    name: rec.name.clone(),
+                    source: rec.source.to_declared(),
+                },
+                InstallErrorKind::SkillPluginManifest {
+                    name: rec.name.clone(),
+                    entry,
+                    installed: true,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The manifest-named entry at the root of an installed skill's output, read
+/// with `symlink_metadata`-style listing so no link is followed into the
+/// tree. `None` for any other kind, an absent output or an unreadable one: an
+/// install that cannot see the entry cannot refuse over it.
+pub(crate) fn installed_plugin_manifest(rec: &InstallRecord, roots: &AnchorRoots) -> Option<String> {
+    if rec.kind != ArtifactKind::Skill {
+        return None;
+    }
+    rec.outputs.iter().find_map(|out| {
+        let root = out.resolved_target(roots, Containment::AllowRelocatedAncestor).ok()?;
+        std::fs::symlink_metadata(&root).ok()?;
+        let names = std::fs::read_dir(&root)
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect::<Vec<_>>();
+        crate::skill::skill_package::skill_plugin_manifest_entry(names.iter().map(String::as_str)).map(str::to_string)
+    })
 }
 
 /// Integrity gate shared by every install path: for every client output of a
@@ -2841,6 +2934,9 @@ pub(crate) async fn stage_locked_artifact_within(
     let entries = materializer.materialize(kind, &artifact.name, &blob, &materialized_root)?;
 
     let canonical = locate_canonical(&materialized_root, kind, &artifact.name)?;
+    if kind == ArtifactKind::Skill {
+        refuse_staged_plugin_manifest(&canonical, artifact)?;
+    }
 
     // A rule may carry a sibling support directory staged beside the index
     // file (`<root>/<stem>/…`); a plain single-file rule has none. The
@@ -2861,6 +2957,38 @@ pub(crate) async fn stage_locked_artifact_within(
         support_dir,
         entries,
     })
+}
+
+/// Refuse a staged skill whose root holds a manifest-named entry. The names
+/// come from the staged directory as the filesystem stored them, never from tar
+/// header strings, so a case-folding or stream-suffix spelling is caught.
+fn refuse_staged_plugin_manifest(canonical: &Path, artifact: &LockedArtifact) -> Result<(), InstallError> {
+    match staged_plugin_manifest(canonical)? {
+        Some(entry) => Err(InstallError::with_reference(
+            ArtifactRef {
+                kind: ArtifactKind::Skill,
+                name: artifact.name.clone(),
+                source: artifact.source.to_declared(),
+            },
+            InstallErrorKind::SkillPluginManifest {
+                name: artifact.name.clone(),
+                entry,
+                installed: false,
+            },
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The manifest-named entry at the root of a staged skill, listed as the
+/// filesystem stored it.
+pub(crate) fn staged_plugin_manifest(canonical: &Path) -> Result<Option<String>, InstallError> {
+    let names = std::fs::read_dir(canonical)
+        .map_err(|e| target_io(canonical, e))?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| target_io(canonical, e))?;
+    Ok(crate::skill::skill_package::skill_plugin_manifest_entry(names.iter().map(String::as_str)).map(str::to_string))
 }
 
 /// Validate + pack a locked path source and verify the bytes hash to the
@@ -3044,7 +3172,7 @@ fn decode_refused(refusal: Refusal) -> crate::error::Error {
 
 /// The source an install record stores: the pin without its advisory tag, so a
 /// record reads the same whichever command's lock it was written from.
-fn tagless(source: &crate::lock::locked_source::LockedSource) -> crate::lock::locked_source::LockedSource {
+pub(crate) fn tagless(source: &crate::lock::locked_source::LockedSource) -> crate::lock::locked_source::LockedSource {
     match source {
         crate::lock::locked_source::LockedSource::Registry(pinned) => {
             crate::lock::locked_source::LockedSource::Registry(pinned.strip_advisory())
@@ -3756,6 +3884,7 @@ fn locate_canonical(
         // MCP installs diverge into config registration before this point.
         ArtifactKind::Mcp => unreachable!("mcp descriptors register into client configs, never materialize"),
         ArtifactKind::Settings => unreachable!("settings merge into client configs, never materialize"),
+        ArtifactKind::Mod => materialized_root.join(name),
     };
     if exact.exists() {
         return Ok(exact);
@@ -3765,7 +3894,7 @@ fn locate_canonical(
     for entry in std::fs::read_dir(materialized_root).map_err(|e| target_io(materialized_root, e))? {
         let path = entry.map_err(|e| target_io(materialized_root, e))?.path();
         let matches = match kind {
-            ArtifactKind::Skill | ArtifactKind::Hook => path.is_dir(),
+            ArtifactKind::Skill | ArtifactKind::Hook | ArtifactKind::Mod => path.is_dir(),
             ArtifactKind::Rule | ArtifactKind::Agent => {
                 path.is_file() && path.extension() == Some(std::ffi::OsStr::new("md"))
             }
@@ -4227,6 +4356,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -4244,6 +4374,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -4272,6 +4403,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -8461,6 +8593,7 @@ mod tests {
             SyncAdds::Every,
             &SilentProgress,
             SettingsRun::Skip,
+            ModReach::Skip,
         )
         .await
         .unwrap();
@@ -8812,6 +8945,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -9034,6 +9168,7 @@ mod tests {
             SyncAdds::Every,
             &crate::install::progress::SilentProgress,
             SettingsRun::Skip,
+            ModReach::Skip,
         )
         .await;
     }
@@ -9659,6 +9794,7 @@ mod tests {
                     SyncAdds::Every,
                     &crate::install::progress::SilentProgress,
                     SettingsRun::Skip,
+                    ModReach::Skip,
                 )
                 .await
                 .unwrap()
@@ -9769,10 +9905,134 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
     const SKILL_DOC: &[u8] = b"---\nname: code-review\ndescription: d\n---\n# Review\n";
+
+    /// A skill tar holding `SKILL.md` plus the given `(entry, body)` pairs;
+    /// a `None` body is a directory-only entry.
+    fn skill_tar_with(name: &str, extra: &[(&str, Option<&[u8]>)]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(SKILL_DOC.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, format!("{name}/SKILL.md"), SKILL_DOC).unwrap();
+        for (entry, body) in extra {
+            let mut h = tar::Header::new_gnu();
+            match body {
+                Some(body) => {
+                    h.set_size(body.len() as u64);
+                    h.set_mode(0o644);
+                    h.set_cksum();
+                    b.append_data(&mut h, format!("{name}/{entry}"), *body).unwrap();
+                }
+                None => {
+                    h.set_entry_type(tar::EntryType::Directory);
+                    h.set_size(0);
+                    h.set_mode(0o755);
+                    h.set_cksum();
+                    b.append_data(&mut h, format!("{name}/{entry}/"), std::io::empty())
+                        .unwrap();
+                }
+            }
+        }
+        b.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn stage_refuses_root_manifest_entry() {
+        for (label, extra) in [
+            ("directory-only entry", vec![(".Claude-Plugin", None)]),
+            ("file under it", vec![(".claude-plugin/plugin.json", Some(&b"{}"[..]))]),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let blob = skill_tar_with("code-review", &extra);
+            let artifact = locked_skill("code-review", &blob);
+            let err = stage_locked_artifact(
+                &artifact,
+                ArtifactKind::Skill,
+                &arc(BlobMock { blob }),
+                Path::new("."),
+                &DefaultMaterializer,
+                tmp.path(),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{label}: must be refused"));
+            assert!(
+                matches!(&err, crate::error::Error::Install(ie)
+                    if matches!(&ie.kind, InstallErrorKind::SkillPluginManifest { installed: false, .. })),
+                "{label}: {err:?}"
+            );
+            let text = err.to_string();
+            assert!(text.contains("grim remove skill code-review"), "{label}: {text}");
+            assert_eq!(exit_of(err), crate::cli::exit_code::ExitCode::DataError);
+        }
+
+        // Positive control: a nested manifest name below the root stages.
+        let tmp = tempfile::tempdir().unwrap();
+        let blob = skill_tar_with("code-review", &[("templates/.claude-plugin/p.json", Some(&b"{}"[..]))]);
+        let artifact = locked_skill("code-review", &blob);
+        stage_locked_artifact(
+            &artifact,
+            ArtifactKind::Skill,
+            &arc(BlobMock { blob }),
+            Path::new("."),
+            &DefaultMaterializer,
+            tmp.path(),
+        )
+        .await
+        .expect("nested manifest name stages");
+    }
+
+    #[tokio::test]
+    async fn install_one_refuses_intact_installed_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = skill_tar("code-review", SKILL_DOC);
+        let lock = lock_of_skills(vec![locked_skill("code-review", &blob)]);
+        let access = arc(BlobMock { blob });
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let roots = roots(dir.path());
+        macro_rules! run {
+            ($force:expr) => {
+                install_all(
+                    &lock,
+                    &access,
+                    &DefaultMaterializer,
+                    &target,
+                    &mut state,
+                    &roots,
+                    Path::new("."),
+                    $force,
+                )
+            };
+        }
+
+        let first = run!(false).await;
+        assert_eq!(*first[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let skill = dir.path().join(".claude/skills/code-review");
+        // Positive control: the clean install is a no-op before the entry appears.
+        let again = run!(false).await;
+        assert_eq!(*again[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
+
+        // An older grim wrote the entry; the record still lists only SKILL.md.
+        std::fs::create_dir(skill.join(".Claude-Plugin")).unwrap();
+        for force in [false, true] {
+            let second = run!(force).await;
+            let err = second[0].result.as_ref().expect_err("refused");
+            assert!(
+                matches!(err, crate::error::Error::Install(ie)
+                    if matches!(&ie.kind, InstallErrorKind::SkillPluginManifest { installed: true, .. })),
+                "force={force}: {err:?}"
+            );
+            assert!(err.to_string().contains("grim uninstall skill code-review"), "{err}");
+        }
+        assert!(skill.join(".Claude-Plugin").is_dir(), "files stay");
+    }
 
     #[tokio::test]
     async fn c017_registry_skill_stages_its_canonical_dir_under_the_given_parent() {
@@ -9907,6 +10167,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
 
         let err = stage_locked_artifact(
@@ -10527,6 +10788,111 @@ mod tests {
             recorder.events.lock().unwrap().clone(),
             vec!["start:1", "advance:1:rule a", "finish"]
         );
+    }
+
+    /// A client that hosts a mod must still never get one from the generic
+    /// pipeline: only the mod phase writes a mod. The rule in the same run is
+    /// the positive control that the run reached the writer at all.
+    #[tokio::test]
+    async fn the_generic_pipeline_never_materializes_a_mod_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("a", b"# a\n");
+        let mut lock = lock_of(vec![locked_rule("a", &blob)]);
+        let mut row = locked_of("status-band", &blob, ArtifactKind::Mod);
+        row.clients = vec!["claude".to_string()];
+        lock.mods = vec![row];
+        let access = arc(BlobMock { blob: blob.clone() });
+        let target = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        assert!(
+            client_supports_kind(
+                ClientTarget::Claude,
+                ArtifactKind::Mod,
+                dir.path(),
+                ConfigScope::Project
+            ),
+            "precondition: the client does host the kind"
+        );
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+        let run = install_all_with_progress(
+            &lock,
+            &access,
+            &DefaultMaterializer,
+            &target,
+            &mut state,
+            &roots(dir.path()),
+            Path::new("."),
+            ForceScope::None,
+            InstallIntent::Declared,
+            &crate::install::progress::SilentProgress,
+            SettingsRun::Skip,
+        )
+        .await;
+
+        let outcome = |kind| {
+            run.items
+                .iter()
+                .find(|i| i.reference.kind == kind)
+                .unwrap()
+                .result
+                .as_ref()
+        };
+        assert_eq!(*outcome(ArtifactKind::Rule).unwrap(), InstallOutcome::Installed);
+        assert!(
+            matches!(outcome(ArtifactKind::Mod), Ok(InstallOutcome::Skipped(_))),
+            "the mod row is skipped: {:?}",
+            outcome(ArtifactKind::Mod)
+        );
+        assert!(dir.path().join(".claude/rules/a.md").is_file());
+        assert!(!dir.path().join(".claude/mods").exists());
+        assert!(!dir.path().join(".claude/skills/status-band").exists());
+        assert!(!dir.path().join(".claude/rules/status-band.md").exists());
+        assert!(state.get(ArtifactKind::Mod, "status-band").is_none());
+    }
+
+    /// A mod is hosted by the clients its vendor supports AND its row lists;
+    /// every other kind ignores the row's list.
+    #[test]
+    fn client_hosts_reads_the_row_clients_for_a_mod_only() {
+        let ws = Path::new("/ws");
+        let both = ["claude".to_string(), "opencode".to_string()];
+        for scope in [ConfigScope::Project, ConfigScope::Global] {
+            for client in ClientTarget::ALL {
+                let hosts_mods = matches!(client, ClientTarget::Claude | ClientTarget::OpenCode);
+                assert_eq!(
+                    client_supports_kind(client, ArtifactKind::Mod, ws, scope),
+                    hosts_mods,
+                    "{client} at {scope:?}"
+                );
+                assert_eq!(
+                    client_hosts(client, ArtifactKind::Mod, "m", &both, ws, scope),
+                    hosts_mods,
+                    "{client} listed at {scope:?}"
+                );
+                assert!(
+                    !client_hosts(client, ArtifactKind::Mod, "m", &[], ws, scope),
+                    "{client}: a row listing nothing hosts nothing"
+                );
+                assert_eq!(
+                    client_hosts(client, ArtifactKind::Skill, "m", &[], ws, scope),
+                    client_hosts(client, ArtifactKind::Skill, "m", &both, ws, scope),
+                    "{client}: a skill ignores the row list"
+                );
+            }
+        }
+        assert!(!client_hosts(
+            ClientTarget::OpenCode,
+            ArtifactKind::Mod,
+            "m",
+            &["claude".to_string()],
+            ws,
+            ConfigScope::Project
+        ));
+        assert!(
+            !kind_is_permanently_declined(ClientTarget::Claude, ArtifactKind::Mod)
+                && !kind_is_permanently_declined(ClientTarget::OpenCode, ArtifactKind::Mod)
+        );
+        assert!(kind_is_permanently_declined(ClientTarget::Kilo, ArtifactKind::Mod));
     }
 
     #[test]

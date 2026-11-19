@@ -1,0 +1,4 @@
+{
+  "name": "status-band",
+  "types": "./src/types/index.d.ts"
+}

@@ -221,6 +221,9 @@ pub struct SearchEntry {
     pub oci: crate::catalog::registry_catalog::OciMeta,
     /// How the repository relates to the current scope.
     pub status: StatusBadge,
+    /// The harnesses a mod serves, from its manifest. Always present in JSON,
+    /// `null` for every kind but a mod.
+    pub serves: Option<Vec<String>>,
 }
 
 impl Serialize for SearchEntry {
@@ -230,7 +233,7 @@ impl Serialize for SearchEntry {
         // Field count below is asserted by
         // `json_carries_replaced_by_plain_table_does_not` — adding a field
         // here requires bumping both, or the test fails.
-        let mut s = serializer.serialize_struct("SearchEntry", 16)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 17)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("source", &self.source)?;
@@ -247,6 +250,7 @@ impl Serialize for SearchEntry {
         s.serialize_field("downloads", &self.downloads)?;
         s.serialize_field("oci", &self.oci)?;
         s.serialize_field("status", &self.status.to_string())?;
+        s.serialize_field("serves", &self.serves)?;
         s.end()
     }
 }
@@ -456,6 +460,7 @@ mod tests {
             downloads: None,
             oci: Default::default(),
             status,
+            serves: None,
         }
     }
 
@@ -590,6 +595,7 @@ mod tests {
             downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
+            serves: None,
         };
         let mut buf = Vec::new();
         SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
@@ -619,6 +625,7 @@ mod tests {
             downloads: None,
             oci: Default::default(),
             status: StatusBadge::NotInstalled,
+            serves: None,
         };
         let mut buf = Vec::new();
         SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
@@ -645,6 +652,7 @@ mod tests {
             downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
+            serves: None,
         };
         let mut buf = Vec::new();
         SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
@@ -672,6 +680,7 @@ mod tests {
             downloads: None,
             oci: Default::default(),
             status: StatusBadge::NotInstalled,
+            serves: None,
         };
         let mut buf = Vec::new();
         SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
@@ -701,6 +710,7 @@ mod tests {
             downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
+            serves: None,
         };
         let mut buf = Vec::new();
         SearchReport::new(vec![e], vec![]).print_plain(&mut buf).unwrap();
@@ -739,6 +749,7 @@ mod tests {
             downloads: None,
             oci: Default::default(),
             status: StatusBadge::Installed,
+            serves: None,
         };
         let mut buf = Vec::new();
         SearchReport::new(vec![e], vec![]).print_json(&mut buf).unwrap();
@@ -846,10 +857,11 @@ mod tests {
         SearchReport::new(vec![e.clone()], vec![]).print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["items"][0]["replaced_by"], "ghcr.io/acme/skills/x2");
-        // The full 16-field object still round-trips. This count is linked to
+        // The full 17-field object still round-trips. This count is linked to
         // the manual `Serialize for SearchEntry` impl's serialize_struct count
         // — the two must move together.
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 16);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 17);
+        assert!(v["items"][0]["serves"].is_null());
         // Absent ⇒ explicit null, key always present for stable consumers.
         let mut buf = Vec::new();
         SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)], vec![])
@@ -942,9 +954,9 @@ mod tests {
         let rating = v["items"][0]["rating"].as_object().expect("rating is an object");
         assert_eq!(rating.len(), 2, "rating carries `up` and `url` only: {rating:?}");
         assert!(!rating.contains_key("target"), "the opaque target is not emitted");
-        // The full 16-field object still round-trips (see the count assertion
+        // The full 17-field object still round-trips (see the count assertion
         // in `json_carries_replaced_by_plain_table_does_not`).
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 16);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 17);
 
         // Unrated ⇒ explicit null, key always present — and never `0`, which
         // would read as "rated, nobody voted".
@@ -1112,7 +1124,7 @@ mod tests {
         assert_eq!(bad["capped"], false, "capped is a bool on every source, never absent");
 
         // The item shape is untouched — this is a sibling key, not a row field.
-        assert_eq!(v["items"][0].as_object().unwrap().len(), 16);
+        assert_eq!(v["items"][0].as_object().unwrap().len(), 17);
 
         // The plain table stays five columns — no source status leaks into it.
         let mut buf = Vec::new();

@@ -67,6 +67,7 @@ pub fn direct_keys(set: &DesiredSet) -> BTreeSet<NodeKey> {
         (ArtifactKind::Mcp, &set.mcp),
         (ArtifactKind::Hook, &set.hooks),
         (ArtifactKind::Settings, &set.settings),
+        (ArtifactKind::Mod, &set.mods),
     ]
     .into_iter()
     .flat_map(|(kind, declared)| declared.keys().map(move |name| (kind, name.clone())))

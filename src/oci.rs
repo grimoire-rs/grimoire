@@ -18,6 +18,7 @@ pub mod layer;
 pub mod manifest;
 pub mod mcp;
 pub mod member_ref;
+pub mod mod_manifest;
 pub mod pinned_identifier;
 pub mod reference;
 pub mod release;

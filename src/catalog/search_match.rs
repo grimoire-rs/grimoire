@@ -408,7 +408,7 @@ fn without_registry_host(repo: &str) -> &str {
 
 /// Map a lowercased token to a kind filter, accepting both singular and
 /// plural spellings of every kind (`skill`, `rule`, `bundle`, `agent`, `mcp`,
-/// `hook`, `settings`).
+/// `hook`, `settings`, `mod`).
 /// `None` for any other token (it is a text term).
 fn kind_keyword(token: &str) -> Option<ArtifactKind> {
     // One trailing `s` comes off both sides: `settings` is plural on the wire,

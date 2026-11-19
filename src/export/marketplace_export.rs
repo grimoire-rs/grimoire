@@ -558,7 +558,7 @@ fn refuse_linked_manifest(manifest: &Path) -> Result<(), ExportError> {
 /// directory (`con`, `aux`, ...) would make the repository unportable (C-015).
 fn check_plugin_names(manifest: &marketplace::MarketplaceManifest) -> Result<(), ExportError> {
     for name in manifest.plugins.keys() {
-        if let Some(reason) = archive::unportable_component(name) {
+        if let Some(reason) = crate::path_safety::unportable_component(name) {
             tracing::warn!("plugin name '{name}' {reason}");
             return Err(ExportError::UnsafeEntry {
                 path: PathBuf::from(name),
@@ -3115,6 +3115,7 @@ mod tests {
                 },
                 bundles: Vec::new(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }],
             rules: vec![],
             agents: vec![],
@@ -3122,6 +3123,7 @@ mod tests {
             hooks: vec![],
             settings: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         crate::lock::lock_io::save(&discovered.lock_path(), &lock, None).unwrap();
         let manifest = dir.join("marketplace.toml");

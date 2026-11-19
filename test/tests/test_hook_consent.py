@@ -85,7 +85,7 @@ def _rows(runner) -> list[dict]:
 
 
 def _consent_dir(runner) -> Path:
-    return Path(runner.grim_home) / "hooks" / "consent"
+    return Path(runner.grim_home) / "consent"
 
 
 def _records(runner) -> list[Path]:
@@ -254,7 +254,7 @@ def test_add_records_consent_because_typing_a_ref_is_the_gesture(
     runner.run("add", "--kind", "hook", hook.fq)
     record = _record_for(runner, project_dir)
     assert record is not None, "typing the ref consents to it"
-    assert record["hooks"] == [f"shell-guard@{REGISTRY_HOST}/{hook.repo}"]
+    assert record["sources"] == [f"shell-guard@{REGISTRY_HOST}/{hook.repo}"]
     assert len(_rows(runner)) == 1, "and the hook it named arms"
 
 
@@ -280,7 +280,7 @@ def test_add_unions_and_never_consents_to_a_hook_already_sitting_there(
 
     record = _record_for(runner, project_dir)
     assert record is not None
-    assert record["hooks"] == [f"wanted@{REGISTRY_HOST}/{wanted.repo}"], (
+    assert record["sources"] == [f"wanted@{REGISTRY_HOST}/{wanted.repo}"], (
         "adding one hook must not consent to another that was merely lying there"
     )
     armed = {row["artifact"] for row in _rows(runner)}
@@ -449,13 +449,13 @@ def test_allow_replaces_the_recorded_set_rather_than_growing_it(
     _enabled(runner)
     runner.run("lock")
     runner.run("hook", "allow")
-    assert len(_record_for(runner, project_dir)["hooks"]) == 2
+    assert len(_record_for(runner, project_dir)["sources"]) == 2
 
     write_config(project_dir, hooks={"shell-guard": first.fq})
     _enabled(runner)  # `write_config` rewrites the whole file, `[options]` included
     runner.run("lock")
     runner.run("hook", "allow")
-    assert _record_for(runner, project_dir)["hooks"] == [f"shell-guard@{REGISTRY_HOST}/{first.repo}"]
+    assert _record_for(runner, project_dir)["sources"] == [f"shell-guard@{REGISTRY_HOST}/{first.repo}"]
 
 
 def test_allow_refuses_the_global_scope_as_a_usage_error(
@@ -579,7 +579,7 @@ def test_the_record_is_machine_local_and_never_repo_resident(
     record = _record_for(runner, project_dir)
     assert record is not None, "the record lives under $GRIM_HOME, keyed on the workspace"
     assert record["workspace"] == str(project_dir), "the path is the identity, not the filename"
-    assert record["v"] == 1
+    assert record["v"] == 2
 
     inside = [p for p in project_dir.rglob("*consent*") if p.is_file()]
     assert inside == [], f"nothing consent-shaped may sit in the repository: {inside}"
@@ -605,7 +605,11 @@ def test_an_unreadable_record_degrades_to_unconsented_and_never_to_an_error(
     runner.run("install")
     assert len(_rows(runner)) == 1
 
-    for corrupt in ('{"v":99,"workspace":"/x","hooks":[],"consented_at":"x"}', '{"v":1,"work'):
+    for corrupt in (
+        '{"v":99,"workspace":"/x","sources":[],"consented_at":"x"}',
+        '{"v":1,"workspace":"/x","hooks":[],"consented_at":"x"}',
+        '{"v":2,"work',
+    ):
         _records(runner)[0].write_text(corrupt, encoding="utf-8", newline="\n")
         result = runner.run("install", check=False)
         assert result.returncode == 0, f"an unreadable record must not fail a command: {corrupt}"
@@ -660,7 +664,7 @@ def test_add_does_not_consent_preexisting_hook(
 
     record = _record_for(runner, project_dir)
     assert record is not None, "positive control: the newly reached hook is consented"
-    assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"]
+    assert record["sources"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"]
     # `planted` is still declared and unconsented, which is drift: nothing arms,
     # exactly as the `grim install` after this add would decide.
     assert _hook_names(_rows(runner)) == set()
@@ -689,7 +693,7 @@ def test_add_does_not_consent_when_closure_incomputable(
 
     record = _record_for(runner, project_dir)
     assert record is not None, "positive control: the genuinely new hook is consented"
-    assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"], record
+    assert record["sources"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"], record
     assert "planted" not in _hook_names(_rows(runner))
 
 
@@ -715,7 +719,7 @@ def test_add_bundle_does_not_consent_preexisting_member(
 
     record = _record_for(runner, project_dir)
     assert record is not None, "positive control: the bundle's new hook is consented"
-    assert record["hooks"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"], record
+    assert record["sources"] == [f"fresh@{REGISTRY_HOST}/{fresh.repo}"], record
     # `planted` (declared through `old`) is unconsented drift, so nothing arms.
     assert _hook_names(_rows(runner)) == set()
 
@@ -857,7 +861,7 @@ def _evict(runner, digest: str) -> None:
 
 def _consented(runner, workspace: Path) -> set[str]:
     record = _record_for(runner, workspace)
-    return set(record["hooks"]) if record else set()
+    return set(record["sources"]) if record else set()
 
 
 def _armed_in(runner, workspace: Path) -> set[str]:

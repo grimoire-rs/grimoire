@@ -1173,7 +1173,7 @@ pub(crate) fn recorded_refusal(
 /// The vendor variables that place it are environment, which a repository can
 /// set, so a relative root or one inside the work tree lets the repository
 /// pick the file grim writes (T3). Project scope is confined by [`landing`].
-fn root_refusal(file: &Path, scope: ConfigScope, fence: &RootFence) -> Option<SettingsDecline> {
+pub(crate) fn root_refusal(file: &Path, scope: ConfigScope, fence: &RootFence) -> Option<SettingsDecline> {
     if scope == ConfigScope::Project {
         return None;
     }
@@ -4078,6 +4078,7 @@ mod tests {
             let flags = crate::config::declaration::ExperimentalOptions {
                 hooks: false,
                 settings: self.feature,
+                ..Default::default()
             };
             let inputs = ConsentInputs {
                 flags: &flags,
@@ -4088,12 +4089,17 @@ mod tests {
                 registries: &[],
             };
             let record = ConsentRecord {
-                v: ConsentVersion::V1,
+                v: ConsentVersion::V2,
                 workspace: self.dir.path().to_path_buf(),
-                hooks: keys.clone(),
+                sources: keys.clone(),
                 consented_at: String::new(),
             };
-            ConsentPolicies::new(&inputs, Some(&record), &keys).settings
+            ConsentPolicies::new(
+                &inputs,
+                Some(&record),
+                &crate::hook::consent::DeclaredKeys::from([(ArtifactKind::Settings, keys)]),
+            )
+            .settings
         }
 
         async fn lock(&self, packages: &[(&str, &str)]) -> GrimoireLock {

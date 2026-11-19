@@ -17,6 +17,54 @@ effect and called out as breaking where it appears. Three more are what grim
 0.16.0 packs for a [rule][ref-rule-support-dir] and an [agent][ref-agent-companions],
 and which [logo][ref-logo-svg] a package publishes.
 
+## Consent is asked again once per workspace {#consent-reask}
+
+The workspace consent record moved from `$GRIM_HOME/hooks/consent/` to
+`$GRIM_HOME/consent/`, one record for every gated kind. Its entries lose their
+kind prefix. A hook entry stays `<binding>@<registry>/<repository>`, and a
+settings entry loses its `settings:` prefix.
+
+**What you will see.** The first `grim install` in each workspace after the
+upgrade asks for consent again, because grim never reads the old record. With
+no terminal, hooks and settings read `gated` with the cause
+`workspace-not-consented`.
+
+A persistent machine that runs grim non-interactively loses the grant it held.
+Pass `--trust-workspace` on that run, or run `grim consent allow` once. A fresh
+CI environment held no stored record, so it is unaffected.
+
+On every write and every revoke, grim deletes the old record when its
+`workspace` field names the current workspace. A revoke therefore reaches an
+older grim too. The reverse does not hold: an older grim's `grim hook revoke`
+never removes the new record. Revoke with the grim that granted.
+
+## Mods need grim 0.17.0 {#upgrade-mods}
+
+The experimental [`mod` kind][mods] ships in grim 0.17.0 behind
+`[options.experimental] mods`. A project that declares no mod is unchanged,
+apart from `serves: null` on every `status`, `describe` and `search` item. An
+older grim fails closed on a mod project, as the
+[forward compatibility table][stability-forward-compat] lists.
+
+Two rules keep a mixed team working:
+
+- Add the `[options.vendors.opencode] plugin_api = "v2"` key to a project
+  config freely. That config already exits `78` on an older grim, because of
+  the `mods` flag beside it.
+- Set `plugin_api` in the global config only once no older grim runs on the
+  machine. On grim 0.15.1 and 0.16.0, project commands ignore an unusable
+  global option and exit `0`, and 0.16.0 warns. Every `--global` command
+  exits `78`.
+
+Where `grimoire.toml` has no `[mods]` table, a mod is reached only through a
+`requires` edge or a stale row. There grim 0.15.1's `lock`, `update` and `add`
+drop every `[[mod]]` row with exit `0`. The mod's files stay and keep loading
+until a newer grim converges.
+
+A skill whose root carries a Claude plugin manifest directory is refused from
+this release. See [the skill note](#skill-plugin-manifest). Client-loaded code
+ships as a mod.
+
 ## Adding a client changes what autodetect targets {#autodetect}
 
 grim installs into every AI client it detects, unless you pin the set with
@@ -1320,6 +1368,79 @@ instead.
 the agent needs at run time belong in a skill it requires, which
 [`requires`][requires] declares the same way as for a rule.
 
+## A skill can no longer carry a Claude plugin manifest {#skill-plugin-manifest}
+
+**Breaking.** From grim 0.17.0 a skill whose root holds a Claude plugin
+manifest directory, `.claude-plugin`, is refused. Name matching is
+case-insensitive and also catches the spellings a filesystem folds onto that
+name, such as a trailing dot or space. Any entry type at the skill root counts,
+a directory or a file. The same name below the root is still allowed.
+
+This covers `grim build`, `grim release` and `grim publish`. The check runs on
+the files that would ship, so an entry [`.grimignore`](./artifacts.md#grimignore)
+excludes is not refused. A batch `grim publish` checks every skill before its
+first push, so a refused skill leaves nothing published, `--dry-run` included.
+
+A skill declared by local path is refused the same way by `grim lock`,
+`grim update`, `grim add <path>` and `grim install <path>`. `grim install`,
+`grim add` and `grim update` refuse a registry skill that carries the entry, as
+do the [TUI][tui] and `grim export plugin` and `grim export marketplace`. The
+MCP `grim_render` tool returns a tool error for it. Every refusal exits `65`
+with the reason `skill-plugin-manifest`, and the message reads:
+
+```text
+a skill can no longer ship a Claude plugin manifest (since grim 0.17.0)
+  found in <dir>/: <entry>
+  why: a skill package must not carry code a client loads; that code ships as the consent-gated `mod` kind
+  fix: publish it as a mod, ship the plugin through a marketplace, or list <entry> in .grimignore
+  see https://grimoire.rs/upgrading.html#skill-plugin-manifest
+```
+
+**Why.** A skill package carries instructions, not code a client loads. Code a
+client loads belongs to the `mod` kind, which asks for your consent first.
+
+**Who is affected.** A publisher whose skill root holds the entry, and anyone
+who installs such a skill, from a registry or from a local path. A skill with
+no such entry at its root builds to the same digest and installs the same bytes
+as before.
+
+**The fix.** As a publisher, pick one:
+
+- ship the client-loaded code as the consent-gated `mod` kind,
+- ship the plugin through a marketplace, with
+  [`grim export marketplace`][export-marketplace],
+- list the entry in `.grimignore`, when it was never meant to ship.
+
+As a consumer, install a version without the entry, or run
+`grim remove skill <name>` to drop the declaration. A fresh refusal writes
+nothing for any client, and every other declared row still installs.
+`--force` does not lift it.
+
+**Already installed.** grim does not delete what an earlier version wrote.
+Every install-type run fails with exit `65` for a skill whose installed
+files hold the entry. That covers `grim install`, `grim add <other>`,
+`grim update` with no clean version, and the TUI. The run leaves its files, `state.json` and `grimoire.lock`
+byte-unchanged. `--offline` and `--force` give the same result.
+
+Two residuals stay until you act. The files remain on that machine until
+`grim update` moves the skill to a version without the entry, or
+`grim uninstall skill <name>` removes it. [`grim status`][status] still reads
+the skill `installed`, exits `0` and keeps its JSON as before. It adds one
+line on stderr that names the skill.
+
+**Reach.** The refusal also fires for an installed record whose output sits
+under a client outside `--client`, because every recorded output is checked. A
+dev install (`grim install ./path`) that carries the entry makes `grim install`
+and `grim update` exit `65` with the reason `skill-plugin-manifest`.
+`grim status` keeps exit `0` with its stderr line, and
+`grim uninstall skill <name>` succeeds. A dev install of a different directory
+is not refused by a stale dev record elsewhere.
+
+**Grims before 0.17.0.** They still build and install such a skill, and this
+change cannot reach them. Upgrade every machine and CI job that builds or
+installs skills. Run on a machine where `grim uninstall` removed the files, such
+a grim reinstalls the skill.
+
 ## Each package's own README and logo become its description {#package-readme-companion}
 
 `grim publish` used to give every entry the repository-level README and logo.
@@ -1724,6 +1845,8 @@ accepts a pipe. See [Non-regular files][json-error-document].
 [entry-readme]: ./publishing.md#description-entry-readme
 [agents-limitations]: ./agents.md#limitations
 [agent-locations]: ./agents.md#locations
+[mods]: ./mods.md
+[stability-forward-compat]: ./stability.md#limitations-forward-compat
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
 [mcp-oauth]: ./mcp-servers.md#server-oauth
 [git-provenance]: ./publishing.md#git-provenance

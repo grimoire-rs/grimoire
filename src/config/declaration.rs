@@ -321,6 +321,14 @@ pub struct ExperimentalOptions {
     /// Enabling the feature is not consent to apply any particular package.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub settings: bool,
+    /// Controls whether `grim install` renders declared mods into the
+    /// clients that host them. When unset, install writes and removes no
+    /// mod output; no environment variable overrides this.
+    ///
+    /// Set it with `grim config set options.experimental.mods true`, in
+    /// project or global config. Declaring and locking a mod needs no flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mods: bool,
 }
 
 impl ExperimentalOptions {
@@ -354,6 +362,16 @@ impl ExperimentalOptions {
     pub fn settings_enabled(&self) -> bool {
         self.settings
     }
+
+    /// The effective mods flag: the config key is the whole answer, as for
+    /// [`Self::hooks_enabled`].
+    #[allow(
+        dead_code,
+        reason = "the mod install phase reads this flag; only config tests call it until that phase lands"
+    )]
+    pub fn mods_enabled(&self) -> bool {
+        self.mods
+    }
 }
 
 /// Per-client rendering options, nested under `[options.vendors.<name>]`.
@@ -376,6 +394,14 @@ pub struct VendorOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "bool")]
     pub shared_skills: Option<bool>,
+    /// Names the plugin API generation this client's host runs, for the
+    /// mods grim renders into it. Only `opencode` hosts mods through a
+    /// plugin API; the one accepted value today is `v2`. Unset, grim
+    /// renders no plugin-API-specific output. The resolved scope's value is
+    /// the only source: there is no cross-scope merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub plugin_api: Option<String>,
 }
 
 /// Optional config options shared by both scopes.
@@ -611,6 +637,9 @@ pub struct DesiredSet {
     /// Declared settings packages, keyed by config name. Always `Registry` —
     /// the config parser rejects path values under `[settings]`.
     pub settings: BTreeMap<String, DeclaredSource>,
+    /// Declared mods, keyed by config name. Always `Registry` — the config
+    /// parser rejects path values under `[mods]`.
+    pub mods: BTreeMap<String, DeclaredSource>,
 
     /// Lazily-computed canonical declaration hash.
     ///
@@ -634,6 +663,7 @@ impl Clone for DesiredSet {
             mcp: self.mcp.clone(),
             hooks: self.hooks.clone(),
             settings: self.settings.clone(),
+            mods: self.mods.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -649,6 +679,7 @@ impl PartialEq for DesiredSet {
             && self.mcp == other.mcp
             && self.hooks == other.hooks
             && self.settings == other.settings
+            && self.mods == other.mods
     }
 }
 
@@ -695,6 +726,7 @@ impl DesiredSet {
             // signature stays at the four kinds every fixture already passes.
             hooks: BTreeMap::new(),
             settings: BTreeMap::new(),
+            mods: BTreeMap::new(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -710,6 +742,7 @@ impl DesiredSet {
             ArtifactKind::Mcp => &self.mcp,
             ArtifactKind::Hook => &self.hooks,
             ArtifactKind::Settings => &self.settings,
+            ArtifactKind::Mod => &self.mods,
         }
     }
 
@@ -836,12 +869,14 @@ mod tests {
             "cursor".to_string(),
             VendorOptions {
                 shared_skills: Some(true),
+                ..Default::default()
             },
         );
         populated.vendors.insert(
             "opencode".to_string(),
             VendorOptions {
                 shared_skills: Some(false),
+                ..Default::default()
             },
         );
         let round_tripped: ConfigOptions =
@@ -852,7 +887,8 @@ mod tests {
         // skipped on the way out.
         assert_eq!(
             serde_json::to_value(VendorOptions {
-                shared_skills: Some(false)
+                shared_skills: Some(false),
+                ..Default::default()
             })
             .expect("serialize"),
             serde_json::json!({ "shared_skills": false }),

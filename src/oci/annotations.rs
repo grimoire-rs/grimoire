@@ -307,6 +307,39 @@ pub fn keywords_from_annotations(annotations: &BTreeMap<String, String>) -> Vec<
         .unwrap_or_default()
 }
 
+/// Annotation key carrying the clients a `mod` package serves: a
+/// comma-separated list of `[a-z0-9]+` names, read by
+/// [`mod_clients_from_annotations`].
+pub const MOD_CLIENTS_ANNOTATION: &str = "com.grimoire.mod.clients";
+
+/// Read the served clients off a mod manifest: the [`MOD_CLIENTS_ANNOTATION`]
+/// value split on commas, each name `[a-z0-9]+`, returned sorted and unique.
+/// An unknown name that fits the pattern is kept, so a newer client reaches an
+/// older grim's lock intact.
+///
+/// # Errors
+///
+/// [`ModError::MissingClients`] when the annotation is absent, and
+/// [`ModError::InvalidClients`] when it is empty or a name breaks the pattern.
+pub fn mod_clients_from_annotations(
+    annotations: &BTreeMap<String, String>,
+) -> Result<Vec<String>, crate::oci::mod_manifest::ModError> {
+    use crate::oci::mod_manifest::ModError;
+    let value = annotations
+        .get(MOD_CLIENTS_ANNOTATION)
+        .ok_or(ModError::MissingClients)?;
+    let valid = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    if !value.split(',').all(valid) {
+        return Err(ModError::InvalidClients {
+            value: crate::oci::text::registry_text(value),
+        });
+    }
+    let mut names: Vec<String> = value.split(',').map(str::to_string).collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// An authored `repository` metadata value rejected at publish time.
 ///
 /// Raised at publish time (`grim build` / `grim release`) so a bad value
@@ -896,6 +929,55 @@ pub fn annotations_for_hook(
     a
 }
 
+/// Build the manifest annotation map for a mod artifact: the
+/// [`annotations_for_hook`] shape plus [`MOD_CLIENTS_ANNOTATION`], the
+/// sorted, comma-joined harness directory names `clients`.
+pub fn annotations_for_mod(
+    manifest: &crate::oci::mod_manifest::ModManifest,
+    clients: &[String],
+    version: &str,
+    fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
+    defaults: &MetadataDefaults,
+) -> BTreeMap<String, String> {
+    let mut a = BTreeMap::new();
+    a.insert("org.opencontainers.image.title".to_string(), manifest.name.clone());
+    a.insert(
+        "org.opencontainers.image.description".to_string(),
+        manifest.description.clone(),
+    );
+    a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Mod.to_string());
+    let mut sorted = clients.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    a.insert(MOD_CLIENTS_ANNOTATION.to_string(), sorted.join(","));
+    if let Some(license) = defaults.license.as_deref() {
+        a.insert("org.opencontainers.image.licenses".to_string(), license.to_string());
+    }
+    if let Some(src) = source_annotation(SourceInputs {
+        authored: defaults.repository.as_deref(),
+        git,
+        fallback: fallback_source,
+    }) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
+    }
+    insert_git_provenance(&mut a, git);
+    insert_descriptive(
+        &mut a,
+        &DescriptiveInputs {
+            authors: defaults.authors.as_deref(),
+            vendor: defaults.vendor.as_deref(),
+            url: defaults.homepage.as_deref(),
+            documentation: defaults.documentation.as_deref(),
+        },
+        git,
+        None,
+        fallback_source,
+    );
+    a
+}
+
 /// Extract a scalar string `key` from a rule's forward-compat `extra` map.
 /// Catalog metadata (`keywords`, `summary`, `repository`) is authored as a
 /// plain string — keywords are comma-separated, matching the on-the-wire
@@ -908,6 +990,66 @@ pub fn string_from_extra(fm: &RuleFrontmatter, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn clients_of(value: Option<&str>) -> Result<Vec<String>, crate::oci::mod_manifest::ModError> {
+        let map = value
+            .map(|v| BTreeMap::from([(MOD_CLIENTS_ANNOTATION.to_string(), v.to_string())]))
+            .unwrap_or_default();
+        mod_clients_from_annotations(&map)
+    }
+
+    #[test]
+    fn mod_clients_are_sorted_unique_and_unknown_names_kept() {
+        assert_eq!(
+            clients_of(Some("opencode,claude,claude,zed9")).unwrap(),
+            ["claude", "opencode", "zed9"]
+        );
+    }
+
+    #[test]
+    fn mod_clients_refuse_a_missing_empty_or_malformed_annotation() {
+        use crate::oci::mod_manifest::ModError;
+        assert!(matches!(clients_of(None), Err(ModError::MissingClients)));
+        for bad in [
+            "",
+            "claude,",
+            ",claude",
+            "Claude",
+            "claude opencode",
+            "claude;x",
+            "clau-de",
+        ] {
+            assert!(
+                matches!(clients_of(Some(bad)), Err(ModError::InvalidClients { .. })),
+                "{bad:?}"
+            );
+        }
+        assert!(clients_of(Some("claude")).is_ok(), "positive control");
+    }
+
+    #[test]
+    fn mod_annotations_carry_kind_and_sorted_clients() {
+        let manifest = crate::oci::mod_manifest::ModManifest::from_build_toml(
+            "schema = 1\nname = \"band\"\ndescription = \"d\"\n",
+            "band",
+        )
+        .unwrap();
+        let a = annotations_for_mod(
+            &manifest,
+            &["opencode".to_string(), "claude".to_string()],
+            "1.0.0",
+            None,
+            None,
+            &MetadataDefaults::default(),
+        );
+        assert_eq!(a[KIND_ANNOTATION], "mod");
+        assert_eq!(a[MOD_CLIENTS_ANNOTATION], "claude,opencode");
+        assert_eq!(a["org.opencontainers.image.title"], "band");
+        assert_eq!(
+            mod_clients_from_annotations(&a).unwrap(),
+            vec!["claude".to_string(), "opencode".to_string()]
+        );
+    }
 
     #[test]
     fn hook_annotations_apply_catalog_defaults() {

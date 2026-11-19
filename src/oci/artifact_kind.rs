@@ -61,6 +61,10 @@ pub enum ArtifactKind {
     /// Harness settings: typed values for each client, merged key by key into
     /// that client's own settings file. Never a materialized file of its own.
     Settings,
+    /// A mod: a directory artifact carrying a client-side extension (a plugin
+    /// for each harness it serves). Declared and locked like any kind; no
+    /// client hosts it yet.
+    Mod,
 }
 
 impl ArtifactKind {
@@ -74,7 +78,7 @@ impl ArtifactKind {
     /// (C-016(a) in `plan_hooks_artifact_kind.md`). An array is not itself
     /// compiler-checked for exhaustiveness — [`all_index`](Self::all_index) is
     /// the total `match` that makes a new variant a `cargo check` failure here.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Skill,
         Self::Rule,
         Self::Agent,
@@ -82,6 +86,7 @@ impl ArtifactKind {
         Self::Mcp,
         Self::Hook,
         Self::Settings,
+        Self::Mod,
     ];
 
     /// This kind's position in [`ALL`](Self::ALL).
@@ -114,11 +119,12 @@ impl ArtifactKind {
             Self::Mcp => 4,
             Self::Hook => 5,
             Self::Settings => 6,
+            Self::Mod => 7,
         }
     }
 
     /// The lowercase kind string (`skill`/`rule`/`agent`/`bundle`/`mcp`/
-    /// `hook`/`settings`) — the value of the [`KIND_ANNOTATION`] and of the `--kind` CLI
+    /// `hook`/`settings`/`mod`) — the value of the [`KIND_ANNOTATION`] and of the `--kind` CLI
     /// flag. The single source of truth for the spelling: [`Display`] and
     /// [`from_kind_str`](Self::from_kind_str) both go through it.
     ///
@@ -132,6 +138,7 @@ impl ArtifactKind {
             Self::Mcp => "mcp",
             Self::Hook => "hook",
             Self::Settings => "settings",
+            Self::Mod => "mod",
         }
     }
 
@@ -145,11 +152,12 @@ impl ArtifactKind {
             Self::Mcp => "mcp",
             Self::Hook => "hooks",
             Self::Settings => "settings",
+            Self::Mod => "mods",
         }
     }
 
     /// Parse the lowercase kind string
-    /// (`skill`/`rule`/`agent`/`bundle`/`mcp`/`hook`/`settings`) into a kind.
+    /// (`skill`/`rule`/`agent`/`bundle`/`mcp`/`hook`/`settings`/`mod`) into a kind.
     /// `None` for any other string. Used to interpret the `--kind` CLI flag
     /// and the `com.grimoire.kind` annotation (the on-the-wire discriminator,
     /// see [`KIND_ANNOTATION`]); this string is not itself the wire format.
@@ -171,6 +179,7 @@ impl ArtifactKind {
             Self::Mcp => "application/vnd.grimoire.mcp.v1",
             Self::Hook => "application/vnd.grimoire.hook.v1",
             Self::Settings => "application/vnd.grimoire.settings.v1",
+            Self::Mod => "application/vnd.grimoire.mod.v1",
         }
     }
 
@@ -185,11 +194,12 @@ impl ArtifactKind {
             Self::Rule => "application/vnd.grimoire.rule.config.v1+json",
             Self::Agent => "application/vnd.grimoire.agent.config.v1+json",
             Self::Bundle => "application/vnd.grimoire.bundle.config.v1+json",
-            // Mcp, Hook and Settings postdate the legacy artifactType/config-media-type
+            // Mcp, Hook, Settings and Mod postdate the legacy artifactType/config-media-type
             // wire formats; the strings exist only to keep these methods total.
             Self::Mcp => "application/vnd.grimoire.mcp.config.v1+json",
             Self::Hook => "application/vnd.grimoire.hook.config.v1+json",
             Self::Settings => "application/vnd.grimoire.settings.config.v1+json",
+            Self::Mod => "application/vnd.grimoire.mod.config.v1+json",
         }
     }
 
@@ -216,7 +226,7 @@ impl ArtifactKind {
     )]
     pub fn is_dir_artifact(self) -> bool {
         match self {
-            Self::Skill | Self::Hook => true,
+            Self::Skill | Self::Hook | Self::Mod => true,
             Self::Rule | Self::Agent | Self::Bundle | Self::Mcp | Self::Settings => false,
         }
     }
@@ -281,14 +291,29 @@ mod tests {
         // handlers invoke (C-001).
         assert!(ArtifactKind::Hook.is_dir_artifact());
         assert!(!ArtifactKind::Settings.is_dir_artifact());
+        assert_eq!(ArtifactKind::Mod.subdir(), "mods");
+        assert!(ArtifactKind::Mod.is_dir_artifact());
     }
 
     /// `BundleManifest::new` sorts members by the derived `Ord`, so a kind
     /// placed anywhere but last reorders the bytes of a published bundle layer.
     #[test]
     fn settings_is_appended_last_and_sorts_last() {
-        use ArtifactKind::{Agent, Bundle, Hook, Mcp, Rule, Settings, Skill};
-        assert_eq!(ArtifactKind::ALL, [Skill, Rule, Agent, Bundle, Mcp, Hook, Settings]);
+        use ArtifactKind::{Agent, Bundle, Hook, Mcp, Mod, Rule, Settings, Skill};
+        assert_eq!(
+            ArtifactKind::ALL,
+            [Skill, Rule, Agent, Bundle, Mcp, Hook, Settings, Mod]
+        );
+        let mut sorted = ArtifactKind::ALL;
+        sorted.sort();
+        assert_eq!(sorted, ArtifactKind::ALL);
+    }
+
+    #[test]
+    fn mod_is_appended_last_and_sorts_last() {
+        assert_eq!(ArtifactKind::ALL.last(), Some(&ArtifactKind::Mod));
+        assert_eq!(ArtifactKind::ALL.len(), 8);
+        assert!(ArtifactKind::Settings < ArtifactKind::Mod);
         let mut sorted = ArtifactKind::ALL;
         sorted.sort();
         assert_eq!(sorted, ArtifactKind::ALL);
@@ -307,6 +332,18 @@ mod tests {
             kind.config_media_type(),
             "application/vnd.grimoire.settings.config.v1+json"
         );
+    }
+
+    #[test]
+    fn mod_token_round_trips() {
+        let kind = ArtifactKind::Mod;
+        assert_eq!(kind.kind_str(), "mod");
+        assert_eq!(kind.to_string(), "mod");
+        assert_eq!(ArtifactKind::from_kind_str("mod"), Some(kind));
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"mod\"");
+        assert_eq!(serde_json::from_str::<ArtifactKind>("\"mod\"").unwrap(), kind);
+        assert_eq!(kind.artifact_type(), "application/vnd.grimoire.mod.v1");
+        assert_eq!(kind.config_media_type(), "application/vnd.grimoire.mod.config.v1+json");
     }
 
     /// The runtime half of C-016(a). `all_index`'s total `match` forces an arm

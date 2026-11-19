@@ -252,6 +252,17 @@ Ask the publisher of the named repository to move them into a required skill.
 It prints once per such rule, only when grim writes files, not on a no-op
 install.
 
+## A Skill With a Plugin Manifest
+
+Exit 65 with reason `skill-plugin-manifest` (grim 0.17.0 and later) means a
+skill's root holds a `.claude-plugin` entry. It is refused at build, publish,
+install, add, update, lock and export. A skill an older grim already installed
+keeps its files, and every install-type run fails until `grim update` reaches
+a version without the entry or `grim uninstall skill <name>` removes it; `grim
+status` still reads `installed` (exit 0) and names the skill on stderr. The refusal also covers an installed record whose output sits under a client outside `--client`, and `grim install` and `grim update` refuse while a dev install (`grim install ./path`) carries the refused entry; `grim uninstall skill <name>` still succeeds. Publisher fix:
+ship it as a `mod`, ship the plugin through a marketplace, or list the entry in
+`.grimignore`. Link: `https://grimoire.rs/upgrading.html#skill-plugin-manifest`.
+
 ## A Held-Back Request
 
 A warning that `skill/x is requested by skill/p as <ref>, but your declaration
@@ -380,7 +391,7 @@ working as designed. Nothing here is a bug to chase:
 ```sh
 grim hook list                                    # what is declared, and its state
 grim config get options.experimental.hooks        # exit 1 = off (see below); prints true = on
-ls "$GRIM_HOME/hooks/consent/"                    # one file per consented workspace
+ls "$GRIM_HOME/consent/"                    # one file per consented workspace
 ```
 
 **The machine contract.** `grim install` rows carry `armed` (null for a
@@ -412,7 +423,7 @@ Work through it in this order:
    "off" looks like**.
 2. **This workspace's consent.** A separate question from the flag, and one
    no config file answers. Consent is a machine-local record under
-   `$GRIM_HOME/hooks/consent/`, one file per workspace, and only three
+   `$GRIM_HOME/consent/`, one file per workspace, and only three
    things write one: `grim hook allow`, `grim add`, and a prompt you
    accepted. `grim install` deliberately does not — which is why a hook that
    arrived with a `git clone` reports `workspace-not-consented` however many
@@ -532,6 +543,27 @@ Gates](#integrity-gates). A settings file whose value changed during the run
 exits 75 (`locked`, retryable) and is left untouched; one that then no longer
 parses exits 65. Details: [Settings][settings-ref].
 
+## A Mod That Never Loads
+
+**Expected, not a fault.** Mods are experimental and off by default. The row
+reads `gated` with a `cause` (`feature-flag-off`, `workspace-not-consented`,
+`consent-drifted`); branch on `cause`, never on `message`.
+
+1. Set `options.experimental.mods` (config-only, `--global` for global scope).
+2. Record consent: `grim consent allow`, or pass `--trust-workspace` on one run.
+3. OpenCode also needs `options.vendors.opencode.plugin_api = "v2"` in the
+   scope's config, or the install warns and writes nothing for it.
+4. Claude reserves some names (`claude`, `anthropic`, prefixes `claude-`,
+   `anthropic-`, `cc-plugin-`); bind the mod to another name.
+
+Advisory causes exit 0: `mod-files-tracked` (git tracks a file grim wrote),
+`mod-files-present` (files sit at the expected paths and grim does not own
+them), `mod-disabled-in-client` (the client records the plugin as disabled;
+`--force` restores it). After `grim consent revoke` a written mod reads
+`installed` until the next converging command disarms it. `installed` never
+means running: the client can skip a written mod under its own policy. Details:
+[Mod reference][mods-ref].
+
 ## Marketplace and Plugin Export
 
 Symptom, cause, fix for `grim export marketplace` and the manifests it reads
@@ -632,6 +664,7 @@ Exit 80 is the registry rejecting your credential. Things to know:
 [ht-windows]: https://grimoire.rs/hooks-troubleshooting.html#platform-unsupported
 [ht-full]: https://grimoire.rs/hooks-troubleshooting.html#dispatch-full
 [ht-unreadable]: https://grimoire.rs/hooks-troubleshooting.html#dispatch-unreadable
+[mods-ref]: https://grimoire.rs/mods.html
 [settings-ref]: https://grimoire.rs/settings.html
 [ht-payload]: https://grimoire.rs/hooks-troubleshooting.html#payload-unarmable
 [mk-tokens]: https://grimoire.rs/guides/hosting-a-marketplace.html#tokens

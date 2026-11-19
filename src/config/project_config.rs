@@ -105,6 +105,8 @@ struct RawConfig {
     hooks: BTreeMap<String, String>,
     #[serde(default)]
     settings: BTreeMap<String, String>,
+    #[serde(default)]
+    mods: BTreeMap<String, String>,
 }
 
 /// The JSON Schema (schemars) for the on-disk `grimoire.toml` shape.
@@ -232,6 +234,8 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     // A settings package has no local-pack path, as `[mcp]` has none, and a
     // path value would give the workspace consent key no registry to name.
     let settings = parse_artifact_map(&raw.settings, &path, PathValues::Rejected, ArtifactKind::Settings)?;
+    // A mod has no local-pack path either, and its consent key needs a registry.
+    let mods = parse_artifact_map(&raw.mods, &path, PathValues::Rejected, ArtifactKind::Mod)?;
     let mut set = DesiredSet::from_maps(skills, rules, agents, bundles);
     set.mcp = mcp;
     let mut plugin = raw.plugin;
@@ -241,6 +245,7 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     }
     set.hooks = hooks;
     set.settings = settings;
+    set.mods = mods;
     Ok(ProjectConfig {
         options: raw.options,
         registries: raw.registries,
@@ -659,6 +664,36 @@ pub(crate) fn check_vendor_name(name: &str) -> Result<(), ClientsInvalid> {
     check_clients(std::slice::from_ref(&name.to_string()))
 }
 
+/// The closed set of values `plugin_api` accepts.
+pub(crate) const PLUGIN_API_VALUES: &[&str] = &["v2"];
+
+/// The only client whose host declares a plugin API.
+const PLUGIN_API_CLIENT: &str = "opencode";
+
+/// Validate a `plugin_api` declaration: only under `opencode`, and only a
+/// value in [`PLUGIN_API_VALUES`]. Shared by `config set` (exit 65) and load
+/// time ([`validate_vendors`], exit 78) so the two cannot drift.
+///
+/// # Errors
+///
+/// The reason, ready to render after `invalid options.vendors: `.
+pub(crate) fn check_plugin_api(name: &str, value: &str) -> Result<(), String> {
+    if name != PLUGIN_API_CLIENT {
+        return Err(format!(
+            "plugin_api is only valid under the '{PLUGIN_API_CLIENT}' client, not '{}'",
+            name.escape_debug()
+        ));
+    }
+    if !PLUGIN_API_VALUES.contains(&value) {
+        return Err(format!(
+            "plugin_api '{}' is not supported; valid values: {}",
+            value.escape_debug(),
+            PLUGIN_API_VALUES.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse `shared_skills = true` on a client that does not read the shared
 /// `$HOME/.agents/skills` pool.
 ///
@@ -734,6 +769,10 @@ fn validate_vendors(vendors: &BTreeMap<String, VendorOptions>, path: &Path) -> R
         // `false` is an opt-out and fine on any client.
         if opts.shared_skills == Some(true) {
             check_pool_capable(name)
+                .map_err(|detail| ConfigError::new(path.to_path_buf(), ConfigErrorKind::VendorsInvalid { detail }))?;
+        }
+        if let Some(api) = &opts.plugin_api {
+            check_plugin_api(name, api)
                 .map_err(|detail| ConfigError::new(path.to_path_buf(), ConfigErrorKind::VendorsInvalid { detail }))?;
         }
     }
@@ -819,6 +858,9 @@ pub struct BundleSource {
     /// declaration: delivery stays the install seam's decision, however the
     /// package was reached.
     pub settings: BTreeMap<String, MemberRef>,
+    /// Mod members, name → validated member reference. Appended after every
+    /// other member table; a declaration, like `[hooks]`.
+    pub mods: BTreeMap<String, MemberRef>,
     /// Catalog metadata for the bundle artifact.
     pub metadata: BundleMetadata,
 }
@@ -888,6 +930,9 @@ struct RawBundleSource {
     /// is `ArtifactKind`'s last variant, so an existing bundle keeps its bytes.
     #[serde(default)]
     settings: BTreeMap<String, String>,
+    /// Appended after `settings`, so an existing bundle keeps its bytes.
+    #[serde(default)]
+    mods: BTreeMap<String, String>,
 }
 
 /// Parse + validate a bundle source: members through [`parse_member_map`]
@@ -903,6 +948,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
     let mcp = parse_member_map(&raw.mcp, &path)?;
     let bundles = parse_member_map(&raw.bundles, &path)?;
     let settings = parse_member_map(&raw.settings, &path)?;
+    let mods = parse_member_map(&raw.mods, &path)?;
     Ok(BundleSource {
         skills,
         rules,
@@ -911,6 +957,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
         mcp,
         bundles,
         settings,
+        mods,
         metadata: BundleMetadata {
             summary: raw.summary,
             keywords: raw.keywords,
@@ -1112,6 +1159,7 @@ mod tests {
                 "local-settings",
                 "settings artifacts",
             ),
+            ("mods", ArtifactKind::Mod, "local-mod", "mod artifacts"),
         ] {
             let raw = BTreeMap::from([(name.to_string(), "./somewhere".to_string())]);
             let error = parse_artifact_map(&raw, Path::new("grimoire.toml"), PathValues::Rejected, kind)
@@ -2070,7 +2118,9 @@ rust-style = "ghcr.io/acme/rust-style:2"
     /// in every table, before anything can be written.
     #[test]
     fn grimoire_toml_rejects_traversal_capable_declaration_keys() {
-        for table in ["skills", "rules", "agents", "bundles", "mcp", "hooks", "settings"] {
+        for table in [
+            "skills", "rules", "agents", "bundles", "mcp", "hooks", "settings", "mods",
+        ] {
             for key in [
                 "../../escaped",
                 "..",
@@ -2647,6 +2697,61 @@ tree_separators = ["/", "::"]
             err.kind.to_string().starts_with("invalid options.vendors: "),
             "rendered kind must carry the VendorsInvalid prefix: {}",
             err.kind
+        );
+    }
+
+    #[test]
+    fn plugin_api_under_opencode_is_accepted() {
+        let cfg = ProjectConfig::from_toml_str("[options.vendors.opencode]\nplugin_api = \"v2\"\n")
+            .expect("plugin_api v2 under opencode must parse");
+        assert_eq!(cfg.options.vendors["opencode"].plugin_api.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn plugin_api_under_claude_is_refused() {
+        let err = ProjectConfig::from_toml_str("[options.vendors.claude]\nplugin_api = \"v2\"\n")
+            .expect_err("plugin_api under a client other than opencode must be refused");
+        let ConfigErrorKind::VendorsInvalid { detail } = &err.kind else {
+            panic!("expected VendorsInvalid, got {:?}", err.kind);
+        };
+        assert!(detail.contains("opencode"), "{detail}");
+    }
+
+    #[test]
+    fn plugin_api_v3_is_refused() {
+        let err = ProjectConfig::from_toml_str("[options.vendors.opencode]\nplugin_api = \"v3\"\n")
+            .expect_err("a plugin_api outside the closed set must be refused");
+        let ConfigErrorKind::VendorsInvalid { detail } = &err.kind else {
+            panic!("expected VendorsInvalid, got {:?}", err.kind);
+        };
+        assert!(detail.contains("v2"), "{detail}");
+    }
+
+    #[test]
+    fn an_empty_mods_table_leaves_the_declaration_hash() {
+        let plain = ProjectConfig::from_toml_str("[skills]\n[rules]\n").unwrap();
+        let with_empty = ProjectConfig::from_toml_str("[skills]\n[rules]\n[mods]\n").unwrap();
+        assert_eq!(
+            plain.set.declaration_hash_cached(),
+            with_empty.set.declaration_hash_cached()
+        );
+    }
+
+    #[test]
+    fn mods_table_parses_into_the_desired_set() {
+        let cfg = ProjectConfig::from_toml_str("[mods]\nstatus = \"ghcr.io/acme/mods/status:1\"\n")
+            .expect("[mods] must parse");
+        assert_eq!(cfg.set.mods.len(), 1);
+        assert_eq!(cfg.set.table(ArtifactKind::Mod).len(), 1);
+    }
+
+    #[test]
+    fn a_mods_path_value_exits_at_parse() {
+        let err = ProjectConfig::from_toml_str("[mods]\nlocal = \"./mods/local\"\n")
+            .expect_err("a path value must be refused in [mods]");
+        assert!(
+            matches!(err.kind, ConfigErrorKind::ArtifactValuePathInvalid { .. }),
+            "{err:?}"
         );
     }
 

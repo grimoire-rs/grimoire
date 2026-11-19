@@ -38,7 +38,8 @@
       "as_of": "2026-09-10T21:48:47Z"
     },
     "oci": {},
-    "status": "not-installed"
+    "status": "not-installed",
+    "serves": null
   },
   {
     "kind": "skill",
@@ -68,7 +69,8 @@
       "as_of": "2026-09-10T21:48:47Z"
     },
     "oci": {},
-    "status": "not-installed"
+    "status": "not-installed",
+    "serves": null
   },
   {
     "kind": "rule",
@@ -92,6 +94,7 @@
     },
     "downloads": null,
     "oci": {},
-    "status": "not-installed"
+    "status": "not-installed",
+    "serves": null
   }
 ]

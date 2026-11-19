@@ -95,12 +95,13 @@ tasks:
       GRIM_G1_COMMAND: "{{.G1_COMMAND}}"
 
   old-grim:
-    desc: Run the grim 0.15.1 interop modules against GRIM_OLD_BIN; any skip fails the run
+    desc: Run the older-grim interop modules against GRIM_OLD_BIN and GRIM_OLD_BIN_0_16_0; any skip fails the run
     summary: |
       Runs the modules that hand locks, state and caches between grim 0.15.1
-      (GRIM_OLD_BIN, the v0.15.1 release binary) and the current grim
+      (GRIM_OLD_BIN, the v0.15.1 release binary), grim 0.16.0
+      (GRIM_OLD_BIN_0_16_0, its release binary) and the current grim
       (GRIM_COMMAND, else the built test/bin/grim). A dev build that prints
-      0.15.1 fails the run (src/old_grim.py). Writes results/old-grim/junit.xml,
+      0.15.1 or 0.16.0 fails the run (src/old_grim.py). Writes results/old-grim/junit.xml,
       then fails on any case that did not pass, a skip included, and on a module
       that ran no case.
     vars:
@@ -108,8 +109,10 @@ tasks:
         tests/test_old_grim_dependencies.py
         tests/test_old_grim_lock_pins.py
         tests/test_old_grim_marketplace_pins.py
+        tests/test_old_grim_mods.py
         tests/test_old_grim_remove_unread.py
         tests/test_old_grim_settings.py
+        tests/test_old_grim_skill_plugin_manifest.py
         tests/test_old_grim_unwalked_requires.py
         tests/test_old_grim_version_claims.py
         tests/test_old_grim_record_cache.py
@@ -123,6 +126,8 @@ tasks:
     preconditions:
       - sh: test -n "$GRIM_OLD_BIN"
         msg: GRIM_OLD_BIN must name the grim binary from the v0.15.1 release (grimoire-<target>.tar.gz)
+      - sh: test -n "$GRIM_OLD_BIN_0_16_0"
+        msg: GRIM_OLD_BIN_0_16_0 must name the grim binary from the v0.16.0 release (grimoire-<target>.tar.gz)
     cmds:
       - task: build
         vars:

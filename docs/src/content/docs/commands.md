@@ -370,7 +370,7 @@ string.
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp|hook|settings>] [--name <name>] [--no-install] [--force] [--allow-downgrade] [--trust-workspace | --no-trust-workspace] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp|hook|settings|mod>] [--name <name>] [--no-install] [--force] [--allow-downgrade] [--trust-workspace | --no-trust-workspace] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
 bundle, or (experimental) [hook](./hooks.md), and pins it in the lock. By default
 it also materializes the artifact into your detected AI clients in one step. `<reference>` is the only required argument —
@@ -2435,10 +2435,10 @@ hooks and settings".
   it. A hook reaped by flag-off keeps its payload and shows up `gated`
   like any other.
 - **`grim hook allow [path]`**. Records this **workspace's** consent to
-  the hooks and settings packages its lock pins, whichever flags are on.
+  the hooks, settings and mod packages its lock pins, whichever flags are on.
   Its help reads "Consent to the hooks and settings this workspace
   declares". The record lives at
-  `$GRIM_HOME/hooks/consent/<workspace-key>.json`, machine-local and keyed
+  `$GRIM_HOME/consent/<workspace-key>.json`, machine-local and keyed
   by the resolved workspace path.
 
   `--global` exits **64**: global scope is
@@ -2446,8 +2446,9 @@ hooks and settings".
   lock, the refusal names `grim consent allow`, and a recorded consent warns
   ``consent recorded; run `grim install` to apply what it covers``.
 - **`grim hook revoke [path]`** (alias `deny`). Removes the workspace
-  consent record, for hooks and settings alike. Settings values already
-  written stay in place. Its warning still reads
+  consent record, for hooks, settings and mods alike. Settings values already
+  written stay in place. A written mod stays too, and its stderr names each
+  one and `grim install`, which disarms them. See [Revoke][mods-revoke]. Its warning still reads
   ``consent revoked; run `grim install` to disarm these hooks``.
 
   It is idempotent, so revoking a never-consented workspace exits `0` and
@@ -2485,7 +2486,7 @@ are flattened into one table.
 
 `--kind <KIND>` (short `-k`) shows only the listed kinds. It is repeatable and
 comma-separated, so `--kind skill,rule` equals `-k skill -k rule`. The values
-are `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook` and `settings`, singular
+are `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, `settings` and `mod`, singular
 only. An unknown value exits `64`. With `--kind`, every query word matches as
 text, so a bare kind keyword is no longer a filter. `grim search --kind skill
 settings` finds a skill named `vscode-settings`, which bare `grim search
@@ -4413,7 +4414,7 @@ grim tui --registry ghcr.io/acme
 `grim build <path>` validates and packs a local skill directory, rule `.md`
 file, [agent](./agents.md) `.md` file, [MCP server](./mcp-servers.md)
 `.toml` file, or bundle `.toml` file without pushing it — a dry run for authors.
-`--kind <skill|rule|agent|bundle|mcp|hook|settings>` forces the artifact kind
+`--kind <skill|rule|agent|bundle|mcp|hook|settings|mod>` forces the artifact kind
 instead of auto-detecting it from the path. An agent always needs `--kind
 agent` — a bare `.md` packs as a rule; an MCP server always needs `--kind
 mcp` — a bare `.toml` packs as a bundle. A [settings document][settings] is
@@ -4435,6 +4436,8 @@ with `65` when the directory beside it sharing its stem (`rules/<name>/`,
 `logo.svg`, and it packs none of those three. `release` and `publish` refuse
 the same way. See [Rules ship one file][ref-publishing-md-rule-support-dir] and
 [Agents ship one file][ref-publishing-md-agent-companions].
+
+Since grim 0.17.0 `build` also refuses a skill whose root holds a `.claude-plugin` entry. See [Skills refuse a plugin manifest][ref-publishing-md-skill-plugin-manifest].
 
 ## grim release {#release}
 
@@ -4656,7 +4659,7 @@ grim logout ghcr.io
 
 ## grim schema {#schema}
 
-`grim schema --kind <config|publish|lock|mcp|hook|settings>` prints a [JSON
+`grim schema --kind <config|publish|lock|mcp|hook|settings|mod>` prints a [JSON
 Schema](https://json-schema.org/) for one of grim's TOML files to stdout.
 `--kind config` describes `grimoire.toml`. Its schema carries the
 `[options.experimental]` table additively. `--kind publish` describes
@@ -4667,7 +4670,8 @@ so tooling can validate or introspect it, additively gaining a `hooks`
 array. `--kind mcp` describes the [MCP server descriptor](./mcp-servers.md)
 (`mcp/<name>.toml`). `--kind hook` describes [`hook.toml`](./hooks.md)
 (experimental). `--kind settings` describes a [settings
-document][settings] (`settings/<name>.toml`, experimental). Each schema is
+document][settings] (`settings/<name>.toml`, experimental). `--kind mod`
+describes [`mod.toml`][mods] (experimental). Each schema is
 generated from grim's own parser, so it accepts exactly what grim accepts.
 
 ```sh
@@ -4799,6 +4803,8 @@ registers the same entry — in every detected client, not just Claude Code
 [clients-matrix]: ./clients.md#matrix
 [json-hook-arming]: ./json-interface.md#hook-arming
 [settings]: ./settings.md
+[mods]: ./mods.md
+[mods-revoke]: ./mods.md#revoke
 [settings-changes]: ./settings.md#changes
 [settings-conflicts]: ./settings.md#conflicts
 [settings-consent]: ./settings.md#consent
@@ -4832,3 +4838,4 @@ registers the same entry — in every detected client, not just Claude Code
 [ref-build]: #build
 [ref-publishing-md-rule-support-dir]: ./publishing.md#rule-support-dir
 [ref-publishing-md-agent-companions]: ./publishing.md#agent-companions
+[ref-publishing-md-skill-plugin-manifest]: ./publishing.md#skill-plugin-manifest

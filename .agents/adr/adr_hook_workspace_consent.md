@@ -214,6 +214,20 @@ read-modify-write entirely — no lock, no cross-workspace blast radius.
 `consent` joins `RESERVED_ARTIFACT_NAMES`, because a hook bound to a name grim
 writes under `$GRIM_HOME/hooks/` lands a directory on that path.
 
+> ### ⛔ AMENDED (2026-11-19, `adr_mod_artifact_kind.md`) — decisions 1 and 2: one path, one entry shape for every gated kind
+>
+> - **Record.** The record is `$GRIM_HOME/consent/<workspace-key>.json`, not
+>   `$GRIM_HOME/hooks/consent/…`. Its shape is the D6 example:
+>   `{"v": 2, "workspace": "/abs/path/to/checkout", "sources": ["guard@ghcr.io/acme/hooks/command-guard"], "consented_at": "2026-08-28T10:00:00Z"}`.
+>   Older records are never honoured as consent; a write or a revoke deletes the
+>   old file for the same workspace.
+> - **Reserved name.** `consent` stays in `RESERVED_ARTIFACT_NAMES` after the
+>   record moved, because the list is append-only.
+> - **Consented set.** The consented set is `<binding>@<registry>/<repository>`
+>   for every gated kind, with no kind prefix, no tag, no digest and no tier. A
+>   new binding, a rebinding, or one from a new repository is drift; the same
+>   binding from the same repository under another gated kind is not.
+
 **2. The consented set is `<binding>@<registry>/<repository>` — no tag, no
 digest, and no tier.** A new hook, a rebinding, or one from a new repository is **drift**:
 arming stops, and the report names the new entry. A version bump of an
@@ -560,3 +574,4 @@ puts it.
 | 2026-11-05 | Claude (/hex-execute RF4) | Decision 4: `grim add` records ahead of its install, so a failed install keeps its consent and the next `grim install` finds no drift (CWE-636); RF3's sentence accepting the disarm is withdrawn; `--no-install` records the same set. Proposed under the plan's `TUI consent` decision, awaiting the owner: a TUI Install that declares a row is `grim add`'s TUI form and records by the same rule, which widens the must-never-write list; every other TUI install path arms on the record as it stands |
 | 2026-11-06 | Claude (/hex-execute RF5) | Decision 4's allowlist and its bundle paragraph restored to the owner's accepted text. The branch's changes now sit after it as three blocks marked Proposed, awaiting the owner: what an add consents to (RD-3, RD3-6), the record written ahead of the install ("TUI consent"), and a TUI Install that declares a row as a write seam (RD4-3). All three are goal-loop decisions, and the shipped code follows them. Status stays Accepted for the owner's text |
 | 2026-11-07 | Claude (/hex-execute RF5) | Decision 6 restored to the owner's accepted text. Its two `grim add` sentences, added on this branch (`fc56a922`) with no row until then, move to the block after it, "Clarification of shipped behaviour: what the flag writes", labelled as no owner decision. They restate what `c5e3824` already shipped: `resolve_for_add` records under `--trust-hooks` and records nothing under `--no-trust-hooks`, citing this decision's "never persisted". Decision 4 lists `grim add` as a writer with no flag condition, so the clarification narrows nothing it accepted. What an add records under either flag still follows the proposed RD-3 block |
+| 2026-11-19 | Claude (records pass) | Decisions 1 and 2 amended by `adr_mod_artifact_kind.md` D6: the record moves to `$GRIM_HOME/consent/` at `"v": 2`, the set is `<binding>@<registry>/<repository>` for every gated kind with no kind prefix, `consent` stays reserved |

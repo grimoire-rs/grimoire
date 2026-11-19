@@ -28,6 +28,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::command::scope_resolution;
 use crate::context::Context;
 use crate::hook::consent::{self, Revoked};
+use crate::oci::ArtifactKind;
 
 /// `grim hook revoke` arguments.
 #[derive(Debug, Args)]
@@ -70,6 +71,16 @@ pub async fn run(ctx: &Context, args: &RevokeArgs) -> anyhow::Result<(HookConsen
                 "consent revoked; run `{} install` to disarm these hooks",
                 scope.invocation
             );
+            // The store is only read: a missing or unusable one names nothing.
+            let (_, store) =
+                crate::install::mod_store::ModStoreSlot::open(ctx.grim_home(), &scope.workspace, scope.scope);
+            for record in store.records.iter().filter(|r| r.kind == ArtifactKind::Mod) {
+                tracing::warn!(
+                    "mod '{}' stays written; run `{} install` to disarm it",
+                    record.name,
+                    scope.invocation
+                );
+            }
             HookConsentAction::Revoked
         }
         Revoked::Absent => HookConsentAction::NotConsented,

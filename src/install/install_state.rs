@@ -1119,6 +1119,8 @@ impl InstallState {
             }
         };
         let mut withheld = WithheldOutputs::new();
+        // Both scopes: the mod store is the only home of a mod record.
+        discard_mod_records(&mut records, path);
         if let Some((scope, roots)) = convert {
             if scope == ConfigScope::Project {
                 discard_settings_records(&mut records, path);
@@ -2070,6 +2072,23 @@ fn discard_settings_records(records: &mut Vec<InstallRecord>, path: &Path) {
     });
 }
 
+/// Drop every mod record from a state file of either scope, warning once per
+/// record: mod records live only in the mod store (`mod_store.rs`), and a state
+/// file a `git pull` replaced must not supply a record the integrity gate trusts.
+fn discard_mod_records(records: &mut Vec<InstallRecord>, path: &Path) {
+    records.retain(|record| {
+        let foreign = record.kind == ArtifactKind::Mod;
+        if foreign {
+            tracing::warn!(
+                "discarded mod record '{}' from {}: a state file cannot carry one",
+                shown(&record.name),
+                path.display()
+            );
+        }
+        !foreign
+    });
+}
+
 /// State-file text for a terminal, bounded and escaped for the reasons
 /// [`InstallState::invalid_state_data`] gives.
 fn shown(text: &str) -> String {
@@ -2116,7 +2135,7 @@ fn output_is_legal(
         ArtifactKind::Mcp => is_own_mcp_member(out, client, name, scope, roots),
         ArtifactKind::Hook => is_hook_payload(&out.target, name, scope),
         ArtifactKind::Settings => is_settings_piece(out, client, name, scope, roots),
-        ArtifactKind::Bundle => false,
+        ArtifactKind::Bundle | ArtifactKind::Mod => false,
     }
 }
 
@@ -2719,6 +2738,38 @@ mod tests {
                 let names: Vec<_> = state.iter_records().map(|r| r.name.as_str()).collect();
                 assert_eq!(names, ["code-review"]);
             }
+        }
+    }
+
+    /// A state file of either scope never supplies a mod record: the mod store is
+    /// their only home, so one found here (a replaced `state.json`) is dropped.
+    #[test]
+    fn a_mod_record_in_a_state_file_is_dropped_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let grim_home = dir.path().join("home");
+        let config_path = workspace.join("grimoire.toml");
+        InstallState::ensure_project_state_dir(&workspace).unwrap();
+        std::fs::create_dir_all(grim_home.join("state")).unwrap();
+        let global_path = InstallState::global_path(&grim_home.join("state"));
+        for path in [InstallState::project_state_path(&workspace), global_path.clone()] {
+            let mut st = InstallState::empty(&path);
+            st.record(record("code-review", ArtifactKind::Skill));
+            st.record(record("sneaky-mod", ArtifactKind::Mod));
+            st.save().unwrap();
+        }
+        let roots = AnchorRoots {
+            workspace: workspace.clone(),
+            grim_home: grim_home.clone(),
+            ..Default::default()
+        };
+        let project = || InstallState::read_project(&workspace, &grim_home, &config_path).unwrap();
+        let global = || InstallState::read_global(&global_path, &roots).unwrap();
+        for read in [&project as &dyn Fn() -> Unadopted, &global] {
+            let (read_back, warnings) = project_settings::warnings_during(|| read().adopt());
+            let names: Vec<_> = read_back.iter_records().map(|r| r.name.as_str()).collect();
+            assert_eq!(names, ["code-review"]);
+            assert!(warnings.contains("discarded mod record 'sneaky-mod'"), "{warnings}");
         }
     }
 
@@ -5936,6 +5987,7 @@ mod tests {
                 agents: vec![],
                 mcp: vec![],
                 bundles: vec![],
+                mods: Vec::new(),
             }
         }
 

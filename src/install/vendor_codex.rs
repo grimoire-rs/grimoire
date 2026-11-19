@@ -230,6 +230,8 @@ impl Vendor for CodexVendor {
         // declined — skipped rather than materialized as inert files.
         match kind {
             ArtifactKind::Rule => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }

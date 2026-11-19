@@ -192,6 +192,8 @@ impl Vendor for DroidVendor {
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
         match kind {
             ArtifactKind::Rule => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }
@@ -547,6 +549,7 @@ mod tests {
             ClientTarget::Droid,
             ArtifactKind::Agent,
             "code-rev_1",
+            &[],
             ws,
             scope
         ));
@@ -554,6 +557,7 @@ mod tests {
             ClientTarget::Droid,
             ArtifactKind::Agent,
             "code.rev",
+            &[],
             ws,
             scope
         ));
@@ -562,6 +566,7 @@ mod tests {
             ClientTarget::Droid,
             ArtifactKind::Skill,
             "code.rev",
+            &[],
             ws,
             scope
         ));
@@ -569,6 +574,7 @@ mod tests {
             ClientTarget::Claude,
             ArtifactKind::Agent,
             "code.rev",
+            &[],
             ws,
             scope
         ));

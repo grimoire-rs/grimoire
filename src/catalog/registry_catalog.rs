@@ -317,6 +317,11 @@ pub struct CatalogEntry {
     /// registry does — so on most indexes this is absent on every row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloads: Option<DownloadSummary>,
+    /// The harnesses a mod serves, from its `com.grimoire.mod.clients`
+    /// annotation (sorted). `None` for every other kind and for a mod whose
+    /// manifest never published it; an older cache lacks the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serves: Option<Vec<String>>,
     /// RFC3339 UTC timestamp this entry was fetched.
     pub fetched_at: String,
 }
@@ -1374,6 +1379,7 @@ impl Catalog {
             // sidecar to read, so its rows are always unrated.
             rating: None,
             downloads: None,
+            serves: None,
             fetched_at: fetched_at.clone(),
         };
 
@@ -1483,6 +1489,7 @@ impl Catalog {
                     version: version.clone(),
                     rating: None,
                     downloads: None,
+                    serves: crate::oci::annotations::mod_clients_from_annotations(&m.annotations).ok(),
                     fetched_at: fetched_at.clone(),
                 }
             })
@@ -1895,6 +1902,7 @@ mod tests {
                     as_of: Some("2026-09-10T21:48:47Z".to_string()),
                     versions: Vec::new(),
                 }),
+                serves: None,
                 fetched_at: ts(10),
             },
         );
@@ -2117,6 +2125,19 @@ mod tests {
             std::fs::read(&plain).unwrap(),
             "the file's byte shape is unchanged"
         );
+    }
+
+    #[test]
+    fn serves_defaults_to_none_and_round_trips() {
+        let mut e = full_entry("acme/m");
+        assert_eq!(e.serves, None);
+        assert!(
+            !serde_json::to_string(&e).unwrap().contains("serves"),
+            "an absent list is not written"
+        );
+        e.serves = Some(vec!["claude".to_string()]);
+        let back: CatalogEntry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back.serves, Some(vec!["claude".to_string()]));
     }
 
     fn full_entry(repository: &str) -> CatalogEntry {
@@ -4840,6 +4861,7 @@ mod tests {
             version: None,
             rating: None,
             downloads: None,
+            serves: None,
             fetched_at: ts(1),
         };
         assert!(e.matches(&parse("")), "empty query matches all");

@@ -160,6 +160,28 @@ mod tests {
     use super::*;
     use crate::api::artifact_status::HookArmingCause;
 
+    #[test]
+    fn the_consent_report_carries_every_kinds_entries_under_hooks() {
+        let report = HookConsentReport::new(
+            "/w/proj".into(),
+            HookConsentAction::Consented,
+            vec![
+                "guard@ghcr.io/acme/guard".to_string(),
+                "team@ghcr.io/acme/team".to_string(),
+            ],
+            None,
+        );
+
+        let json = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(
+            json["hooks"],
+            serde_json::json!(["guard@ghcr.io/acme/guard", "team@ghcr.io/acme/team"])
+        );
+        assert!(json.get("settings").is_none(), "no second key: {json}");
+        assert!(!json.to_string().contains("settings:"), "{json}");
+    }
+
     fn entry(arming: Vec<HookArming>, state: ArtifactStatus) -> HookListEntry {
         HookListEntry {
             artifact: "shell-guard".to_string(),
@@ -341,8 +363,9 @@ pub struct HookConsentReport {
     /// What happened.
     pub action: HookConsentAction,
     /// The `<binding>@<registry>/<repository>` entries consent now covers,
-    /// sorted. `[]` after a revoke, and `[]` for a workspace that declares no
-    /// hooks.
+    /// sorted, for every gated kind: a hook and a settings package spell theirs
+    /// alike, so one key holds both. `[]` after a revoke, and `[]` for a
+    /// workspace that declares nothing gated.
     pub hooks: Vec<String>,
     /// The record's own path, or null when none was written.
     pub record: Option<std::path::PathBuf>,
@@ -417,7 +440,7 @@ mod consent_tests {
             std::path::PathBuf::from("/ws"),
             HookConsentAction::Consented,
             Vec::new(),
-            Some(std::path::PathBuf::from("/home/u/.grimoire/hooks/consent/abc.json")),
+            Some(std::path::PathBuf::from("/home/u/.grimoire/consent/abc.json")),
         );
         let mut out = Vec::new();
         report.print_plain(&mut out).unwrap();

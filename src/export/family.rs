@@ -74,6 +74,9 @@ struct ClaudeManifest<'a> {
     documentation_url: Option<&'a str>,
     #[serde(rename = "supportUrl", skip_serializing_if = "Option::is_none")]
     support_url: Option<&'a str>,
+    /// Set when a staged mod ships a type file; always the last key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    types: Option<&'static str>,
 }
 
 /// Agent Plugins `plugin.json`: exactly these keys, in this order;
@@ -156,14 +159,25 @@ pub fn plugin_client_names() -> String {
 /// Bundles never reach this gate (resolution expands them into members);
 /// [`ArtifactKind::Bundle`] returns [`OmitReason::NoFormatSurface`]
 /// defensively.
-pub fn admits(family: Family, client: ClientTarget, kind: ArtifactKind) -> Result<(), OmitReason> {
-    use ArtifactKind::{Agent, Bundle, Hook, Mcp, Rule, Settings, Skill};
+pub fn admits(family: Family, client: ClientTarget, kind: ArtifactKind, served: &[String]) -> Result<(), OmitReason> {
+    use ArtifactKind::{Agent, Bundle, Hook, Mcp, Mod, Rule, Settings, Skill};
     match (family, kind) {
         // A hook needs grim at run time, which an exported plugin runs without
         // (C-140). The Claude format has a hook file (`hooks/hooks.json`) that
         // cannot express one; Agent Plugins 1.0 has no hook surface at all.
         (Family::Claude, Hook) => Err(OmitReason::NotRepresentable),
-        (_, Rule | Bundle | Hook | Settings) | (Family::AgentPlugins, Agent) => Err(OmitReason::NoFormatSurface),
+        // A mod is a Claude hooks module: only Claude itself takes one, and
+        // only when the lock row says it serves `claude`. The rest of the
+        // Claude family has no such surface and declines like a client that
+        // does not host the kind.
+        (Family::Claude, Mod) => {
+            if client == ClientTarget::Claude && served.iter().any(|c| c == "claude") {
+                Ok(())
+            } else {
+                Err(OmitReason::ClientDeclined)
+            }
+        }
+        (_, Rule | Bundle | Hook | Settings | Mod) | (Family::AgentPlugins, Agent) => Err(OmitReason::NoFormatSurface),
         // The Agent Plugins `mcp.json` shape is the family's, not the
         // client's: no install-time `kind_support` gate.
         (Family::AgentPlugins, Mcp) => Ok(()),
@@ -237,6 +251,7 @@ pub fn plugin_description(base: Option<&str>) -> (String, bool) {
     }
 }
 
+#[cfg(test)]
 /// The plugin root's `README.md` (C-024): the authored `readme` text, else
 /// the name, the logo image when there is one and the full uncut base; then
 /// the members omitted for `client` and [`ONRAMP`]. `omitted` is
@@ -248,6 +263,20 @@ pub fn plugin_readme(
     omitted: &[(ArtifactKind, String)],
     logo: Option<&str>,
     readme: Option<&str>,
+) -> Vec<u8> {
+    plugin_readme_noted(name, client, base, omitted, logo, readme, None)
+}
+
+/// [`plugin_readme`] with one more line after the omission list, for a reason
+/// that list cannot carry.
+pub fn plugin_readme_noted(
+    name: &str,
+    client: ClientTarget,
+    base: Option<&str>,
+    omitted: &[(ArtifactKind, String)],
+    logo: Option<&str>,
+    readme: Option<&str>,
+    note: Option<&str>,
 ) -> Vec<u8> {
     let mut parts = Vec::new();
     if let Some(readme) = readme.map(str::trim).filter(|r| !r.is_empty()) {
@@ -265,6 +294,9 @@ pub fn plugin_readme(
     if !omitted.is_empty() {
         let list: Vec<String> = omitted.iter().map(|(kind, name)| format!("{kind} {name}")).collect();
         parts.push(format!("Omitted for {client}: {}.", list.join(", ")));
+    }
+    if let Some(note) = note {
+        parts.push(note.to_string());
     }
     parts.push(ONRAMP.to_string());
     let mut text = parts.join("\n\n");
@@ -286,12 +318,25 @@ pub(crate) fn escape_markdown(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 /// Bytes of `.claude-plugin/plugin.json` (C-025): pretty JSON plus one `\n`.
 ///
 /// Serializing a struct of `&str` cannot fail, so this returns bytes, not a
 /// `Result`; the body uses a non-panicking form (no `unwrap`/`expect`, per
 /// the crate lints).
 pub fn claude_plugin_json(name: &str, version: &str, description: &str, profile: &PluginProfile) -> Vec<u8> {
+    claude_plugin_json_typed(name, version, description, profile, false)
+}
+
+/// [`claude_plugin_json`] with the optional `types` key, which points at the
+/// type file a staged mod ships under `src/types/`.
+pub fn claude_plugin_json_typed(
+    name: &str,
+    version: &str,
+    description: &str,
+    profile: &PluginProfile,
+    types: bool,
+) -> Vec<u8> {
     pretty_json_line(&ClaudeManifest {
         name,
         version,
@@ -303,8 +348,15 @@ pub fn claude_plugin_json(name: &str, version: &str, description: &str, profile:
         keywords: &profile.keywords,
         documentation_url: profile.documentation.as_deref(),
         support_url: profile.support.as_deref(),
+        types: types.then_some(MOD_TYPES_PATH),
     })
 }
+
+/// Where a staged mod's type file lands, relative to the plugin root.
+const MOD_TYPES_PATH: &str = "./src/types/index.d.ts";
+
+/// The README line that explains why several mods ship none of them.
+pub const MANY_MODS_NOTE: &str = "A Claude plugin loads one hooks module, so a plugin with two or more mods carries none of them. Put one mod in each plugin.";
 
 /// Bytes of the Agent Plugins `plugin.json` (C-025): pretty JSON plus one
 /// `\n`, `$schema` first.
@@ -510,13 +562,13 @@ mod tests {
             (Family::AgentPlugins, ClientTarget::Agents, ok, Err(Nfs), ok, Err(Nfs)),
         ];
         for (family, client, skill, agent, mcp, rule) in table {
-            assert_eq!(admits(family, client, Skill), skill, "{client} skill");
-            assert_eq!(admits(family, client, Agent), agent, "{client} agent");
-            assert_eq!(admits(family, client, Mcp), mcp, "{client} mcp");
+            assert_eq!(admits(family, client, Skill, &[]), skill, "{client} skill");
+            assert_eq!(admits(family, client, Agent, &[]), agent, "{client} agent");
+            assert_eq!(admits(family, client, Mcp, &[]), mcp, "{client} mcp");
             // Rules: no plugin surface in either family — even where the
             // client declines rules on install (codex), the reason is the format's.
-            assert_eq!(admits(family, client, Rule), rule, "{client} rule");
-            assert_eq!(admits(family, client, Bundle), Err(Nfs), "{client} bundle");
+            assert_eq!(admits(family, client, Rule, &[]), rule, "{client} rule");
+            assert_eq!(admits(family, client, Bundle, &[]), Err(Nfs), "{client} bundle");
         }
     }
 
@@ -531,8 +583,71 @@ mod tests {
                 Family::Claude => OmitReason::NotRepresentable,
                 Family::AgentPlugins => OmitReason::NoFormatSurface,
             };
-            assert_eq!(admits(family, client, ArtifactKind::Hook), Err(expected), "{client}");
+            assert_eq!(
+                admits(family, client, ArtifactKind::Hook, &[]),
+                Err(expected),
+                "{client}"
+            );
         }
+    }
+
+    /// A mod is admitted only for Claude itself and only when the lock row
+    /// serves `claude`; the other Claude-family clients decline it, Agent
+    /// Plugins has no surface for it.
+    #[test]
+    fn mod_admission_rows() {
+        use ArtifactKind::Mod;
+        let claude = ["claude".to_string()];
+        let other = ["opencode".to_string()];
+        assert_eq!(admits(Family::Claude, ClientTarget::Claude, Mod, &claude), Ok(()));
+        assert_eq!(
+            admits(Family::Claude, ClientTarget::Claude, Mod, &other),
+            Err(OmitReason::ClientDeclined)
+        );
+        assert_eq!(
+            admits(Family::Claude, ClientTarget::Claude, Mod, &[]),
+            Err(OmitReason::ClientDeclined)
+        );
+        for client in [
+            ClientTarget::Droid,
+            ClientTarget::Junie,
+            ClientTarget::OpenClaw,
+            ClientTarget::Qoder,
+        ] {
+            assert_eq!(
+                admits(Family::Claude, client, Mod, &claude),
+                Err(OmitReason::ClientDeclined),
+                "{client}"
+            );
+        }
+        for client in [
+            ClientTarget::Copilot,
+            ClientTarget::Codex,
+            ClientTarget::Cursor,
+            ClientTarget::Agents,
+        ] {
+            assert_eq!(
+                admits(Family::AgentPlugins, client, Mod, &claude),
+                Err(OmitReason::NoFormatSurface),
+                "{client}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_manifest_types_key_is_last_and_only_when_set() {
+        let plain = claude_plugin_json("team", "1.0.0", "D", &PluginProfile::default());
+        assert_eq!(
+            plain,
+            claude_plugin_json_typed("team", "1.0.0", "D", &PluginProfile::default(), false)
+        );
+        let typed = claude_plugin_json_typed("team", "1.0.0", "D", &PluginProfile::default(), true);
+        let text = String::from_utf8(typed).unwrap();
+        assert!(
+            text.trim_end().ends_with("\"types\": \"./src/types/index.d.ts\"\n}"),
+            "{text}"
+        );
+        assert!(!String::from_utf8(plain).unwrap().contains("types"));
     }
 
     // ── C-002 version ──
@@ -616,10 +731,10 @@ mod tests {
     fn c005_qoder_admits_skills_agents_and_mcp_but_no_rules() {
         use ArtifactKind::{Agent, Mcp, Rule, Skill};
         for kind in [Skill, Agent, Mcp] {
-            assert_eq!(admits(Family::Claude, ClientTarget::Qoder, kind), Ok(()), "{kind}");
+            assert_eq!(admits(Family::Claude, ClientTarget::Qoder, kind, &[]), Ok(()), "{kind}");
         }
         assert_eq!(
-            admits(Family::Claude, ClientTarget::Qoder, Rule),
+            admits(Family::Claude, ClientTarget::Qoder, Rule, &[]),
             Err(OmitReason::NoFormatSurface)
         );
     }

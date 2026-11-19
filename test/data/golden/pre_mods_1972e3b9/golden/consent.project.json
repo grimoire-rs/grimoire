@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "workspace": "<WORKSPACE>",
+  "hooks": [
+    "reg-hook@localhost:5000/grim-golden/pre-mods-1972e3b9/reg-hook",
+    "settings:reg-settings@localhost:5000/grim-golden/pre-mods-1972e3b9/reg-settings"
+  ],
+  "consented_at": "<NORMALIZED>"
+}

@@ -87,7 +87,7 @@ def _store_files(runner: GrimRunner) -> list[Path]:
 
 def _consent_files(runner: GrimRunner) -> list[Path]:
     """Every consent record on this machine."""
-    return sorted((Path(runner.grim_home) / "hooks" / "consent").glob("*.json"))
+    return sorted((Path(runner.grim_home) / "consent").glob("*.json"))
 
 
 def _layer_cached(runner: GrimRunner, package: PublishedArtifact) -> bool:
@@ -104,14 +104,14 @@ def _seed_record(runner: GrimRunner, workspace: Path, keys: list[str]) -> None:
     on-disk contract.
     """
     key = hashlib.sha256(str(workspace).encode()).hexdigest()
-    path = Path(runner.grim_home) / "hooks" / "consent" / f"{key}.json"
+    path = Path(runner.grim_home) / "consent" / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"v": 1, "workspace": str(workspace), "hooks": keys, "consented_at": "2026-08-28T10:00:00Z"}
+    record = {"v": 2, "workspace": str(workspace), "sources": keys, "consented_at": "2026-08-28T10:00:00Z"}
     path.write_text(json.dumps(record), encoding="utf-8", newline="\n")
 
 
 def _key(binding: str, package: PublishedArtifact) -> str:
-    return f"settings:{binding}@{REGISTRY_HOST}/{package.repo}"
+    return f"{binding}@{REGISTRY_HOST}/{package.repo}"
 
 
 def _on_a_terminal(runner: GrimRunner, *args: str, answer: str | None = None) -> tuple[int, str]:
@@ -339,7 +339,7 @@ def test_grim_home_in_workspace_writes_nothing(
     assert "GRIM_HOME" in trusted.stderr
     assert not (project_dir / LOCAL).exists()
     assert not (nested / "settings").exists()
-    assert not (nested / "hooks" / "consent").exists()
+    assert not (nested / "consent").exists()
 
     # Positive control: under a machine-local home the question and the conflict are real.
     runner.env["GRIM_HOME"] = home

@@ -100,6 +100,19 @@ The line, stated once:
 | **2 — compensating render** | A static artifact the vendor already documents and interprets: a config key, an extra generated file, adjusted body text. Deterministic, removed on uninstall, inert if grim vanishes. | Tier 1 clients only. |
 | **3 — runtime code** | Anything grim must keep alive against someone else's API: plugin, extension, wrapper process, injected script. | Never. Any client, any tier. |
 
+> ### ⛔ AMENDED (2026-11-19, `adr_mod_artifact_kind.md`) — class 3 names behaviour grim authors
+>
+> The class 3 row reads: "Behaviour grim authors and must keep alive against
+> someone else's API: plugin, extension, wrapper process, injected script.
+> Publisher code an artifact carries, and the registration files grim renders so
+> a client loads it, are a kind's render, not a gap response; a load probe checks
+> them for silent breaks (`adr_mod_artifact_kind.md` D10)." The test sentence
+> below ("whether a client release can break grim's contribution without grim
+> being touched, and whether that break is silent") stays. In the consumer
+> section below, "specifically that grim will never install runtime code into
+> their client" reads "specifically that grim will never add runtime code of its
+> own to their client".
+
 Class 1 is the one most likely to be mistaken for scope creep and is not. If
 grim wrote the files, grim owns their behavior; a consumer who installed a
 path-scoped rule did not consent to unconditional context. Repairing that is
@@ -299,3 +312,4 @@ capacity into contract, D changes nothing at decision time.
 |------|--------|--------|
 | 2026-08-25 | maintainer | Initial draft |
 | 2026-08-25 | maintainer | Frontmatter-only class-2 renders are not tier-gated (#103); Kiro removed from the #103 follow-up — it is `Native`, not `Degraded` |
+| 2026-11-19 | Claude (records pass) | Class 3 row and the consumer-section sentence amended by `adr_mod_artifact_kind.md` (amendment 5): publisher code a kind carries is a kind's render, not class 3 |

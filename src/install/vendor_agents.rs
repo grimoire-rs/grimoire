@@ -58,6 +58,8 @@ impl Vendor for AgentsVendor {
         // a location no tool reads.
         match kind {
             ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Mcp => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }

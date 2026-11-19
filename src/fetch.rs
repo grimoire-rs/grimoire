@@ -587,6 +587,8 @@ pub async fn fetch_with_limit(
                     };
                 }
             }
+            // A mod has no index projection yet, so fetch has nothing to show.
+            ArtifactKind::Mod => return Err(anyhow!("mods cannot be fetched yet")),
             ArtifactKind::Mcp => {
                 if path.is_some() {
                     return Err(anyhow!("mcp descriptors carry no support files; omit 'path'"));
@@ -945,6 +947,9 @@ pub struct DescribeReport {
     /// exactly as published. `[]` when it has no requires layer; `null` for a
     /// foreign manifest or a layer layout this grim does not read.
     pub requires: Option<Vec<crate::oci::bundle::BundleMember>>,
+    /// The harnesses a mod serves, from its manifest. `null` for every kind
+    /// but a mod.
+    pub serves: Option<Vec<String>>,
 }
 
 /// Read the requires layer of the artifact `manifest` describes.
@@ -1092,6 +1097,7 @@ pub async fn describe_artifact(
         annotations: a.clone(),
         compression: crate::oci::layer::compression_of(&manifest),
         requires,
+        serves: crate::oci::annotations::mod_clients_from_annotations(a).ok(),
     })
 }
 
@@ -1139,7 +1145,9 @@ fn project_index(
                 .agent_index(&parsed, &pinned_str)
                 .map_err(|e| anyhow!("agent projection failed: {e}"))?
         }
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => unreachable!("tar-backed kinds only"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings | ArtifactKind::Mod => {
+            unreachable!("tar-backed kinds only")
+        }
     };
     Ok(rendered.map(|r| {
         warnings.extend(r.warnings);

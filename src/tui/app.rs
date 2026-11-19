@@ -49,6 +49,7 @@ use crate::config::registry_resolve::RowSource;
 use crate::config::scope::ConfigScope;
 use crate::config::{ResolvedOptions, ResolvedRegistry};
 use crate::env::grim_home;
+use crate::hook::consent::DeclaredKeys;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_error::{InstallError, InstallErrorKind, settings_refusal_heading};
 use crate::install::install_state::{ClientOutput, Exempt, InstallState, Unadopted, active_outputs};
@@ -56,6 +57,7 @@ use crate::install::installer::{
     ForceScope, InstallIntent, InstallOutcome, SettingsOutcome, SettingsRun, install_and_persist, persist_and_converge,
 };
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::mod_phase::ModReach;
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::progress::{InstallProgress, SilentProgress};
 use crate::install::prune::{PruneError, prune_orphans_off_runtime};
@@ -2268,7 +2270,7 @@ fn refresh_member_states(
 }
 
 /// The set of `(kind, registry/repository)` an active scope declares **directly**
-/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`/`[bundles]`) — the key by which the via-bundle badge
+/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`/`[mods]`/`[bundles]`) — the key by which the via-bundle badge
 /// decides whether a present member is also a standalone install.
 fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(ArtifactKind, String)> {
     let mut out = std::collections::BTreeSet::new();
@@ -2279,6 +2281,7 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
         (ArtifactKind::Mcp, &set.mcp),
         (ArtifactKind::Hook, &set.hooks),
         (ArtifactKind::Settings, &set.settings),
+        (ArtifactKind::Mod, &set.mods),
         (ArtifactKind::Bundle, &set.bundles),
     ] {
         for source in map.values() {
@@ -3976,7 +3979,7 @@ async fn perform(
         )
         .await
     } else {
-        BTreeSet::new()
+        DeclaredKeys::new()
     };
     let mut pins = relocked.pins;
     let installed = match RowScope::of(op, &relocked.lock, previous.as_ref(), &key, pruned_ahead) {
@@ -4209,6 +4212,18 @@ fn row_settings<'a>(
     }
 }
 
+/// How far an action's mod phase reaches, as [`row_settings`] does for settings:
+/// Update stops at its closure and prunes only `prune`, Install plans the whole lock.
+fn row_mod_reach<'a>(op: BatchOp, closure: &'a BTreeSet<NodeKey>, prune: &'a BTreeSet<NodeKey>) -> ModReach<'a> {
+    match op {
+        BatchOp::Update => ModReach::Closure {
+            install: closure,
+            prune,
+        },
+        BatchOp::Install | BatchOp::Uninstall => ModReach::Full,
+    }
+}
+
 /// What one row's action installs, may overwrite and may prune. Update is
 /// `grim update <binding>`, so it takes that command's [`NamedScope`]: one closure
 /// for the install, the integrity gate, settings and vendor sync, the binding's
@@ -4313,7 +4328,7 @@ async fn materialize_row(
     progress: &dyn InstallProgress,
     force: &ForceScope,
     ledger: &mut SettingsLedger,
-    consentable: &BTreeSet<String>,
+    consentable: &DeclaredKeys,
 ) -> anyhow::Result<InstallSummary> {
     let policies = row_hook_policy(ctx, Some(lock), consentable);
     let consented = if policies.hooks.feature_enabled() {
@@ -4359,7 +4374,8 @@ async fn install_row(
 ) -> anyhow::Result<(Vec<crate::install::installer::ArtifactInstall>, Vec<NodeKey>)> {
     let target = action_target(ctx)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     let mut install_state = read_state(ctx)
         .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
         .exempt(Exempt::InstallGate);
@@ -4394,6 +4410,7 @@ async fn install_row(
         row_adds(op, &scope.closure),
         progress,
         row_settings(op, lock, &scope.closure, &scope.prune),
+        row_mod_reach(op, &scope.closure, &scope.prune),
     )
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -4476,14 +4493,15 @@ fn prune_error(error: PruneError) -> anyhow::Error {
 
 /// The hooks `single` holds that `consentable` names and the record now covers:
 /// what the action consented to, whatever became of each one's install.
-fn consented_hooks(ctx: &TuiContext, single: &GrimoireLock, consentable: &BTreeSet<String>) -> Vec<String> {
+fn consented_hooks(ctx: &TuiContext, single: &GrimoireLock, consentable: &DeclaredKeys) -> Vec<String> {
     let recorded = crate::command::hook_consent::recorded_hooks(&consent_site(ctx, true));
     single
         .hooks
         .iter()
         .filter(|hook| {
-            crate::hook::consent::consent_key(&hook.name, &hook.source)
-                .is_some_and(|key| consentable.contains(&key) && recorded.contains(&key))
+            crate::hook::consent::consent_key(&hook.name, &hook.source).is_some_and(|key| {
+                crate::hook::consent::keys_of(consentable, ArtifactKind::Hook).contains(&key) && recorded.contains(&key)
+            })
         })
         .map(|hook| hook.name.clone())
         .collect()
@@ -4987,7 +5005,7 @@ async fn perform_local_declared(
                 progress,
                 force,
                 ledger,
-                &BTreeSet::new(),
+                &DeclaredKeys::new(),
             )
             .await
         }
@@ -5046,6 +5064,7 @@ async fn perform_local_dev(
         },
         bundles: Vec::new(),
         requires: Vec::new(),
+        clients: Vec::new(),
     };
     let mut synth = GrimoireLock {
         metadata: crate::lock::grimoire_lock::LockMetadata {
@@ -5062,6 +5081,7 @@ async fn perform_local_dev(
         hooks: Vec::new(),
         settings: Vec::new(),
         bundles: Vec::new(),
+        mods: Vec::new(),
     };
     match kind {
         ArtifactKind::Skill => synth.skills.push(entry),
@@ -5069,7 +5089,7 @@ async fn perform_local_dev(
         ArtifactKind::Agent => synth.agents.push(entry),
         // A dev record is only ever a skill/rule/agent (dev-install rejects the
         // rest); this arm is defensive.
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod => {
             return Err(anyhow::anyhow!(
                 "dev-install is limited to skill/rule/agent, not {kind}"
             ));
@@ -5079,7 +5099,7 @@ async fn perform_local_dev(
     // A dev record is never a hook, but convergence re-arms every hook the
     // on-disk lock declares, so it keeps what the record covers armed.
     let on_disk = lock_io::load(&ctx.lock_path).ok();
-    let policies = row_hook_policy(ctx, on_disk.as_ref(), &BTreeSet::new());
+    let policies = row_hook_policy(ctx, on_disk.as_ref(), &DeclaredKeys::new());
     let target = InstallTarget::parse_with_global(
         &ctx.workspace,
         ctx.scope,
@@ -5090,7 +5110,8 @@ async fn perform_local_dev(
     )
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
     .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
+    .with_settings_policy(policies.settings)
+    .with_mod_policy(policies.mods);
     let mut install_state = read_state(ctx)
         .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
         .exempt(Exempt::InstallGate);
@@ -5115,6 +5136,7 @@ async fn perform_local_dev(
         row_adds(op, &closure),
         progress,
         SettingsRun::Skip,
+        ModReach::Skip,
     )
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -6274,12 +6296,14 @@ fn tui_policy_over(
         });
     let (flags, registries, set) = loaded.unwrap_or_default();
     let mut declared = if config_too {
-        crate::command::hook_consent::config_consent_keys(&set, &flags)
+        crate::command::hook_consent::config_keys(&set, &flags)
     } else {
-        BTreeSet::new()
+        DeclaredKeys::new()
     };
     if let Some(lock) = lock {
-        declared.extend(crate::command::hook_consent::declared_consent_keys(lock, &flags));
+        for (kind, keys) in crate::command::hook_consent::declared_keys(lock, &flags) {
+            declared.entry(kind).or_default().extend(keys);
+        }
     }
     crate::command::hook_consent::policies_without_consent(
         &ctx.roots.grim_home,
@@ -6301,7 +6325,7 @@ fn tui_policy_over(
 fn row_hook_policy(
     ctx: &TuiContext,
     lock: Option<&GrimoireLock>,
-    consentable: &BTreeSet<String>,
+    consentable: &DeclaredKeys,
 ) -> crate::hook::policy::ConsentPolicies {
     let policies = tui_hook_policy(ctx, lock);
     let site = consent_site(ctx, policies.hooks.feature_enabled());
@@ -6358,6 +6382,16 @@ async fn delete_targets(
     let hook_policy = tui_hook_policy(ctx, None).hooks;
     // The install a remedy names reads the lock's hooks and the config's, which the delete's does not.
     let install_hooks = tui_policy_over(ctx, lock.as_ref(), true).hooks;
+    let locked_mods: Option<std::collections::BTreeSet<String>> =
+        lock.as_ref().map(|l| l.mods.iter().map(|m| m.name.clone()).collect());
+    let mod_proofs = crate::install::mod_phase::uninstall_proofs(
+        &ctx.roots,
+        ctx.scope,
+        &ctx.workspace,
+        targets,
+        locked_mods.as_ref(),
+    )
+    .await;
     let deletion = delete_nodes(
         install_state,
         targets,
@@ -6370,6 +6404,8 @@ async fn delete_targets(
             hook_policy: &hook_policy,
             install_hooks: &install_hooks,
             grim: &ctx.invocation,
+            locked_mods: locked_mods.as_ref(),
+            mod_proofs: &mod_proofs,
         },
     );
     // Before the failure: what the nodes ahead of it changed stays changed.
@@ -7223,6 +7259,35 @@ mod tests {
     use super::*;
     use crate::lock::closure::{bundle_members_lock, single_entry_lock};
 
+    #[test]
+    fn row_mod_reach_is_full_for_install_and_the_closures_for_update() {
+        let closure = BTreeSet::from([(ArtifactKind::Mod, "a".to_string())]);
+        let prune = BTreeSet::from([(ArtifactKind::Mod, "b".to_string())]);
+        assert_eq!(row_mod_reach(BatchOp::Install, &closure, &prune), ModReach::Full);
+        assert_eq!(
+            row_mod_reach(BatchOp::Update, &closure, &prune),
+            ModReach::Closure {
+                install: &closure,
+                prune: &prune
+            }
+        );
+    }
+
+    /// The TUI's consent site is hooks-only: a declaring Install records no mod, so
+    /// the next `grim install` asks about it.
+    #[test]
+    fn tui_site_does_not_record_mods() {
+        use crate::command::hook_consent::add_would_record;
+        let ctx = ctx_with_registries(Vec::new(), "ghcr.io/acme");
+        let site = consent_site(&ctx, true);
+        let key = "band@ghcr.io/acme/mods/band";
+        assert!(!add_would_record(&site, ArtifactKind::Mod, key, None));
+        assert!(
+            add_would_record(&site, ArtifactKind::Hook, "guard@ghcr.io/acme/guard", None),
+            "positive control: the same site records a hook"
+        );
+    }
+
     /// The action, for a test that does not read its settings list.
     async fn perform(
         ctx: &TuiContext,
@@ -7380,6 +7445,7 @@ mod tests {
                 version: Some("1.2.3".to_string()),
                 rating: None,
                 downloads: None,
+                serves: None,
                 badge: StatusBadge::NotInstalled,
             }],
         };
@@ -7669,6 +7735,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -7839,6 +7906,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -7994,6 +8062,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
         let registry_entry = locked("a", ArtifactKind::Skill, '1');
         let lock = lock_fixture(vec![path_entry, registry_entry], Vec::new());
@@ -8402,6 +8471,7 @@ mod tests {
                     version: None,
                     rating: None,
                     downloads: None,
+                    serves: None,
                     badge: StatusBadge::NotInstalled,
                 })
                 .collect(),
@@ -10583,6 +10653,52 @@ mod tests {
         }
     }
 
+    /// A catalog row whose skill carries the refused manifest entry reaches the
+    /// installer's refusal, as `grim install` does, and writes nothing.
+    #[tokio::test]
+    async fn tui_install_of_a_skill_with_a_plugin_manifest_is_refused() {
+        use crate::oci::manifest::{Descriptor, OciManifest};
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, body) in [
+            ("m/SKILL.md", "---\nname: m\ndescription: d\n---\n"),
+            ("m/.claude-plugin/plugin.json", "{}\n"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, body.as_bytes()).unwrap();
+        }
+        let tar_blob = builder.into_inner().unwrap();
+        let id = Identifier::new_registry("acme/m".to_string(), "localhost:5050");
+        let layer = Descriptor {
+            digest: reg.push_blob(&id, &tar_blob).await.unwrap(),
+            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+            size: tar_blob.len() as u64,
+            annotations: None,
+        };
+        let manifest = OciManifest {
+            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers: vec![layer],
+            annotations: Default::default(),
+        };
+        let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+        reg.put_tag(&id, "1", &digest).await.unwrap();
+        let ctx = test_ctx(tmp.path(), Arc::new(reg.clone()));
+
+        let err = perform(&ctx, &skill_row("m"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect_err("the refused skill is not installed");
+        assert!(format!("{err:#}").contains("plugin manifest"), "{err:#}");
+        assert!(!ctx.workspace.join(".claude/skills/m").exists(), "nothing is written");
+    }
+
     /// The fields split at the namespace, a parsed reference at the host.
     #[tokio::test]
     async fn tui_install_finds_a_declared_row_of_a_namespaced_registry() {
@@ -11100,6 +11216,34 @@ mod tests {
                 "{key}, member: {member}"
             );
         }
+    }
+
+    /// An intact installed skill whose output root holds a plugin manifest entry
+    /// (written by an older grim) refuses a TUI install; the files and lock stay.
+    #[tokio::test]
+    async fn tui_install_refuses_intact_installed_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_reg, ctx) = project_with_a_dependency_and_a_member(tmp.path()).await;
+        // Positive control: the intact row installs again as a no-op.
+        install_on(&ctx, "c", "c", "1", false).await.expect("clean re-install");
+
+        let skill = ctx.workspace.join(".claude/skills/c");
+        std::fs::create_dir(skill.join(".claude-plugin")).unwrap();
+        let (config, lock) = (
+            std::fs::read(&ctx.config_path).unwrap(),
+            std::fs::read(&ctx.lock_path).unwrap(),
+        );
+
+        let err = install_on(&ctx, "c", "c", "1", false).await.expect_err("refused");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError,
+            "{err:#}"
+        );
+        assert!(err.to_string().contains("grim uninstall skill c"), "{err:#}");
+        assert!(skill.join(".claude-plugin").is_dir(), "files stay");
+        assert_eq!(std::fs::read(&ctx.config_path).unwrap(), config);
+        assert_eq!(std::fs::read(&ctx.lock_path).unwrap(), lock);
     }
 
     /// A fresh checkout has no install record, so the row reads not installed.
@@ -15457,6 +15601,7 @@ mod tests {
                 source: crate::lock::locked_source::LockedSource::Registry(PinnedIdentifier::try_from(id).unwrap()),
                 bundles: Vec::new(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }
         }
 
@@ -18551,6 +18696,7 @@ mod tests {
             source: crate::lock::locked_source::LockedSource::Registry(pin),
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }];
         lock.bundles = vec![LockedBundle {
             name: "pack".to_string(),
@@ -19935,7 +20081,7 @@ mod tests {
             crate::hook::consent::load(&ctx.roots.grim_home, &ctx.workspace)
                 .map(|record| {
                     record
-                        .hooks
+                        .sources
                         .iter()
                         .map(|key| key.split('@').next().unwrap().to_string())
                         .collect()
@@ -20240,7 +20386,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         const REPO: &str = "localhost:5050/acme/team";
-        const CONSENT_KEY: &str = "settings:team@localhost:5050/acme/team";
+        const CONSENT_KEY: &str = "team@localhost:5050/acme/team";
 
         /// A declared package, or only the flag when `declared` is false.
         fn config(flag: bool, declared: bool) -> String {
@@ -20332,6 +20478,7 @@ mod tests {
                 source,
                 bundles: Vec::new(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }
         }
 
@@ -20929,10 +21076,7 @@ mod tests {
         async fn an_update_leaves_an_edit_outside_its_row() {
             let other = "other = \"localhost:5050/acme/other:1\"\n";
             let project = Project::new(&format!("{}{other}", config(true, true)));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:other@localhost:5050/acme/other".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "other@localhost:5050/acme/other".to_string()]);
             let (home, workspace) = (project.home.path(), project.workspace.path());
             consent::record(home, ConfigScope::Project, workspace, &keys).unwrap();
             let reg = MemoryRegistry::new();
@@ -20968,8 +21112,8 @@ mod tests {
                  [settings]\nm = \"localhost:5050/acme/mfork:1\"\n\n[bundles]\nouter = \"localhost:5050/acme/outer:1\"\n",
             );
             let keys = BTreeSet::from([
-                "settings:m@localhost:5050/acme/mfork".to_string(),
-                "settings:m@localhost:5050/acme/m".to_string(),
+                "m@localhost:5050/acme/mfork".to_string(),
+                "m@localhost:5050/acme/m".to_string(),
             ]);
             consent::record(
                 project.home.path(),
@@ -21018,10 +21162,7 @@ mod tests {
         #[tokio::test]
         async fn an_update_keeps_a_value_an_armed_package_outside_it_declares() {
             let project = Project::new(&config(true, true));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:other@localhost:5050/acme/other".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "other@localhost:5050/acme/other".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -21076,8 +21217,8 @@ mod tests {
                  [bundles]\npack = \"localhost:5050/acme/pack:1\"\n",
             );
             let keys = BTreeSet::from([
-                "settings:x@localhost:5050/acme/x".to_string(),
-                "settings:y@localhost:5050/acme/y".to_string(),
+                "x@localhost:5050/acme/x".to_string(),
+                "y@localhost:5050/acme/y".to_string(),
             ]);
             consent::record(
                 project.home.path(),
@@ -21529,10 +21670,7 @@ mod tests {
         /// `pack` installed, holding the settings packages `team` (`/model`) and
         /// `zeta` (`/language`), both consented, and the MCP server `srv`.
         async fn installed_pack_of_three(project: &Project) -> (TuiContext, TuiState) {
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:zeta@localhost:5050/acme/zeta".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "zeta@localhost:5050/acme/zeta".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -21845,10 +21983,7 @@ mod tests {
         #[tokio::test]
         async fn a_tui_update_refuses_a_settings_conflict_before_saving_its_lock() {
             let project = Project::new(&config(true, false));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:rival@localhost:5050/acme/rival".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "rival@localhost:5050/acme/rival".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -21882,10 +22017,7 @@ mod tests {
         #[tokio::test]
         async fn a_delete_refuses_a_settings_conflict_its_relock_finds() {
             let project = Project::new(&config(true, true));
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:rival@localhost:5050/acme/rival".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "rival@localhost:5050/acme/rival".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,
@@ -21974,10 +22106,7 @@ mod tests {
                 "[options]\nclients = [\"claude\"]\n\n[options.experimental]\nsettings = true\n\n\
                  [bundles]\npack = \"localhost:5050/acme/pack:1\"\n",
             );
-            let keys = BTreeSet::from([
-                CONSENT_KEY.to_string(),
-                "settings:zeta@localhost:5050/acme/zeta".to_string(),
-            ]);
+            let keys = BTreeSet::from([CONSENT_KEY.to_string(), "zeta@localhost:5050/acme/zeta".to_string()]);
             consent::record(
                 project.home.path(),
                 ConfigScope::Project,

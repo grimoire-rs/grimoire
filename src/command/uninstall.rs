@@ -45,8 +45,8 @@ use super::scope_resolution;
 /// `grim uninstall` arguments.
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
-    /// `skill`, `rule`, `agent`, `mcp`, `hook`, or `settings`.
-    #[arg(value_parser = ["skill", "rule", "agent", "mcp", "hook", "settings"])]
+    /// `skill`, `rule`, `agent`, `mcp`, `hook`, `settings`, or `mod`.
+    #[arg(value_parser = ["skill", "rule", "agent", "mcp", "hook", "settings", "mod"])]
     pub kind: String,
 
     /// The config binding name to uninstall.
@@ -107,6 +107,20 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         None => None,
     };
     super::lock::require_in_line(ctx, &scope)?;
+
+    // A settings entry grim did not write is the user's: refused before anything is deleted or written.
+    if kind == ArtifactKind::Mod
+        && !args.force
+        && let Some((recorded, actual)) =
+            crate::install::mod_phase::drifted_entry(&scope.roots, scope.scope, &scope.workspace, &args.name)
+    {
+        return Err(
+            crate::error::Error::from(crate::install::install_error::InstallError::without_reference(
+                crate::install::install_error::InstallErrorKind::IntegrityMismatch { recorded, actual },
+            ))
+            .into(),
+        );
+    }
 
     // An artifact a remaining declaration still reaches stays in the effective
     // desired set once its direct declaration is removed: a declared bundle
@@ -219,7 +233,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         // (main's uninstall never read it). Fail closed instead: converge with
         // the feature forced off, which reaps this root's registrations rather
         // than leaving them armed.
-        let no_declared = std::collections::BTreeSet::new();
+        let no_declared = crate::hook::consent::DeclaredKeys::new();
         let hook_policy = match super::hook_consent::resolve_without_consent(ctx, &scope, None, &no_declared) {
             Ok(policy) => policy,
             Err(e) => {
@@ -237,9 +251,11 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         };
         // The lock on disk may trail the config, so the config's own hooks count too.
         let flags = &scope.options.experimental;
-        let mut declared = super::hook_consent::config_consent_keys(&scope.set, flags);
+        let mut declared = super::hook_consent::config_keys(&scope.set, flags);
         if let Some(lock) = &lock {
-            declared.extend(super::hook_consent::declared_consent_keys(lock, flags));
+            for (kind, keys) in super::hook_consent::declared_keys(lock, flags) {
+                declared.entry(kind).or_default().extend(keys);
+            }
         }
         let install_hooks = match super::hook_consent::resolve_without_consent(ctx, &scope, None, &declared) {
             Ok(policy) => policy,
@@ -248,6 +264,11 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         };
         let (roots, workspace, config_path) = (scope.roots.clone(), scope.workspace.clone(), scope.config_path.clone());
         let (config_scope, force, grim) = (scope.scope, ForceScope::from(args.force), scope.invocation.clone());
+        let locked_mods: Option<BTreeSet<String>> =
+            lock.as_ref().map(|l| l.mods.iter().map(|m| m.name.clone()).collect());
+        let mod_proofs =
+            crate::install::mod_phase::uninstall_proofs(&roots, config_scope, &workspace, &nodes, locked_mods.as_ref())
+                .await;
         // Deleting reads, writes and removes files, so it runs on the blocking pool.
         let named = key.clone();
         let work = move || {
@@ -261,6 +282,8 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
                 hook_policy: &hook_policy,
                 install_hooks: &install_hooks,
                 grim: &grim,
+                locked_mods: locked_mods.as_ref(),
+                mod_proofs: &mod_proofs,
             };
             delete_nodes(&mut state, &nodes, &env)
         };
@@ -498,6 +521,7 @@ pub(crate) fn undeclare(set: &mut crate::config::declaration::DesiredSet, kind: 
         ArtifactKind::Bundle => set.bundles.remove(name).is_some(),
         ArtifactKind::Mcp => set.mcp.remove(name).is_some(),
         ArtifactKind::Settings => set.settings.remove(name).is_some(),
+        ArtifactKind::Mod => set.mods.remove(name).is_some(),
     };
     if declared {
         set.invalidate_declaration_hash_cache();
@@ -605,6 +629,11 @@ pub(crate) struct DeleteEnv<'a> {
     pub(crate) install_hooks: &'a crate::hook::policy::HookPolicy,
     /// The `grim` a warning's remedy names.
     pub(crate) grim: &'a Invocation,
+    /// The mod names the lock holds, `None` when no lock could be read: a mod
+    /// record the lock does not name is disarmed with the delete.
+    pub(crate) locked_mods: Option<&'a BTreeSet<String>>,
+    /// Renders of the pins the mod records name, computed before the blocking delete.
+    pub(crate) mod_proofs: &'a crate::install::mod_phase::RenderProofs,
 }
 
 /// Why [`delete_nodes`] stopped before the last node.
@@ -792,6 +821,21 @@ pub(crate) fn delete_nodes(
         env.roots,
         Some(&BTreeSet::new()),
     );
+    // Mods disarm with the scope's last write, whatever this run removed.
+    let mods = crate::install::mod_phase::disarm(
+        env.roots,
+        env.scope,
+        env.workspace,
+        nodes,
+        env.locked_mods,
+        env.mod_proofs,
+        env.force,
+    );
+    if let Some(marketplace) = mods.retired_marketplace {
+        tracing::warn!(
+            "the last Claude mod is gone; `claude plugin marketplace remove {marketplace}` makes Claude Code forget its marketplace"
+        );
+    }
     // The empty closure above writes no survivor's registration back, and `grim
     // status` reads the dispatch table alone, so only this line says a client
     // stopped asking a gatekeeper.
@@ -913,6 +957,7 @@ pub(crate) fn plan_hold(
         ArtifactKind::Agent => after.agents.remove(&key.1),
         ArtifactKind::Mcp => after.mcp.remove(&key.1),
         ArtifactKind::Settings => after.settings.remove(&key.1),
+        ArtifactKind::Mod => after.mods.remove(&key.1),
         ArtifactKind::Bundle => return none,
     };
     after.invalidate_declaration_hash_cache();
@@ -1137,6 +1182,7 @@ mod tests {
             agents: Vec::new(),
             mcp: vec![],
             bundles: Vec::new(),
+            mods: Vec::new(),
         }
     }
 
@@ -1623,7 +1669,7 @@ mod tests {
     /// is a test failure rather than a wrong-target action.
     #[test]
     fn every_accepted_kind_string_resolves_to_that_kind() {
-        for accepted in ["skill", "rule", "agent", "mcp", "hook", "settings"] {
+        for accepted in ["skill", "rule", "agent", "mcp", "hook", "settings", "mod"] {
             let kind = ArtifactKind::from_kind_str(accepted)
                 .unwrap_or_else(|| panic!("the `uninstall` parser accepts '{accepted}' but no kind parses it"));
             assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");

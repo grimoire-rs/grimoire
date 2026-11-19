@@ -700,7 +700,7 @@ def test_lock_reads_no_layer_it_would_not_arm(
     runner = grim_at(project_dir)
     runner.env.update(settings_sandbox(tmp_path / "s", runner.home)[0])
     lock = project_dir / "grimoire.lock"
-    consent = Path(runner.grim_home) / "hooks/consent"
+    consent = Path(runner.grim_home) / "consent"
 
     runner.run("lock")
     if consented:

@@ -1,11 +1,12 @@
 ---
 title: "Artifact Reference"
-description: "Grimoire ships seven artifact kinds: skills, rules, agents, MCP servers, bundles, and the experimental hooks and settings. Each has its own file layout and install target."
+description: "Grimoire ships eight artifact kinds: skills, rules, agents, MCP servers, bundles, and the experimental hooks, settings and mods. Each has its own file layout and install target."
 ---
 <!-- doc_type: reference -->
 
-Grimoire ships seven artifact kinds: skills, rules, agents, MCP servers,
-bundles, and the experimental [hooks](./hooks.md) and [settings][settings]. Each
+Grimoire ships eight artifact kinds: skills, rules, agents, MCP servers,
+bundles, and the experimental [hooks](./hooks.md), [settings][settings] and
+[mods][mods]. Each
 has its own source shape, frontmatter schema, and validation rules. Before this
 page, those details lived scattered across the publishing, agents, and
 vendor-metadata chapters.
@@ -19,7 +20,7 @@ looks like. This page is that reference. Narrative background stays in
 reference lives in its own chapter,
 [MCP Server Artifacts](./mcp-servers.md).
 
-## The seven kinds {#kinds}
+## The eight kinds {#kinds}
 
 Every artifact carries its kind in a `com.grimoire.kind` manifest
 annotation, so registries and tooling can distinguish kinds without
@@ -34,6 +35,7 @@ downloading layers.
 | **Bundle** | `.toml` member list | `bundle` | Never materializes itself — expands to its members |
 | **Hook** (experimental) | Directory with a `hook.toml` index | `hook` | Payload on disk plus a client-native registration, gated behind a feature flag and workspace consent — see [Hooks](./hooks.md) |
 | **Settings** (experimental) | `settings/<name>.toml` document | `settings` | Values merged into each harness's own settings file, gated behind a feature flag and workspace consent. See [Settings][settings] |
+| **Mod** (experimental) | Directory with a `mod.toml` and one directory per harness | `mod` | Publisher code a client loads, gated behind a feature flag and workspace consent. See [Mods][mods] |
 
 The manifest's config descriptor is the OCI empty config
 (`application/vnd.oci.empty.v1+json`) — universally allow-listed, including
@@ -125,6 +127,18 @@ at project scope, workspace consent.
 The [Settings reference][settings] covers the format, the merge rules, the
 refusal error and the fields each harness takes.
 
+### Mod (experimental) {#mod}
+
+**Experimental pre-1.0**, behind the `[options.experimental] mods` flag. A
+**mod** is a directory named after the mod. It holds `mod.toml` and one
+directory per harness, `claude/` and `opencode/`. Each harness directory holds
+code files only, which the client loads into its own process.
+
+`grim build` infers the kind from a `mod.toml`, after it finds no `SKILL.md`
+and no `hook.toml`. `--kind mod` is also accepted. A mod needs workspace
+consent before grim writes it, as a hook does. The [Mods reference][mods]
+covers the layout, `mod.toml`, the served clients and the lifecycle.
+
 ## Names {#names}
 
 Every skill and agent carries a `name` in frontmatter, and grim validates
@@ -159,6 +173,8 @@ A skill is a directory: the `SKILL.md` index plus any supporting files
 single [tar layer](#layers) and installed verbatim, except files excluded by
 [`.grimignore`](#grimignore) — only `SKILL.md` itself is ever re-rendered,
 and only when it carries vendor-namespaced metadata keys.
+
+Since grim 0.17.0 a skill whose root holds a `.claude-plugin` entry is refused with exit `65`. See [the upgrade note][ref-upgrading-md-skill-plugin-manifest].
 
 The frontmatter follows the [agentskills specification][agentskills-spec].
 Parsing is forward-compatible: unknown top-level keys are preserved
@@ -565,6 +581,7 @@ Top-level keys and member tables:
 | `[mcp]` | no | name → ref table | MCP server members; the name is the key the server registers under in each client's MCP config |
 | `[bundles]` | no | name → ref table | Bundle members: a bundle that groups another bundle, see [nested bundles](#bundle-nested) |
 | `[hooks]` | no | name → ref table | Hook members (experimental). A hook arms only past the `[options.experimental] hooks` flag and, at project scope, workspace consent. See [Hooks][hooks] |
+| `[mods]` | no | name → ref table | Mod members (experimental). A mod is written only past the `[options.experimental] mods` flag and workspace consent. See [Mods][mods] |
 | `[settings]` | no | name → ref table | Settings members (experimental). A package applies only past the `[options.experimental] settings` flag and, at project scope, workspace consent. See [Settings][settings] |
 
 Each member entry maps the **config binding name** (the name the member is
@@ -660,7 +677,7 @@ team-defaults = "registry.example.com/grimoire/settings/team-defaults:1"
 
 ## Declaring dependencies {#requires}
 
-A skill, rule, agent, MCP server, hook, or settings package can declare the
+A skill, rule, agent, MCP server, hook, settings package, or mod can declare the
 artifacts it needs.
 Installing it then installs them too, and removing it removes what only it
 needed. A [bundle's](#bundles) member list already works this way. See
@@ -679,6 +696,7 @@ per entry, and a reference as the value.
 | `hooks` | hook |
 | `bundles` | bundle |
 | `settings` | settings |
+| `mods` | mod |
 
 The binding name is the name the dependency installs under, and it follows the
 [name rules](#names). The reference is a fully-qualified `registry/repo:tag` or
@@ -731,6 +749,7 @@ Where the declaration lives depends on the kind:
 | MCP server | `[requires.<table>]` tables in `mcp/<name>.toml` |
 | Hook | `[requires.<table>]` tables in `hook.toml` |
 | Settings | `[requires.<table>]` tables in the settings document, kept out of its layer |
+| Mod | `[requires.<table>]` tables in `mod.toml` |
 | Bundle | The `[bundles]` table of the source, see [nested bundles](#bundle-nested) |
 
 ```yaml
@@ -773,7 +792,7 @@ published after the artifact that needs it. Neither checks a
 satisfies the tag is decided at resolve time, never at build time or offline.
 
 Declared dependencies are stored sorted by kind, in the order skill, rule,
-agent, bundle, mcp, hook, settings, and then by name. That order is part of the
+agent, bundle, mcp, hook, settings, mod, and then by name. That order is part of the
 published bytes. It is not the alphabetical order of the table names.
 
 ## Vendor extensions {#vendor-extensions}
@@ -893,13 +912,15 @@ grim meets a two-layer artifact.
 
 A manifest may also list the features a reader must understand in the
 `com.grimoire.requires-features` annotation, a comma-separated list. This grim
-understands `dependencies`. It refuses an artifact that names any other feature,
+understands `dependencies` and `mods`. It refuses an artifact that names any other feature,
 with the same exit and reason. It refuses a malformed value the same way: over
 1024 bytes, more than 32 features, or a name outside lowercase letters, digits
 and hyphens.
 
-grim reads the annotation but does not write it today, because a dependent
-artifact is recognized by its layout alone. The key is reserved so that a later
+A manifest carries `mods` when its bundle members or its `requires` edges name
+a mod. A mod whose own `requires` name a mod carries it too. A manifest that only sits beside mods never
+carries it. For every other dependency, grim reads the annotation but does not
+write it, because a dependent artifact is recognized by its layout alone. The key is reserved so that a later
 format can turn readers that predate it away cleanly.
 
 ## Catalog annotations {#annotations}
@@ -957,6 +978,7 @@ updated without re-releasing every published version.
 [hooks]: ./hooks.md
 [hooks-exit]: ./hooks.md#handler-exit
 [settings]: ./settings.md
+[mods]: ./mods.md
 [settings-format]: ./settings.md#format
 [stability-unstable]: ./stability.md#unstable
 
@@ -973,5 +995,6 @@ updated without re-releasing every published version.
 [ref-publishing-md-description-entry-readme]: ./publishing.md#description-entry-readme
 [ref-publishing-md-rule-support-dir]: ./publishing.md#rule-support-dir
 [ref-requires]: #requires
+[ref-upgrading-md-skill-plugin-manifest]: ./upgrading.md#skill-plugin-manifest
 [ref-guides-dependencies-md-rule-with-lookup-data]: ./guides/dependencies.md#rule-with-lookup-data
 [ref-well-known-assets]: #well-known-assets
