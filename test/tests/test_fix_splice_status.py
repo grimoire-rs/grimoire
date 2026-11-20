@@ -331,6 +331,43 @@ def test_global_opencode_mcp_edits_an_existing_jsonc_instead_of_a_json_sibling(
     assert "// which model to use" in removed, "the user's config must survive uninstall"
 
 
+def test_global_opencode_mcp_installs_into_cr_only_jsonc(
+    grim_binary, grim_home: Path, registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """A CR-only ``opencode.jsonc`` with a line comment must be editable.
+
+    The comment used to run to the end of the file (both readers ended a
+    ``//`` comment only at a line feed), so grim refused the file outright:
+    "content is not a JSON object grim can edit" (issue #314).
+    """
+    runner = GrimRunner(grim_binary, grim_home)
+    ref = _release_mcp(runner, tmp_path / "src", registry, unique_repo)
+
+    # GrimRunner pins XDG_CONFIG_HOME at <home>/.config.
+    cfg_dir = Path(runner.env["XDG_CONFIG_HOME"]) / "opencode"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_dir / "opencode.jsonc"
+    cfg.write_bytes(b'{\r  // which model to use\r  "model": "anthropic/claude"\r}\r')
+
+    (grim_home / "grimoire.toml").write_text(f'[mcp]\ngrim-mcp = "{ref}"\n', encoding="utf-8", newline="\n")
+    runner.json("lock", "--global")
+    rows = runner.json("install", "--global", "--client", "opencode")["items"]
+    assert rows[0]["status"] == "installed", rows
+
+    added = cfg.read_bytes()
+    assert b'"grim-mcp"' in added, f"the entry must land in the .jsonc: {added}"
+    assert b"// which model to use" in added, f"JSONC comment must survive: {added}"
+    # The shared helper strips a comment to the next line feed, which a
+    # CR-only file never has; strip to either line ending here.
+    doc = json.loads(re.sub(r"//[^\r\n]*", "", added.decode("utf-8")))
+    assert doc["mcp"]["grim-mcp"]["command"] == ["grim", "mcp"], f"the file must still parse: {added}"
+
+    runner.json("uninstall", "--global", "mcp", "grim-mcp")
+    removed = cfg.read_bytes()
+    assert b"grim-mcp" not in removed, f"uninstall must remove the live entry: {removed}"
+    assert b"// which model to use" in removed, "the user's config must survive uninstall"
+
+
 # ── (c2) OpenCode JSONC: a comment ending in a comma survives uninstall ────
 
 COMMA_COMMENT = "// managed by grim, see the team notes,"
