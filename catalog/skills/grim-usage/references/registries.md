@@ -738,11 +738,12 @@ grim install --offline # later: cache-only, no network
 `update` whose resolve needs a tag or manifest the cache lacks exits 69. Its
 message says offline mode blocked it.
 
-Two offline runs exit otherwise. `grim add` without `--kind` exits 65 on an
-uncached reference, because it cannot infer the kind.
-`grim update --marketplace` exits 81 where it needs the network, a recorded
-bundle digest the store lacks included. The flag or env var are the only
-switches — there is no config-file counterpart for offline.
+Two offline runs exit 81 instead. `grim update --marketplace` exits 81
+where it needs the network, a recorded bundle digest the store lacks
+included, and `grim add` without `--kind` exits 81 on an uncached
+reference: offline mode blocks the fetch the kind inference needs, so it
+never reaches the kind-inference error (exit 65). The flag or env var are
+the only switches — there is no config-file counterpart for offline.
 
 ## Search, TUI, and MCP {#search-tui-and-mcp}
 

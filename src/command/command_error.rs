@@ -50,8 +50,9 @@ pub enum CommandError {
     /// `add` could not infer the artifact kind: the reference did not
     /// resolve to a manifest carrying a Grimoire kind — the
     /// `com.grimoire.kind` annotation, or the legacy `artifactType`/config
-    /// media type on older artifacts (a non-Grimoire image, or an offline
-    /// cache miss). The user must pass `--kind`.
+    /// media type on older artifacts (a non-Grimoire image). An offline
+    /// cache miss never reaches this variant: `grim add` reports it as
+    /// offline-blocked instead. The user must pass `--kind`.
     #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp|hook|settings")]
     KindInferenceFailed { reference: String },
 
