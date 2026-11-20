@@ -28,6 +28,10 @@ use crate::telemetry::Telemetry;
 type AccessMemo =
     std::sync::Mutex<std::collections::HashMap<(AccessMode, PlainHttpHosts), (std::time::Instant, Arc<dyn OciAccess>)>>;
 
+/// The store-first seam of one bounded run and the reader that reports on
+/// it, as [`Context::bounded_access`] returns them.
+pub(crate) type BoundedRunSeam = (Arc<dyn OciAccess>, BoundedAccess<Arc<dyn OciAccess>>);
+
 /// Resolved configuration for a single `grim` invocation.
 ///
 /// Fields are resolved eagerly but cheaply (env reads only). The OCI
@@ -419,6 +423,10 @@ impl Context {
     /// now. Never memoized, so every run gets its own budget; the returned
     /// reader shares that run and reports its failed hosts.
     ///
+    /// In test builds the bound wraps the injected `test_access` override
+    /// instead of a fresh client, so a test's scripted registry is what the
+    /// bound applies to.
+    ///
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
@@ -427,11 +435,20 @@ impl Context {
         &self,
         plain_http: PlainHttpHosts,
         run_deadline: std::time::Duration,
-    ) -> std::io::Result<(Arc<dyn OciAccess>, BoundedAccess<RegistryClient>)> {
+    ) -> std::io::Result<BoundedRunSeam> {
         let paths = self.paths();
         paths.ensure_layout()?;
         // shortcut: the 4 MiB manifest cap runs after the oci-client fork read the body; cap the read in the fork.
-        let bounded = BoundedAccess::new(RegistryClient::with_plain_http_hosts(plain_http), run_deadline);
+        let inner: Arc<dyn OciAccess> = {
+            #[cfg(test)]
+            match &self.test_access {
+                Some(injected) => Arc::clone(injected),
+                None => Arc::new(RegistryClient::with_plain_http_hosts(plain_http)),
+            }
+            #[cfg(not(test))]
+            Arc::new(RegistryClient::with_plain_http_hosts(plain_http))
+        };
+        let bounded = BoundedAccess::new(inner, run_deadline);
         let cached = CachedAccess::new(
             bounded.clone(),
             TagCache::new(paths.tags_dir()),

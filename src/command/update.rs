@@ -71,6 +71,7 @@ use crate::lock::prior::Prior;
 use crate::lock::refresh::Refresh;
 use crate::oci::ArtifactKind;
 use crate::oci::access::OciAccess;
+use crate::oci::access::bounded_access::CLI_RUN_DEADLINE;
 use crate::oci::text::{escape_controls, registry_text};
 use crate::resolve::claim_remedy::{RemedyCommand, with_remedy};
 use crate::resolve::resolve_options::{Downgrade, ResolveOptions};
@@ -117,6 +118,13 @@ pub struct UpdateArgs {
 }
 
 /// Run `grim update`.
+///
+/// The pre-pass proves the previous lock's files against their old pins
+/// under a fixed fetch bound (10 s a call, 30 s a run, the same bounds
+/// `grim status` proves under): a registry that stalls on an old pin ends
+/// the pre-pass with those files unproven, kept on disk and named, and the
+/// exit code is the same as for a pin the registry cannot answer for at
+/// all. The resolve and install fetches carry no such bound.
 ///
 /// # Errors
 ///
@@ -209,8 +217,26 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let mut state = scope_resolution::read_state(&scope)
         .map_err(|e| state_io(&scope.state_path, e))?
         .adopt();
+    // The pre-pass proves the previous lock's files against their old pins,
+    // fetching them from the registry when the store lacks them; bound it as
+    // `grim status` bounds its proofs (10 s a call, 30 s a run, #367), so a
+    // registry that accepts and stays silent costs the pre-pass its deadline
+    // instead of the run. A seam that cannot be built, or an offline run,
+    // leaves the pre-pass on the run's access, as before. The resolve and
+    // install fetches keep the run's access: out of scope for #367.
+    let prepass_access = (!ctx.offline())
+        .then(|| {
+            ctx.bounded_access(super::transport_hosts(ctx), CLI_RUN_DEADLINE)
+                .map(|(access, _)| access)
+                .inspect_err(|e| tracing::debug!("update pre-pass runs unbounded: {e}"))
+                .ok()
+        })
+        .flatten()
+        .unwrap_or_else(|| Arc::clone(&access));
     let prepass = match &previous {
-        Some(evidence) => Some(prove_previous(&mut state, evidence, named.as_ref(), &target, &scope, &access).await?),
+        Some(evidence) => {
+            Some(prove_previous(&mut state, evidence, named.as_ref(), &target, &scope, &prepass_access).await?)
+        }
         None => None,
     };
 
@@ -518,7 +544,9 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
 }
 
 /// [`prove_records`], then persists what proved: the lock save that follows
-/// destroys the evidence.
+/// destroys the evidence. `access` is the pre-pass's own seam: the caller
+/// bounds it (10 s a call, 30 s a run), so a stalling registry leaves the
+/// nodes it cannot fetch unproven instead of holding the run.
 async fn prove_previous(
     state: &mut InstallState,
     evidence: &GrimoireLock,
@@ -3089,6 +3117,226 @@ mod tests {
             new.to_short_string()
         );
         assert_eq!(logs.matches(&line).count(), 1, "{logs}");
+    }
+
+    /// A registry that answers nothing. Every read fails the way a refused
+    /// connection does, so the pre-pass treats the old pin as unfetchable.
+    struct Down;
+
+    #[expect(clippy::result_large_err, reason = "the error every OciAccess method returns")]
+    fn refused<T>() -> Result<T, crate::oci::access::error::AccessError> {
+        Err(crate::oci::access::error::AccessError::without_identifier(
+            crate::oci::access::error::AccessErrorKind::Registry(Box::new(std::io::Error::other("connection refused"))),
+        ))
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for Down {
+        async fn resolve_digest(
+            &self,
+            _: &Identifier,
+            _: crate::oci::access::Operation,
+        ) -> Result<Option<Digest>, crate::oci::access::error::AccessError> {
+            refused()
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &PinnedIdentifier,
+        ) -> Result<Option<crate::oci::manifest::OciManifest>, crate::oci::access::error::AccessError> {
+            refused()
+        }
+        async fn fetch_blob(
+            &self,
+            _: &Identifier,
+            _: &Digest,
+            _: u64,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            refused()
+        }
+        async fn list_tags(
+            &self,
+            _: &Identifier,
+        ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
+            refused()
+        }
+        async fn list_catalog(
+            &self,
+            _: &str,
+        ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
+            Ok(crate::oci::access::CatalogListing {
+                repositories: Vec::new(),
+                complete: true,
+            })
+        }
+        async fn push_blob(&self, _: &Identifier, _: &[u8]) -> Result<Digest, crate::oci::access::error::AccessError> {
+            refused()
+        }
+        async fn push_manifest(
+            &self,
+            _: &Identifier,
+            _: &crate::oci::manifest::OciManifest,
+        ) -> Result<Digest, crate::oci::access::error::AccessError> {
+            refused()
+        }
+        async fn put_tag(
+            &self,
+            _: &Identifier,
+            _: &str,
+            _: &Digest,
+        ) -> Result<(), crate::oci::access::error::AccessError> {
+            refused()
+        }
+    }
+
+    /// A registry that accepts and never answers. Every read hangs, so only
+    /// a deadline ends the pre-pass.
+    struct Hang;
+
+    #[async_trait::async_trait]
+    impl OciAccess for Hang {
+        async fn resolve_digest(
+            &self,
+            _: &Identifier,
+            _: crate::oci::access::Operation,
+        ) -> Result<Option<Digest>, crate::oci::access::error::AccessError> {
+            std::future::pending().await
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &PinnedIdentifier,
+        ) -> Result<Option<crate::oci::manifest::OciManifest>, crate::oci::access::error::AccessError> {
+            std::future::pending().await
+        }
+        async fn fetch_manifest_bytes(
+            &self,
+            _: &PinnedIdentifier,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            std::future::pending().await
+        }
+        async fn fetch_blob(
+            &self,
+            _: &Identifier,
+            _: &Digest,
+            _: u64,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            std::future::pending().await
+        }
+        async fn list_tags(
+            &self,
+            _: &Identifier,
+        ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
+            std::future::pending().await
+        }
+        async fn list_catalog(
+            &self,
+            _: &str,
+        ) -> Result<crate::oci::access::CatalogListing, crate::oci::access::error::AccessError> {
+            std::future::pending().await
+        }
+        async fn push_blob(&self, _: &Identifier, _: &[u8]) -> Result<Digest, crate::oci::access::error::AccessError> {
+            unreachable!("an update that drops a skill never pushes")
+        }
+        async fn push_manifest(
+            &self,
+            _: &Identifier,
+            _: &crate::oci::manifest::OciManifest,
+        ) -> Result<Digest, crate::oci::access::error::AccessError> {
+            unreachable!("an update that drops a skill never pushes")
+        }
+        async fn put_tag(
+            &self,
+            _: &Identifier,
+            _: &str,
+            _: &Digest,
+        ) -> Result<(), crate::oci::access::error::AccessError> {
+            unreachable!("an update that drops a skill never tags")
+        }
+    }
+
+    /// A registry that never answers holds the pre-pass to its call deadline
+    /// (10 s) and no longer: the update still finishes, keeps the unproven
+    /// files, names them, and exits 0 (#367). Slow by design: the production
+    /// call deadline is what this test measures, so it takes about 10 s.
+    #[tokio::test]
+    async fn a_stalled_registry_holds_the_prepass_to_its_deadline_only() {
+        use std::time::{Duration, Instant};
+        let (_tmp, home, config, installed) = dropped_skill_workspace().await;
+        let ctx = Context::with_access(home, Hang).with_config(config);
+
+        let capture = crate::catalog::test_hosts::LogCapture::start();
+        let start = Instant::now();
+        let out = tokio::time::timeout(Duration::from_secs(20), run(&ctx, &update_all())).await;
+        let elapsed = start.elapsed();
+        let logs = capture.text();
+
+        let (_report, exit) = out
+            .expect("a stalled registry must not hold the update past its deadline")
+            .expect("a stalled old pin is not an error");
+        assert_eq!(exit, ExitCode::Success);
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "the pre-pass ended within its bound: {elapsed:?}"
+        );
+        assert!(installed.is_file(), "the unproven files stay on disk");
+        assert!(
+            logs.contains("skill 'x' left") && logs.contains(".claude/skills/x"),
+            "the warning names the kept files: {logs}"
+        );
+    }
+    /// A workspace with a local rule and a registry skill `x` installed, the
+    /// skill then dropped from the config and its record removed, so the next
+    /// update's pre-pass must fetch `x`'s old pin to prove its files.
+    /// Returns the tempdir, the grim home, the config path, and the skill's
+    /// installed file.
+    async fn dropped_skill_workspace() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        use super::super::lock::test_registry::{REGISTRY, publish_skill};
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        publish_skill(&reg, "x").await;
+        let config = tmp.path().join("grimoire.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[options]\nclients = [\"claude\"]\n\n[rules]\nlocal = \"./local.md\"\n\n[skills]\nx = \"{REGISTRY}/acme/x:1\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("local.md"), "# local\n").unwrap();
+        let ctx = Context::with_access(home.clone(), reg.clone()).with_config(config.clone());
+        run(&ctx, &update_all()).await.expect("the first update installs");
+        let installed = tmp.path().join(".claude/skills/x/SKILL.md");
+        assert!(installed.is_file(), "the skill installs on the first update");
+        // No record, so the pre-pass must fetch the old pin to prove the
+        // files; the config drops the skill, so nothing else needs the registry.
+        let scope = scope_resolution::resolve(&ctx, false, Some(&config)).unwrap();
+        std::fs::remove_file(&scope.state_path).unwrap();
+        std::fs::write(&config, local_rule_config(r#""claude""#)).unwrap();
+        (tmp, home, config, installed)
+    }
+
+    /// A dropped skill whose old pin the registry cannot answer for keeps its
+    /// files on disk, names them on stderr, and exits 0 (#367): the
+    /// unreachable-pin case the pre-pass deadline must match.
+    #[tokio::test]
+    async fn a_dropped_skill_with_an_unreachable_pin_keeps_its_files_and_exits_0() {
+        let (_tmp, home, config, installed) = dropped_skill_workspace().await;
+        let ctx = Context::with_access(home, Down).with_config(config);
+
+        let (out, logs) = update_logged(&ctx, &update_all()).await;
+
+        let (_report, exit) = out.expect("an unreachable old pin is not an error");
+        assert_eq!(exit, ExitCode::Success);
+        assert!(installed.is_file(), "the unproven files stay on disk");
+        assert!(
+            logs.contains("skill 'x' left") && logs.contains(".claude/skills/x"),
+            "the warning names the kept files: {logs}"
+        );
     }
 
     /// A project that locked `a` 1.0.0, `b` and a bare direct `x` at 3.1.0, after

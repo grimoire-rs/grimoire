@@ -193,6 +193,57 @@ pub trait OciAccess: Send + Sync {
     async fn put_tag(&self, repo: &Identifier, tag: &str, manifest_digest: &Digest) -> Result<(), AccessError>;
 }
 
+/// A shared seam as an access a [`bounded_access::BoundedAccess`] can wrap:
+/// the run's own access, so a bound applies to the seam a caller already
+/// built (and, in tests, to the injected one) instead of to a fresh client.
+#[async_trait]
+impl OciAccess for std::sync::Arc<dyn OciAccess> {
+    async fn resolve_digest(&self, id: &Identifier, op: Operation) -> Result<Option<Digest>, AccessError> {
+        self.as_ref().resolve_digest(id, op).await
+    }
+
+    async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+        self.as_ref().fetch_manifest(id).await
+    }
+
+    async fn fetch_manifest_bytes(&self, id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+        self.as_ref().fetch_manifest_bytes(id).await
+    }
+
+    async fn fetch_blob(
+        &self,
+        repo: &Identifier,
+        digest: &Digest,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, AccessError> {
+        self.as_ref().fetch_blob(repo, digest, max_bytes).await
+    }
+
+    async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+        self.as_ref().list_tags(id).await
+    }
+
+    async fn list_tags_within(&self, id: &Identifier, max_bytes: usize) -> Result<Option<TagListing>, AccessError> {
+        self.as_ref().list_tags_within(id, max_bytes).await
+    }
+
+    async fn list_catalog(&self, registry: &str) -> Result<CatalogListing, AccessError> {
+        self.as_ref().list_catalog(registry).await
+    }
+
+    async fn push_blob(&self, repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+        self.as_ref().push_blob(repo, bytes).await
+    }
+
+    async fn push_manifest(&self, repo: &Identifier, manifest: &OciManifest) -> Result<Digest, AccessError> {
+        self.as_ref().push_manifest(repo, manifest).await
+    }
+
+    async fn put_tag(&self, repo: &Identifier, tag: &str, manifest_digest: &Digest) -> Result<(), AccessError> {
+        self.as_ref().put_tag(repo, tag, manifest_digest).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

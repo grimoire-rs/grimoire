@@ -3804,7 +3804,7 @@ impl<'a, A: OciAccess> Fetcher<'a, A> {
 }
 
 /// The store-first bounded seam of one run; one that cannot be built leaves the run store-only.
-fn open_bounded(ctx: &Context) -> Option<BoundedSeam> {
+fn open_bounded(ctx: &Context) -> Option<BoundedSeam<Arc<dyn OciAccess>>> {
     ctx.bounded_access(super::transport_hosts(ctx), CLI_RUN_DEADLINE)
         .inspect_err(|e| tracing::debug!("registry not read, so no record is proven from it: {e}"))
         .ok()

@@ -1205,6 +1205,7 @@ mod tests {
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
     use crate::oci::access::Operation;
+    use crate::oci::access::bounded_access::BoundedAccess;
     use crate::oci::access::error::AccessError;
     use crate::oci::manifest::{Descriptor, OciManifest};
     use crate::oci::{Algorithm, Identifier, PinnedIdentifier};
@@ -1222,6 +1223,8 @@ mod tests {
         Blobs(Vec<Vec<u8>>),
         /// An offline store miss.
         Offline,
+        /// The registry accepts and never answers.
+        Hang,
         /// No such manifest.
         Missing,
         /// The registry host is down.
@@ -1255,7 +1258,15 @@ mod tests {
                 Serve::Down => Err(AccessError::without_identifier(AccessErrorKind::Registry(Box::new(
                     std::io::Error::other("connection refused"),
                 )))),
-                Serve::Blob(_) | Serve::Blobs(_) | Serve::Missing => Ok(()),
+                Serve::Blob(_) | Serve::Blobs(_) | Serve::Missing | Serve::Hang => Ok(()),
+            }
+        }
+
+        /// Never returns while the registry hangs, so a caller without a
+        /// deadline hangs with it.
+        async fn maybe_hang(&self) {
+            if matches!(self.serve, Serve::Hang) {
+                std::future::pending::<()>().await;
             }
         }
 
@@ -1274,18 +1285,28 @@ mod tests {
     #[async_trait]
     impl OciAccess for Registry {
         async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            self.maybe_hang().await;
             self.answer()?;
             Ok(None)
         }
         async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            self.maybe_hang().await;
             self.answer()?;
             Ok(self.blob(&id.digest()).map(manifest_for))
         }
+        async fn fetch_manifest_bytes(&self, _id: &PinnedIdentifier) -> Result<Option<Vec<u8>>, AccessError> {
+            self.maybe_hang().await;
+            // No raw form: this double's pins name layer digests, not
+            // manifest bytes, so the trait default (`None`) is the answer.
+            Ok(None)
+        }
         async fn fetch_blob(&self, _repo: &Identifier, d: &Digest, _max: u64) -> Result<Option<Vec<u8>>, AccessError> {
+            self.maybe_hang().await;
             self.answer()?;
             Ok(self.blob(d).map(<[u8]>::to_vec))
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            self.maybe_hang().await;
             self.answer()?;
             Ok(None)
         }
@@ -2660,6 +2681,52 @@ mod tests {
         assert!(changed);
         assert_eq!(calls(&counted), calls(&alone), "no second read");
         assert_eq!(fx.record(&b), report.settled.first());
+    }
+
+    /// A registry that never answers leaves the pre-pass unproven within its
+    /// deadline (#367): the run ends, the node stays unproven with its fetch
+    /// budget spent, and nothing on disk or in the record changes.
+    #[tokio::test]
+    async fn a_stalled_registry_leaves_the_prepass_unproven_within_its_deadline() {
+        use std::time::{Duration, Instant};
+
+        let (a, blob_a) = rule(b"# a\n");
+        let (b, _) = rule(b"# b\n");
+        let mut fx = installed(&a, &blob_a, &[ClientTarget::Claude]).await;
+        fx.write(RULE, b"# b\n");
+        let (roots, ws, before) = (fx.roots(), fx.ws().to_path_buf(), fx.records());
+        let hanging = BoundedAccess::new(Registry::new(Serve::Hang), Duration::from_millis(50));
+        let reader: Arc<dyn OciAccess> = Arc::new(hanging);
+
+        let start = Instant::now();
+        let (report, changed) =
+            crate::command::update::prove_records(&mut fx.state, &lock_of(&b), None, &fx.target, &roots, &ws, &reader)
+                .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "a stalled registry must not hold the pre-pass: {elapsed:?}"
+        );
+        assert!(!changed, "nothing proved, so nothing changed");
+        assert_eq!(fx.records(), before, "the record keeps its pin");
+        assert!(report.proven.is_empty() && report.mixed.is_empty() && report.settled.is_empty());
+        assert_eq!(
+            report.unproven.len(),
+            1,
+            "one node left unproven: {:?}",
+            report.unproven
+        );
+        assert_eq!(
+            report.unproven[0].reason,
+            Unproven::NeverAttempted(NotAttempted::FetchBudget),
+            "the run deadline, not the fetch, ended the proof"
+        );
+        assert_eq!(
+            std::fs::read(fx.path(RULE)).unwrap(),
+            b"# b\n",
+            "the drifted file stays on disk"
+        );
     }
 
     /// At the install gate a node split between the two pins is no edit: the
