@@ -713,8 +713,9 @@ The cascade never moves a float off a higher release. Say 2.9.0 is out and you
 backport a fix as 2.3.7. That release moves `2.3` and leaves `2` and `latest` on
 2.9.0. Moving them would hand every consumer on `:2` a lower release. grim names
 each kept float on stderr and in `floats_kept` in the
-[JSON report](./json-interface.md#report-shapes). `tags` lists only the tags that
-moved.
+[JSON report](./json-interface.md#report-shapes), and each repaired float on
+stderr and in `floats_repaired`. `tags` lists only the tags that ended up
+pointing at this release.
 
 Before any tag moves, grim reads each float. It creates one that is absent and
 moves one that already names this release. For any other float it reads the
@@ -734,18 +735,24 @@ The rule trusts the version annotation the publisher wrote, limited by that
 exact-tag check. A publisher who tags both the annotated version and its exact tag
 keeps the float, so retag with another OCI tool to correct one.
 
-Run releases into one repository one at a time, for example in a CI concurrency
-group. A release reads each float before it moves it, and the registry has no
-compare-and-set for tags. So two concurrent releases can leave a float on the
-lower version.
+A release reads each float before it moves it, and the registry has no
+compare-and-set for tags, so two concurrent releases can still leave a float
+on the lower version while they run. After the tags move, grim re-lists the
+repository and moves any float it left below a higher exact release onward to
+that release, so the run that finishes last leaves every float on the highest
+release in its span. A repair only ever moves a float forward, and only when
+the float's manifest version annotation proves it sits below that release, so
+a float on an unannotated third-party manifest stays put. A repair failure
+warns on stderr and leaves the float as it is; the release itself already
+happened, so it keeps its exit code.
 
 A cascading `--dry-run` reads the floats it would move and never writes. When a
 read fails, or offline, it warns once on stderr and plans every float moving, with
 `floats_kept` `[]`, and keeps its exit code. `--force` still applies the cascade
-and never lowers a float. It only lets the exact tag move. Floats that an
-earlier grim or another tool already moved down are not fixed, and neither are
-floats on third-party artifacts. A consumer on `:2` gets that lower release until
-you publish a higher one.
+and never lowers a float. It only lets the exact tag move. A float an earlier
+grim or another tool moved down is fixed by the next cascading release in its
+span and named in `floats_repaired`; a float on a third-party artifact is not,
+because grim cannot prove what version it sits on.
 
 ### Dry runs and overwrites
 
@@ -1613,7 +1620,9 @@ used under a [push/pull registry split](#batch-publish-push-registry), and
 `null` when the split is inactive. The `ref` always stays the pull name.
 `compression` is `none` or `gzip` for skill, rule, agent and hook entries and
 `null` otherwise. `floats_kept` is always present, `[{tag, version}]` for each
-cascade float left on a newer version and `[]` when none.
+cascade float left on a newer version and `[]` when none. `floats_repaired` is
+always present, `[{tag, version}]` for each cascade float moved onward to a
+higher version after the push and `[]` when none.
 
 `descriptions` carries the [description companion](#description-companion)
 pushes this run, one per distinct target repository, in the same

@@ -85,16 +85,17 @@ A cascade never moves a floating tag off a higher release. Before any tag moves,
 grim reads each float's manifest version: a float already on a higher version
 inside its own span stays, with one stderr line, so a `2.3.7` backport after
 `2.9.0` moves `2.3` and keeps `2` and `latest`. The JSON report lists them in
-`floats_kept`. Floats published earlier, or moved by other tools, stay as they
-are. A float stays only while the exact tag of its version still names its
+`floats_kept`. After the tags move, grim re-lists the repository and moves any
+float a concurrent lower release left below a higher exact release onward to
+that release, listed in `floats_repaired`. Floats published earlier, or moved
+by other tools, are repaired the same way by the next cascading release in
+their span. A float stays only while the exact tag of its version still names its
 manifest. A float whose current version is a prerelease always moves, whatever
 the precedence, because a cascade never leaves one there. A
 cascading `--dry-run` reads the registry too and, when it cannot or offline,
 warns once and plans every float moving, exit unchanged. A real release that
-cannot read a float fails before any tag moves. Run releases into one
-repository one at a time, for example in a CI concurrency group. A release
-reads each float before it moves it, and tags have no compare-and-set. So two
-concurrent releases can leave a float on the lower version.
+cannot read a float fails before any tag moves. A repair failure warns and
+leaves the float as it is.
 
 ## Immutability
 

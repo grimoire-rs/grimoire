@@ -4,17 +4,19 @@
 //! `grim publish` output.
 //!
 //! Plain format: 5-column table (Kind | Ref | Digest | Tags | Status),
-//! plus one stderr line per kept float of each entry; the announce outcome
+//! plus one stderr line per kept or repaired float of each entry; the announce outcome
 //! stays human prose on stderr.
 //!
 //! JSON format: `{"items": [...], "descriptions": {...}, "announce": ...}`
 //! (uniform `items` envelope, per subsystem-cli-api.md). `items` is the
 //! per-entry array (`{kind, ref, digest, tags, status, pushed_to,
-//! compression, floats_kept}` — `pushed_to` is always present and `null` unless a
+//! compression, floats_kept, floats_repaired}` — `pushed_to` is always present and `null` unless a
 //! `--push-registry` / manifest `push_registry` split was active;
 //! `compression` is `"none"`/`"gzip"` for tar kinds, `null` for bundle,
 //! mcp and failed entries; `floats_kept` is the release's `[{tag, version}]`,
-//! `[]` for skipped and failed entries); `descriptions` is a
+//! `[]` for skipped and failed entries; `floats_repaired` is the release's
+//! `[{tag, version}]` of floats moved onward to a higher release after the
+//! push, `[]` for skipped and failed entries); `descriptions` is a
 //! sibling `{"items": [...]}` of published description companions
 //! (`{ref, repository, digest, files}`, digest `null` under `--dry-run`);
 //! `announce` is `{outcome, branch, url, fork}` when the `--announce` step
@@ -26,7 +28,7 @@ use std::io::{self, Write};
 
 use serde::{Serialize, Serializer};
 
-use crate::api::release_report::{KeptFloat, kept_float_lines};
+use crate::api::release_report::{KeptFloat, RepairedFloat, kept_float_lines, repaired_float_lines};
 use crate::cli::printer::{Printable, print_table};
 use crate::oci::ArtifactKind;
 
@@ -182,6 +184,10 @@ pub struct PublishEntry {
     /// The cascade floats this entry's release left on a newer version; `[]`
     /// for skipped and failed entries. Additive always-present field.
     pub floats_kept: Vec<KeptFloat>,
+    /// The cascade floats this entry's release moved onward to a higher
+    /// version after the push; `[]` for skipped and failed entries.
+    /// Additive always-present field.
+    pub floats_repaired: Vec<RepairedFloat>,
     /// The version this entry released, which its kept-float stderr lines
     /// name; never serialized.
     #[serde(skip)]
@@ -253,6 +259,19 @@ impl PublishReport {
             })
             .collect()
     }
+
+    /// The stderr lines of a plain run, one per repaired float of each
+    /// entry, prefixed with that entry's reference.
+    pub fn repaired_lines(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .flat_map(|entry| {
+                repaired_float_lines(&entry.release, &entry.floats_repaired)
+                    .into_iter()
+                    .map(move |line| format!("{}: {line}", entry.reference))
+            })
+            .collect()
+    }
 }
 
 /// Truncate a digest for plain-text table display.
@@ -312,7 +331,7 @@ impl Printable for PublishReport {
         }));
         print_table(w, &["Kind", "Ref", "Digest", "Tags", "Status"], &rows)?;
         // Notes, not the result: a closed stderr must not fail a publish that happened.
-        for line in self.kept_lines() {
+        for line in self.kept_lines().into_iter().chain(self.repaired_lines()) {
             let _ = writeln!(io::stderr(), "{line}");
         }
         Ok(())
@@ -353,6 +372,7 @@ mod tests {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         }]);
         let mut buf = Vec::new();
@@ -387,6 +407,7 @@ mod tests {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         }])
         .with_descriptions(vec![PublishDescription {
@@ -437,6 +458,7 @@ mod tests {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         }]);
         let mut buf = Vec::new();
@@ -461,10 +483,12 @@ mod tests {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         }]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["items"][0]["floats_kept"], serde_json::json!([]));
+        assert_eq!(v["items"][0]["floats_repaired"], serde_json::json!([]));
     }
 
     #[test]
@@ -478,6 +502,7 @@ mod tests {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         };
         let pr = PublishReport::new(vec![entry()]).with_announce(Some(PublishAnnounce {
@@ -518,6 +543,7 @@ mod tests {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         };
         // Upstream push (no fork): the key is present and explicit null.
@@ -562,6 +588,7 @@ mod tests {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         }])
         .with_announce(Some(PublishAnnounce {

@@ -1296,6 +1296,7 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
                     pushed_to: None,
                     compression: None,
                     floats_kept: Vec::new(),
+                    floats_repaired: Vec::new(),
                     release: String::new(),
                 };
                 report_entries.push(failed_entry);
@@ -2652,6 +2653,7 @@ fn publish_entry_from_release(
         pushed_to: report.pushed_to.clone(),
         compression: report.compression,
         floats_kept: report.floats_kept.clone(),
+        floats_repaired: report.floats_repaired.clone(),
         release: report.release.clone(),
     }
 }
