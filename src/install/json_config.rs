@@ -90,7 +90,10 @@ pub fn sanitize_jsonc(input: &str) -> String {
                 i += 1;
             }
             '/' if chars.get(i + 1) == Some(&'/') => {
-                while i < chars.len() && chars[i] != '\n' {
+                // A line comment ends at a line feed or a carriage return
+                // (ECMAScript ends it at either); a CR-only file must not
+                // lose the rest of the document to one comment.
+                while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
                     i += 1;
                 }
             }
@@ -202,6 +205,22 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let err = parse_object("[1, 2]", p).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "non-object JSON is refused");
+    }
+
+    #[test]
+    fn line_comment_ends_at_carriage_return() {
+        let p = Path::new("cfg.json");
+        // CR-only line endings (issue #314): the comment ends at the CR, so
+        // the member after it still parses instead of being swallowed.
+        let (map, extras) = parse_object("{\r  // note\r  \"theme\": \"dark\"\r}\r", p).unwrap();
+        assert_eq!(map["theme"], "dark");
+        assert!(extras, "JSONC parse reports that a rewrite loses comments");
+        // CRLF: the comment ends at the CR, the LF stays trivia.
+        let (map, _) = parse_object("{\r\n  // note\r\n  \"theme\": \"dark\"\r\n}\r\n", p).unwrap();
+        assert_eq!(map["theme"], "dark");
+        // A `//` inside a string is still not a comment, CR or not.
+        let (map, _) = parse_object("{\"a\": \"x//y\"}\r", p).unwrap();
+        assert_eq!(map["a"], "x//y");
     }
 
     #[test]
