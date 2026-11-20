@@ -987,7 +987,7 @@ fn fresh_group_array(path: &NestedHandlerPath<'_>, handler: &serde_json::Value) 
 fn element_indent(text: &str, array: &ScannedArray, key_indent: &str) -> String {
     match array.elements.first() {
         Some(first) => line_indent(text, first.start),
-        None if text[..array.close_bracket].contains('\n') => deeper(key_indent),
+        None if has_line_break(&text[..array.close_bracket]) => deeper(key_indent),
         None => String::new(),
     }
 }
@@ -1115,7 +1115,12 @@ fn insert_element(text: &str, array: &ScannedArray, rendered: &str, key_indent: 
             if indent.is_empty() {
                 out.push_str(", ");
             } else {
-                out.push_str(",\n");
+                out.push(',');
+                // The new element joins with the break that starts its own
+                // line: a CR-only array keeps its carriage return, so no
+                // line feed enters the file. LF and CRLF arrays keep the
+                // line feed this path has always written.
+                out.push_str(line_break_before(text, first.start));
                 out.push_str(&indent);
             }
             out.push_str(rendered);
@@ -1125,6 +1130,8 @@ fn insert_element(text: &str, array: &ScannedArray, rendered: &str, key_indent: 
         }
         _ => {
             // Empty array: `[]` stays inline, `[\n]` keeps its own line.
+            // A CR-only `[\r]` stays inline too: this path writes literal
+            // line feeds, so treating it as multi-line would mix endings.
             let head = &text[..array.close_bracket];
             out.push_str(head.trim_end());
             if head.contains('\n') {
@@ -1236,12 +1243,29 @@ fn line_indent(text: &str, at: usize) -> String {
     while s > 0 && (bytes[s - 1] == b' ' || bytes[s - 1] == b'\t') {
         s -= 1;
     }
-    if s == 0 || bytes[s - 1] == b'\n' {
+    if s == 0 || bytes[s - 1] == b'\n' || bytes[s - 1] == b'\r' {
         text[s..at].to_string()
     } else {
         // Key does not start its own line (single-line object): no indent.
         String::new()
     }
+}
+
+/// The line break that starts the line `at` sits on: a bare carriage
+/// return for a CR-only line, a line feed otherwise. CRLF lines join with
+/// the line feed, as the splice paths have always written.
+fn line_break_before(text: &str, at: usize) -> &'static str {
+    let bytes = text.as_bytes();
+    let mut s = at;
+    while s > 0 && (bytes[s - 1] == b' ' || bytes[s - 1] == b'\t') {
+        s -= 1;
+    }
+    if s > 0 && bytes[s - 1] == b'\r' { "\r" } else { "\n" }
+}
+
+/// True when `s` holds a line break of any shape: LF, CR, or CRLF.
+fn has_line_break(s: &str) -> bool {
+    s.contains('\n') || s.contains('\r')
 }
 
 /// Scan `text` as a single JSON/JSONC object and index its members.
@@ -1383,7 +1407,9 @@ impl<'a> Scanner<'a> {
             }
             match (self.peek(), self.bytes.get(self.pos + 1).copied()) {
                 (Some(b'/'), Some(b'/')) => {
-                    while self.peek().is_some_and(|b| b != b'\n') {
+                    // As in `sanitize_jsonc`: a line comment ends at a line
+                    // feed or a carriage return, so a CR-only file survives.
+                    while self.peek().is_some_and(|b| b != b'\n' && b != b'\r') {
                         self.pos += 1;
                     }
                 }
@@ -1477,14 +1503,28 @@ struct Layout {
     step: String,
 }
 
+/// The document's own line break: CRLF, LF, or a bare CR. A splice copies
+/// it, so an edit to a CR-only file adds no foreign line either.
+fn first_line_break(text: &str) -> &'static str {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => return if bytes.get(i + 1) == Some(&b'\n') { "\r\n" } else { "\r" },
+            b'\n' => return "\n",
+            _ => i += 1,
+        }
+    }
+    "\n"
+}
+
 impl Layout {
     /// Read from `text`: its first line break and its root members' indent,
     /// or two spaces when they have none.
     fn of(text: &str, root: &ScannedObject) -> Self {
-        let crlf = text.split_once('\n').is_some_and(|(line, _)| line.ends_with('\r'));
         let step = root.member_indent(text);
         Self {
-            newline: if crlf { "\r\n" } else { "\n" },
+            newline: first_line_break(text),
             step: if step.is_empty() { "  ".to_string() } else { step },
         }
     }
@@ -1516,7 +1556,7 @@ impl Layout {
         if let Some((first, last)) = scanned.elements.first().zip(scanned.elements.last()) {
             return self.after_last(array, last.clone(), close, &snippet, &line_indent(array, first.start));
         }
-        if array[..close].contains('\n') {
+        if has_line_break(&array[..close]) {
             let close_indent = line_indent(array, close);
             let indent = format!("{close_indent}{}", self.step);
             return self.on_own_line(array, close, &snippet, &indent, &close_indent);
@@ -1556,7 +1596,7 @@ impl Layout {
         };
         // Line breaks are read from the untrimmed span: joining onto a line
         // that ends in a `//` comment would swallow the new item.
-        let line_start = if container[last.start..close].contains('\n') {
+        let line_start = if has_line_break(&container[last.start..close]) {
             format!("{}{indent}", self.newline)
         } else {
             " ".to_string()
@@ -2336,6 +2376,21 @@ mod tests {
 
         let back = changed(remove_array_element(&out, "instructions", "g.md").unwrap());
         assert_eq!(back, text, "remove undoes upsert exactly");
+    }
+
+    #[test]
+    fn array_upsert_keeps_cr_only_line_endings() {
+        // Review follow-up on #378: a CR-only multi-line array used to take
+        // the multi-line branch and write a line feed into the file.
+        let text = "{\"instructions\": [\r  \"a.md\",\r  \"b.md\"\r]}\r";
+        let out = changed(upsert_array_element(text, "instructions", "g.md").unwrap());
+        assert_eq!(
+            out, "{\"instructions\": [\r  \"a.md\",\r  \"b.md\",\r  \"g.md\"\r]}\r",
+            "the new element joins with the array's own carriage return"
+        );
+        assert!(!out.contains('\n'), "no line feed may enter a CR-only file: {out:?}");
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["instructions"], json!(["a.md", "b.md", "g.md"]));
     }
 
     #[test]
@@ -3513,6 +3568,34 @@ mod tests {
         for out in [deep, replaced] {
             assert!(!out.replace("\r\n", "").contains('\n'), "a bare line feed: {out:?}");
         }
+    }
+
+    #[test]
+    fn upsert_keeps_cr_only_line_endings() {
+        // Issue #314: a CR-only file with a line comment. The comment ends
+        // at the CR, and the splice keeps the file's own line endings.
+        let text = "{\r  // note\r  \"mcpServers\": {}\r}\r";
+        let out = changed(upsert_member_at(text, &path(&["mcpServers", "grim"]), &json!({"command": "grim"})).unwrap());
+        assert_eq!(
+            out, "{\r  // note\r  \"mcpServers\": {\r    \"grim\": {\r      \"command\": \"grim\"\r    }\r  }\r}\r",
+            "every byte outside the new member survives, no line feed enters"
+        );
+        assert_eq!(
+            value_at(&out, &path(&["mcpServers", "grim"])).unwrap(),
+            found(json!({"command": "grim"})),
+            "{out}"
+        );
+
+        // A new container beside an existing member takes its own line too.
+        let text = "{\r  // note\r  \"theme\": \"dark\"\r}\r";
+        let out = changed(upsert_member_at(text, &path(&["mcpServers", "grim"]), &json!({"command": "grim"})).unwrap());
+        assert!(!out.contains('\n'), "no line feed may enter a CR-only file: {out:?}");
+        assert!(out.contains("// note"), "comment preserved: {out}");
+        assert_eq!(
+            value_at(&out, &path(&["mcpServers", "grim"])).unwrap(),
+            found(json!({"command": "grim"})),
+            "{out}"
+        );
     }
 
     #[test]
