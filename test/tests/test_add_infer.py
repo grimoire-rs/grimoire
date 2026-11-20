@@ -210,6 +210,33 @@ def test_add_missing_reference_kind_inference_fails_exit_65(
     )
 
 
+def test_add_offline_uncached_artifact_blames_offline_not_kind(
+    grim_at, project_dir: Path
+) -> None:
+    """Issue #358: offline, `grim add` of an artifact never fetched must
+    report offline-blocked (81), not kind-inference failure (65) — `--kind`
+    cannot help when the manifest was never cached. Needs no registry: the
+    point is that grim must not touch the network at all."""
+    write_config(project_dir)
+    runner = grim_at(project_dir)
+    runner.env["GRIM_OFFLINE"] = "1"
+
+    result = runner.run("add", "localhost:5000/acme/x:1", check=False)
+    assert result.returncode == 81, (
+        f"offline cache miss must exit 81, got {result.returncode}; "
+        f"stderr: {result.stderr}"
+    )
+    assert "offline mode blocked a required network operation" in result.stderr, (
+        f"error must blame offline mode; stderr:\n{result.stderr}"
+    )
+    assert "could not infer the kind" not in result.stderr, (
+        f"error must not send the user to --kind; stderr:\n{result.stderr}"
+    )
+    # Nothing declared.
+    cfg = (project_dir / "grimoire.toml").read_text(encoding="utf-8")
+    assert "acme/x" not in cfg, "refused add must not write the config"
+
+
 def test_add_dotted_name_installs_end_to_end(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
