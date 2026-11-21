@@ -4,7 +4,8 @@
 //! `grim release` output.
 //!
 //! Plain format: a single-row 4-column table
-//! (Ref | Manifest Digest | Tags | Pushed), plus one stderr line per kept float.
+//! (Ref | Manifest Digest | Tags | Pushed), plus one stderr line per kept or
+//! repaired float.
 //!
 //! JSON format: a single object `{ref, manifest_digest, tags, pushed,
 //! pushed_to, compression}` (not an array — `release` concerns exactly one artifact
@@ -13,6 +14,8 @@
 //! `compression` is always present: `"none"` or `"gzip"` for a tar kind,
 //! `null` for bundle and mcp (they ignore `--compression`). `floats_kept`
 //! is always present: `[{tag, version}]`, `[]` when no float stayed put.
+//! `floats_repaired` is always present: `[{tag, version}]`, `[]` when no
+//! float was moved onward to a higher release after the push.
 
 use std::io::{self, Write};
 
@@ -46,6 +49,34 @@ pub fn kept_float_lines(release: &str, floats_kept: &[KeptFloat]) -> Vec<String>
         .collect()
 }
 
+/// A cascade float the release moved onward to a higher version after the
+/// push, because a concurrent lower release had left it below that version.
+///
+/// JSON format: `{"tag": "latest", "version": "3.0.0"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepairedFloat {
+    /// The float tag (`X.Y`, `X` or `latest`).
+    pub tag: String,
+    /// The higher version the float was moved onward to.
+    #[serde(serialize_with = "serialize_version")]
+    pub version: semver::Version,
+}
+
+/// One line per repaired float, for a plain run's stderr: `release` is the
+/// version released and `floats_repaired` the floats it moved onward to a
+/// higher version after the push.
+pub fn repaired_float_lines(release: &str, floats_repaired: &[RepairedFloat]) -> Vec<String> {
+    floats_repaired
+        .iter()
+        .map(|repaired| {
+            format!(
+                "repaired '{}' to {}, above this release {release}",
+                repaired.tag, repaired.version
+            )
+        })
+        .collect()
+}
+
 /// The result of a release (or a `--dry-run` plan).
 #[derive(Debug, Serialize)]
 pub struct ReleaseReport {
@@ -71,6 +102,11 @@ pub struct ReleaseReport {
     /// The cascade floats left on a newer version; such a float is not in
     /// `tags`. Additive always-present field, `[]` when none.
     pub floats_kept: Vec<KeptFloat>,
+    /// The cascade floats this release moved onward to a higher version
+    /// after the push, because a concurrent lower release had left them
+    /// below that version; such a float is not in `tags`. Additive
+    /// always-present field, `[]` when none.
+    pub floats_repaired: Vec<RepairedFloat>,
     /// The version released, which the kept-float stderr lines name; never serialized.
     #[serde(skip)]
     pub release: String,
@@ -88,6 +124,7 @@ impl ReleaseReport {
             pushed_to: None,
             compression: None,
             floats_kept: Vec::new(),
+            floats_repaired: Vec::new(),
             release: String::new(),
         }
     }
@@ -100,9 +137,22 @@ impl ReleaseReport {
         self
     }
 
+    /// Attach the cascade floats the release moved onward to a higher
+    /// version after the push (consuming builder).
+    #[must_use]
+    pub fn with_floats_repaired(mut self, floats_repaired: Vec<RepairedFloat>) -> Self {
+        self.floats_repaired = floats_repaired;
+        self
+    }
+
     /// The stderr lines of a plain run, one per kept float.
     pub fn kept_lines(&self) -> Vec<String> {
         kept_float_lines(&self.release, &self.floats_kept)
+    }
+
+    /// The stderr lines of a plain run, one per repaired float.
+    pub fn repaired_lines(&self) -> Vec<String> {
+        repaired_float_lines(&self.release, &self.floats_repaired)
     }
 
     /// Attach the layer compression (consuming builder). Left `None` for
@@ -135,7 +185,7 @@ impl Printable for ReleaseReport {
             ]],
         )?;
         // Notes, not the result: a closed stderr must not fail a release that happened.
-        for line in self.kept_lines() {
+        for line in self.kept_lines().into_iter().chain(self.repaired_lines()) {
             let _ = writeln!(io::stderr(), "{line}");
         }
         Ok(())
@@ -197,6 +247,7 @@ mod tests {
         let report = ReleaseReport::new("x:1.0.0".into(), "sha256:a".into(), vec!["1.0.0".into()], true);
         let v = serde_json::to_value(&report).unwrap();
         assert_eq!(v["floats_kept"], serde_json::json!([]));
+        assert_eq!(v["floats_repaired"], serde_json::json!([]));
 
         let kept = report.with_floats_kept(
             "1.0.0",

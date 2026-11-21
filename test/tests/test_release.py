@@ -443,6 +443,33 @@ def test_backport_release_keeps_major_and_latest_on_the_newer_release(
         assert tag_digest(repo_path, tag) == newer["manifest_digest"], tag
 
 
+def test_stale_float_below_a_higher_release_is_repaired_onward(
+    grim_at, project_dir: Path, unique_repo: str
+) -> None:
+    """Two concurrent releases can leave a float on the lower version (#359):
+    both read the floats before either moves them, and the lower version's
+    writes land last. The next cascading release repairs the stale float
+    onward to the highest exact release in its span."""
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    higher = release_with_grim(runner, repo_path, "3.0.0", _skill_files("3.0.0"))
+    lower = release_with_grim(runner, repo_path, "1.0.0", _skill_files("1.0.0"))
+
+    # The 1.0.0 backport kept `latest` on 3.0.0. Simulate the race's outcome:
+    # the lower run's writes land after the higher run's.
+    retag(repo_path, "latest", lower["manifest_digest"])
+
+    mid = release_with_grim(runner, repo_path, "2.0.0", _skill_files("2.0.0"))
+
+    assert mid["tags"] == ["2.0.0", "2.0", "2"]
+    assert mid["floats_kept"] == []
+    assert mid["floats_repaired"] == [{"tag": "latest", "version": "3.0.0"}]
+    for tag in ("2.0.0", "2.0", "2"):
+        assert tag_digest(repo_path, tag) == mid["manifest_digest"], tag
+    assert tag_digest(repo_path, "latest") == higher["manifest_digest"]
+    assert tag_digest(repo_path, "1") == lower["manifest_digest"]
+
+
 def test_backport_release_prints_one_stderr_line_per_kept_float(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

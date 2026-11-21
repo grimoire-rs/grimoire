@@ -116,12 +116,15 @@ for everyone already on them. Full rules: [Batch publishing][batch-publish].
   tracking `:1` pick up your patch on `grim update`. Implication: a
   cascade never moves a floating tag off a higher release: a `2.3.7` backport
   released after `2.9.0` moves `2.3` and leaves `2` and `latest` on `2.9.0`
-  (reported in `floats_kept`). A
+  (reported in `floats_kept`). After the tags move, grim re-lists the
+  repository and moves any float a concurrent lower release left below a
+  higher exact release onward to that release (reported in
+  `floats_repaired`). Still run releases one at a time — a CI concurrency
+  group per repository — with the repair as the safety net, not the plan:
+  tags have no compare-and-set, two repairs can cross, and a failed
+  repair only warns. A
   release is immediately visible to every floating consumer; do not
-  release a breaking change under the same major. Run releases into one
-  repository one at a time, for example in a CI concurrency group. Tags
-  have no compare-and-set, so two concurrent releases can leave a float on
-  the lower version.
+  release a breaking change under the same major.
 - **Immutability gate.** An exact-version tag that already exists and
   points at different bytes refuses to move. `--force` overrides —
   use it only to deliberately rewrite history. Re-releasing *identical*
