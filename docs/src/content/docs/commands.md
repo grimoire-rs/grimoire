@@ -4523,6 +4523,10 @@ plus one tag resolve per float that would be kept. A failed read stops a real
 release before any tag moves, with exit `69`, `80` or `81`. Offline, a real
 cascading release exits `81` before any plan.
 
+Run releases one at a time (a CI concurrency group per repository), with
+the repair as the safety net, not the plan: tags have no compare-and-set,
+two repairs can cross, and a failed repair only warns.
+
 A release reads each float before it moves it, and the registry has no
 compare-and-set for tags, so two concurrent releases can still leave a float
 on the lower version while they run. After the tags move, grim re-lists the
@@ -4533,6 +4537,12 @@ the float's manifest version annotation proves it sits below that release. The
 JSON report lists each repaired float in `floats_repaired`, and stderr carries
 one line per repaired float: `repaired 'latest' to 3.0.0, above this release
 2.0.0`. A repair failure warns on stderr and leaves the float as it is.
+
+The repair cannot tell a float a lost
+race left behind from one held back on purpose: with 3.0.0 out and a float
+moved back to 2.9.0 by hand because 3.0.0 is broken, releasing 2.9.1 moves
+the float to 2.9.1 and the repair then moves it on to 3.0.0. To keep a float
+back, publish with `--no-cascade`, or remove the higher exact tag.
 
 `--dry-run` runs the same reads and never writes. When a read fails, or offline,
 it warns once on stderr, plans every float moving, reports `floats_kept` and
