@@ -112,12 +112,12 @@ def _rows(runner) -> list[dict]:
 def _records(runner) -> list[Path]:
     """Every workspace consent record on this machine, in a stable order.
 
-    `$GRIM_HOME/hooks/consent/<workspace-key>.json`. Machine-local (**I1**) and
+    `$GRIM_HOME/consent/<workspace-key>.json`. Machine-local (**I1**) and
     written by exactly three seams — `grim hook allow`, `grim add`, an accepted
     prompt — so an unexpected file here is a widened write seam, not an
     incidental artefact.
     """
-    d = Path(runner.grim_home) / "hooks" / "consent"
+    d = Path(runner.grim_home) / "consent"
     return sorted(d.glob("*.json")) if d.is_dir() else []
 
 

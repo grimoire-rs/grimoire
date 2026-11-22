@@ -12,17 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import select
 import shutil
-import subprocess
-import time
 from pathlib import Path
 from subprocess import CompletedProcess
 
 import pytest
 
+from src.consent_driver import PROMPT, on_a_terminal
 from src.helpers import make_artifact, make_settings, settings_sandbox, write_config
 from src.registry import REGISTRY_HOST, PublishedArtifact, fetch_manifest
 from src.runner import GrimRunner
@@ -32,9 +29,7 @@ LOCAL = ".claude/settings.local.json"
 SKILL_DOC = "---\nname: good\ndescription: d\n---\n# Good\n"
 
 # The one piece of the question its wording never moves.
-PROMPT = "[y/N]"
 
-TERMINAL_DEADLINE_SECONDS = 60
 
 # What a run with the flag off prints for each declared package, by scope. The
 # project flag does not cover `--global`, so each names its own.
@@ -87,7 +82,7 @@ def _store_files(runner: GrimRunner) -> list[Path]:
 
 def _consent_files(runner: GrimRunner) -> list[Path]:
     """Every consent record on this machine."""
-    return sorted((Path(runner.grim_home) / "hooks" / "consent").glob("*.json"))
+    return sorted((Path(runner.grim_home) / "consent").glob("*.json"))
 
 
 def _layer_cached(runner: GrimRunner, package: PublishedArtifact) -> bool:
@@ -104,58 +99,14 @@ def _seed_record(runner: GrimRunner, workspace: Path, keys: list[str]) -> None:
     on-disk contract.
     """
     key = hashlib.sha256(str(workspace).encode()).hexdigest()
-    path = Path(runner.grim_home) / "hooks" / "consent" / f"{key}.json"
+    path = Path(runner.grim_home) / "consent" / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"v": 1, "workspace": str(workspace), "hooks": keys, "consented_at": "2026-08-28T10:00:00Z"}
+    record = {"v": 2, "workspace": str(workspace), "sources": keys, "consented_at": "2026-08-28T10:00:00Z"}
     path.write_text(json.dumps(record), encoding="utf-8", newline="\n")
 
 
 def _key(binding: str, package: PublishedArtifact) -> str:
-    return f"settings:{binding}@{REGISTRY_HOST}/{package.repo}"
-
-
-def _on_a_terminal(runner: GrimRunner, *args: str, answer: str | None = None) -> tuple[int, str]:
-    """Run grim with stdin and stderr on a pseudo-terminal.
-
-    Returns the exit code and everything printed there. ``answer`` is typed
-    once the question appears. With no answer, a question nobody expected hangs
-    the child until the deadline, which fails the test.
-    """
-    pty = pytest.importorskip("pty")
-    master, slave = pty.openpty()
-    child = subprocess.Popen(
-        [str(runner.binary), *args],
-        cwd=runner.cwd,
-        env=runner.env,
-        stdin=slave,
-        stdout=subprocess.DEVNULL,
-        stderr=slave,
-    )
-    os.close(slave)
-    transcript = ""
-    answered = answer is None
-    deadline = time.monotonic() + TERMINAL_DEADLINE_SECONDS
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, f"grim never finished on its terminal:\n{transcript}"
-            if not select.select([master], [], [], remaining)[0]:
-                continue
-            try:
-                chunk = os.read(master, 4096)
-            except OSError:  # Linux reports the closed far side as EIO.
-                break
-            if not chunk:
-                break
-            transcript += chunk.decode(errors="replace")
-            if not answered and PROMPT in transcript:
-                os.write(master, f"{answer}\n".encode())
-                answered = True
-    finally:
-        os.close(master)
-        if child.poll() is None:
-            child.kill()
-    return child.wait(timeout=TERMINAL_DEADLINE_SECONDS), transcript
+    return f"{binding}@{REGISTRY_HOST}/{package.repo}"
 
 
 def test_fresh_clone_writes_nothing(grim_at, project_dir: Path, tmp_path: Path, unique_repo: str) -> None:
@@ -191,7 +142,7 @@ def test_trust_flag_applies(grim_at, project_dir: Path, tmp_path: Path, unique_r
     runner = _workspace(grim_at, project_dir, tmp_path / "s", {"team": team})
     target = project_dir / LOCAL
 
-    code, shown = _on_a_terminal(runner, "install", TRUST)
+    code, shown = on_a_terminal(runner, "install", TRUST)
 
     assert code == 0, shown
     assert PROMPT not in shown
@@ -200,7 +151,7 @@ def test_trust_flag_applies(grim_at, project_dir: Path, tmp_path: Path, unique_r
 
     # Positive control: the plain run asks on that terminal, and accepting records.
     _repin(project_dir, team, retuned)
-    code, shown = _on_a_terminal(runner, "install", answer="y")
+    code, shown = on_a_terminal(runner, "install", answer="y")
     assert code == 0, shown
     assert PROMPT in shown
     assert _file(target) == {"model": "opus"}
@@ -227,7 +178,7 @@ def test_declined_changes_no_file(
     [store] = _store_files(runner)
     store_bytes = store.read_bytes()
 
-    code, shown = _on_a_terminal(runner, "install", *flags, answer=answer)
+    code, shown = on_a_terminal(runner, "install", *flags, answer=answer)
 
     assert code == 0, shown
     assert (PROMPT in shown) == (answer is not None)
@@ -329,7 +280,7 @@ def test_grim_home_in_workspace_writes_nothing(
     home = runner.env["GRIM_HOME"]
     runner.env["GRIM_HOME"] = ".grim-home" if relative else str(nested)
 
-    code, shown = _on_a_terminal(runner, "install")
+    code, shown = on_a_terminal(runner, "install")
 
     assert code == 0, shown
     assert PROMPT not in shown
@@ -339,11 +290,11 @@ def test_grim_home_in_workspace_writes_nothing(
     assert "GRIM_HOME" in trusted.stderr
     assert not (project_dir / LOCAL).exists()
     assert not (nested / "settings").exists()
-    assert not (nested / "hooks" / "consent").exists()
+    assert not (nested / "consent").exists()
 
     # Positive control: under a machine-local home the question and the conflict are real.
     runner.env["GRIM_HOME"] = home
-    code, shown = _on_a_terminal(runner, "install", answer="n")
+    code, shown = on_a_terminal(runner, "install", answer="n")
     assert code == 0, shown
     assert PROMPT in shown
     assert runner.run("install", TRUST, check=False).returncode == 78

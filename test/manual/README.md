@@ -741,7 +741,7 @@ consent says *this workspace* may arm what it declares:
 ```sh
 grim config set options.experimental.hooks true
 grim install                          # still gated: cause "workspace-not-consented"
-grim hook allow                       # writes $GRIM_HOME/hooks/consent/<workspace-key>.json
+grim hook allow                       # writes $GRIM_HOME/consent/<workspace-key>.json
 grim install                          # now it arms: "updated  claude (observer)"
 grim hook list
 ```
@@ -845,7 +845,7 @@ consent record; the next converging command disarms — there is no runtime
 kill switch, only a deferred one:
 
 ```sh
-grim hook revoke                      # removes $GRIM_HOME/hooks/consent/<workspace-key>.json
+grim hook revoke                      # removes $GRIM_HOME/consent/<workspace-key>.json
 grim install                          # both hooks skipped
 grim status --format json | jq -c '[.items[] | select(.kind=="hook") | {name, state}]'
 grim uninstall hook tool-logger       # reaps the dispatch row AND the registration
@@ -966,7 +966,7 @@ record. `grim add` also counts as the user's own consent, which is why
 `grim add <ref>` in a project with the flag on installs at once.
 
 **b. Consent, then install.** `grim consent allow` (alias of `grim hook allow`)
-records the answer for this checkout under `$GRIM_HOME/hooks/consent/`:
+records the answer for this checkout under `$GRIM_HOME/consent/`:
 
 ```sh
 grim consent allow

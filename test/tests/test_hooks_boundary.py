@@ -117,7 +117,7 @@ def _rows(runner: GrimRunner) -> list[dict]:
 
 def _records(runner: GrimRunner) -> list[Path]:
     """Every workspace consent record under this runner's `$GRIM_HOME`."""
-    d = Path(runner.grim_home) / "hooks" / "consent"
+    d = Path(runner.grim_home) / "consent"
     return sorted(d.glob("*.json")) if d.is_dir() else []
 
 
@@ -405,7 +405,7 @@ def test_s011_a_clone_cannot_consent_for_itself_with_committed_lines(
 
     That is now the *whole* config surface an attacker can author, and it is why
     the second gate was moved off the config file entirely: consent is recorded
-    per **checkout**, machine-local, under `$GRIM_HOME/hooks/consent/`, and a
+    per **checkout**, machine-local, under `$GRIM_HOME/consent/`, and a
     repository cannot write there. There is deliberately no environment form of
     it either (no `GRIM_ALLOW_HOOKS`, no path variable), because `.envrc`,
     `.mise.toml` and devcontainer `containerEnv` are ordinary repo files —

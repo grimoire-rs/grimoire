@@ -4088,12 +4088,17 @@ mod tests {
                 registries: &[],
             };
             let record = ConsentRecord {
-                v: ConsentVersion::V1,
+                v: ConsentVersion::V2,
                 workspace: self.dir.path().to_path_buf(),
-                hooks: keys.clone(),
+                sources: keys.clone(),
                 consented_at: String::new(),
             };
-            ConsentPolicies::new(&inputs, Some(&record), &keys).settings
+            ConsentPolicies::new(
+                &inputs,
+                Some(&record),
+                &crate::hook::consent::DeclaredKeys::from([(ArtifactKind::Settings, keys)]),
+            )
+            .settings
         }
 
         async fn lock(&self, packages: &[(&str, &str)]) -> GrimoireLock {

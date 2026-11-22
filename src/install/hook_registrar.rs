@@ -4142,7 +4142,7 @@ mod tests {
             true,
             None,
             &[],
-            &keys(declared),
+            &crate::hook::consent::DeclaredKeys::from([(ArtifactKind::Hook, keys(declared))]),
         );
         let outcomes = converge_clients(&state, ws.path(), ConfigScope::Project, &roots, &policy);
         (outcomes, super::test_fixture::dispatch_rows(home.path()))
@@ -4211,7 +4211,7 @@ mod tests {
                     true,
                     flag,
                     &[],
-                    &keys,
+                    &crate::hook::consent::DeclaredKeys::from([(ArtifactKind::Hook, keys.clone())]),
                 )
                 .with_locked(locked.iter().map(|n| n.to_string()).collect())
             };

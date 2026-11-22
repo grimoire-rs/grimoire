@@ -1457,7 +1457,7 @@ def test_add_refuses_a_conflict_before_it_saves(grim_at, project_dir: Path, tmp_
     held = target.read_bytes()
     config, lock = project_dir / "grimoire.toml", project_dir / "grimoire.lock"
     config_before, lock_before = config.read_bytes(), lock.read_bytes()
-    consent = sorted(path.read_bytes() for path in (Path(runner.grim_home) / "hooks/consent").glob("*.json"))
+    consent = sorted(path.read_bytes() for path in (Path(runner.grim_home) / "consent").glob("*.json"))
 
     result = runner.run("add", clash.fq, format="json", check=False)
 
@@ -1466,7 +1466,7 @@ def test_add_refuses_a_conflict_before_it_saves(grim_at, project_dir: Path, tmp_
     assert config.read_bytes() == config_before
     assert lock.read_bytes() == lock_before
     assert target.read_bytes() == held
-    after = sorted(path.read_bytes() for path in (Path(runner.grim_home) / "hooks/consent").glob("*.json"))
+    after = sorted(path.read_bytes() for path in (Path(runner.grim_home) / "consent").glob("*.json"))
     assert after == consent
 
     # Positive control: declined, nothing is armed, so the same add declares it.

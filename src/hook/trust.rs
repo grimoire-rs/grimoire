@@ -83,11 +83,14 @@
 //! that way in every user-facing string and doc page; a silently-absent guardrail
 //! that a user believes is enforcing is worse than no guardrail.
 
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal as _, Write};
 use std::path::Path;
 
 use crate::config::registry_resolve::normalize_locator;
 use crate::config::scope::ConfigScope;
+
+use crate::oci::ArtifactKind;
 
 use super::consent::Consent;
 
@@ -307,87 +310,143 @@ pub enum ConsentAnswer {
     Declined,
 }
 
-/// What the one consent question names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsentNoun {
-    /// Only hooks need the answer.
-    Hooks,
-    /// Only settings need the answer.
-    Settings,
-    /// Both kinds need the answer.
-    HooksAndSettings,
+/// What the one consent question names: the gated kinds the answer covers.
+///
+/// A set rather than a variant per combination, so a further gated kind adds
+/// one row to [`kind_words`] and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentNoun(BTreeSet<ArtifactKind>);
+
+/// One declared entry the question lists beside its wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptEntry {
+    /// The kind the declaration binds the entry under.
+    pub kind: ArtifactKind,
+    /// The record's spelling of the entry.
+    pub key: String,
+    /// Whether `kind`'s feature flag is on; an entry of a kind whose flag is
+    /// off is not recorded by an accepted answer.
+    pub enabled: bool,
 }
 
-/// The words one [`ConsentNoun`] puts into the question.
+/// The words one kind puts into the question.
+struct KindWords {
+    /// `hooks`, the plural noun.
+    inline: &'static str,
+    /// What the kind is, for a reader meeting it here.
+    gloss: &'static str,
+    /// One of these, as `every <coverage>`.
+    coverage: &'static str,
+    /// What a decline leaves undone for this kind.
+    undone: &'static str,
+}
+
+/// The words of a gated kind; `None` for a kind no consent question names.
+const fn kind_words(kind: ArtifactKind) -> Option<KindWords> {
+    match kind {
+        ArtifactKind::Hook => Some(KindWords {
+            inline: "hooks",
+            gloss: "A hook is code your AI client runs automatically.",
+            coverage: "hook",
+            undone: "armed",
+        }),
+        ArtifactKind::Settings => Some(KindWords {
+            inline: "settings",
+            gloss: "Settings change how your AI client behaves and what it may do.",
+            coverage: "settings package",
+            undone: "applied",
+        }),
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
+            None
+        }
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`; `last` joins the final two.
+fn join_words(words: &[&str], last: &str) -> String {
+    match words {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [init @ .., tail] => format!("{} {last} {tail}", init.join(", ")),
+    }
+}
+
+/// The words a [`ConsentNoun`] puts into the question.
 struct NounWords {
     /// `Hooks` declared by this workspace.
-    opening: &'static str,
+    opening: String,
     /// Allow `hooks` from this workspace.
-    inline: &'static str,
-    /// What the noun does, for a reader meeting it here.
-    gloss: &'static str,
+    inline: String,
+    /// What each kind is, for a reader meeting it here.
+    gloss: String,
     /// What one answer covers.
-    coverage: &'static str,
+    coverage: String,
     /// The verb of the answer that needs no terminal and lasts, after `grim`.
     allow: &'static str,
     /// The flag that answers for one run.
     trust: &'static str,
     /// What a decline leaves undone.
-    undone: &'static str,
+    undone: String,
 }
 
 impl ConsentNoun {
-    // `Hooks` keeps the old verb and flag: a workspace with no settings reads
-    // word for word as it did, and a settings noun never sends a reader to a
-    // verb named for hooks.
-    const fn words(self) -> NounWords {
-        match self {
-            Self::Hooks => NounWords {
-                opening: "Hooks",
-                inline: "hooks",
-                gloss: "A hook is code your AI client runs automatically.",
-                coverage: "every hook",
-                allow: "hook allow",
-                trust: "--trust-hooks",
-                undone: "nothing armed",
-            },
-            Self::Settings => NounWords {
-                opening: "Settings",
-                inline: "settings",
-                gloss: "Settings change how your AI client behaves and what it may do.",
-                coverage: "every settings package",
-                allow: "consent allow",
-                trust: "--trust-workspace",
-                undone: "nothing applied",
-            },
-            Self::HooksAndSettings => NounWords {
-                opening: "Hooks and settings",
-                inline: "hooks and settings",
-                gloss: "A hook is code your AI client runs automatically. \
-                        Settings change how your AI client behaves and what it may do.",
-                coverage: "every hook and settings package",
-                allow: "consent allow",
-                trust: "--trust-workspace",
-                undone: "nothing armed or applied",
-            },
+    /// The noun for the gated kinds among `kinds`.
+    pub fn of(kinds: impl IntoIterator<Item = ArtifactKind>) -> Self {
+        Self(kinds.into_iter().filter(|k| kind_words(*k).is_some()).collect())
+    }
+
+    /// Whether hooks are the only kind named.
+    fn hooks_only(&self) -> bool {
+        self.0.len() == 1 && self.0.contains(&ArtifactKind::Hook)
+    }
+
+    // A hooks-only noun keeps the old verb and flag: a workspace with no other
+    // gated kind reads word for word as it did, and any other noun never sends
+    // a reader to a verb named for hooks.
+    fn words(&self) -> NounWords {
+        let words: Vec<KindWords> = self.0.iter().filter_map(|k| kind_words(*k)).collect();
+        let inline = join_words(&words.iter().map(|w| w.inline).collect::<Vec<_>>(), "and");
+        let mut opening = inline.clone();
+        if let Some(first) = opening.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        let coverage = format!(
+            "every {}",
+            join_words(&words.iter().map(|w| w.coverage).collect::<Vec<_>>(), "and")
+        );
+        let undone = format!(
+            "nothing {}",
+            join_words(&words.iter().map(|w| w.undone).collect::<Vec<_>>(), "or")
+        );
+        let (allow, trust) = if self.hooks_only() {
+            ("hook allow", "--trust-hooks")
+        } else {
+            ("consent allow", "--trust-workspace")
+        };
+        NounWords {
+            opening,
+            inline,
+            gloss: words.iter().map(|w| w.gloss).collect::<Vec<_>>().join(" "),
+            coverage,
+            allow,
+            trust,
+            undone,
         }
     }
 
     /// The log line for a question that could not be asked.
-    pub const fn prompt_failed(self) -> &'static str {
-        match self {
-            Self::Hooks => "hook consent prompt failed; treating as declined",
-            Self::Settings | Self::HooksAndSettings => "consent prompt failed; treating as declined",
+    pub fn prompt_failed(&self) -> &'static str {
+        if self.hooks_only() {
+            "hook consent prompt failed; treating as declined"
+        } else {
+            "consent prompt failed; treating as declined"
         }
     }
 
     /// The log line for an accepted answer whose record at `record` could not
     /// be written, ending with the fix as `grim` runs it.
-    pub fn record_failed(self, record: &Path, grim: &crate::config::scope::Invocation) -> String {
-        let subject = match self {
-            Self::Hooks => "hook",
-            Self::Settings | Self::HooksAndSettings => "workspace",
-        };
+    pub fn record_failed(&self, record: &Path, grim: &crate::config::scope::Invocation) -> String {
+        let subject = if self.hooks_only() { "hook" } else { "workspace" };
         let NounWords { allow, undone, .. } = self.words();
         format!(
             "{subject} consent could not be recorded; {undone}; make {} writable, then run {grim} {allow}",
@@ -396,7 +455,7 @@ impl ConsentNoun {
     }
 
     /// The warning a declined answer leaves on stderr.
-    pub fn declined_warning(self, workspace: &Path) -> String {
+    pub fn declined_warning(&self, workspace: &Path) -> String {
         let NounWords { inline, undone, .. } = self.words();
         format!("{inline} in '{}' were declined; {undone}", workspace.display())
     }
@@ -438,11 +497,12 @@ pub fn prompt_for_workspace(
     workspace: &Path,
     record: &Path,
     new: &[String],
-    noun: ConsentNoun,
+    entries: &[PromptEntry],
+    noun: &ConsentNoun,
     grim: &crate::config::scope::Invocation,
 ) -> io::Result<ConsentAnswer> {
     let mut stderr = io::stderr();
-    write_question(&mut stderr, workspace, record, new, noun, grim)?;
+    write_question(&mut stderr, workspace, record, new, entries, noun, grim)?;
     stderr.flush()?;
 
     let mut line = String::new();
@@ -463,7 +523,8 @@ fn write_question(
     workspace: &Path,
     record: &Path,
     new: &[String],
-    noun: ConsentNoun,
+    entries: &[PromptEntry],
+    noun: &ConsentNoun,
     grim: &crate::config::scope::Invocation,
 ) -> io::Result<()> {
     // Escaped on the way to a terminal for the same reason `validate_registries`
@@ -488,6 +549,19 @@ fn write_question(
         writeln!(out, "'{shown}' declares {inline} it was not consented for. {gloss}")?;
         for entry in new {
             writeln!(out, "  new: {}", entry.escape_debug())?;
+        }
+    }
+    // A hooks-only workspace reads as it always did; the list appears only when
+    // the answer spans kinds or a declared kind is switched off.
+    if noun.0.len() > 1 || entries.iter().any(|e| !e.enabled) {
+        writeln!(out, "Declared here:")?;
+        for entry in entries {
+            let note = if entry.enabled {
+                ""
+            } else {
+                " (feature off: not recorded by this answer)"
+            };
+            writeln!(out, "  {}: {}{note}", entry.kind, entry.key.escape_debug())?;
         }
     }
     writeln!(
@@ -524,17 +598,31 @@ mod tests {
         Consent::Drifted(BTreeSet::from([entry.to_string()]))
     }
 
-    const ALL_NOUNS: [ConsentNoun; 3] = [ConsentNoun::Hooks, ConsentNoun::Settings, ConsentNoun::HooksAndSettings];
+    fn hooks() -> ConsentNoun {
+        ConsentNoun::of([ArtifactKind::Hook])
+    }
+
+    fn settings() -> ConsentNoun {
+        ConsentNoun::of([ArtifactKind::Settings])
+    }
+
+    fn hooks_and_settings() -> ConsentNoun {
+        ConsentNoun::of([ArtifactKind::Hook, ArtifactKind::Settings])
+    }
+
+    fn all_nouns() -> [ConsentNoun; 3] {
+        [hooks(), settings(), hooks_and_settings()]
+    }
 
     /// A hook question keeps the line it shipped with, and a question that also
     /// asked about settings does not claim to be about hooks alone.
     #[test]
     fn a_failed_prompt_is_logged_for_what_it_asked() {
         assert_eq!(
-            ConsentNoun::Hooks.prompt_failed(),
+            hooks().prompt_failed(),
             "hook consent prompt failed; treating as declined"
         );
-        for noun in [ConsentNoun::Settings, ConsentNoun::HooksAndSettings] {
+        for noun in [settings(), hooks_and_settings()] {
             assert_eq!(noun.prompt_failed(), "consent prompt failed; treating as declined");
         }
     }
@@ -543,32 +631,32 @@ mod tests {
     /// two name the workspace. Each names what is left undone, the record, and the fix.
     #[test]
     fn a_failed_record_is_logged_for_what_it_asked() {
-        let record = Path::new("/grim/hooks/consent/k.json");
+        let record = Path::new("/grim/consent/k.json");
         let grim = crate::config::scope::Invocation::WALKED;
-        let tail = |verb: &str| format!("; make /grim/hooks/consent/k.json writable, then run {verb}");
+        let tail = |verb: &str| format!("; make /grim/consent/k.json writable, then run {verb}");
         assert_eq!(
-            ConsentNoun::Hooks.record_failed(record, &grim),
+            hooks().record_failed(record, &grim),
             format!(
                 "hook consent could not be recorded; nothing armed{}",
                 tail("grim hook allow")
             )
         );
         assert_eq!(
-            ConsentNoun::Settings.record_failed(record, &grim),
+            settings().record_failed(record, &grim),
             format!(
                 "workspace consent could not be recorded; nothing applied{}",
                 tail("grim consent allow")
             )
         );
         assert_eq!(
-            ConsentNoun::HooksAndSettings.record_failed(record, &grim),
+            hooks_and_settings().record_failed(record, &grim),
             format!(
                 "workspace consent could not be recorded; nothing armed or applied{}",
                 tail("grim consent allow")
             )
         );
         assert!(
-            ConsentNoun::Settings
+            settings()
                 .record_failed(record, &crate::config::scope::Invocation::GLOBAL)
                 .ends_with("then run grim --global consent allow")
         );
@@ -581,7 +669,8 @@ mod tests {
             Path::new("/work/app"),
             Path::new("/grim/k.json"),
             new,
-            noun,
+            &[],
+            &noun,
             &crate::config::scope::Invocation::WALKED,
         )
         .unwrap();
@@ -593,14 +682,14 @@ mod tests {
     #[test]
     fn the_hooks_question_keeps_every_word() {
         assert_eq!(
-            question(ConsentNoun::Hooks, &[]),
+            question(hooks(), &[]),
             "Hooks declared by '/work/app' are not consented yet. A hook is code your AI client runs automatically.\n\
              Consenting records this checkout in /grim/k.json, for every hook it declares. It grants nothing to any other checkout.\n\
              Declining arms nothing and changes no file. Non-interactive runs never ask — use 'grim hook allow', or pass --trust-hooks for one run.\n\
              Allow hooks from '/work/app'? [y/N] "
         );
         assert_eq!(
-            question(ConsentNoun::Hooks, &["evil@ghcr.io/acme/evil".to_string()]),
+            question(hooks(), &["evil@ghcr.io/acme/evil".to_string()]),
             "'/work/app' declares hooks it was not consented for. A hook is code your AI client runs automatically.\n  \
              new: evil@ghcr.io/acme/evil\n\
              Consenting records this checkout in /grim/k.json, for every hook it declares. It grants nothing to any other checkout.\n\
@@ -611,8 +700,8 @@ mod tests {
 
     #[test]
     fn a_settings_question_names_settings_and_only_settings() {
-        for new in [Vec::new(), vec!["settings:team@ghcr.io/acme/team".to_string()]] {
-            let text = question(ConsentNoun::Settings, &new);
+        for new in [Vec::new(), vec!["team@ghcr.io/acme/team".to_string()]] {
+            let text = question(settings(), &new);
             assert!(
                 text.contains("Settings change how your AI client behaves and what it may do."),
                 "{text}"
@@ -625,18 +714,16 @@ mod tests {
             assert!(text.ends_with("Allow settings from '/work/app'? [y/N] "), "{text}");
             assert!(!text.contains("A hook is code"), "{text}");
         }
+        assert!(question(settings(), &[]).starts_with("Settings declared by '/work/app' are not consented yet."));
         assert!(
-            question(ConsentNoun::Settings, &[]).starts_with("Settings declared by '/work/app' are not consented yet.")
-        );
-        assert!(
-            question(ConsentNoun::Settings, &["x".to_string()])
+            question(settings(), &["x".to_string()])
                 .starts_with("'/work/app' declares settings it was not consented for.")
         );
     }
 
     #[test]
     fn a_question_about_both_kinds_names_both() {
-        let text = question(ConsentNoun::HooksAndSettings, &[]);
+        let text = question(hooks_and_settings(), &[]);
         assert!(
             text.starts_with("Hooks and settings declared by '/work/app' are not consented yet."),
             "{text}"
@@ -662,7 +749,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            question(ConsentNoun::HooksAndSettings, &["x".to_string()])
+            question(hooks_and_settings(), &["x".to_string()])
                 .starts_with("'/work/app' declares hooks and settings it was not consented for.")
         );
     }
@@ -671,7 +758,7 @@ mod tests {
     /// checkout's, and a decline changes no file, orphans included.
     #[test]
     fn every_noun_makes_the_same_promises() {
-        for noun in ALL_NOUNS {
+        for noun in all_nouns() {
             let text = question(noun, &[]);
             assert!(
                 text.contains("Consenting records this checkout in /grim/k.json"),
@@ -688,7 +775,7 @@ mod tests {
     /// raw ESC repaints the line the user is answering.
     #[test]
     fn every_noun_escapes_what_it_echoes() {
-        for noun in ALL_NOUNS {
+        for noun in all_nouns() {
             let mut out = Vec::new();
             let new = ["evil\u{1b}[2J@ghcr.io/x".to_string()];
             write_question(
@@ -696,7 +783,8 @@ mod tests {
                 Path::new("/work/\u{202e}app"),
                 Path::new("/grim/k.json"),
                 &new,
-                noun,
+                &[],
+                &noun,
                 &crate::config::scope::Invocation::WALKED,
             )
             .unwrap();
@@ -710,17 +798,81 @@ mod tests {
     fn a_decline_warns_in_the_words_of_the_question() {
         let workspace = Path::new("/work/app");
         assert_eq!(
-            ConsentNoun::Hooks.declined_warning(workspace),
+            hooks().declined_warning(workspace),
             "hooks in '/work/app' were declined; nothing armed"
         );
         assert_eq!(
-            ConsentNoun::Settings.declined_warning(workspace),
+            settings().declined_warning(workspace),
             "settings in '/work/app' were declined; nothing applied"
         );
         assert_eq!(
-            ConsentNoun::HooksAndSettings.declined_warning(workspace),
+            hooks_and_settings().declined_warning(workspace),
             "hooks and settings in '/work/app' were declined; nothing armed or applied"
         );
+    }
+
+    fn question_with(noun: &ConsentNoun, entries: &[PromptEntry]) -> String {
+        let mut out = Vec::new();
+        write_question(
+            &mut out,
+            Path::new("/work/app"),
+            Path::new("/grim/k.json"),
+            &[],
+            entries,
+            noun,
+            &crate::config::scope::Invocation::WALKED,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn entry(kind: ArtifactKind, key: &str, enabled: bool) -> PromptEntry {
+        PromptEntry {
+            kind,
+            key: key.to_string(),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn the_question_lists_each_kind_and_marks_a_kind_whose_flag_is_off() {
+        // Hooks alone, nothing off: the shipped wording, no list.
+        let plain = question_with(&hooks(), &[entry(ArtifactKind::Hook, "h@r/x", true)]);
+        assert!(!plain.contains("Declared here:"), "{plain}");
+        assert_eq!(plain, question(hooks(), &[]));
+
+        // Two kinds: each entry under its own kind.
+        let both = question_with(
+            &hooks_and_settings(),
+            &[
+                entry(ArtifactKind::Hook, "h@r/x", true),
+                entry(ArtifactKind::Settings, "s@r/y", true),
+            ],
+        );
+        assert!(both.contains("  hook: h@r/x\n  settings: s@r/y\n"), "{both}");
+        assert!(!both.contains("feature off"), "{both}");
+
+        // A kind whose flag is off is listed and marked, and the noun stays hooks.
+        let off = question_with(
+            &hooks(),
+            &[
+                entry(ArtifactKind::Hook, "h@r/x", true),
+                entry(ArtifactKind::Settings, "s@r/y", false),
+            ],
+        );
+        assert!(
+            off.contains("  settings: s@r/y (feature off: not recorded by this answer)\n"),
+            "{off}"
+        );
+        assert!(off.contains("  hook: h@r/x\n"), "{off}");
+        assert!(off.ends_with("Allow hooks from '/work/app'? [y/N] "), "{off}");
+    }
+
+    #[test]
+    fn join_words_reads_as_a_list() {
+        assert_eq!(join_words(&["a"], "and"), "a");
+        assert_eq!(join_words(&["a", "b"], "and"), "a and b");
+        assert_eq!(join_words(&["a", "b", "c"], "or"), "a, b or c");
     }
 
     /// Every rung of the ladder, each isolated by narrowing one field.

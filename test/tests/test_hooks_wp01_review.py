@@ -127,7 +127,7 @@ def test_add_no_trust_hooks_writes_no_consent_record(
     write_config(project_dir)
     runner = grim_at(project_dir)
     runner.run("config", "set", "options.experimental.hooks", "true")
-    consent = Path(runner.grim_home) / "hooks" / "consent"
+    consent = Path(runner.grim_home) / "consent"
 
     runner.run("add", "--no-trust-hooks", "--kind", "hook", hook.fq)
     assert not consent.exists() or not any(consent.iterdir()), sorted(consent.iterdir())

@@ -29,7 +29,7 @@
 //!
 //! ## The record is machine-local, and that is invariant I1, not a preference
 //!
-//! `$GRIM_HOME/hooks/consent/<workspace-key>.json`. Nothing armable lives inside
+//! `$GRIM_HOME/consent/<workspace-key>.json`. Nothing armable lives inside
 //! a repository, and an answer to *"may this repo arm code?"* stored **in that
 //! repo** is the purest form of the thing I1 forbids. There is deliberately no
 //! environment form of the record's location, for the same CWE-426 reason
@@ -68,7 +68,7 @@
 //! routine version bump, which is exactly the habituation A2 reversed D5 to
 //! avoid. The trade is deliberate.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -91,7 +91,7 @@ use crate::oci::{ArtifactKind, Identifier};
 #[repr(u8)]
 pub enum ConsentVersion {
     #[default]
-    V1 = 1,
+    V2 = 2,
 }
 
 /// One workspace's recorded consent.
@@ -110,8 +110,8 @@ pub struct ConsentRecord {
     /// The workspace this record consents to — **the identity**, compared by
     /// [`evaluate`]. Not merely the thing the filename hashes.
     pub workspace: PathBuf,
-    /// The consented hook set, as [`consent_key`] spells it.
-    pub hooks: BTreeSet<String>,
+    /// The consented set, as [`consent_key`] spells it.
+    pub sources: BTreeSet<String>,
     /// RFC 3339 UTC instant the record was written. Provenance only.
     pub consented_at: String,
 }
@@ -173,51 +173,47 @@ pub fn consent_key(binding: &str, source: &LockedSource) -> Option<String> {
     Some(format!("{binding}@{}/{}", pinned.registry(), pinned.repository()))
 }
 
+/// Each gated kind's declared entries. One record covers every kind, but each
+/// kind checks only its own set against it, so a kind the record lacks cannot
+/// disarm another.
+pub type DeclaredKeys = BTreeMap<ArtifactKind, BTreeSet<String>>;
+
+/// Whether `kind` is gated by workspace consent.
+pub fn is_gated(kind: ArtifactKind) -> bool {
+    match kind {
+        ArtifactKind::Hook | ArtifactKind::Settings => true,
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
+            false
+        }
+    }
+}
+
 /// [`consent_key_for`] over a declaration, which names the same registry and
 /// repository as the pin the lock will hold, so a config can be judged before
 /// the lock catches up with it.
 pub fn declared_consent_key_for(kind: ArtifactKind, binding: &str, id: &Identifier) -> Option<String> {
-    let key = format!("{binding}@{}/{}", id.registry(), id.repository());
-    match kind {
-        ArtifactKind::Hook if binding.starts_with(SETTINGS_KEY_PREFIX) => None,
-        ArtifactKind::Hook => Some(key),
-        ArtifactKind::Settings => Some(format!("{SETTINGS_KEY_PREFIX}{key}")),
-        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
-            None
-        }
-    }
+    is_gated(kind).then(|| format!("{binding}@{}/{}", id.registry(), id.repository()))
 }
 
-/// All that tells a settings key from a hook key in the one record, so
-/// [`consent_key_for`] gives a hook binding that starts with it no key at all.
-const SETTINGS_KEY_PREFIX: &str = "settings:";
-
-/// [`consent_key`] for a gated kind, `None` for any other. A settings key
-/// carries a prefix so one record can gate both kinds, and a hook key keeps
-/// its spelling so every record already on disk stays valid.
+/// [`consent_key`] for a gated kind, `None` for any other. The spelling is the
+/// same for every kind, so a hook and a settings package with one binding and
+/// repository are one entry.
 pub fn consent_key_for(kind: ArtifactKind, binding: &str, source: &LockedSource) -> Option<String> {
-    match kind {
-        // The name grammar runs after this key is minted, so without this arm a
-        // repository binding a hook as `settings:x` records consent for package `x`.
-        ArtifactKind::Hook if binding.starts_with(SETTINGS_KEY_PREFIX) => None,
-        ArtifactKind::Hook => consent_key(binding, source),
-        ArtifactKind::Settings => consent_key(binding, source).map(|key| format!("{SETTINGS_KEY_PREFIX}{key}")),
-        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
-            None
-        }
+    if is_gated(kind) {
+        consent_key(binding, source)
+    } else {
+        None
     }
 }
 
-/// Split a declared set into `(hook keys, settings keys)`. Each kind evaluates
-/// its own half: read as one answer, a settings key the record lacks would
-/// disarm every consented hook.
-pub fn split_by_kind(declared: &BTreeSet<String>) -> (BTreeSet<String>, BTreeSet<String>) {
-    declared.iter().cloned().partition(|key| !is_settings_key(key))
+/// The entries `declared` holds for `kind`, empty when it holds none.
+pub fn keys_of(declared: &DeclaredKeys, kind: ArtifactKind) -> BTreeSet<String> {
+    declared.get(&kind).cloned().unwrap_or_default()
 }
 
-/// Whether `key` is a settings package's key rather than a hook's.
-pub fn is_settings_key(key: &str) -> bool {
-    key.starts_with(SETTINGS_KEY_PREFIX)
+/// Every entry of every kind, as the one record spells them.
+pub fn all_keys(declared: &DeclaredKeys) -> BTreeSet<String> {
+    declared.values().flatten().cloned().collect()
 }
 
 /// Resolve consent for one workspace over what it declares. **Pure** — no I/O,
@@ -236,7 +232,7 @@ pub fn evaluate(record: Option<&ConsentRecord>, workspace: &Path, declared: &BTr
     let Some(record) = record.filter(|r| r.workspace == workspace) else {
         return Consent::Absent;
     };
-    let new: BTreeSet<String> = declared.difference(&record.hooks).cloned().collect();
+    let new: BTreeSet<String> = declared.difference(&record.sources).cloned().collect();
     if new.is_empty() {
         Consent::Granted
     } else {
@@ -323,9 +319,9 @@ pub fn record(
     }
     hook_dispatch::ensure_consent_dir(grim_home)?;
     let record = ConsentRecord {
-        v: ConsentVersion::V1,
+        v: ConsentVersion::V2,
         workspace: workspace.to_path_buf(),
-        hooks: hooks.clone(),
+        sources: hooks.clone(),
         // RFC 3339, UTC, second precision. Provenance for a human reading the
         // file; nothing reads it back, and in particular consent **never expires**.
         consented_at: grimoire_hook_core::time::rfc3339_utc(std::time::SystemTime::now()),
@@ -336,6 +332,9 @@ pub fn record(
     // `grim hook allow` runs in the same workspace race to write the same
     // answer.
     crate::store::atomic_write(&hook_dispatch::consent_path(grim_home, workspace), &bytes)?;
+    // Only after the rename: an interruption between the two leaves both files
+    // and loses no grant.
+    remove_old_record(grim_home, workspace);
     Ok(Recorded::Stamped)
 }
 
@@ -354,11 +353,66 @@ pub fn record(
 /// an error.
 pub fn revoke(grim_home: &Path, workspace: &Path) -> io::Result<Revoked> {
     let target = hook_dispatch::consent_path(grim_home, workspace);
-    match std::fs::remove_file(&target) {
-        Ok(()) => Ok(Revoked::Removed),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Revoked::Absent),
-        Err(e) => Err(e),
+    let revoked = match std::fs::remove_file(&target) {
+        Ok(()) => Revoked::Removed,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Revoked::Absent,
+        Err(e) => return Err(e),
+    };
+    // An older grim would otherwise keep reading its own record and arm again.
+    remove_old_record(grim_home, workspace);
+    Ok(revoked)
+}
+
+/// Where an older grim kept this workspace's record. Nothing reads it as
+/// consent; it is only ever deleted.
+fn old_record_path(grim_home: &Path, workspace: &Path) -> PathBuf {
+    hook_dispatch::hooks_dir(grim_home)
+        .join("consent")
+        .join(format!("{}.json", hook_dispatch::workspace_key(workspace)))
+}
+
+/// The one field of an older record that says whose it is.
+#[derive(Deserialize)]
+struct OldRecordIdentity {
+    workspace: PathBuf,
+}
+
+/// Delete the older grim's record for `workspace`, so a revoke reaches that
+/// grim and a grant is not left shadowed by a stale one.
+///
+/// Deleted only when it is a regular file reached without following a link,
+/// inside `grim_home`, whose `workspace` equals this one. An unreadable, foreign
+/// or linked record stays: it is not this grim's to remove, and a symlink
+/// planted there must never turn the delete into one outside `$GRIM_HOME`.
+/// Failure is logged and never raised: the v2 answer already stands.
+fn remove_old_record(grim_home: &Path, workspace: &Path) {
+    let path = old_record_path(grim_home, workspace);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return;
+    };
+    if !meta.file_type().is_file() || !parent_is_inside(&path, grim_home) {
+        tracing::debug!("leaving {} in place: not a plain file inside GRIM_HOME", path.display());
+        return;
     }
+    let Ok(bytes) = crate::store::read_regular(&path) else {
+        return;
+    };
+    match serde_json::from_slice::<OldRecordIdentity>(&bytes) {
+        Ok(old) if old.workspace == workspace => {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::debug!("could not delete the older consent record {}: {e}", path.display());
+            }
+        }
+        _ => tracing::debug!("leaving {} in place: it is not this workspace's record", path.display()),
+    }
+}
+
+/// Whether `path`'s directory, links resolved, lies inside `grim_home`.
+fn parent_is_inside(path: &Path, grim_home: &Path) -> bool {
+    let (Some(parent), Ok(home)) = (path.parent(), std::fs::canonicalize(grim_home)) else {
+        return false;
+    };
+    std::fs::canonicalize(parent).is_ok_and(|dir| dir.starts_with(home))
 }
 
 #[cfg(test)]
@@ -371,9 +425,9 @@ mod tests {
 
     fn stamped<const N: usize>(workspace: &str, hooks: [&str; N]) -> ConsentRecord {
         ConsentRecord {
-            v: ConsentVersion::V1,
+            v: ConsentVersion::V2,
             workspace: PathBuf::from(workspace),
-            hooks: set(hooks),
+            sources: set(hooks),
             consented_at: "2026-08-28T10:00:00Z".to_string(),
         }
     }
@@ -384,72 +438,67 @@ mod tests {
         LockedSource::Registry(crate::oci::PinnedIdentifier::try_from(id).unwrap())
     }
 
-    /// A record an older grim wrote stays valid only while a hook key keeps
-    /// the exact spelling it was stamped with.
     #[test]
-    fn consent_key_for_leaves_a_hook_key_as_it_was() {
+    fn consent_key_for_spells_every_gated_kind_alike() {
         let source = pinned_source("ghcr.io", "acme/fmt");
-        assert_eq!(
-            consent_key_for(ArtifactKind::Hook, "fmt", &source).as_deref(),
-            Some("fmt@ghcr.io/acme/fmt")
-        );
-        assert_eq!(
-            consent_key_for(ArtifactKind::Hook, "fmt", &source),
-            consent_key("fmt", &source)
-        );
+        for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
+            assert_eq!(
+                consent_key_for(kind, "fmt", &source).as_deref(),
+                Some("fmt@ghcr.io/acme/fmt"),
+                "{kind}"
+            );
+            assert_eq!(consent_key_for(kind, "fmt", &source), consent_key("fmt", &source));
+        }
     }
 
     #[test]
-    fn consent_key_for_prefixes_a_settings_key() {
-        assert_eq!(
-            consent_key_for(ArtifactKind::Settings, "team", &pinned_source("ghcr.io", "acme/team")).as_deref(),
-            Some("settings:team@ghcr.io/acme/team")
-        );
-    }
-
-    /// One record holds both kinds, so the prefix is all that stops a hook's
-    /// consent reaching a package of the same name, in either direction.
-    #[test]
-    fn a_hook_and_a_settings_package_of_one_name_never_consent_each_other() {
+    fn hook_and_settings_with_one_binding_share_an_entry() {
         let source = pinned_source("ghcr.io", "acme/x");
         let hook = consent_key_for(ArtifactKind::Hook, "x", &source).unwrap();
         let settings = consent_key_for(ArtifactKind::Settings, "x", &source).unwrap();
-        assert_ne!(hook, settings);
+        assert_eq!(hook, settings);
         let workspace = Path::new("/w/proj");
+        let record = stamped("/w/proj", [hook.as_str()]);
+        for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
+            let declared = DeclaredKeys::from([(kind, set([hook.as_str()]))]);
+            assert_eq!(
+                evaluate(Some(&record), workspace, &keys_of(&declared, kind)),
+                Consent::Granted,
+                "{kind}: one entry covers both kinds"
+            );
+        }
+        let both = DeclaredKeys::from([
+            (ArtifactKind::Hook, set([hook.as_str()])),
+            (ArtifactKind::Settings, set([settings.as_str()])),
+        ]);
+        assert_eq!(all_keys(&both), set([hook.as_str()]), "one entry in the record");
+    }
 
-        let hook_record = stamped("/w/proj", [hook.as_str()]);
+    #[test]
+    fn a_new_binding_drifts() {
+        let record = stamped("/w/proj", ["fmt@ghcr.io/acme/fmt"]);
         assert_eq!(
-            evaluate(Some(&hook_record), workspace, &set([hook.as_str()])),
-            Consent::Granted,
-            "positive control: the record covers its own kind"
-        );
-        assert_eq!(
-            evaluate(Some(&hook_record), workspace, &set([settings.as_str()])),
-            Consent::Drifted(set([settings.as_str()]))
-        );
-
-        let settings_record = stamped("/w/proj", [settings.as_str()]);
-        assert_eq!(
-            evaluate(Some(&settings_record), workspace, &set([settings.as_str()])),
-            Consent::Granted,
-            "positive control: the record covers its own kind"
-        );
-        assert_eq!(
-            evaluate(Some(&settings_record), workspace, &set([hook.as_str()])),
-            Consent::Drifted(set([hook.as_str()]))
+            evaluate(Some(&record), Path::new("/w/proj"), &set(["lint@ghcr.io/acme/fmt"])),
+            Consent::Drifted(set(["lint@ghcr.io/acme/fmt"]))
         );
     }
 
     #[test]
-    fn split_by_kind_sends_each_key_to_its_own_kind() {
-        let source = pinned_source("ghcr.io", "acme/x");
-        let hook = consent_key_for(ArtifactKind::Hook, "x", &source).unwrap();
-        let settings = consent_key_for(ArtifactKind::Settings, "x", &source).unwrap();
+    fn a_rebinding_drifts() {
+        let record = stamped("/w/proj", ["fmt@ghcr.io/acme/fmt"]);
+        assert_eq!(
+            evaluate(Some(&record), Path::new("/w/proj"), &set(["fmt2@ghcr.io/acme/fmt"])),
+            Consent::Drifted(set(["fmt2@ghcr.io/acme/fmt"]))
+        );
+    }
 
-        let (hooks, packages) = split_by_kind(&set([hook.as_str(), settings.as_str()]));
-
-        assert_eq!(hooks, set([hook.as_str()]));
-        assert_eq!(packages, set([settings.as_str()]));
+    #[test]
+    fn a_new_repository_drifts() {
+        let record = stamped("/w/proj", ["fmt@ghcr.io/acme/fmt"]);
+        assert_eq!(
+            evaluate(Some(&record), Path::new("/w/proj"), &set(["fmt@ghcr.io/acme/other"])),
+            Consent::Drifted(set(["fmt@ghcr.io/acme/other"]))
+        );
     }
 
     /// Only hooks and settings are gated, and a path source has no publisher
@@ -469,24 +518,6 @@ mod tests {
         for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
             assert_eq!(consent_key_for(kind, "fmt", &path), None, "{kind}");
         }
-    }
-
-    /// A hook binding reaches this function before any name grammar does, and
-    /// the prefix alone tells the kinds apart, so a hook must not spell it.
-    #[test]
-    fn a_hook_bound_under_the_settings_prefix_has_no_key() {
-        let source = pinned_source("ghcr.io", "acme/x");
-        assert_eq!(consent_key_for(ArtifactKind::Hook, "settings:x", &source), None);
-        assert_eq!(
-            consent_key_for(ArtifactKind::Hook, "settings", &source).as_deref(),
-            Some("settings@ghcr.io/acme/x"),
-            "positive control: only the prefix itself is refused"
-        );
-        assert_eq!(
-            consent_key_for(ArtifactKind::Hook, "x", &source).as_deref(),
-            Some("x@ghcr.io/acme/x"),
-            "positive control: a valid binding keeps its key"
-        );
     }
 
     /// The predicate's whole table, each row isolated.
@@ -546,17 +577,17 @@ mod tests {
         let cases: &[(&str, &str)] = &[
             ("", "an empty file"),
             ("{", "truncated JSON"),
-            (r#"{"v":1,"workspace":"/w/proj"}"#, "a record missing `hooks`"),
+            (r#"{"v":2,"workspace":"/w/proj"}"#, "a record missing `sources`"),
             (
-                r#"{"v":1,"hooks":[],"consented_at":"x"}"#,
+                r#"{"v":2,"sources":[],"consented_at":"x"}"#,
                 "a record missing `workspace`",
             ),
             (
-                r#"{"v":99,"workspace":"/w/proj","hooks":[],"consented_at":"x"}"#,
+                r#"{"v":99,"workspace":"/w/proj","sources":[],"consented_at":"x"}"#,
                 "a version this grim does not recognize",
             ),
             (
-                r#"{"v":1,"workspace":"/w/proj","hooks":[],"consented_at":"x","extra":true}"#,
+                r#"{"v":2,"workspace":"/w/proj","sources":[],"consented_at":"x","extra":true}"#,
                 "an unknown field",
             ),
         ];
@@ -568,7 +599,7 @@ mod tests {
         // failing for some unrelated reason.
         std::fs::write(
             &path,
-            r#"{"v":1,"workspace":"/w/proj","hooks":["fmt@r/x"],"consented_at":"x"}"#,
+            r#"{"v":2,"workspace":"/w/proj","sources":["fmt@r/x"],"consented_at":"x"}"#,
         )
         .unwrap();
         assert_eq!(load_at(&path).unwrap().workspace, PathBuf::from("/w/proj"));
@@ -610,7 +641,7 @@ mod tests {
 
         let loaded = load(grim_home, workspace).expect("written record must read back");
         assert_eq!(loaded.workspace, workspace);
-        assert_eq!(loaded.hooks, hooks);
+        assert_eq!(loaded.sources, hooks);
         assert_eq!(evaluate(Some(&loaded), workspace, &hooks), Consent::Granted);
 
         assert_eq!(revoke(grim_home, workspace).unwrap(), Revoked::Removed);
@@ -648,5 +679,152 @@ mod tests {
             evaluate(load(grim_home, production).as_ref(), production, &hooks),
             Consent::Absent
         );
+    }
+
+    fn write_body(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.json");
+        std::fs::write(&path, body).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn v2_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Path::new("/w/proj");
+        let keys = set(["b@r/x", "a@r/y"]);
+        record(dir.path(), ConfigScope::Project, ws, &keys).unwrap();
+        let path = hook_dispatch::consent_path(dir.path(), ws);
+        assert_eq!(path.parent().unwrap(), dir.path().join("consent"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""v": 2"#) && text.contains("\"sources\""), "{text}");
+        assert!(text.find("a@r/y").unwrap() < text.find("b@r/x").unwrap(), "sorted");
+        let loaded = load(dir.path(), ws).unwrap();
+        assert_eq!(loaded.v, ConsentVersion::V2);
+        assert_eq!(loaded.sources, keys);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert!(!dir.path().join("hooks").exists(), "nothing under the old home");
+    }
+
+    #[test]
+    fn v1_body_at_the_new_path_reads_absent() {
+        let (_d, path) = write_body(r#"{"v":1,"workspace":"/w/proj","hooks":["fmt@r/x"],"consented_at":"x"}"#);
+        assert!(load_at(&path).is_none());
+    }
+
+    #[test]
+    fn unknown_field_reads_absent() {
+        let (_d, ok) = write_body(r#"{"v":2,"workspace":"/w/proj","sources":[],"consented_at":"x"}"#);
+        assert!(load_at(&ok).is_some(), "positive control");
+        let (_d, bad) = write_body(r#"{"v":2,"workspace":"/w/proj","sources":[],"consented_at":"x","hooks":[]}"#);
+        assert!(load_at(&bad).is_none());
+    }
+
+    #[test]
+    fn foreign_workspace_reads_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Path::new("/w/proj");
+        record(dir.path(), ConfigScope::Project, Path::new("/w/other"), &set(["a@r/x"])).unwrap();
+        let foreign = hook_dispatch::consent_path(dir.path(), Path::new("/w/other"));
+        std::fs::rename(&foreign, hook_dispatch::consent_path(dir.path(), ws)).unwrap();
+        let loaded = load(dir.path(), ws);
+        assert!(loaded.is_some(), "positive control: the file itself parses");
+        assert_eq!(evaluate(loaded.as_ref(), ws, &set(["a@r/x"])), Consent::Absent);
+    }
+
+    #[test]
+    fn truncated_reads_absent() {
+        let (_d, ok) = write_body(r#"{"v":2,"workspace":"/w/proj","sources":[],"consented_at":"x"}"#);
+        assert!(load_at(&ok).is_some(), "positive control");
+        for body in ["", "{", r#"{"v":2,"workspace":"/w/proj","sources":["a@r/x""#] {
+            let (_d, p) = write_body(body);
+            assert!(load_at(&p).is_none(), "{body:?}");
+        }
+    }
+
+    fn seed_old(home: &Path, workspace: &str, recorded: &str) -> PathBuf {
+        let path = old_record_path(home, Path::new(workspace));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"v":1,"workspace":"{recorded}","hooks":[],"consented_at":"x"}}"#),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn old_record_delete_follows_the_v2_write() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = Path::new("/w/proj");
+        let old = seed_old(home.path(), "/w/proj", "/w/proj");
+        let foreign = seed_old(home.path(), "/w/other", "/w/elsewhere");
+
+        // The v2 write fails (a file where the directory goes): the old record stays.
+        std::fs::write(home.path().join("consent"), b"in the way").unwrap();
+        assert!(record(home.path(), ConfigScope::Project, ws, &set(["a@r/x"])).is_err());
+        assert!(old.is_file(), "no grant lost when the v2 write did not land");
+        std::fs::remove_file(home.path().join("consent")).unwrap();
+
+        // Positive control: a landed write deletes this workspace's old record only.
+        record(home.path(), ConfigScope::Project, ws, &set(["a@r/x"])).unwrap();
+        assert!(hook_dispatch::consent_path(home.path(), ws).is_file());
+        assert!(!old.exists());
+        record(home.path(), ConfigScope::Project, Path::new("/w/other"), &set([])).unwrap();
+        assert!(foreign.is_file(), "a record naming another workspace stays");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn old_record_symlink_is_not_deleted() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = Path::new("/w/proj");
+        let target = outside.path().join("victim.json");
+        std::fs::write(&target, r#"{"workspace":"/w/proj"}"#).unwrap();
+        let old = old_record_path(home.path(), ws);
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &old).unwrap();
+
+        record(home.path(), ConfigScope::Project, ws, &set([])).unwrap();
+        assert!(target.is_file(), "the link target is never touched");
+        assert!(old.symlink_metadata().is_ok(), "the link itself stays");
+
+        // Positive control: the same shape as a plain file is deleted.
+        std::fs::remove_file(&old).unwrap();
+        std::fs::write(&old, r#"{"workspace":"/w/proj"}"#).unwrap();
+        record(home.path(), ConfigScope::Project, ws, &set([])).unwrap();
+        assert!(!old.exists());
+
+        // A linked directory leading outside GRIM_HOME is refused too.
+        std::fs::remove_dir_all(home.path().join("hooks")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("hooks")).unwrap();
+        std::fs::create_dir_all(outside.path().join("consent")).unwrap();
+        let planted = outside
+            .path()
+            .join("consent")
+            .join(format!("{}.json", hook_dispatch::workspace_key(ws)));
+        std::fs::write(&planted, r#"{"workspace":"/w/proj"}"#).unwrap();
+        revoke(home.path(), ws).unwrap();
+        assert!(planted.is_file(), "a record reached through a linked directory stays");
+    }
+
+    #[test]
+    fn revoke_deletes_the_old_record_too() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = Path::new("/w/proj");
+        let old = seed_old(home.path(), "/w/proj", "/w/proj");
+        record(home.path(), ConfigScope::Project, ws, &set([])).unwrap();
+        let again = seed_old(home.path(), "/w/proj", "/w/proj");
+        assert_eq!(revoke(home.path(), ws).unwrap(), Revoked::Removed);
+        assert!(!again.exists() && !old.exists());
     }
 }
