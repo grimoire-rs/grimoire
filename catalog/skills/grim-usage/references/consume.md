@@ -466,8 +466,10 @@ that read `modified` after a pull reads `installed`. `--offline` sends no
 request. Under `--check` the proof reads the store only, but the catalog and
 tag requests still go out. `grim_status` over MCP writes only under
 `--allow-writes`. `grim update` and `grim uninstall` run the same proof before
-they relock or delete, and never delete a file they cannot prove. Confirm the
-details in the [status section][status-adoption].
+they relock or delete, and never delete a file they cannot prove. `update`'s
+registry reads run within the same fixed bounds as `status` (10 s a call,
+30 s a run, at most 64 manifest and 64 layer fetches, a host skipped after its
+first failure). Confirm the details in the [status section][status-adoption].
 
 `grim status` reports each declared artifact's state: `installed`,
 `outdated`, `modified`, `missing`, or `stale`. A hook row adds three more:

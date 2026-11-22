@@ -120,11 +120,13 @@ pub struct UpdateArgs {
 /// Run `grim update`.
 ///
 /// The pre-pass proves the previous lock's files against their old pins
-/// under a fixed fetch bound (10 s a call, 30 s a run, the same bounds
-/// `grim status` proves under): a registry that stalls on an old pin ends
-/// the pre-pass with those files unproven, kept on disk and named, and the
-/// exit code is the same as for a pin the registry cannot answer for at
-/// all. The resolve and install fetches carry no such bound.
+/// under fixed fetch bounds (10 s a call, 30 s a run, at most 64 manifest
+/// and 64 layer fetches, a host skipped after its first failure, the same
+/// bounds `grim status` proves under): a registry that stalls on an old pin,
+/// or a run that hits a cap, ends the pre-pass with those files unproven,
+/// kept on disk and named, and the exit code is the same as for a pin the
+/// registry cannot answer for at all. The resolve and install fetches carry
+/// no such bound.
 ///
 /// # Errors
 ///
@@ -219,11 +221,14 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         .adopt();
     // The pre-pass proves the previous lock's files against their old pins,
     // fetching them from the registry when the store lacks them; bound it as
-    // `grim status` bounds its proofs (10 s a call, 30 s a run, #367), so a
-    // registry that accepts and stays silent costs the pre-pass its deadline
-    // instead of the run. A seam that cannot be built, or an offline run,
-    // leaves the pre-pass on the run's access, as before. The resolve and
-    // install fetches keep the run's access: out of scope for #367.
+    // `grim status` bounds its proofs (10 s a call, 30 s a run, at most 64
+    // manifest and 64 layer fetches, a host skipped after its first failure,
+    // #367), so a registry that accepts and stays silent costs the pre-pass
+    // its deadline instead of the run, and a run that hits a cap leaves the
+    // files it could not prove on disk, named. A seam that cannot be built,
+    // or an offline run, leaves the pre-pass on the run's access, as before.
+    // The resolve and install fetches keep the run's access: out of scope
+    // for #367.
     let prepass_access = (!ctx.offline())
         .then(|| {
             ctx.bounded_access(super::transport_hosts(ctx), CLI_RUN_DEADLINE)
@@ -545,8 +550,10 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
 
 /// [`prove_records`], then persists what proved: the lock save that follows
 /// destroys the evidence. `access` is the pre-pass's own seam: the caller
-/// bounds it (10 s a call, 30 s a run), so a stalling registry leaves the
-/// nodes it cannot fetch unproven instead of holding the run.
+/// bounds it (10 s a call, 30 s a run, at most 64 manifest and 64 layer
+/// fetches, a host skipped after its first failure), so a stalling registry,
+/// or a run that hits a cap, leaves the nodes it cannot fetch unproven
+/// instead of holding the run, and the files stay on disk.
 async fn prove_previous(
     state: &mut InstallState,
     evidence: &GrimoireLock,
@@ -3145,6 +3152,12 @@ mod tests {
         ) -> Result<Option<crate::oci::manifest::OciManifest>, crate::oci::access::error::AccessError> {
             refused()
         }
+        async fn fetch_manifest_bytes(
+            &self,
+            _: &PinnedIdentifier,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            refused()
+        }
         async fn fetch_blob(
             &self,
             _: &Identifier,
@@ -3186,6 +3199,28 @@ mod tests {
         ) -> Result<(), crate::oci::access::error::AccessError> {
             refused()
         }
+    }
+
+    /// A down registry reads as refused, not absent, through the bounded seam
+    /// (#387 review): without the `fetch_manifest_bytes` override the trait
+    /// default answered `Ok(None)` and the pre-pass treated the old pin as
+    /// missing instead of unreachable.
+    #[tokio::test]
+    async fn a_down_registry_refuses_manifest_bytes_through_the_bounded_seam() {
+        use crate::oci::access::bounded_access::BoundedAccess;
+        let id = Identifier::new_registry("x", "localhost:5000")
+            .clone_with_digest(Digest::Sha256(std::iter::repeat_n('a', 64).collect()));
+        let pinned = PinnedIdentifier::try_from(id).unwrap();
+        let inner: std::sync::Arc<dyn crate::oci::access::OciAccess> = std::sync::Arc::new(Down);
+        let seam = BoundedAccess::new(inner, CLI_RUN_DEADLINE);
+        assert!(
+            seam.fetch_manifest_bytes(&pinned).await.is_err(),
+            "a down registry refuses the raw manifest read"
+        );
+        assert!(
+            seam.fetch_manifest(&pinned).await.is_err(),
+            "a down registry refuses the parsed manifest read too"
+        );
     }
 
     /// A registry that accepts and never answers. Every read hangs, so only

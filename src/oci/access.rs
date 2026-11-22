@@ -196,6 +196,10 @@ pub trait OciAccess: Send + Sync {
 /// A shared seam as an access a [`bounded_access::BoundedAccess`] can wrap:
 /// the run's own access, so a bound applies to the seam a caller already
 /// built (and, in tests, to the injected one) instead of to a fresh client.
+///
+/// Every method is forwarded one by one: a trait method added later with a
+/// default body is not forwarded, and an access wrapped here silently takes
+/// that default instead, so keep this list in step with the trait.
 #[async_trait]
 impl OciAccess for std::sync::Arc<dyn OciAccess> {
     async fn resolve_digest(&self, id: &Identifier, op: Operation) -> Result<Option<Digest>, AccessError> {
