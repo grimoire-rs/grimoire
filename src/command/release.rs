@@ -10,8 +10,11 @@
 //! manifest (with annotations), then move the cascade tags onto the
 //! manifest digest, never a float off a newer release. The exact version
 //! tag goes FIRST so a crash never leaves a float (`1.2`/`1`/`latest`)
-//! on a manifest that has no specific tag. Re-releasing identical content
-//! is an idempotent no-op (same digest). `--dry-run` prints the plan;
+//! on a manifest that has no specific tag. After the tags move, a repair
+//! re-lists the repository and moves any float a concurrent lower release
+//! left below a higher exact release onward to that release. Re-releasing
+//! identical content is an idempotent no-op (same digest). `--dry-run`
+//! prints the plan;
 //! `--force` allows moving an existing exact-version tag that points
 //! elsewhere.
 
@@ -19,7 +22,7 @@ use std::sync::Arc;
 
 use clap::Args;
 
-use crate::api::release_report::{KeptFloat, ReleaseReport};
+use crate::api::release_report::{KeptFloat, ReleaseReport, RepairedFloat};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::access::error::{AccessError, AccessErrorKind};
@@ -31,7 +34,8 @@ use crate::oci::manifest::{Descriptor, OciManifest};
 use crate::oci::mcp::MCP_LAYER_MEDIA_TYPE;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::release::{
-    FloatVerdict, ReleaseError, ReleaseErrorKind, float_verdict, publish_tags, resolve_cascade, version_tag,
+    FloatVerdict, ReleaseError, ReleaseErrorKind, float_verdict, highest_release_in_span, publish_tags,
+    resolve_cascade, version_tag,
 };
 use crate::oci::settings::SETTINGS_LAYER_MEDIA_TYPE;
 use crate::oci::version_evidence::{annotated_version, evidence};
@@ -366,7 +370,7 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
 
     // Move the exact version tag FIRST, then the wider floating tags last
     // (crash safety: `1.2.3` exists before `1.2`/`1`/`latest` move to it).
-    let (tags, kept) =
+    let (tags, kept, repaired) =
         super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, &tags, &version, &target).await)?;
 
     // An adopted manifest has the same content under the other compression.
@@ -378,7 +382,8 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
         .with_pushed_to(pushed_to)
         .with_compression(compression)
-        .with_floats_kept(&version, kept);
+        .with_floats_kept(&version, kept)
+        .with_floats_repaired(repaired);
     Ok((report, ExitCode::Success))
 }
 
@@ -482,11 +487,13 @@ async fn release_bundle(
     } else {
         super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
     };
-    let (tags, kept) = super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
+    let (tags, kept, repaired) =
+        super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
 
     let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
         .with_pushed_to(pushed_to)
-        .with_floats_kept(version, kept);
+        .with_floats_kept(version, kept)
+        .with_floats_repaired(repaired);
     Ok((report, ExitCode::Success))
 }
 
@@ -578,11 +585,13 @@ async fn release_mcp(
     } else {
         super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
     };
-    let (tags, kept) = super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
+    let (tags, kept, repaired) =
+        super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
 
     let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
         .with_pushed_to(pushed_to)
-        .with_floats_kept(version, kept);
+        .with_floats_kept(version, kept)
+        .with_floats_repaired(repaired);
     Ok((report, ExitCode::Success))
 }
 
@@ -669,11 +678,13 @@ async fn release_settings(
     } else {
         super::grim(guard_existing_version(&access, &push_repo, version, &manifest_digest, None).await)?
     };
-    let (tags, kept) = super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
+    let (tags, kept, repaired) =
+        super::grim(move_cascade(&access, ctx.access_mode(), &push_repo, tags, version, &target).await)?;
 
     let report = ReleaseReport::new(id.to_string(), target.to_string(), tags, true)
         .with_pushed_to(pushed_to)
-        .with_floats_kept(version, kept);
+        .with_floats_kept(version, kept)
+        .with_floats_repaired(repaired);
     Ok((report, ExitCode::Success))
 }
 
@@ -862,11 +873,15 @@ async fn move_tags(
 }
 
 /// Judge the cascade floats, then move the exact tag and the floats that
-/// follow this release onto `digest`. Returns the tags moved and the floats kept.
+/// follow this release onto `digest`, then repair any float a concurrent
+/// lower release left below a higher exact release. Returns the tags that
+/// ended up on this release, the floats kept, and the floats repaired.
 ///
 /// # Errors
 ///
 /// A failed or offline float read, before any tag moves; a failed tag write.
+/// A failed repair never errors: the release already happened, so the
+/// repair warns and leaves the float as it is.
 async fn move_cascade(
     access: &Arc<dyn OciAccess>,
     mode: AccessMode,
@@ -874,10 +889,128 @@ async fn move_cascade(
     tags: &[String],
     version: &str,
     digest: &Digest,
-) -> Result<(Vec<String>, Vec<KeptFloat>), crate::error::Error> {
+) -> Result<(Vec<String>, Vec<KeptFloat>, Vec<RepairedFloat>), crate::error::Error> {
     let (moving, kept) = judge_floats(access, mode, repo, tags, version, digest).await?;
     move_tags(access, repo, &moving, version, digest).await?;
-    Ok((moving, kept))
+    let repaired = repair_floats(access, repo, &moving, version).await;
+    let tags = moving
+        .into_iter()
+        .filter(|tag| repaired.iter().all(|float| &float.tag != tag))
+        .collect();
+    Ok((tags, kept, repaired))
+}
+
+/// After the cascade tags move, re-list the repository and move any float
+/// this release left below a higher exact release onward to that release.
+///
+/// Two concurrent releases can each read the floats before either moves
+/// them, so the lower version's writes can land last and leave a float on
+/// the lower release. The registry has no compare-and-set for tags, so the
+/// judge cannot prevent it; the repair closes the race instead. It only
+/// ever moves a float forward, to the highest exact release in its span, so
+/// repeated repairs converge and a repair never undoes a newer release. A
+/// float is repaired only when its manifest's version annotation proves it
+/// sits on an exact release below the highest; anything else stays put.
+///
+/// Best effort by design: the release already happened, so a listing or
+/// lookup failure warns and leaves the float as it is rather than failing
+/// the release. Costs one tag listing per cascading release.
+async fn repair_floats(
+    access: &Arc<dyn OciAccess>,
+    repo: &Identifier,
+    tags: &[String],
+    version: &str,
+) -> Vec<RepairedFloat> {
+    let floats: Vec<&String> = tags.iter().filter(|tag| *tag != version).collect();
+    if floats.is_empty() {
+        return Vec::new();
+    }
+    let listed = match access.list_tags(repo).await {
+        Ok(Some(listed)) => listed,
+        Ok(None) => {
+            tracing::warn!("{repo}: registry does not list tags; skipping post-release float repair");
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!("{repo}: could not list tags for post-release float repair: {e}");
+            return Vec::new();
+        }
+    };
+    let mut repaired = Vec::new();
+    for float in floats {
+        let Some(highest) = highest_release_in_span(float, &listed) else {
+            continue;
+        };
+        let highest_digest = match resolve_existing_version(access, repo, &version_tag(&highest)).await {
+            Ok(Some(digest)) => digest,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!("{repo}:{float}: could not resolve {highest} for float repair: {e}");
+                continue;
+            }
+        };
+        // The exact tag alone is not proof: the manifest it names must
+        // carry the same version annotation, the same check the judge
+        // applies before keeping a float. Otherwise a sloppy retag could
+        // move the float onto a lower or foreign manifest.
+        let highest_pinned = match PinnedIdentifier::try_from(repo.clone_with_digest(highest_digest.clone())) {
+            Ok(pinned) => pinned,
+            Err(_) => continue,
+        };
+        let highest_annotated = match access.fetch_manifest(&highest_pinned).await {
+            Ok(manifest) => manifest.and_then(|manifest| annotated_version(&manifest.annotations)),
+            Err(e) => {
+                tracing::warn!("{repo}:{float}: could not read {highest} for float repair: {e}");
+                continue;
+            }
+        };
+        let Some(highest_annotated) = highest_annotated else {
+            continue;
+        };
+        if !highest_annotated.pre.is_empty() || highest_annotated.cmp_precedence(&highest) != std::cmp::Ordering::Equal
+        {
+            continue;
+        }
+        let current_digest = match resolve_existing_version(access, repo, float).await {
+            Ok(Some(digest)) => digest,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!("{repo}:{float}: could not resolve the float for repair: {e}");
+                continue;
+            }
+        };
+        if current_digest == highest_digest {
+            continue;
+        }
+        // Prove the float is actually below the highest: only an exact
+        // normal version counts. A float on an unannotated or prerelease
+        // manifest stays put rather than moving on a guess.
+        let pinned = match PinnedIdentifier::try_from(repo.clone_with_digest(current_digest.clone())) {
+            Ok(pinned) => pinned,
+            Err(_) => continue,
+        };
+        let current = match access.fetch_manifest(&pinned).await {
+            Ok(manifest) => manifest.and_then(|manifest| annotated_version(&manifest.annotations)),
+            Err(e) => {
+                tracing::warn!("{repo}:{float}: could not read the float's manifest for repair: {e}");
+                continue;
+            }
+        };
+        let Some(current) = current else { continue };
+        if !current.pre.is_empty() || current.cmp_precedence(&highest) != std::cmp::Ordering::Less {
+            continue;
+        }
+        if let Err(e) = access.put_tag(repo, float, &highest_digest).await {
+            tracing::warn!("{repo}:{float}: could not move the float to {highest}: {e}");
+            continue;
+        }
+        tracing::debug!("{repo}:{float} was on {current}, below {highest}; moved on to {highest}");
+        repaired.push(RepairedFloat {
+            tag: float.clone(),
+            version: highest,
+        });
+    }
+    repaired
 }
 
 /// The floats a dry run onto `target` would move and keep. A float it cannot
@@ -1320,6 +1453,13 @@ mod tests {
         }
     }
 
+    fn repaired(tag: &str, version: &str) -> RepairedFloat {
+        RepairedFloat {
+            tag: tag.to_string(),
+            version: semver::Version::parse(version).unwrap(),
+        }
+    }
+
     fn write_mcp(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let path = dir.join(format!("{name}.toml"));
         std::fs::write(
@@ -1498,6 +1638,86 @@ mod tests {
             let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
             assert_eq!(digest.to_string(), forced.manifest_digest, "{tag}");
         }
+    }
+
+    /// Two concurrent releases can leave a float on the lower version: both
+    /// read the floats before either moves them, and the lower version's
+    /// writes land last (#359). The next cascading release repairs the
+    /// stale float onward to the highest exact release in its span.
+    #[tokio::test]
+    async fn a_stale_float_below_a_higher_release_is_repaired_onward() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "stale-float");
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let repo = "localhost:5000/acme/stale-float";
+        let release = |version: &str| release_args(skill.clone(), &format!("{repo}:{version}"), None);
+
+        let (high, _) = run(&ctx, &release("3.0.0")).await.expect("3.0.0");
+        let (low, _) = run(&ctx, &release("1.0.0")).await.expect("1.0.0");
+        // The 1.0.0 backport kept `latest` on 3.0.0. Simulate the race's
+        // outcome: the lower run's writes land after the higher run's, so
+        // `latest` ends on the lower release.
+        let repo_id = Identifier::parse(repo).unwrap();
+        let low_digest = tag_digest(&registry, &format!("{repo}:1.0.0")).await;
+        assert_eq!(low_digest.to_string(), low.manifest_digest);
+        registry.put_tag(&repo_id, "latest", &low_digest).await.unwrap();
+
+        let (mid, _) = run(&ctx, &release("2.0.0")).await.expect("2.0.0");
+        // The judge reads `latest` on 1.0.0, so 2.0.0 moves it; the repair
+        // then moves it on to 3.0.0, the highest exact release in its span.
+        assert_eq!(mid.tags, ["2.0.0", "2.0", "2"]);
+        assert!(mid.floats_kept.is_empty());
+        assert_eq!(mid.floats_repaired, [repaired("latest", "3.0.0")]);
+        for (tag, at) in [("2.0.0", &mid), ("2.0", &mid), ("2", &mid)] {
+            let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+            assert_eq!(digest.to_string(), at.manifest_digest, "{tag}");
+        }
+        assert_eq!(
+            tag_digest(&registry, &format!("{repo}:latest")).await.to_string(),
+            high.manifest_digest,
+            "latest must end on the highest release"
+        );
+        assert_eq!(
+            tag_digest(&registry, &format!("{repo}:1")).await.to_string(),
+            low.manifest_digest,
+            "the other major's float is untouched"
+        );
+    }
+
+    /// The repair trusts an exact tag only when the manifest it names
+    /// carries the same version annotation: a sloppy retag must not move a
+    /// float onto a lower or foreign manifest.
+    #[tokio::test]
+    async fn a_repair_skips_a_highest_tag_whose_manifest_disagrees() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = write_skill(tmp.path(), "mistagged");
+        let registry = MemoryRegistry::new();
+        let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
+        let repo = "localhost:5000/acme/mistagged";
+        let release = |version: &str| release_args(skill.clone(), &format!("{repo}:{version}"), None);
+
+        run(&ctx, &release("1.0.0")).await.expect("1.0.0");
+        run(&ctx, &release("2.0.0")).await.expect("2.0.0");
+        // A stale `latest` on 1.0.0, and a 3.0.0 exact tag naming a manifest
+        // annotated 2.5.0: a sloppy retag, not a 3.0.0 release.
+        let repo_id = Identifier::parse(repo).unwrap();
+        let low_digest = tag_digest(&registry, &format!("{repo}:1.0.0")).await;
+        registry.put_tag(&repo_id, "latest", &low_digest).await.unwrap();
+        tag_annotated(&registry, repo, "3.0.0", Some("2.5.0")).await;
+
+        let (report, _) = run(&ctx, &release("2.5.0")).await.expect("2.5.0");
+        assert_eq!(report.tags, ["2.5.0", "2.5", "2", "latest"]);
+        assert!(report.floats_repaired.is_empty());
+        assert_eq!(
+            tag_digest(&registry, &format!("{repo}:latest")).await.to_string(),
+            report.manifest_digest,
+            "latest stays on 2.5.0, not the mistagged 3.0.0"
+        );
     }
 
     #[tokio::test]
@@ -1680,10 +1900,17 @@ mod tests {
             let newer = tag_annotated(&registry, repo, "2", Some("2.9.0")).await;
             let repo_id = Identifier::parse(repo).unwrap();
             registry.put_tag(&repo_id, "latest", &newer).await.unwrap();
-            if retag_elsewhere {
+            // In the `elsewhere` case the 2.9.0 exact tag names a manifest
+            // annotated 2.9.0, so the post-write repair moves the floats
+            // onward to it; without it there is no higher release to repair
+            // to. Either way the floats leave the unverifiable manifest.
+            let other = if retag_elsewhere {
                 let other = tag_annotated(&registry, repo, "2.9.0", Some("2.9.0")).await;
                 assert_ne!(other, newer);
-            }
+                Some(other)
+            } else {
+                None
+            };
 
             let ctx = Context::with_access(tmp.path().to_path_buf(), registry.clone());
             for dry_run in [true, false] {
@@ -1691,11 +1918,32 @@ mod tests {
                 args.dry_run = dry_run;
                 let (report, _) = run(&ctx, &args).await.expect("release");
                 let case = format!("retag_elsewhere={retag_elsewhere} dry_run={dry_run}");
-                assert_eq!(report.tags, ["2.4.1", "2.4", "2", "latest"], "{case}");
-                assert!(report.floats_kept.is_empty(), "{case}");
+                if dry_run {
+                    // A dry run plans the move and repairs nothing.
+                    assert_eq!(report.tags, ["2.4.1", "2.4", "2", "latest"], "{case}");
+                    assert!(report.floats_kept.is_empty(), "{case}");
+                    assert!(report.floats_repaired.is_empty(), "{case}");
+                } else if other.is_some() {
+                    assert_eq!(report.tags, ["2.4.1", "2.4"], "{case}");
+                    assert!(report.floats_kept.is_empty(), "{case}");
+                    assert_eq!(
+                        report.floats_repaired,
+                        [repaired("2", "2.9.0"), repaired("latest", "2.9.0")],
+                        "{case}"
+                    );
+                } else {
+                    // No 2.9.0 exact tag exists, so nothing is higher to repair to.
+                    assert_eq!(report.tags, ["2.4.1", "2.4", "2", "latest"], "{case}");
+                    assert!(report.floats_kept.is_empty(), "{case}");
+                    assert!(report.floats_repaired.is_empty(), "{case}");
+                }
             }
             for tag in ["2", "latest"] {
-                assert_ne!(tag_digest(&registry, &format!("{repo}:{tag}")).await, newer, "{tag}");
+                let digest = tag_digest(&registry, &format!("{repo}:{tag}")).await;
+                assert_ne!(digest, newer, "{tag}");
+                if let Some(other) = &other {
+                    assert_eq!(digest, *other, "{tag} ends on the verified 2.9.0");
+                }
             }
         }
     }

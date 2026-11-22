@@ -251,6 +251,27 @@ pub fn float_verdict(float: &str, current: &Evidence, release: &semver::Version)
     }
 }
 
+/// The highest exact release among `tags` inside `float`'s span, if any.
+///
+/// Only full normal releases count: prereleases never become a floating
+/// version, and non-semver tags carry no version to compare. Used by the
+/// post-write repair: a float sitting below this version is stale, however
+/// it got there.
+pub fn highest_release_in_span(float: &str, tags: &[String]) -> Option<semver::Version> {
+    tags.iter()
+        .filter_map(|tag| semver::Version::parse(tag).ok())
+        .filter(|version| version.pre.is_empty())
+        .filter(|version| {
+            float == "latest"
+                || match decimal_parts(float).as_deref() {
+                    Some(&[major]) => version.major == major,
+                    Some(&[major, minor]) => (version.major, version.minor) == (major, minor),
+                    _ => false,
+                }
+        })
+        .max_by(|a, b| a.cmp_precedence(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +517,36 @@ mod tests {
         assert_eq!(resolve_cascade(false, true), Some(false));
         // Belt-and-braces: --cascade wins if both ever arrive true.
         assert_eq!(resolve_cascade(true, true), Some(true));
+    }
+
+    // ── highest release in a float's span ────────────────────────────────
+
+    fn tags(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn highest_release_in_span_picks_the_max_exact_release() {
+        let listed = tags(&["1.0.0", "2.4.1", "2.9.0", "3.0.0"]);
+        assert_eq!(
+            highest_release_in_span("latest", &listed),
+            Some(v("3.0.0")),
+            "latest spans every major"
+        );
+        assert_eq!(highest_release_in_span("2", &listed), Some(v("2.9.0")));
+        assert_eq!(highest_release_in_span("2.4", &listed), Some(v("2.4.1")));
+        assert_eq!(highest_release_in_span("1", &listed), Some(v("1.0.0")));
+        assert_eq!(highest_release_in_span("4", &listed), None, "no 4.x release listed");
+    }
+
+    #[test]
+    fn highest_release_in_span_ignores_prereleases_and_non_versions() {
+        // A prerelease never becomes a floating version, so it is never a
+        // repair target even when it is the highest version listed.
+        let listed = tags(&["2.9.0", "3.0.0-rc.1", "canary", "2.4", "edge"]);
+        assert_eq!(highest_release_in_span("latest", &listed), Some(v("2.9.0")));
+        assert_eq!(highest_release_in_span("3", &listed), None);
+        assert_eq!(highest_release_in_span("canary", &listed), None);
+        assert_eq!(highest_release_in_span("latest", &tags(&[])), None);
     }
 }
