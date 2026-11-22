@@ -370,7 +370,7 @@ string.
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|agent|bundle|mcp|hook|settings>] [--name <name>] [--no-install] [--force] [--allow-downgrade] [--trust-workspace | --no-trust-workspace] <reference>`
+`grim add [--kind <skill|rule|agent|bundle|mcp|hook|settings|mod>] [--name <name>] [--no-install] [--force] [--allow-downgrade] [--trust-workspace | --no-trust-workspace] <reference>`
 declares a skill, rule, [agent](./agents.md), [MCP server](./mcp-servers.md),
 bundle, or (experimental) [hook](./hooks.md), and pins it in the lock. By default
 it also materializes the artifact into your detected AI clients in one step. `<reference>` is the only required argument —
@@ -2124,8 +2124,8 @@ project without `--global` it exits `79` like every other scope command.
 ## grim remove {#remove}
 
 `grim remove <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `bundle`,
-`mcp`, or the experimental [`hook`](./hooks.md) or [`settings`][settings])
-undeclares an artifact from `grimoire.toml` and the lock. It leaves
+`mcp`, or the experimental [`hook`](./hooks.md), [`settings`][settings] or
+[`mod`][mods]) undeclares an artifact from `grimoire.toml` and the lock. It leaves
 already-installed files (or, for an [MCP server](./mcp-servers.md), the
 registered config entry) in place — use [`grim uninstall`](#uninstall) to
 remove those too.
@@ -2322,9 +2322,11 @@ cache answers every tag. Otherwise it exits `69` and leaves the lock as it was.
 ## grim uninstall {#uninstall}
 
 `grim uninstall <kind> <name>` (`<kind>` is `skill`, `rule`, `agent`, `mcp`,
-`hook`, or `settings`) is the full inverse of install: it deletes the
+`hook`, `settings` or `mod`) is the full inverse of install: it deletes the
 materialized files, drops the install record, and undeclares the artifact from
-the config and lock. The interactive TUI's delete action reuses the same seam.
+the config and lock. The interactive TUI's delete action reuses the same seam. A bundle is not a
+kind here: `grim uninstall bundle <name>` exits `64`, and
+[`grim remove`](#remove) undeclares one.
 
 Like [`remove`](#remove), `uninstall` relocks in the same run, and also deletes
 the files of every row the relock drops. If the relock fails or finds a settings
@@ -2438,10 +2440,10 @@ hooks and settings".
   it. A hook reaped by flag-off keeps its payload and shows up `gated`
   like any other.
 - **`grim hook allow [path]`**. Records this **workspace's** consent to
-  the hooks and settings packages its lock pins, whichever flags are on.
+  the hooks, settings and mod packages its lock pins, whichever flags are on.
   Its help reads "Consent to the hooks and settings this workspace
   declares". The record lives at
-  `$GRIM_HOME/hooks/consent/<workspace-key>.json`, machine-local and keyed
+  `$GRIM_HOME/consent/<workspace-key>.json`, machine-local and keyed
   by the resolved workspace path.
 
   `--global` exits **64**: global scope is
@@ -2449,8 +2451,9 @@ hooks and settings".
   lock, the refusal names `grim consent allow`, and a recorded consent warns
   ``consent recorded; run `grim install` to apply what it covers``.
 - **`grim hook revoke [path]`** (alias `deny`). Removes the workspace
-  consent record, for hooks and settings alike. Settings values already
-  written stay in place. Its warning still reads
+  consent record, for hooks, settings and mods alike. Settings values already
+  written stay in place. A written mod stays too, and its stderr names each
+  one and `grim install`, which disarms them. See [Revoke][mods-revoke]. Its warning still reads
   ``consent revoked; run `grim install` to disarm these hooks``.
 
   It is idempotent, so revoking a never-consented workspace exits `0` and
@@ -2488,7 +2491,7 @@ are flattened into one table.
 
 `--kind <KIND>` (short `-k`) shows only the listed kinds. It is repeatable and
 comma-separated, so `--kind skill,rule` equals `-k skill -k rule`. The values
-are `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook` and `settings`, singular
+are `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, `settings` and `mod`, singular
 only. An unknown value exits `64`. With `--kind`, every query word matches as
 text, so a bare kind keyword is no longer a filter. `grim search --kind skill
 settings` finds a skill named `vscode-settings`, which bare `grim search
@@ -3066,6 +3069,11 @@ or tag — the artifact itself, or (with `--description`) its companion —
 is a not-found failure (exit 79); an offline run against an uncached
 reference exits 81 instead, since the reference may exist and only the
 network to confirm it is unreachable.
+
+A [mod](./mods.md#mod-toml) fetches as its `mod.toml`: `content` is the text of
+`<name>/mod.toml` and `files` lists every layer file. `--path` returns one of them, and `--vendor`
+exits `1`, because a mod has no vendor projection. Fetching a mod never installs
+or arms it.
 
 A [dependent artifact](./artifacts.md#requires-layer) prints its content
 layer only; the dependency list is not part of the payload, and
@@ -4416,7 +4424,7 @@ grim tui --registry ghcr.io/acme
 `grim build <path>` validates and packs a local skill directory, rule `.md`
 file, [agent](./agents.md) `.md` file, [MCP server](./mcp-servers.md)
 `.toml` file, or bundle `.toml` file without pushing it — a dry run for authors.
-`--kind <skill|rule|agent|bundle|mcp|hook|settings>` forces the artifact kind
+`--kind <skill|rule|agent|bundle|mcp|hook|settings|mod>` forces the artifact kind
 instead of auto-detecting it from the path. An agent always needs `--kind
 agent` — a bare `.md` packs as a rule; an MCP server always needs `--kind
 mcp` — a bare `.toml` packs as a bundle. A [settings document][settings] is
@@ -4679,7 +4687,7 @@ grim logout ghcr.io
 
 ## grim schema {#schema}
 
-`grim schema --kind <config|publish|lock|mcp|hook|settings>` prints a [JSON
+`grim schema --kind <config|publish|lock|mcp|hook|settings|mod>` prints a [JSON
 Schema](https://json-schema.org/) for one of grim's TOML files to stdout.
 `--kind config` describes `grimoire.toml`. Its schema carries the
 `[options.experimental]` table additively. `--kind publish` describes
@@ -4690,7 +4698,8 @@ so tooling can validate or introspect it, additively gaining a `hooks`
 array. `--kind mcp` describes the [MCP server descriptor](./mcp-servers.md)
 (`mcp/<name>.toml`). `--kind hook` describes [`hook.toml`](./hooks.md)
 (experimental). `--kind settings` describes a [settings
-document][settings] (`settings/<name>.toml`, experimental). Each schema is
+document][settings] (`settings/<name>.toml`, experimental). `--kind mod`
+describes [`mod.toml`][mods] (experimental). Each schema is
 generated from grim's own parser, so it accepts exactly what grim accepts.
 
 ```sh
@@ -4767,7 +4776,7 @@ down when the client closes stdin (EOF).
 |------|-------------|------|
 | `grim_search` | Browse/search the resolved scope's registries (no registry override — the configured set is the boundary). Each source's [browse filter](./configuration.md#browse-filters) narrows the results, exactly as for `grim search`; the tool's own description says so, and says that an absent package is still fetchable and installable by direct reference — a filter is a view, never a boundary. Args: `query?`, `kind?` (an array of the `grim search --kind` kind names; with it, every word of `query` matches as text), `refresh?`, `limit?` (positive integer, the same cap as `grim search --limit`), `offset?` (non-negative integer, the same skip as `grim search --offset`; a negative or non-integer value is an invalid-params error), scope. The payload still carries `total` and `truncated`; page with the [recipe][json-search-paging]. An unpaged call on a large index can return tens of megabytes, so pass `limit` and `offset`. `total`, `truncated` and `sources[].capped` report the cut. Same shape as `grim search --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
 | `grim_status` | Install status of every declared artifact in the requested scope. `check` (optional, default `false`) re-checks the live catalog for deprecation/replacement and re-resolves update availability — same semantics as CLI `grim status --check` (network read; the report's `checked` field says whether it ran). Under `--allow-writes` it also records what it proves, as [`grim status`](#status-adoption) does. The proof reads the store alone, but `check: true` still reads the network. Args: `check?`, scope. Same shape as `grim status --format json` (not byte-identical — see [MCP parity][json-mcp-parity]). | always |
-| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 32 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
+| `grim_fetch` | Return an artifact's content in the tool result — no install. Canonical bytes by default; `vendor` (any supported client name — see the [client compatibility matrix][clients-matrix]) returns that client's projection; `path` fetches one support file (base64 with `encoding: "base64"` for a binary file); a `files` listing is always included. A [mod](./mods.md) answers with its `mod.toml` and file list, and `vendor` is refused for it. `description` fetches the repository's [description companion](./publishing.md#description-companion) instead (every member inline); `digest_only` resolves to `{ref, digest}` with no download and composes with `description` to probe the companion tag. Content caps at 256 KiB (truncated content carries a marker); layers over 32 MiB are refused before download, and a registry that streams more bytes than its declared layer size aborts mid-transfer into a data error rather than buffering an unbounded body. Args: `ref`, `vendor?`, `path?`, `description?`, `digest_only?`, scope. | always |
 | `grim_describe` | Report an artifact's manifest-level metadata — kind, curated annotations, tags, `has_description`, and the verbatim annotation map — without downloading its content. Same shape as `grim describe --format json`. Args: `ref`, scope. | always |
 | `grim_render` | Write an artifact's vendor-native files into an arbitrary `dest_dir` (created if absent) — no install state, no client-config edits. Skill → `<dest_dir>/<name>/`, rule/agent → `<dest_dir>/<name>.md`. Args: `ref`, `vendor`, `dest_dir`, scope. | `--allow-writes` |
 
@@ -4822,6 +4831,8 @@ registers the same entry — in every detected client, not just Claude Code
 [clients-matrix]: ./clients.md#matrix
 [json-hook-arming]: ./json-interface.md#hook-arming
 [settings]: ./settings.md
+[mods]: ./mods.md
+[mods-revoke]: ./mods.md#revoke
 [settings-changes]: ./settings.md#changes
 [settings-conflicts]: ./settings.md#conflicts
 [settings-consent]: ./settings.md#consent

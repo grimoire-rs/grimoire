@@ -151,6 +151,7 @@ fn walk(set: &DesiredSet, lock: &GrimoireLock, leaf: &dyn Fn(&NodeKey) -> bool) 
         (ArtifactKind::Mcp, &set.mcp),
         (ArtifactKind::Hook, &set.hooks),
         (ArtifactKind::Settings, &set.settings),
+        (ArtifactKind::Mod, &set.mods),
     ] {
         for (name, id) in map {
             out.insert((kind, name.clone()), Origin::Direct(id.clone()));
@@ -253,6 +254,7 @@ fn locked_entry<'a>(lock: &'a GrimoireLock, key: &NodeKey) -> Option<&'a LockedA
         ArtifactKind::Mcp => &lock.mcp,
         ArtifactKind::Hook => &lock.hooks,
         ArtifactKind::Settings => &lock.settings,
+        ArtifactKind::Mod => &lock.mods,
         ArtifactKind::Bundle => return None,
     };
     list.iter().find(|a| a.name == key.1)
@@ -620,6 +622,9 @@ pub fn declared_parent_provides(set: &DesiredSet, lock: &GrimoireLock, key: &Nod
         ArtifactKind::Settings => {
             after.settings.remove(name);
         }
+        ArtifactKind::Mod => {
+            after.mods.remove(name);
+        }
     }
     after.invalidate_declaration_hash_cache();
     effective_set(&after, lock)
@@ -678,6 +683,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: bundles.to_vec(),
+            mods: Vec::new(),
         }
     }
 
@@ -965,6 +971,7 @@ mod tests {
                     id: (*i).to_string(),
                 })
                 .collect(),
+            clients: Vec::new(),
         }
     }
 

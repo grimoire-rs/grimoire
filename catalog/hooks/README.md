@@ -141,7 +141,7 @@ teammate committed, or one you hand-edited. That is the case the gate exists
 for — cloning a repository is not consenting to it.
 
 The record is machine-local, one file per workspace under
-`$GRIM_HOME/hooks/consent/`, and it names this checkout by absolute path.
+`$GRIM_HOME/consent/`, and it names this checkout by absolute path.
 Consent in this sandbox arms nothing in any other directory.
 
 For a one-off run without writing anything, `grim install --trust-workspace`

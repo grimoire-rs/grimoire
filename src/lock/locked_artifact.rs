@@ -71,6 +71,10 @@ pub struct LockedArtifact {
     /// `(kind, name)`; omitted when empty, whatever the provenance.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<BundleMember>,
+    /// The clients a `mod` package serves, copied from its manifest
+    /// annotation: sorted, unique, non-empty on a `[[mod]]` row and empty
+    /// on every other kind (the lock load refuses both mismatches).
+    pub clients: Vec<String>,
 }
 
 /// Wire shape accepted when deserializing a lock entry: the legacy
@@ -112,6 +116,9 @@ struct RawLockedArtifact {
     /// `[[<kind>.requires]]` after the entry's own keys.
     #[serde(default)]
     requires: Vec<BundleMember>,
+    /// `[[mod]]` rows only: the clients the package serves.
+    #[serde(default)]
+    clients: Vec<String>,
     /// `marketplace.lock` only: the plugin this entry belongs to. Wire-only
     /// — it never reaches [`LockedArtifact`], and it is skipped from the
     /// published `grimoire.lock` schema, which must stay byte-identical.
@@ -231,6 +238,7 @@ impl TryFrom<RawLockedArtifact> for LockedArtifact {
             source,
             bundles,
             requires: raw.requires,
+            clients: raw.clients,
         })
     }
 }
@@ -248,6 +256,7 @@ impl LockedArtifact {
             source: LockedSource::Registry(pinned),
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 

@@ -352,13 +352,7 @@ mod tests {
     #[test]
     fn layout_accepts_one_layer_for_every_non_bundle_kind() {
         let m = manifest_of(&[TAR]);
-        for kind in [
-            ArtifactKind::Skill,
-            ArtifactKind::Rule,
-            ArtifactKind::Agent,
-            ArtifactKind::Mcp,
-            ArtifactKind::Hook,
-        ] {
+        for kind in ArtifactKind::ALL.into_iter().filter(|k| *k != ArtifactKind::Bundle) {
             assert_eq!(m.layout(kind).unwrap(), LayerLayout::Content(&m.layers[0]), "{kind}");
         }
     }

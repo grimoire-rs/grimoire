@@ -100,5 +100,7 @@ def test_grim_0_15_1_lists_the_rows_this_grim_cached(upgraded, tmp_path: Path) -
     listed_new = runner.json("search", "--offline", "--registry", locator)
 
     assert len(listed_new["items"]) == 2, listed_new["items"]
+    # `serves` is the mod kind's additive search key, which 0.15.1 predates.
+    assert [row.pop("serves") for row in listed_new["items"]] == [None, None]
     assert listed_old["items"] == listed_new["items"]
     assert listed_old["sources"][0]["ok"] is True, listed_old["sources"]

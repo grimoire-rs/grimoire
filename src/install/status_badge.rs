@@ -162,12 +162,39 @@ fn artifact_badge(
     let pending = target.is_some_and(|t| {
         !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots, None)
             .is_empty()
+            || mod_client_unwritten(record, locked, t)
     });
     if pending {
         StatusBadge::Pending
     } else {
         StatusBadge::Installed
     }
+}
+
+/// Whether a mod row serves a client the target names that has no recorded
+/// output and that an install would write. `pending_outputs` knows nothing of a mod, whose store
+/// record this reads.
+pub(crate) fn mod_client_unwritten(
+    record: &crate::install::install_state::InstallRecord,
+    locked: &LockedArtifact,
+    target: &InstallTarget,
+) -> bool {
+    use crate::install::mod_phase::{ModHosting, mod_hosting};
+    record.kind == ArtifactKind::Mod
+        && target.clients().iter().any(|client| {
+            !record.outputs.iter().any(|o| o.client == client.as_str())
+                && matches!(
+                    mod_hosting(
+                        *client,
+                        &locked.name,
+                        &locked.clients,
+                        target.plugin_api(),
+                        target.workspace(),
+                        target.scope(),
+                    ),
+                    ModHosting::Hosted
+                )
+        })
 }
 
 /// A bundle has no install record: its badge is its members', through nested
@@ -306,6 +333,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -338,6 +366,7 @@ mod tests {
                 crate::oci::ArtifactKind::Mcp => lock.mcp.push(artifact),
                 crate::oci::ArtifactKind::Hook => lock.hooks.push(artifact),
                 crate::oci::ArtifactKind::Settings => lock.settings.push(artifact),
+                crate::oci::ArtifactKind::Mod => lock.mods.push(artifact),
                 crate::oci::ArtifactKind::Bundle => unreachable!("skipped above"),
             }
             assert!(
@@ -548,6 +577,130 @@ mod tests {
         assert_eq!(badge('a'), StatusBadge::Modified, "a local edit still wins");
     }
 
+    /// A mod lock row serving `served`, recorded with a Claude output only.
+    fn mod_fixture(ws: &std::path::Path, served: &[&str]) -> (GrimoireLock, InstallState) {
+        let mut lock = lock_with("acme/x", 'a');
+        let mut row = lock.skills.remove(0);
+        row.kind = ArtifactKind::Mod;
+        row.clients = served.iter().map(|c| (*c).to_string()).collect();
+        lock.mods.push(row);
+        let mut rec = state_with("acme/x", 'a', ws, "x.md")
+            .iter_records()
+            .next()
+            .unwrap()
+            .clone();
+        rec.kind = ArtifactKind::Mod;
+        rec.outputs[0].content_hash =
+            crate::install::install_state::own_file_hash(&std::fs::read(ws.join("x.md")).unwrap());
+        let mut st = InstallState::empty(std::path::Path::new("/tmp/s.json"));
+        st.record(rec);
+        (lock, st)
+    }
+
+    fn mod_badge(
+        lock: &GrimoireLock,
+        st: &InstallState,
+        ws: &std::path::Path,
+        clients: &[&str],
+        api: Option<&str>,
+    ) -> StatusBadge {
+        let mut vendors = std::collections::BTreeMap::new();
+        if let Some(api) = api {
+            vendors.insert(
+                "opencode".to_string(),
+                crate::config::declaration::VendorOptions {
+                    plugin_api: Some(api.to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        let names: Vec<String> = clients.iter().map(|c| (*c).to_string()).collect();
+        let target = InstallTarget::parse_with_global(
+            ws,
+            crate::config::scope::ConfigScope::Project,
+            &names,
+            &[],
+            &[],
+            &vendors,
+        )
+        .unwrap();
+        derive_badge(
+            "localhost:5000",
+            "acme/x",
+            Some(lock),
+            st,
+            &roots(ws),
+            &[ClientTarget::Claude],
+            Some(&target),
+        )
+    }
+
+    /// A mod written for Claude only reads `Pending` when the target also names
+    /// a served client an install would write; a `v1` opt-out is not pending.
+    /// `pending_outputs` knows nothing of a mod.
+    #[test]
+    fn a_mod_with_an_unwritten_served_client_reads_pending_unless_opted_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("x.md"), b"canonical\n").unwrap();
+        let (lock, st) = mod_fixture(ws, &["claude", "opencode"]);
+        assert_eq!(
+            mod_badge(&lock, &st, ws, &["claude", "opencode"], Some("v2")),
+            StatusBadge::Pending,
+            "plugin_api v2"
+        );
+        assert_eq!(
+            mod_badge(&lock, &st, ws, &["claude", "opencode"], None),
+            StatusBadge::Pending,
+            "plugin_api unset: opencode hosts"
+        );
+        assert_eq!(
+            mod_badge(&lock, &st, ws, &["claude", "opencode"], Some("v1")),
+            StatusBadge::Installed,
+            "plugin_api v1: a chosen opt-out is not pending"
+        );
+    }
+
+    #[test]
+    fn a_mod_never_reads_pending_for_a_client_it_does_not_serve() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::write(ws.join("x.md"), b"canonical\n").unwrap();
+        let (lock, st) = mod_fixture(ws, &["claude"]);
+        assert_eq!(
+            mod_badge(&lock, &st, ws, &["claude", "opencode"], Some("v2")),
+            StatusBadge::Installed,
+            "the lock row serves claude only"
+        );
+        let (lock, st) = mod_fixture(ws, &["claude", "opencode"]);
+        assert_eq!(
+            mod_badge(&lock, &st, ws, &["claude"], Some("v2")),
+            StatusBadge::Installed,
+            "the target names claude only"
+        );
+    }
+
+    #[test]
+    fn a_mod_keeps_a_louder_badge_over_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let file = ws.join("x.md");
+        std::fs::write(&file, b"canonical\n").unwrap();
+        let (mut lock, st) = mod_fixture(ws, &["claude", "opencode"]);
+        let advanced = pinned("acme/x", 'b');
+        lock.mods[0].source = crate::lock::locked_source::LockedSource::Registry(advanced);
+        assert_eq!(
+            mod_badge(&lock, &st, ws, &["claude", "opencode"], Some("v2")),
+            StatusBadge::Outdated
+        );
+        let (lock, st) = mod_fixture(ws, &["claude", "opencode"]);
+        std::fs::write(&file, b"hand edited\n").unwrap();
+        assert_eq!(
+            mod_badge(&lock, &st, ws, &["claude", "opencode"], Some("v2")),
+            StatusBadge::Modified
+        );
+    }
+
     /// Without a target the badge cannot ask the question, and must fall back
     /// to exactly the four-badge behaviour it had before.
     #[test]
@@ -719,6 +872,7 @@ mod tests {
             agents: vec![LockedArtifact::direct("my-agent".to_string(), ArtifactKind::Agent, p)],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
 
         let roots = roots(ws);
@@ -795,6 +949,7 @@ mod tests {
             agents: vec![],
             mcp: vec![LockedArtifact::direct("grim".to_string(), ArtifactKind::Mcp, p)],
             bundles: vec![],
+            mods: Vec::new(),
         };
 
         assert_eq!(

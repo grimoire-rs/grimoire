@@ -1252,6 +1252,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -3369,6 +3370,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: Vec::new(),
+            mods: Vec::new(),
         }
     }
 
@@ -3961,6 +3963,7 @@ mod tests {
             ),
             bundles: vec![BundleProvenance::new("localhost:5000/acme/pack", "1")],
             requires: Vec::new(),
+            clients: Vec::new(),
         }];
         part.bundles = vec![LockedBundle {
             name: "pack".to_string(),

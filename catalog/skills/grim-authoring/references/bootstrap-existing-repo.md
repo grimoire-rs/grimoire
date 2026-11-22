@@ -89,10 +89,10 @@ repository = "acme/style"
 repository = "acme/reviewer"
 ```
 
-`publish.toml` also has `[mcp]`, `[hooks]` and `[settings]` tables; their
+`publish.toml` also has `[mcp]`, `[hooks]`, `[settings]` and `[mods]` tables; their
 conventional source paths are `mcp/<name>.toml`, `hooks/<name>/` (a
-directory) and `settings/<name>.toml`. Batch publish walks the kinds in a
-fixed order — skills, rules, agents, mcp, hooks, settings, bundles — so
+directory), `settings/<name>.toml` and `mods/<name>/` (a directory). Batch publish walks the kinds in a
+fixed order — skills, rules, agents, mcp, hooks, settings, mods, bundles — so
 nothing depends on the order you write them in the file.
 
 Write `repository` out verbatim on every entry rather than leaning on

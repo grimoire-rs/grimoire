@@ -1,0 +1,13 @@
+{
+  "enabledPlugins": {
+    "status-band@grim-mods-3fa9c2d1e0b7": true
+  },
+  "extraKnownMarketplaces": {
+    "grim-mods-3fa9c2d1e0b7": {
+      "source": {
+        "path": "/home/dev/src/app/.claude/mods",
+        "source": "directory"
+      }
+    }
+  }
+}

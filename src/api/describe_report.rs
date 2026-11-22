@@ -118,6 +118,7 @@ mod tests {
                 name: "gdrive".to_string(),
                 id: "./gdrive:2".to_string(),
             }]),
+            serves: None,
         })
     }
 
@@ -210,5 +211,6 @@ mod tests {
         // Always-present-null: an absent curated field is explicit null.
         assert!(v.get("revision").expect("key present").is_null());
         assert!(v.get("deprecated").expect("key present").is_null());
+        assert!(v.get("serves").expect("key present").is_null());
     }
 }

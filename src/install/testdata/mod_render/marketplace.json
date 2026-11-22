@@ -1,0 +1,12 @@
+{
+  "name": "grim-mods-3fa9c2d1e0b7",
+  "owner": {
+    "name": "grim"
+  },
+  "plugins": [
+    {
+      "name": "status-band",
+      "source": "./status-band"
+    }
+  ]
+}

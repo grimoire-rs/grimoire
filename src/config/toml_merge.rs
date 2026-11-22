@@ -21,7 +21,9 @@ use crate::install::toml_splice::toml_item_to_json;
 use crate::oci::Identifier;
 
 /// Top-level tables whose leaves are artifact declarations.
-const DECLARATION_TABLES: [&str; 7] = ["bundles", "skills", "rules", "agents", "mcp", "hooks", "settings"];
+const DECLARATION_TABLES: [&str; 8] = [
+    "bundles", "skills", "rules", "agents", "mcp", "hooks", "settings", "mods",
+];
 
 /// Merge `desired` (a rendered config) into `existing` (the file on disk).
 ///

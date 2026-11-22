@@ -129,6 +129,10 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
                 "settings merge into client configs and render no files; use grim install"
             ));
         }
+        // Same reason again: a mod is client-side code, never rendered to a caller-chosen directory.
+        ArtifactKind::Mod => {
+            return Err(anyhow!("mods render no files; use grim install"));
+        }
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {}
     }
 
@@ -144,7 +148,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     let canonical = match kind {
         ArtifactKind::Skill => materialized_root.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{}.md", fetched.name)),
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod => {
             unreachable!("rejected above")
         }
     };
@@ -184,7 +188,7 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
     let dest = match kind {
         ArtifactKind::Skill => args.dest_dir.join(&fetched.name),
         ArtifactKind::Rule | ArtifactKind::Agent => args.dest_dir.join(format!("{}.md", fetched.name)),
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod => {
             unreachable!("rejected above")
         }
     };

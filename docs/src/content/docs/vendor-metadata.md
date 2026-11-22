@@ -44,8 +44,8 @@ Copilot][copilot-instructions-docs] receives it joined as a single
 no parallel field for other clients. It belongs in `metadata` under its
 vendor namespace.
 
-`keywords` and `summary` stay top-level in every kind (skills, rules,
-bundles, settings). They are catalog fields shared by all clients and by
+`keywords` and `summary` stay top-level in every kind that carries them,
+which is every kind but hooks. They are catalog fields shared by all clients and by
 grim's own `grim search` display, and they are not vendor-specific.
 
 The experimental [settings][settings-format] kind, new in grim 0.16.0 and

@@ -769,7 +769,7 @@ list all`); `grim config set options.search_min_relevance 0` (or
 `grim config --global set options.search_min_relevance 0` outside a
 project) turns the cutoff off for good. The unqueried browse is unranked
 and lists registry by registry. A bare kind keyword
-(`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular or plural)
+(`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`/`mod`, singular or plural)
 filters by kind
 instead of matching as text; an empty query lists the whole catalog.
 `--kind <KIND>` / `-k` (repeatable, comma-separated; singular kind names only,

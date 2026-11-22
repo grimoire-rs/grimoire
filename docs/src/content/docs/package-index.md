@@ -285,14 +285,15 @@ scripts/                           # (optional) build/validation tooling
 |---|---|---|---|
 | `schema` | integer | yes | Metadata schema version. This document specifies `1`. Consumers MUST skip entries with an unknown `schema` (forward compatibility). |
 | `name` | string | yes | Package name. MUST equal the directory name containing the file. |
-| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)), `settings` (experimental since grim 0.16.0, see [Settings][settings-kind]; index operators: indexer 0.7.0 or newer). |
+| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)), `settings` (experimental since grim 0.16.0, see [Settings][settings-kind]; index operators: indexer 0.7.0 or newer), `mod` (experimental, see [Mods](./mods.md)). A consumer must list an unknown `kind` rather than drop it. |
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
 | `summary` | string | no | Short single-line blurb, matched by `grim search` alongside `description` (distinct from it — usually shorter). |
 | `keywords` | array of string | no | Publisher keywords, matched by `grim search`. Omitted when empty; a `null` reads as empty. |
 | `repository` | string | no | Source repository URL. Consumers keep it only with an `https://` prefix. |
 | `deprecated` | string | no | Publisher deprecation notice, mirroring the artifact's `com.grimoire.deprecated` annotation. A non-empty value marks the package deprecated — `grim search` and the TUI hide it unless it is installed or `show_deprecated` is on, and mark it when shown. Absent or whitespace-only ⇒ not deprecated. Written here because the pointer is the only source a browse reads: resolving the annotation would cost one manifest fetch per index entry. |
-| `replaced_by` | string | no | Successor grim reference, mirroring `com.grimoire.replaced-by`. Independent of `deprecated`. |
+| `replaced_by` | string | no | Successor grim reference, mirroring `com.grimoire.replaced-by`. Independent of `deprecated`. A reader also accepts `replacedBy`. A record that carries both is kept and `replaced_by` wins, but write one. |
+| `serves` | array of string | no | The harnesses a mod serves, mirroring `com.grimoire.mod.clients`. Read only for kind `mod`. Each name matches `[a-z0-9]+`. Grim sorts and deduplicates the list. An invalid value reads as absent and keeps the record. `grim search` reports it as `serves`. |
 | `license` | string | no | SPDX license expression, mirroring `org.opencontainers.image.licenses`. Written here for the same reason as `deprecated`: the pointer is the only source a browse reads. |
 | `created` | string | no | Publishing commit date (RFC3339), mirroring `org.opencontainers.image.created` — the browse-time recency signal. Absent for an artifact published without [build provenance](./publishing.md#git-provenance). A re-announce does not refresh `created` on its own: it moves with the next change to another field. |
 | `owner.github` | string | yes* | GitHub login owning the namespace — for pointers under `index/github.com/` (and other GitHub-forge hosts). MUST match the namespace directory (case-insensitive). |

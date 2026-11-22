@@ -792,8 +792,13 @@ pub trait Vendor {
     /// installer warns + skips, records no output). Codex declines
     /// [`ArtifactKind::Rule`] — it has no faithful path-scoped instruction
     /// mechanism; OpenCode degrades it — a per-file surface without scoping.
-    fn kind_support(&self, _kind: ArtifactKind) -> KindSupport {
-        KindSupport::Native
+    fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
+        match kind {
+            // Only Claude and OpenCode host a mod, so a vendor that says
+            // nothing declines it.
+            ArtifactKind::Mod => KindSupport::Declined,
+            _ => KindSupport::Native,
+        }
     }
 
     /// Whether this vendor has a grim-ownable directory for `kind` at `scope`.

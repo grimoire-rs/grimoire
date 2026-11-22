@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "registry": "localhost:5000",
+  "repository": "grim-golden/pre-mods-1972e3b9/reg-bundle",
+  "tags": {
+    "1.0.0": "sha256:02b5d941101f6b677a6f42fb98dc9fffd89005aef0084cf7909c997ab2ee652d"
+  }
+}

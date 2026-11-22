@@ -53,7 +53,7 @@ pub enum CommandError {
     /// media type on older artifacts (a non-Grimoire image). An offline
     /// cache miss never reaches this variant: `grim add` reports it as
     /// offline-blocked instead. The user must pass `--kind`.
-    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp|hook|settings")]
+    #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|agent|bundle|mcp|hook|settings|mod")]
     KindInferenceFailed { reference: String },
 
     /// `add` declared a `(kind, name)` that already exists in the config

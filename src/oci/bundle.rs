@@ -5,7 +5,7 @@
 //!
 //! A bundle is a standard single-layer OCI artifact whose layer blob is a
 //! JSON document listing the members it groups — any installable kind
-//! (skill, rule, agent, mcp, hook, settings), never a nested bundle. It is typed
+//! (skill, rule, agent, mcp, hook, settings, mod), never a nested bundle. It is typed
 //! `bundle` on the wire like any other Grimoire artifact (the
 //! `com.grimoire.kind` annotation; legacy readers may still see the
 //! pre-empty-config `artifactType` `application/vnd.grimoire.bundle.v1`).
@@ -153,11 +153,25 @@ mod tests {
                 member(second, "z", "ghcr.io/acme/z:1"),
             ])
         };
-        for kind in ArtifactKind::ALL.into_iter().filter(|k| *k != ArtifactKind::Settings) {
+        // `Mod` is appended after `Settings`, so it sorts after it.
+        for kind in ArtifactKind::ALL
+            .into_iter()
+            .filter(|k| !matches!(k, ArtifactKind::Settings | ArtifactKind::Mod))
+        {
             let manifest = authored(ArtifactKind::Settings, kind);
             assert_eq!(manifest.members[0].kind, kind);
             assert_eq!(manifest.members[1].kind, ArtifactKind::Settings);
         }
+    }
+
+    #[test]
+    fn a_mod_member_sorts_after_every_other_kind() {
+        let manifest = BundleManifest::new(vec![
+            member(ArtifactKind::Mod, "a", "ghcr.io/acme/a:1"),
+            member(ArtifactKind::Settings, "z", "ghcr.io/acme/z:1"),
+        ]);
+        assert_eq!(manifest.members[0].kind, ArtifactKind::Settings);
+        assert_eq!(manifest.members[1].kind, ArtifactKind::Mod);
     }
 
     #[test]

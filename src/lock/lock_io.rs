@@ -252,6 +252,7 @@ fn content_equal(a: &GrimoireLock, b: &GrimoireLock) -> bool {
         && lists_content_equal(&a.mcp, &b.mcp)
         && lists_content_equal(&a.hooks, &b.hooks)
         && lists_content_equal(&a.settings, &b.settings)
+        && lists_content_equal(&a.mods, &b.mods)
         && bundles_content_equal(&a.bundles, &b.bundles)
 }
 
@@ -348,6 +349,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -548,6 +550,26 @@ mod tests {
         let path = dir.path().join("grimoire.lock");
         save(&path, &next, Some(&prev)).unwrap();
         assert_eq!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    /// The digest pins the annotation `clients` was copied from, so the
+    /// annotation never needs comparing; the mod pin still does.
+    #[test]
+    fn clients_do_not_change_content_equality() {
+        let row = |clients: &[&str], byte: char| LockedArtifact {
+            clients: clients.iter().map(|c| (*c).to_string()).collect(),
+            ..LockedArtifact::direct("m".to_string(), ArtifactKind::Mod, pinned("acme/m", None, byte))
+        };
+        let mut a = lock_with("2026-01-01T00:00:00Z", vec![]);
+        a.mods = vec![row(&["claude"], 'a')];
+        let mut b = lock_with("2026-01-01T00:00:00Z", vec![]);
+        b.mods = vec![row(&["claude", "opencode"], 'a')];
+        assert!(content_equal(&a, &b), "different clients, same pin");
+        b.mods = vec![row(&["claude"], 'b')];
+        assert!(
+            !content_equal(&a, &b),
+            "positive control: a moved mod pin is a content change"
+        );
     }
 
     #[test]
@@ -986,6 +1008,7 @@ mod tests {
             hooks: of(ArtifactKind::Hook),
             settings: of(ArtifactKind::Settings),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 

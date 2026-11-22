@@ -67,12 +67,15 @@ ADDITIVE_STDOUT_KEYS: dict[str, dict[str, Callable[[object], bool]]] = {
         "moved_nested_bundles": lambda v: v is None,
         "required_by": lambda v: v is None or isinstance(v, list),
         "element": lambda v: v is None,
+        "serves": lambda v: v is None,
     },
     "install": {
         "armed": lambda v: v is None,
         "settings_changes": lambda v: v == [],
     },
     "context": {"catalog": lambda v: v is None},
+    "describe": {"serves": lambda v: v is None},
+    "search": {"serves": lambda v: v is None},
     "add": {
         "dropped": lambda v: v == [],
         "moved": lambda v: v == [],
@@ -117,6 +120,9 @@ _BUNDLE_PIN_MOVED = re.compile(
 VOLATILE: tuple[tuple[str, str], ...] = (
     ("*grimoire.lock", "generated_at"),
     ("*grimoire.lock", "generated_by"),
+    # `grim search` caches the catalog it read, stamped with the read times.
+    ("*grim_home/catalog/*.json", "built_at"),
+    ("*grim_home/catalog/*.json", "fetched_at"),
 )
 
 # Named lock equivalence pinned-advisory-tag: a lock records the tag that
@@ -125,7 +131,7 @@ VOLATILE: tuple[tuple[str, str], ...] = (
 # pin keeps its tag in a sibling key, so one there stays a difference.
 PINNED_TAG_LOCKS = ("*grimoire.lock", "*marketplace.lock")
 _TABLE_HEADER = re.compile(rb"\[\[?[^\]]+\]\]?")
-_ARTIFACT_TABLE = re.compile(rb"\[\[(?:skill|rule|agent|mcp|hook|settings)\]\]")
+_ARTIFACT_TABLE = re.compile(rb"\[\[(?:skill|rule|agent|mcp|hook|settings|mod)\]\]")
 _PINNED_TAG = re.compile(
     rb'(pinned = "[^"/]+(?:/[^"/:@]+)+):[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}'
     rb'(@sha256:[0-9a-f]{64}")'
@@ -284,6 +290,11 @@ def scenario(reg: str) -> list[Step | str]:
             Step(("install", *scope), (lock,)),
             Step(("status", *scope), (lock,)),
         ]
+    # Read-only registry commands: a row without a mod prints `serves: null`.
+    steps += [
+        Step(("describe", f"{reg}/skills/p9-skill:1")),
+        Step(("search", "--registry", reg)),
+    ]
     # Relative --config from outside the workspace (C-118 must not move a byte).
     steps += [
         Step(
@@ -891,6 +902,15 @@ def self_test(root: Path) -> None:
     )
     assert _mask_file("ws/other.toml", lock) == lock
 
+    cat = b'{\n  "built_at": "2026-01-01T00:00:00Z",\n  "scope": "a"\n}'
+    cat_path = "grim_home/catalog/x.json"
+    assert _mask_file(cat_path, cat) == _mask_file(
+        cat_path, cat.replace(b"2026-01-01", b"2027-02-02")
+    )
+    assert _mask_file(cat_path, cat) != _mask_file(
+        cat_path, cat.replace(b'"a"', b'"b"')
+    )
+
     _self_test_pinned_tag()
     _self_test_record_tag()
 
@@ -930,6 +950,17 @@ def self_test(root: Path) -> None:
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": []}', "update") == []
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": [{"p": 1}]}', "update")
     assert diff_stdout("t", '{"a": 1}', '{"a": 1, "pieces": []}', "install")
+    srv = '{"items": [{"x": 1, "serves": null}]}'
+    assert diff_stdout("t", '{"items": [{"x": 1}]}', srv, "status") == []
+    assert diff_stdout(
+        "t", '{"items": [{"x": 1}]}', srv.replace("null", '["claude"]'), "status"
+    ), "planted serves on a status row"
+    assert diff_stdout("t", '{"items": [{"x": 1}]}', srv, "install"), "status-only key"
+    for cmd in ("describe", "search"):
+        assert diff_stdout("t", '{"items": [{"x": 1}]}', srv, cmd) == [], cmd
+        assert diff_stdout(
+            "t", '{"items": [{"x": 1}]}', srv.replace("null", '["claude"]'), cmd
+        ), f"{cmd}: planted serves"
     out = '{"items": [{"x": 1, "outputs": [{"path": "p"}]}]}'
     out_null = '{"items": [{"x": 1, "outputs": [{"path": "p", "element": null}]}]}'
     out_set = '{"items": [{"x": 1, "outputs": [{"path": "p", "element": "e"}]}]}'

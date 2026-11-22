@@ -138,7 +138,7 @@ pub enum Command {
     /// marketplace repository, for Claude-family or Agent Plugins clients.
     Export(ExportArgs),
     /// Print the JSON Schema for grimoire.toml, publish.toml, grimoire.lock,
-    /// mcp/<name>.toml, hook.toml, or settings/<name>.toml.
+    /// mcp/<name>.toml, hook.toml, settings/<name>.toml, or mod.toml.
     Schema(SchemaArgs),
     /// Print a shell completion script (bash, zsh, fish, elvish, powershell).
     Completions(CompletionsArgs),
@@ -637,23 +637,25 @@ mod tests {
 
     #[test]
     fn every_kind_argument_accepts_settings() {
-        let cases: [&[&str]; 6] = [
-            &["grim", "add", "--kind", "settings", "ghcr.io/acme/team:1"],
-            &["grim", "build", "--kind", "settings", "./team.toml"],
-            &[
-                "grim",
-                "release",
-                "--kind",
-                "settings",
-                "./team.toml",
-                "ghcr.io/acme/team:1",
-            ],
-            &["grim", "remove", "settings", "team"],
-            &["grim", "uninstall", "settings", "team"],
-            &["grim", "why", "settings", "team"],
+        every_kind_argument_accepts("settings");
+    }
+
+    #[test]
+    fn every_kind_argument_accepts_mod() {
+        every_kind_argument_accepts("mod");
+    }
+
+    fn every_kind_argument_accepts(kind: &str) {
+        let cases: [Vec<&str>; 6] = [
+            vec!["grim", "add", "--kind", kind, "ghcr.io/acme/team:1"],
+            vec!["grim", "build", "--kind", kind, "./team.toml"],
+            vec!["grim", "release", "--kind", kind, "./team.toml", "ghcr.io/acme/team:1"],
+            vec!["grim", "remove", kind, "team"],
+            vec!["grim", "uninstall", kind, "team"],
+            vec!["grim", "why", kind, "team"],
         ];
         for argv in cases {
-            let parsed = <Cli as clap::Parser>::try_parse_from(argv);
+            let parsed = <Cli as clap::Parser>::try_parse_from(argv.clone());
             assert!(parsed.is_ok(), "{argv:?} must parse");
         }
     }

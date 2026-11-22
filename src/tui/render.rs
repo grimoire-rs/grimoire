@@ -1804,7 +1804,7 @@ fn confirm_init_view(p: &super::state::PendingInit) -> ConfirmView {
 /// message says what the list is.
 fn settings_result_view(r: &super::state::SettingsResult) -> ConfirmView {
     ConfirmView {
-        title: "Settings".to_string(),
+        title: r.title.to_string(),
         message: sanitize_member_label(&r.message),
         detail: sanitize_lines(&r.detail),
         action: "Close",
@@ -4090,6 +4090,26 @@ mod tests {
         }
 
         assert!(seen.contains("setting29 changed"), "{seen}");
+    }
+
+    /// The title row cuts the status line, so a mod's full remedy opens in a
+    /// `Mods` notice that has to draw whole at 80x24.
+    #[test]
+    fn a_mods_notice_draws_the_full_plugin_api_remedy() {
+        let mut s = named_rows(&["alpha"]);
+        s.set_term_size((80, 24));
+        s.open_notice(
+            "Mods",
+            "These were not written.",
+            "mod 'hello-mod' not installed for opencode: this scope sets options.vendors.opencode.plugin_api \
+             = \"v1\", and a mod needs the OpenCode V2 plugin API; remove the key if this OpenCode runs V2",
+        );
+
+        let text = screen(&draw_sized(&s, 80, 24));
+
+        assert!(text.contains("Mods"), "{text}");
+        assert!(text.contains("plugin_api"), "{text}");
+        assert!(text.contains("OpenCode runs V2"), "{text}");
     }
 
     /// Enter runs the chosen button whether or not the screen shows it whole, so

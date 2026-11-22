@@ -538,7 +538,11 @@ pub async fn fetch_with_limit(
             //
             // No feature-flag gate here for the same reason: the flag governs
             // arming, and a `gated` hook is one the user most wants to inspect.
-            ArtifactKind::Hook | ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent => {
+            ArtifactKind::Hook | ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Mod => {
+                // A mod ships harness code with no per-vendor index, so refuse before unpacking.
+                if kind == ArtifactKind::Mod && vendor_client.is_some() {
+                    return Err(anyhow!("mods have no vendor projection; fetch without a vendor"));
+                }
                 let entries = wrap(unpack_tar_in_memory(&fetched.blob, doc_limit as u64))?;
                 report.files = entries
                     .iter()
@@ -553,6 +557,7 @@ pub async fn fetch_with_limit(
                     // A hook's index is its manifest, inside the payload dir —
                     // the skill shape, not the rule/agent single-file shape.
                     ArtifactKind::Hook => PathBuf::from(&fetched.name).join(crate::oci::hook::HOOK_MANIFEST_FILE),
+                    ArtifactKind::Mod => PathBuf::from(&fetched.name).join("mod.toml"),
                     _ => PathBuf::from(format!("{}.md", fetched.name)),
                 };
 
@@ -945,6 +950,9 @@ pub struct DescribeReport {
     /// exactly as published. `[]` when it has no requires layer; `null` for a
     /// foreign manifest or a layer layout this grim does not read.
     pub requires: Option<Vec<crate::oci::bundle::BundleMember>>,
+    /// The harnesses a mod serves, from its manifest. `null` for every kind
+    /// but a mod.
+    pub serves: Option<Vec<String>>,
 }
 
 /// Read the requires layer of the artifact `manifest` describes.
@@ -1092,6 +1100,7 @@ pub async fn describe_artifact(
         annotations: a.clone(),
         compression: crate::oci::layer::compression_of(&manifest),
         requires,
+        serves: crate::oci::annotations::mod_clients_from_annotations(a).ok(),
     })
 }
 
@@ -1139,7 +1148,9 @@ fn project_index(
                 .agent_index(&parsed, &pinned_str)
                 .map_err(|e| anyhow!("agent projection failed: {e}"))?
         }
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => unreachable!("tar-backed kinds only"),
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings | ArtifactKind::Mod => {
+            unreachable!("tar-backed kinds only")
+        }
     };
     Ok(rendered.map(|r| {
         warnings.extend(r.warnings);
@@ -1444,6 +1455,87 @@ mod tests {
         .await
         .expect_err("missing path errors");
         assert!(err.to_string().contains("files listing"));
+    }
+
+    const MOD_REF: &str = "test.registry/acme/mods/demo:latest";
+    const MOD_TOML: &[u8] = b"schema = 1\nname = \"demo\"\ndescription = \"d\"\n";
+
+    async fn publish_demo_mod(reg: &MemoryRegistry) {
+        let blob = tar_of(&[
+            ("demo/mod.toml", MOD_TOML),
+            ("demo/claude/index.js", b"export default {};\n"),
+            ("demo/opencode/index.ts", b"export default {};\n"),
+        ]);
+        publish(reg, MOD_REF, "mod", &blob).await;
+    }
+
+    #[tokio::test]
+    async fn fetch_mod_returns_mod_toml_and_lists_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        publish_demo_mod(&reg).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let report = fetch_with_limit(&scope, &access, MOD_REF, None, None, FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect("a mod fetches");
+        assert_eq!(report.kind, "mod");
+        assert_eq!(report.name, "demo");
+        assert_eq!(report.content.as_bytes(), MOD_TOML);
+        let files: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            files,
+            vec!["demo/claude/index.js", "demo/mod.toml", "demo/opencode/index.ts"],
+            "the listing is sorted by path, as for every tar kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_mod_path_returns_one_file_and_refuses_a_missing_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        publish_demo_mod(&reg).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let report = fetch_with_limit(
+            &scope,
+            &access,
+            MOD_REF,
+            None,
+            Some("demo/claude/index.js"),
+            FETCH_DOC_SIZE_LIMIT,
+        )
+        .await
+        .expect("a mod file fetches");
+        assert_eq!(report.content, "export default {};\n");
+
+        let err = fetch_with_limit(
+            &scope,
+            &access,
+            MOD_REF,
+            None,
+            Some("demo/absent.js"),
+            FETCH_DOC_SIZE_LIMIT,
+        )
+        .await
+        .expect_err("missing path errors");
+        assert!(err.to_string().contains("files listing"));
+    }
+
+    #[tokio::test]
+    async fn fetch_mod_refuses_a_vendor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        publish_demo_mod(&reg).await;
+        let (scope, access) = scope_and_access(&reg, tmp.path(), tmp.path());
+
+        let err = fetch_with_limit(&scope, &access, MOD_REF, Some("claude"), None, FETCH_DOC_SIZE_LIMIT)
+            .await
+            .expect_err("a vendor is refused");
+        assert_eq!(
+            err.to_string(),
+            "mods have no vendor projection; fetch without a vendor"
+        );
     }
 
     #[tokio::test]

@@ -66,6 +66,7 @@ pub enum ConfigKey {
     ExperimentalHooks,
     ExperimentalSettings,
     TuiTheme,
+    ExperimentalMods,
 }
 
 impl ConfigKey {
@@ -74,7 +75,7 @@ impl ConfigKey {
     /// `clients`, `show_deprecated`, then the `tui.*` keys, then
     /// `search_min_relevance`, then the `experimental.*` keys — **append
     /// only**: consumers of `grim config list --all` may index by position.
-    pub const ALL: [ConfigKey; 13] = [
+    pub const ALL: [ConfigKey; 14] = [
         ConfigKey::DefaultRegistry,
         ConfigKey::Clients,
         ConfigKey::ShowDeprecated,
@@ -88,6 +89,7 @@ impl ConfigKey {
         ConfigKey::ExperimentalHooks,
         ConfigKey::ExperimentalSettings,
         ConfigKey::TuiTheme,
+        ConfigKey::ExperimentalMods,
     ];
 
     /// This key's static metadata.
@@ -250,6 +252,16 @@ impl ConfigKey {
             constraints: None,
             section: ConfigSection::Experimental,
         };
+        const EXPERIMENTAL_MODS: KeySpec = KeySpec {
+            key: "options.experimental.mods",
+            value_type: ValueType::Bool { default: Some(false) },
+            title: "Experimental mods",
+            description: "Controls whether `grim install` renders declared mods into the clients that \
+                           host them. When unset, install writes and removes no mod output; no \
+                           environment variable overrides this.",
+            constraints: None,
+            section: ConfigSection::Experimental,
+        };
         const TUI_THEME: KeySpec = KeySpec {
             key: "options.tui.theme",
             value_type: ValueType::Enum {
@@ -275,6 +287,7 @@ impl ConfigKey {
             Self::ExperimentalHooks => &EXPERIMENTAL_HOOKS,
             Self::ExperimentalSettings => &EXPERIMENTAL_SETTINGS,
             Self::TuiTheme => &TUI_THEME,
+            Self::ExperimentalMods => &EXPERIMENTAL_MODS,
         }
     }
 
@@ -449,6 +462,25 @@ pub const VENDOR_SHARED_SKILLS: KeySpec = KeySpec {
     section: ConfigSection::Vendors,
 };
 
+/// The host-declaration field, `options.vendors.<name>.plugin_api`.
+///
+/// Dynamic like [`VENDOR_SHARED_SKILLS`]. A string with the closed value set
+/// `{v1, v2}` checked at set and load time, and only under `opencode`.
+pub const VENDOR_PLUGIN_API: KeySpec = KeySpec {
+    key: "options.vendors.<name>.plugin_api",
+    value_type: ValueType::String { default: None },
+    title: "Plugin API generation",
+    description: "Names the plugin API generation this client's host runs, for the mods grim \
+                   renders into it. Only `opencode` hosts mods through a plugin API. Unset means \
+                   `v2`. Set `v1` for an OpenCode that still runs the V1 plugin API: grim then \
+                   writes no mod for it.",
+    constraints: None,
+    section: ConfigSection::Vendors,
+};
+
+/// The field name of [`VENDOR_PLUGIN_API`].
+pub const VENDOR_PLUGIN_API_FIELD_NAME: &str = "plugin_api";
+
 /// The field name addressable under a vendor table — the last segment of
 /// [`VENDOR_SHARED_SKILLS`]'s pattern key, used by the key parser and by the
 /// unknown-field error message.
@@ -611,6 +643,7 @@ pub fn valid_keys() -> String {
     fixed
         .chain(registry)
         .chain(std::iter::once(VENDOR_SHARED_SKILLS.key))
+        .chain(std::iter::once(VENDOR_PLUGIN_API.key))
         .chain(plugin)
         .collect::<Vec<_>>()
         .join(", ")
@@ -649,6 +682,7 @@ mod tests {
             .map(|k| k.spec())
             .chain(RegistryField::ALL.iter().map(|f| f.spec()))
             .chain(std::iter::once(&VENDOR_SHARED_SKILLS))
+            .chain(std::iter::once(&VENDOR_PLUGIN_API))
             .chain(PluginField::ALL.iter().map(|f| f.spec()));
         for spec in specs {
             let expected = [
@@ -851,6 +885,7 @@ mod tests {
             experimental: ExperimentalOptions {
                 hooks: true,
                 settings: true,
+                mods: true,
             },
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string()],
@@ -869,6 +904,7 @@ mod tests {
                 "claude".to_string(),
                 VendorOptions {
                     shared_skills: Some(true),
+                    plugin_api: Some("v2".to_string()),
                 },
             )]
             .into_iter()
@@ -896,7 +932,10 @@ mod tests {
             .collect();
         assert_eq!(
             vendor_keys,
-            BTreeSet::from(["options.vendors.claude.shared_skills".to_string()]),
+            BTreeSet::from([
+                "options.vendors.claude.plugin_api".to_string(),
+                "options.vendors.claude.shared_skills".to_string(),
+            ]),
             "the populated vendor entry must flatten to exactly its one dynamic key"
         );
         flattened.retain(|k| !k.starts_with("options.vendors."));
@@ -916,6 +955,7 @@ mod tests {
         use crate::config::declaration::VendorOptions;
         let value = serde_json::to_value(VendorOptions {
             shared_skills: Some(true),
+            plugin_api: Some("v2".to_string()),
         })
         .expect("VendorOptions must serialize");
         let fields: BTreeSet<String> = value
@@ -926,7 +966,7 @@ mod tests {
             .collect();
         assert_eq!(
             fields,
-            BTreeSet::from([VENDOR_FIELD_NAME.to_string()]),
+            BTreeSet::from([VENDOR_FIELD_NAME.to_string(), VENDOR_PLUGIN_API_FIELD_NAME.to_string()]),
             "every VendorOptions field must have exactly one spec, and vice versa"
         );
         assert!(
@@ -1194,6 +1234,7 @@ mod tests {
                 ConfigKey::SearchMinRelevance => &config_options["properties"]["search_min_relevance"],
                 ConfigKey::ExperimentalHooks => &experimental_options["properties"]["hooks"],
                 ConfigKey::ExperimentalSettings => &experimental_options["properties"]["settings"],
+                ConfigKey::ExperimentalMods => &experimental_options["properties"]["mods"],
                 ConfigKey::TuiTheme => &tui_options["properties"]["theme"],
             };
             assert_description_prefix(node, spec.description, spec.key);
@@ -1239,6 +1280,14 @@ mod tests {
         let type_node = unwrap_nullable(&schema, node);
         assert_schema_type_matches(VENDOR_SHARED_SKILLS.value_type, type_node, VENDOR_SHARED_SKILLS.key);
 
+        let api_node = &vendor_options["properties"][VENDOR_PLUGIN_API_FIELD_NAME];
+        assert_description_prefix(api_node, VENDOR_PLUGIN_API.description, VENDOR_PLUGIN_API.key);
+        assert_schema_type_matches(
+            VENDOR_PLUGIN_API.value_type,
+            unwrap_nullable(&schema, api_node),
+            VENDOR_PLUGIN_API.key,
+        );
+
         let plugin_meta = &schema["$defs"]["PluginMeta"];
         for field in PluginField::ALL {
             let spec = field.spec();
@@ -1255,7 +1304,7 @@ mod tests {
     /// is the design record's text verbatim.
     #[test]
     fn c153_experimental_hooks_is_the_appended_eleventh_row() {
-        assert_eq!(ConfigKey::ALL.len(), 13);
+        assert_eq!(ConfigKey::ALL.len(), 14);
         assert_eq!(ConfigKey::ALL[9], ConfigKey::SearchMinRelevance);
         assert_eq!(ConfigKey::ALL[10], ConfigKey::ExperimentalHooks);
         let spec = ConfigKey::ExperimentalHooks.spec();
@@ -1269,11 +1318,22 @@ mod tests {
         );
     }
 
+    /// Appended after the theme row, so `grim config list` gains one row at
+    /// the end and every existing row keeps its position.
+    #[test]
+    fn experimental_mods_is_the_appended_last_row() {
+        assert_eq!(ConfigKey::ALL[12], ConfigKey::TuiTheme);
+        assert_eq!(ConfigKey::ALL[13], ConfigKey::ExperimentalMods);
+        let spec = ConfigKey::ExperimentalMods.spec();
+        assert_eq!(spec.key, "options.experimental.mods");
+        assert!(matches!(spec.value_type, ValueType::Bool { default: Some(false) }));
+    }
+
     /// Appended after the hook row, so `grim config list` gains one row at
     /// the end of the fixed keys and every existing row keeps its position.
     #[test]
     fn experimental_settings_is_the_appended_twelfth_row() {
-        assert_eq!(ConfigKey::ALL.len(), 13);
+        assert_eq!(ConfigKey::ALL.len(), 14);
         assert_eq!(ConfigKey::ALL[10], ConfigKey::ExperimentalHooks);
         assert_eq!(ConfigKey::ALL[11], ConfigKey::ExperimentalSettings);
         let spec = ConfigKey::ExperimentalSettings.spec();

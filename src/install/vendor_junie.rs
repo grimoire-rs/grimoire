@@ -99,6 +99,8 @@ impl Vendor for JunieVendor {
         // it is concatenated unconditionally, so `paths` scoping is dropped.
         match kind {
             ArtifactKind::Rule => KindSupport::Degraded,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }

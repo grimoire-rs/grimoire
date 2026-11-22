@@ -25,6 +25,7 @@ project, and a `teardown.sh`.
 | `catalog/publish.toml` | Batch-publish manifest for the annotation showcase — `[metadata]` defaults, `[description]` companion (README + CHANGELOG), manifest-level `[support]` channels (committed) |
 | `catalog/hooks/<name>/hook.toml` | Source-of-truth sample hooks + their payload scripts (committed) |
 | `catalog/settings/team-defaults.toml` | Source-of-truth sample settings package: a model, allow and deny rules, a marketplace (committed) |
+| `catalog/mods/<name>/` | Source-of-truth sample mod: `mod.toml` plus one entry file for Claude Code and one for OpenCode (committed) |
 | `catalog/bundles/starter-pack.toml` | Bundle v1 member set (committed) |
 | `catalog/bundles/starter-pack-v2.toml` | Bundle v2 member set — adds + removes members (committed) |
 | `catalog/mcp/docs-search.toml` | Sample MCP server descriptor — a dependency target (committed) |
@@ -36,6 +37,7 @@ project, and a `teardown.sh`.
 | `project/grimoire.toml` | Ready-made consumer project (floating `:1` tags) — the OCI registry plus the static index |
 | `project-deps/grimoire.toml` | Dependency-demo project: declares only dependents, see § 12 |
 | `project-settings/grimoire.toml` | Settings-demo project: the experimental flag on, one settings package declared, see § 13 |
+| `project-mods/grimoire.toml` | Mod-demo project: the experimental flag and the OpenCode V2 declaration on, one mod declared, see § 15 |
 | `project-multi/grimoire.toml` | Multi-registry consumer project (`[[registries]]` aliases across 5050 + 5051) |
 | `scripts/env.sh` | `source` it to point `grim` at the rig |
 | `scripts/bootstrap.sh` | Build `grim`, start both registries + the static index, publish the version matrix + multi-registry subset + deep-fold solo package + the annotation showcase, write the global registry config |
@@ -73,6 +75,7 @@ Published catalog (a small **version matrix** — most artifacts ship one
 | agent | `localhost:5050/grimoire/agents/release-bot` | 1.0.0 (vendor-override demo) |
 | settings | `localhost:5050/grimoire/settings/team-defaults` | 1.0.0 (experimental kind, see § 13) |
 | hook | `localhost:5050/grimoire/hooks/tool-logger` | 1.0.0 (observer; alternation matcher) |
+| mod | `localhost:5050/grimoire/mods/hello-mod` | 1.0.0 (experimental kind, see § 15) |
 | hook | `localhost:5050/grimoire/hooks/write-guard` | 1.0.0 (gatekeeper; JSON verdict) |
 | bundle | `localhost:5050/grimoire/bundles/starter-pack` | 1.0.0, 2.0.0 (v2 adds commit-helper, drops security-baseline) |
 | bundle | `localhost:5050/grimoire/bundles/review-pack` | 1.0.0 (shares code-reviewer with starter-pack, adds the reviewer agent) |
@@ -1052,6 +1055,239 @@ Re-run `scripts/bootstrap.sh` after editing `team-defaults.toml`; it releases wi
 `--force` like the rest. Restore the demo state with `teardown.sh`, which also
 removes `project-settings/.claude`, the lock and `.settings-roots/`, part e's
 global config with it.
+
+## 14. Mod load probe (experimental, real clients)
+
+`tests/test_mod_load_probe.py` installs a probe mod with grim and runs the real
+Claude Code and OpenCode CLIs headless against it. It is opt-in and Linux only;
+with the variables unset every probe skips with its reason. A red run means a
+client changed how it loads mods; it gates nothing.
+
+```sh
+# Install the clients into a scratch prefix (no scripts, throwaway cache):
+P=$(mktemp -d); npm install --ignore-scripts --prefix "$P" --cache "$P/cache" \
+  @anthropic-ai/claude-code@latest @opencode/cli@latest
+
+cd test
+GRIM_REAL_CLAUDE_BIN="$P/node_modules/.bin/claude" \
+GRIM_REAL_OPENCODE_BIN="$P/node_modules/.bin/opencode" \
+  uv run pytest tests/test_mod_load_probe.py -n 0 -v -rs --junit-xml=results/mod-probe/junit.xml
+```
+
+Each session runs under a scratch `HOME`, config roots and an allowlisted
+environment; neither client logs in or sends a model request. Observations
+(probe items 5 and 6) and the resolved client versions land in the junit
+properties. In CI the same run is the dispatch-only `mod-load-probe` job of
+`verify-deep.yml`; its junit is the `deep-mod-probe` artifact.
+
+## 15. Mod in a logged-in client (experimental)
+
+A `mod` is code a client loads into its own process. `bootstrap.sh` published
+`hello-mod`; its source is `catalog/mods/hello-mod/`. For Claude Code it shows a
+status line entry and a toast when a session starts, and it adds a slash command,
+`/grim-hello`, that answers with one fixed line. OpenCode loads only the server
+entry of a mod, and that side has no toast, so there the effect is the same
+`/grim-hello` command plus a shell variable, `GRIM_HELLO_MOD`.
+
+**This section needs a client you are logged in to.** Everything you are asked to
+look at happens inside a running Claude Code or OpenCode session. Section 14 is
+the automated headless counterpart: it proves the clients load what grim writes,
+without a login and without looking at the screen. Parts a, b, e and f only use
+`grim`; parts c and d use the clients.
+
+The sample was checked without a login: Claude Code 2.1.330 loaded the module,
+ran all three calls and answered `/grim-hello` headless, and OpenCode 2.3.2
+loaded the plugin and ran its `setup` without an error. What no headless run can
+show is the screen, so each expected screen below is labelled as expected.
+
+**Where it writes.** Project scope only: `project-mods/.claude/` and
+`project-mods/.opencode/`, inside the rig (gitignored, removed by `teardown.sh`).
+Claude Code also reads the project's `.claude/settings.local.json`, which grim
+fills with the marketplace and plugin entries. No global file is touched. There
+is no global-scope variant here: `settings-env.sh` redirects the Claude root but
+not the OpenCode one, so a global mod install could reach a real OpenCode config.
+
+```sh
+source test/manual/scripts/env.sh
+cd test/manual/project-mods
+grim lock
+```
+
+**a. The flag is committed, consent is not.** This `grimoire.toml` already turns
+the flag on and declares the OpenCode V2 plugin API, as a team would. A fresh
+clone is still gated. With no terminal to ask on, `install` writes nothing and
+exits 0, and `status` names the cause:
+
+```sh
+grim install </dev/null; echo $?                  # 0, nothing written
+ls -A                                             # no .claude, no .opencode
+grim status --format json | jq -c '.items[] | select(.kind=="mod") | {name, state, arming: [.arming[] | {client, cause}]}'
+```
+
+Observed:
+
+```text
+{"name":"hello-mod","state":"gated","arming":[{"client":"claude","cause":"workspace-not-consented"},{"client":"opencode","cause":"workspace-not-consented"}]}
+```
+
+**b. Consent, then install.** `grim consent allow` records the answer for this
+checkout under `$GRIM_HOME/consent/`; `grim install --trust-workspace` answers
+for one run and records nothing. Either way, read what grim wrote:
+
+```sh
+grim consent allow
+grim install
+find .claude .opencode -type f | sort
+cat .claude/settings.local.json
+cat .claude/mods/hello-mod/hooks/hooks.json
+cat .opencode/plugins/hello-mod/index.ts
+```
+
+Observed, with the install line `mod 'hello-mod' … written under an existing consent
+entry` on stderr, and a report row for `hello-mod` that reads `installed` (the
+same row read `skipped` in part a, where nothing was written):
+
+```text
+.claude/mods/.claude-plugin/marketplace.json
+.claude/mods/hello-mod/.claude-plugin/plugin.json
+.claude/mods/hello-mod/hooks/hooks.json
+.claude/mods/hello-mod/src/hello-mod.js
+.claude/settings.local.json
+.opencode/plugins/hello-mod/index.ts
+.opencode/plugins/hello-mod/src/hello-mod.ts
+```
+
+`settings.local.json` holds an `extraKnownMarketplaces` entry named
+`grim-mods-` plus twelve hex digits, whose `source.path` is the absolute path of
+`.claude/mods`, and an `enabledPlugins` entry `hello-mod@grim-mods-<hex>` set to
+`true`. `hooks.json` lists the module `../src/hello-mod.js`. `index.ts` is the
+one line `export { default } from "./src/hello-mod"`.
+
+The `.opencode` files exist because OpenCode hosts a mod when `grimoire.toml`
+does not set `plugin_api`. With `plugin_api = "v1"` under
+`[options.vendors.opencode]`, `grim status` reads `installed` with the note
+`opencode: mod-plugin-api-unsupported` and grim writes the Claude files only.
+
+**b1. The same from the TUI.** Pressing `i` on a mod row is consent for that
+mod, as `grim add` is. `project-mods` already declares `hello-mod`, and an
+Install of a declared row records nothing, so use an empty project:
+
+```sh
+T=$(mktemp -d) && cd "$T" && git init -q
+cat > grimoire.toml <<'TOML'
+[options]
+default_registry = "localhost:5050"
+clients = ["claude", "opencode"]
+
+[options.experimental]
+mods = true
+TOML
+grim tui --registry localhost:5050/grimoire
+```
+
+Type `/hello-mod`, press Enter, then `i`. The status line reads
+`mod 'hello-mod' consented; installed (1 ok)` and the row turns to `✓ installed`.
+Quit with `q`. `find .claude .opencode -type f | sort` lists the seven files of
+part b.
+
+With `[options.vendors.opencode] plugin_api = "v1"` added, the same run writes
+Claude only: `grim status` reads `installed` with the note
+`opencode: mod-plugin-api-unsupported`, and the TUI status line leads with the
+clause that names the key. The title row cuts that line, so the TUI also opens a
+`Mods` notice with the full text, including `plugin_api = "v1"`. Any key closes
+it. With the key unset, the Install writes both clients and opens no `Mods`
+notice. With the mods flag off, the same notice
+carries the full `mod 'hello-mod' not written: mods are gated; …` line.
+With `clients = ["claude", "opencode"]` set after a Claude-only install, the row reads
+`+ pending` in the TUI and `pending` in `grim search` until an install writes OpenCode.
+
+Repeat in a second empty directory without the `[options.experimental]` table.
+The status line then starts `mod 'hello-mod' not written: mods are gated`, names
+`grim config set options.experimental.mods true`, and nothing is written. Remove
+both directories afterwards.
+
+**c. Claude Code.** Start it in the project and watch, in this order:
+
+```sh
+claude
+```
+
+Expected, not yet seen on a screen by anyone:
+
+1. Claude may ask whether you trust the folder. Answer yes only if the path it
+   shows ends in `test/manual/project-mods`; a trusted folder is what lets a
+   project-enabled plugin load.
+2. A toast reads `hello from the grim hello-mod` for a few seconds.
+3. The status line carries the entry `grim hello-mod loaded` and keeps it.
+4. Type `/grim-hello`. The command is listed in the menu and answers with
+   `hello-mod: hello from the grim hello-mod` as a transcript line, with no model
+   request.
+
+Seen in a headless run (`claude -p '/grim-hello'`, no login): the answer line
+above. Seen in the debug log of a session start: the `$.ui.status`, `$.ui.toast`
+and `$.command.register` calls all ran, and the two UI calls were kept in the log
+because a headless session has no status row or notification bar.
+
+If nothing shows, run `/plugin`: `hello-mod` should be listed as enabled under
+the `grim-mods-…` marketplace. A mod the client skips leaves no error for grim to
+see; see the `When installed is not running` list in `mods.md`.
+
+**d. OpenCode.** Quit Claude, then start OpenCode in the same directory. It must
+be the V2 client (`@opencode/cli`); `grimoire.toml` sets no `plugin_api`, so
+grim assumes V2:
+
+```sh
+opencode
+```
+
+Expected, not yet seen on a screen by anyone: type `/grim-hello`. The command
+appears in the slash menu and a line `hello from the grim hello-mod` is added to
+the session. The command only adds that line; it does not call a model. If the
+command is missing from the menu, use the fallback: run `!echo $GRIM_HELLO_MOD`
+in the prompt, which prints the same line because the plugin injects the variable
+into the shells OpenCode starts.
+
+Seen in a headless run (`opencode run --standalone -m none/none`): the plugin
+directory was loaded, `setup` ran past the command registration without an
+error, and the server published a `command.updated` event. Not seen: the command in a menu, the line
+in a session, and the variable in a shell. The server side offers no toast, so a
+TUI toast is not part of this mod.
+
+**e. Disable it in the client.** In Claude Code run `/plugin`, disable
+`hello-mod`, then quit. Back in the shell:
+
+```sh
+grim status
+grim install --force
+grim status
+```
+
+Not yet observed by anyone with a real `/plugin`. Observed with a stand-in:
+setting the `enabledPlugins` entry to `false` by hand makes `status` read
+`installed` with the note `claude: mod-disabled-in-client`, a plain `install`
+keeps the choice and warns, and `install --force` writes the entry back to
+`true`. Whether `/plugin` writes `false` into this same file, and not into the
+user settings, is the open question this part answers.
+
+**f. Uninstall.** Remove the mod and look at what is left:
+
+```sh
+grim uninstall mod hello-mod
+find .claude .opencode -type f
+cat .claude/settings.local.json
+git restore grimoire.toml
+```
+
+Observed: the report row `mod hello-mod uninstalled`, one warning that names
+`claude plugin marketplace remove grim-mods-<hex>` (it makes Claude forget the
+marketplace; grim never touches Claude's own plugin cache), no file left under
+`.claude/mods` or `.opencode/plugins`, and `.claude/settings.local.json` reduced
+to an empty object. The uninstall also undeclares `hello-mod` from `grimoire.toml`, which is
+why the last line restores the committed file.
+
+Re-run `scripts/bootstrap.sh` after editing the sample; it releases with `--force`
+like the rest. `teardown.sh` removes `project-mods/.claude`, `.opencode`, `.grimoire`
+and the lock.
 
 ## Teardown
 

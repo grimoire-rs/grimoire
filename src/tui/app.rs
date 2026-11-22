@@ -57,6 +57,7 @@ use crate::install::installer::{
     ForceScope, InstallIntent, InstallOutcome, SettingsOutcome, SettingsRun, install_and_persist, persist_and_converge,
 };
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::mod_phase::ModReach;
 use crate::install::path_anchor::{AnchorRoots, Containment};
 use crate::install::progress::{InstallProgress, SilentProgress};
 use crate::install::prune::{PruneError, prune_orphans_off_runtime};
@@ -509,7 +510,8 @@ pub async fn run(
                     let modal = InstallModal::new(&mut terminal, batch_title(op));
                     modal.working(&repo);
                     let mut ledger = SettingsLedger::default();
-                    let label = member_action(&ctx, &mut state, op, &repo, kind, &name, &mut ledger).await;
+                    let mut hooks = HookNote::default();
+                    let label = member_action(&ctx, &mut state, op, &repo, kind, &name, &mut ledger, &mut hooks).await;
                     if let Some(line) = label {
                         state.set_status(line);
                         // Recompute all row badges — the member action may have
@@ -525,6 +527,7 @@ pub async fn run(
                         }
                     }
                     show_settings_ledger(&mut state, &ledger, op);
+                    show_mod_notes(&mut state, &hooks);
                 }
             }
             TuiAction::LoadCompanion { repo } => {
@@ -539,9 +542,10 @@ pub async fn run(
                 // the offline gate and keeps UX snappy — the lock is always
                 // fresher than any previous network fetch in most sessions.
                 let lock = lock_io::load(&ctx.lock_path).ok();
-                let install_state = read_state(&ctx)
+                let mut install_state = read_state(&ctx)
                     .map(|read| read.exempt(Exempt::Browse))
                     .unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+                overlay_mod_records(&mut install_state, &ctx);
                 let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
                 // Direct declarations decide the via-bundle badge; a declaration-
                 // matched bundle snapshot lets a stale-dropped member still derive
@@ -1221,9 +1225,10 @@ fn drain_bundle_member_checks(
                 // was incorrect: a member's repo may be directly declared in
                 // the catalog even when the bundle itself has no lock snapshot.
                 let lock = lock_io::load(&ctx.lock_path).ok();
-                let install_state = read_state(ctx)
+                let mut install_state = read_state(ctx)
                     .map(|read| read.exempt(Exempt::Browse))
                     .unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+                overlay_mod_records(&mut install_state, ctx);
                 let active = active_clients(&ctx.workspace, ctx.scope, &ctx.clients_global);
                 let (direct_repos, snapshot_repos, target, lock_matches_config) = load_scope_declaration(ctx)
                     .map(|(options, _, set)| {
@@ -2045,6 +2050,7 @@ fn derive_artifact_state(
         let pending = target.is_some_and(|t| {
             !crate::install::expected_outputs::pending_outputs(Some(record), record.kind, &record.name, t, roots, None)
                 .is_empty()
+                || locked.is_some_and(|l| crate::install::status_badge::mod_client_unwritten(record, l, t))
         });
         if pending {
             ArtifactState::Pending
@@ -2269,7 +2275,7 @@ fn refresh_member_states(
 }
 
 /// The set of `(kind, registry/repository)` an active scope declares **directly**
-/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`/`[bundles]`) — the key by which the via-bundle badge
+/// (in `[skills]`/`[rules]`/`[agents]`/`[mcp]`/`[hooks]`/`[settings]`/`[mods]`/`[bundles]`) — the key by which the via-bundle badge
 /// decides whether a present member is also a standalone install.
 fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(ArtifactKind, String)> {
     let mut out = std::collections::BTreeSet::new();
@@ -2280,6 +2286,7 @@ fn direct_declared_repos(set: &DesiredSet) -> std::collections::BTreeSet<(Artifa
         (ArtifactKind::Mcp, &set.mcp),
         (ArtifactKind::Hook, &set.hooks),
         (ArtifactKind::Settings, &set.settings),
+        (ArtifactKind::Mod, &set.mods),
         (ArtifactKind::Bundle, &set.bundles),
     ] {
         for source in map.values() {
@@ -2398,6 +2405,11 @@ fn read_state(ctx: &TuiContext) -> io::Result<Unadopted> {
     scope_resolution::read_state_at(ctx.scope, &ctx.workspace, &ctx.config_path, &ctx.state_path, &ctx.roots)
 }
 
+/// Add the scope's mod records to a state read for badges only; never save it.
+fn overlay_mod_records(state: &mut InstallState, ctx: &TuiContext) {
+    crate::install::mod_store::overlay_records(state, &ctx.roots.grim_home, &ctx.workspace, ctx.scope);
+}
+
 /// The state [`read_state`] reads, for a test.
 #[cfg(test)]
 fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
@@ -2453,9 +2465,10 @@ fn load_scope_for_badges(
     Option<InstallTarget>,
 ) {
     let lock = lock_io::load(&ctx.lock_path).ok();
-    let state = read_state(ctx)
+    let mut state = read_state(ctx)
         .map(|read| read.exempt(Exempt::Browse))
         .unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+    overlay_mod_records(&mut state, ctx);
     let cached = lock.as_ref();
     let (set, declared_bundle_repos, direct_repos, snapshot_repos, target) = load_scope_declaration(ctx)
         .map(|(options, _registries, set)| {
@@ -2876,6 +2889,7 @@ async fn run_batch_scoped(
     let mut pins = carried;
     // The hooks any row consented to or left unarmed.
     let mut hooks = HookNote::default();
+    let mut nothing_written = false;
     // The edited dropped artifacts an Update's prune kept.
     let mut kept_edits: Vec<NodeKey> = Vec::new();
     // What a delete's lock edit had to say.
@@ -2939,6 +2953,7 @@ async fn run_batch_scoped(
                 if let Some(summary) = summary {
                     pins.extend(&summary.pins);
                     hooks.extend(&summary.hooks);
+                    nothing_written |= summary.nothing_written;
                     kept_edits.extend(summary.kept_edits.iter().cloned());
                     let unlisted = summary
                         .refused_nodes
@@ -3016,6 +3031,7 @@ async fn run_batch_scoped(
         refused_dependency,
         pins: &pins,
         hooks: &hooks,
+        nothing_written: nothing_written && total == 1,
         kept_edits: &kept_edits,
         notes: &notes,
         kept: &kept,
@@ -3035,6 +3051,7 @@ async fn run_batch_scoped(
         state.open_confirm_delete(row, &repo, &detail, pins, listed);
     }
     show_settings_ledger(state, &ledger, op);
+    show_mod_notes(state, &hooks);
 }
 
 /// A delete refused by a drifted value a declaration still reaches. `grim
@@ -3079,6 +3096,8 @@ struct BatchTally<'a> {
     refused_dependency: Option<String>,
     pins: &'a PinChanges,
     hooks: &'a HookNote,
+    /// The one acted row wrote nothing: its outcomes were all skipped mods.
+    nothing_written: bool,
     /// The edited dropped artifacts an Update's prune kept.
     kept_edits: &'a [NodeKey],
     notes: &'a [EditNote],
@@ -3121,6 +3140,10 @@ fn batch_line(tally: &BatchTally<'_>) -> String {
         kept_edits_lead(tally.kept_edits, tally.grim)
     );
     let moved = moved_note(tally.pins);
+    // A claimed `installed (1 ok)` would hide that the mod was not written.
+    if failed == 0 && tally.nothing_written {
+        return format!("{lead}{hooks}{moved}{tail}").trim_end_matches("; ").to_string();
+    }
     if failed == 0 {
         let also_removed = if total == 1 && !tally.removed_dependencies.is_empty() {
             format!(" (also removed: {})", pin_names(tally.removed_dependencies))
@@ -3965,7 +3988,11 @@ async fn perform(
     // An Install that declares is `grim add`'s TUI form, so it consents to what
     // `grim add` would. A repair and an Update declare nothing and record nothing.
     let consentable = if op == BatchOp::Install && declares {
-        let site = consent_site(ctx, options.experimental.hooks_enabled());
+        let site = consent_site(
+            ctx,
+            options.experimental.hooks_enabled(),
+            options.experimental.mods_enabled(),
+        );
         crate::command::add::gesture_consent(
             &site,
             &before,
@@ -4210,6 +4237,18 @@ fn row_settings<'a>(
     }
 }
 
+/// How far an action's mod phase reaches, as [`row_settings`] does for settings:
+/// Update stops at its closure and prunes only `prune`, Install plans the whole lock.
+fn row_mod_reach<'a>(op: BatchOp, closure: &'a BTreeSet<NodeKey>, prune: &'a BTreeSet<NodeKey>) -> ModReach<'a> {
+    match op {
+        BatchOp::Update => ModReach::Closure {
+            install: closure,
+            prune,
+        },
+        BatchOp::Install | BatchOp::Uninstall => ModReach::Full,
+    }
+}
+
 /// What one row's action installs, may overwrite and may prune. Update is
 /// `grim update <binding>`, so it takes that command's [`NamedScope`]: one closure
 /// for the install, the integrity gate, settings and vendor sync, the binding's
@@ -4317,19 +4356,26 @@ async fn materialize_row(
     consentable: &DeclaredKeys,
 ) -> anyhow::Result<InstallSummary> {
     let policies = row_hook_policy(ctx, Some(lock), consentable);
-    let consented = if policies.hooks.feature_enabled() {
-        consented_hooks(ctx, &scope.single, consentable)
-    } else {
-        Vec::new()
-    };
+    let consented = consented_artifacts(ctx, &scope.single, consentable, &policies);
+    // The mod phase writes no row for a mod its policy gates, so the row the
+    // generic pass left says only that no client hosts it: the policy's own
+    // refusal is the reason the user needs.
+    let mods = policies.mods.clone();
     let installed = install_row(ctx, lock, scope, op, progress, force, policies, ledger).await;
-    let hooks = HookNote::of(
+    let mut hooks = HookNote::of(
         installed
             .as_ref()
             .map(|(outcomes, _)| outcomes.as_slice())
             .unwrap_or_default(),
         consented,
+        |name| {
+            let module = scope.single.mods.iter().find(|m| m.name == name)?;
+            mods.refusal_reason(&module.name, &module.source)
+        },
     );
+    if let Ok((outcomes, _)) = &installed {
+        hooks.declined = declined_mod_clauses(ctx, &scope.single, outcomes);
+    }
     let summary = installed.and_then(|(outcomes, kept)| {
         install_outcomes_label(outcomes, &scope.force).map(|summary| summary.keeping(kept))
     });
@@ -4338,6 +4384,39 @@ async fn materialize_row(
         Err(e) if hooks.is_empty() => Err(e),
         Err(e) => Err(e.context(HooksAhead(hooks))),
     }
+}
+
+/// The clause for each client a mod the action touched serves but declines
+/// (`mod_phase::hosting_warning`, remedy included), whatever its outcome.
+fn declined_mod_clauses(
+    ctx: &TuiContext,
+    single: &GrimoireLock,
+    outcomes: &[crate::install::installer::ArtifactInstall],
+) -> Vec<String> {
+    let Ok(target) = action_target(ctx) else {
+        return Vec::new();
+    };
+    let mut clauses: Vec<String> = Vec::new();
+    for module in single.mods.iter().filter(|m| {
+        outcomes.iter().any(|o| {
+            o.reference.kind == ArtifactKind::Mod
+                && o.reference.name == m.name
+                && !matches!(o.result, Ok(InstallOutcome::Skipped(_)))
+        })
+    }) {
+        for clause in crate::install::mod_phase::declined_warnings(
+            target.clients(),
+            module,
+            target.plugin_api(),
+            &ctx.workspace,
+            ctx.scope,
+        ) {
+            if !clauses.contains(&clause) {
+                clauses.push(clause);
+            }
+        }
+    }
+    clauses
 }
 
 /// Install `scope` under `policies` through the shared pipeline, then prune what
@@ -4360,7 +4439,8 @@ async fn install_row(
 ) -> anyhow::Result<(Vec<crate::install::installer::ArtifactInstall>, Vec<NodeKey>)> {
     let target = action_target(ctx)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     let mut install_state = read_state(ctx)
         .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
         .exempt(Exempt::InstallGate);
@@ -4395,6 +4475,7 @@ async fn install_row(
         row_adds(op, &scope.closure),
         progress,
         row_settings(op, lock, &scope.closure, &scope.prune),
+        row_mod_reach(op, &scope.closure, &scope.prune),
     )
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -4475,20 +4556,34 @@ fn prune_error(error: PruneError) -> anyhow::Error {
     anyhow::Error::from(error)
 }
 
-/// The hooks `single` holds that `consentable` names and the record now covers:
-/// what the action consented to, whatever became of each one's install.
-fn consented_hooks(ctx: &TuiContext, single: &GrimoireLock, consentable: &DeclaredKeys) -> Vec<String> {
-    let recorded = crate::command::hook_consent::recorded_hooks(&consent_site(ctx, true));
-    single
+/// The hooks and mods `single` holds that `consentable` names and the record now
+/// covers, each whose feature is on: what the action consented to, whatever
+/// became of each one's install.
+fn consented_artifacts(
+    ctx: &TuiContext,
+    single: &GrimoireLock,
+    consentable: &DeclaredKeys,
+    policies: &crate::hook::policy::ConsentPolicies,
+) -> Vec<NodeKey> {
+    let recorded = crate::command::hook_consent::recorded_hooks(&consent_site(ctx, true, true));
+    let covered = |kind: ArtifactKind, artifact: &LockedArtifact| {
+        crate::hook::consent::consent_key(&artifact.name, &artifact.source).is_some_and(|key| {
+            crate::hook::consent::keys_of(consentable, kind).contains(&key) && recorded.contains(&key)
+        })
+    };
+    let hooks = single
         .hooks
         .iter()
-        .filter(|hook| {
-            crate::hook::consent::consent_key(&hook.name, &hook.source).is_some_and(|key| {
-                crate::hook::consent::keys_of(consentable, ArtifactKind::Hook).contains(&key) && recorded.contains(&key)
-            })
-        })
-        .map(|hook| hook.name.clone())
-        .collect()
+        .filter(|_| policies.hooks.feature_enabled())
+        .filter(|hook| covered(ArtifactKind::Hook, hook))
+        .map(|hook| (ArtifactKind::Hook, hook.name.clone()));
+    let mods = single
+        .mods
+        .iter()
+        .filter(|_| policies.mods.feature_enabled())
+        .filter(|module| covered(ArtifactKind::Mod, module))
+        .map(|module| (ArtifactKind::Mod, module.name.clone()));
+    hooks.chain(mods).collect()
 }
 
 /// The hooks an action named ahead of its failure.
@@ -5048,6 +5143,7 @@ async fn perform_local_dev(
         },
         bundles: Vec::new(),
         requires: Vec::new(),
+        clients: Vec::new(),
     };
     let mut synth = GrimoireLock {
         metadata: crate::lock::grimoire_lock::LockMetadata {
@@ -5064,6 +5160,7 @@ async fn perform_local_dev(
         hooks: Vec::new(),
         settings: Vec::new(),
         bundles: Vec::new(),
+        mods: Vec::new(),
     };
     match kind {
         ArtifactKind::Skill => synth.skills.push(entry),
@@ -5071,7 +5168,7 @@ async fn perform_local_dev(
         ArtifactKind::Agent => synth.agents.push(entry),
         // A dev record is only ever a skill/rule/agent (dev-install rejects the
         // rest); this arm is defensive.
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod => {
             return Err(anyhow::anyhow!(
                 "dev-install is limited to skill/rule/agent, not {kind}"
             ));
@@ -5092,7 +5189,8 @@ async fn perform_local_dev(
     )
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?
     .with_hook_policy(policies.hooks)
-    .with_settings_policy(policies.settings);
+    .with_settings_policy(policies.settings)
+    .with_mod_policy(policies.mods);
     let mut install_state = read_state(ctx)
         .map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?
         .exempt(Exempt::InstallGate);
@@ -5117,6 +5215,7 @@ async fn perform_local_dev(
         row_adds(op, &closure),
         progress,
         SettingsRun::Skip,
+        ModReach::Skip,
     )
     .await
     .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -5462,6 +5561,36 @@ fn show_settings_ledger(state: &mut TuiState, ledger: &SettingsLedger, op: Batch
     state.open_settings_result(&message, &lines.collect::<Vec<_>>().join("\n"));
 }
 
+/// Put the mod lines in front of the user: the title row cuts the status line,
+/// and the remedy sits at its end. Joins an open dialog or panel, else opens one.
+fn show_mod_notes(state: &mut TuiState, hooks: &HookNote) {
+    let lines = hooks.mod_lines();
+    if lines.is_empty() {
+        return;
+    }
+    if let Some(dialog) = &mut state.confirm {
+        for line in &lines {
+            if !dialog.detail.lines().any(|shown| shown == line) {
+                dialog.detail.push('\n');
+                dialog.detail.push_str(line);
+            }
+        }
+        return;
+    }
+    if let Some(panel) = &mut state.settings_result {
+        for line in &lines {
+            if !panel.detail.lines().any(|shown| shown == line) {
+                if !panel.detail.is_empty() {
+                    panel.detail.push('\n');
+                }
+                panel.detail.push_str(line);
+            }
+        }
+        return;
+    }
+    state.open_notice("Mods", "These were not written.", &lines.join("\n"));
+}
+
 /// One install action's result: the status label, plus grim's refusal text
 /// when the action was REFUSED.
 ///
@@ -5489,8 +5618,10 @@ pub struct InstallSummary {
     /// The pins the action's relock moved or dropped. A warning reaches only
     /// `tui.log`, so the status line names these.
     pub pins: PinChanges,
-    /// The hooks the action consented to or left unarmed, for the same reason.
+    /// The hooks and mods the action consented to or left unarmed, for the same reason.
     pub hooks: HookNote,
+    /// Every outcome was a skipped mod, so the action wrote nothing at all.
+    pub nothing_written: bool,
 }
 
 impl InstallSummary {
@@ -5504,6 +5635,7 @@ impl InstallSummary {
             kept_edits: Vec::new(),
             pins: PinChanges::default(),
             hooks: HookNote::default(),
+            nothing_written: false,
         }
     }
 
@@ -5524,11 +5656,15 @@ impl InstallSummary {
     }
 }
 
-/// The hooks an install action consented to, and each it left unarmed with why.
+/// The hooks and mods an install action consented to, and each it left unarmed
+/// or unwritten with why.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct HookNote {
-    consented: Vec<String>,
-    gated: Vec<(String, Unarmed)>,
+    consented: Vec<NodeKey>,
+    gated: Vec<(NodeKey, Unarmed)>,
+    /// One clause per client a mod row serves but declines, from the mod phase's
+    /// own warning. Written or unchanged, the mod reaches fewer clients than asked.
+    declined: Vec<String>,
 }
 
 /// Why a hook a status line names is not armed.
@@ -5545,17 +5681,34 @@ enum Unarmed {
 }
 
 impl HookNote {
-    /// The hooks `outcomes` skipped, beside `consented`.
-    fn of(outcomes: &[crate::install::installer::ArtifactInstall], consented: Vec<String>) -> Self {
+    /// The hooks and mods `outcomes` skipped, beside `consented`; `mod_refusal`
+    /// gives a skipped mod's reason when its policy refuses it.
+    fn of(
+        outcomes: &[crate::install::installer::ArtifactInstall],
+        consented: Vec<NodeKey>,
+        mod_refusal: impl Fn(&str) -> Option<String>,
+    ) -> Self {
         let gated = outcomes
             .iter()
-            .filter(|o| o.reference.kind == ArtifactKind::Hook)
+            .filter(|o| matches!(o.reference.kind, ArtifactKind::Hook | ArtifactKind::Mod))
             .filter_map(|o| match &o.result {
-                Ok(InstallOutcome::Skipped(why)) => Some((o.reference.name.clone(), Unarmed::Skipped(why.clone()))),
+                Ok(InstallOutcome::Skipped(why)) => {
+                    let refused = (o.reference.kind == ArtifactKind::Mod)
+                        .then(|| mod_refusal(&o.reference.name))
+                        .flatten();
+                    Some((
+                        (o.reference.kind, o.reference.name.clone()),
+                        Unarmed::Skipped(refused.unwrap_or_else(|| why.clone())),
+                    ))
+                }
                 _ => None,
             })
             .collect();
-        Self { consented, gated }
+        Self {
+            consented,
+            gated,
+            declined: Vec::new(),
+        }
     }
 
     /// The gatekeepers a delete left with a dispatch row and no client
@@ -5567,10 +5720,11 @@ impl HookNote {
         let why = Unarmed::Unregistered(unregistered.clone(), grim.clone());
         Self {
             consented: Vec::new(),
+            declined: Vec::new(),
             gated: unregistered
                 .hooks
                 .iter()
-                .map(|name| (name.clone(), why.clone()))
+                .map(|name| ((ArtifactKind::Hook, name.clone()), why.clone()))
                 .collect(),
         }
     }
@@ -5607,17 +5761,31 @@ impl HookNote {
     }
 
     fn is_empty(&self) -> bool {
-        self.consented.is_empty() && self.gated.is_empty()
+        self.consented.is_empty() && self.gated.is_empty() && self.declined.is_empty()
+    }
+
+    /// Every declined clause, then one line per mod left unwritten.
+    fn mod_lines(&self) -> Vec<String> {
+        let unwritten = self.gated.iter().filter_map(|((kind, name), why)| match why {
+            Unarmed::Skipped(why) if *kind == ArtifactKind::Mod => Some(format!("mod '{name}' not written: {why}")),
+            _ => None,
+        });
+        self.declined.iter().cloned().chain(unwritten).collect()
     }
 
     fn extend(&mut self, other: &Self) {
-        for name in &other.consented {
-            if !self.consented.contains(name) {
-                self.consented.push(name.clone());
+        for clause in &other.declined {
+            if !self.declined.contains(clause) {
+                self.declined.push(clause.clone());
+            }
+        }
+        for node in &other.consented {
+            if !self.consented.contains(node) {
+                self.consented.push(node.clone());
             }
         }
         for gated in &other.gated {
-            if !self.gated.iter().any(|(name, _)| *name == gated.0) {
+            if !self.gated.iter().any(|(node, _)| *node == gated.0) {
                 self.gated.push(gated.clone());
             }
         }
@@ -5630,29 +5798,46 @@ impl HookNote {
         self.lead_beside(&[])
     }
 
-    /// [`Self::lead`] on a line beside `notes`, its delete notes.
+    /// [`Self::lead`] on a line beside `notes`, its delete notes. Hooks come
+    /// first, then mods: a hook is `armed`, a mod `written`.
     fn lead_beside(&self, notes: &[EditNote]) -> String {
-        let named = |names: &[&String], state: &str| match names {
-            [one] => format!("hook '{one}' {state}"),
+        let named = |noun: &str, names: &[&String], state: &str| match names {
+            [one] => format!("{noun} '{one}' {state}"),
             many => {
                 let quoted = many.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
-                format!("{} hooks {state}: {quoted}", many.len())
+                format!("{} {noun}s {state}: {quoted}", many.len())
             }
         };
-        let mut lead = String::new();
-        if !self.consented.is_empty() {
-            let names: Vec<&String> = self.consented.iter().collect();
-            lead.push_str(&format!("{}; ", named(&names, "consented")));
-        }
-        if let Some((_, why)) = self.gated.first() {
-            let names: Vec<&String> = self.gated.iter().map(|(name, _)| name).collect();
+        let consented = |kind: ArtifactKind| -> Vec<&String> {
+            self.consented
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, name)| name)
+                .collect()
+        };
+        let mut lead: String = self.declined.iter().map(|clause| format!("{clause}; ")).collect();
+        let mut consent = |kind: ArtifactKind, noun: &str| {
+            let names = consented(kind);
+            if !names.is_empty() {
+                lead.push_str(&format!("{}; ", named(noun, &names, "consented")));
+            }
+        };
+        consent(ArtifactKind::Hook, "hook");
+        consent(ArtifactKind::Mod, "mod");
+        for (kind, noun, state) in [
+            (ArtifactKind::Hook, "hook", "not armed"),
+            (ArtifactKind::Mod, "mod", "not written"),
+        ] {
+            let gated: Vec<_> = self.gated.iter().filter(|((k, _), _)| *k == kind).collect();
+            let Some((_, why)) = gated.first() else { continue };
+            let names: Vec<&String> = gated.iter().map(|((_, name), _)| name).collect();
             let why = match why {
                 Unarmed::Skipped(why) => why.clone(),
                 Unarmed::Unregistered(unregistered, grim) => {
                     format!("no client registration; {}", unregistered.remedy(grim, notes))
                 }
             };
-            lead.push_str(&format!("{}: {why}; ", named(&names, "not armed")));
+            lead.push_str(&format!("{}: {why}; ", named(noun, &names, state)));
         }
         lead
     }
@@ -5666,6 +5851,10 @@ fn install_outcomes_label(
     force: &BTreeSet<crate::lock::effective_set::NodeKey>,
 ) -> anyhow::Result<InstallSummary> {
     let mut summary = InstallSummary::unchanged();
+    summary.nothing_written = !outcomes.is_empty()
+        && outcomes
+            .iter()
+            .all(|o| o.reference.kind == ArtifactKind::Mod && matches!(o.result, Ok(InstallOutcome::Skipped(_))));
     // The CLI's own "refusals outside the force set" rule, so the dialog is
     // offered exactly where `grim add --force` would succeed.
     let node = |o: &crate::install::installer::ArtifactInstall| (o.reference.kind, o.reference.name.clone());
@@ -5676,8 +5865,10 @@ fn install_outcomes_label(
     let mut lines: Vec<String> = Vec::new();
     for o in &outcomes {
         let Ok(outcome) = &o.result else { continue };
-        // A gated hook is named by the action's hook note, never as its label.
-        if !(o.reference.kind == ArtifactKind::Hook && matches!(outcome, InstallOutcome::Skipped(_))) {
+        // A gated hook or mod is named by the action's hook note, never as its label.
+        if !(matches!(o.reference.kind, ArtifactKind::Hook | ArtifactKind::Mod)
+            && matches!(outcome, InstallOutcome::Skipped(_)))
+        {
             summary.label = outcome_label(outcome).to_string();
         }
         let Some(detail) = refusal_detail(outcome) else {
@@ -6308,19 +6499,20 @@ fn row_hook_policy(
     consentable: &DeclaredKeys,
 ) -> crate::hook::policy::ConsentPolicies {
     let policies = tui_hook_policy(ctx, lock);
-    let site = consent_site(ctx, policies.hooks.feature_enabled());
+    let site = consent_site(ctx, policies.hooks.feature_enabled(), policies.mods.feature_enabled());
     crate::command::hook_consent::gesture(policies, &site, consentable, None)
 }
 
-/// The TUI's consent site. Hooks only: a declaring Install records no
-/// settings package, which the next `grim install` asks about instead.
-fn consent_site(ctx: &TuiContext, hooks_enabled: bool) -> ConsentSite<'_> {
+/// The TUI's consent site: hooks and mods, each under its own flag. A declaring
+/// Install records no settings package, which the next `grim install` asks about.
+fn consent_site(ctx: &TuiContext, hooks_enabled: bool, mods_enabled: bool) -> ConsentSite<'_> {
     ConsentSite {
         grim_home: &ctx.roots.grim_home,
         scope: ctx.scope,
         workspace: &ctx.workspace,
         flags: crate::config::declaration::ExperimentalOptions {
             hooks: hooks_enabled,
+            mods: mods_enabled,
             ..Default::default()
         },
         invocation: &ctx.invocation,
@@ -6362,6 +6554,16 @@ async fn delete_targets(
     let hook_policy = tui_hook_policy(ctx, None).hooks;
     // The install a remedy names reads the lock's hooks and the config's, which the delete's does not.
     let install_hooks = tui_policy_over(ctx, lock.as_ref(), true).hooks;
+    let locked_mods: Option<std::collections::BTreeSet<String>> =
+        lock.as_ref().map(|l| l.mods.iter().map(|m| m.name.clone()).collect());
+    let mod_proofs = crate::install::mod_phase::uninstall_proofs(
+        &ctx.roots,
+        ctx.scope,
+        &ctx.workspace,
+        targets,
+        locked_mods.as_ref(),
+    )
+    .await;
     let deletion = delete_nodes(
         install_state,
         targets,
@@ -6374,6 +6576,8 @@ async fn delete_targets(
             hook_policy: &hook_policy,
             install_hooks: &install_hooks,
             grim: &ctx.invocation,
+            locked_mods: locked_mods.as_ref(),
+            mod_proofs: &mod_proofs,
         },
     );
     // Before the failure: what the nodes ahead of it changed stays changed.
@@ -6986,6 +7190,10 @@ pub(crate) fn resolve_member_tag(repo: &str, rows: &[TuiRow]) -> String {
 
 /// Run one bundle member's install, update or uninstall, and return the label
 /// for its status line, or `None` once the failure is on the status line.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the action and its member, plus the settings ledger and hook note it fills"
+)]
 async fn member_action(
     ctx: &TuiContext,
     state: &mut TuiState,
@@ -6994,6 +7202,7 @@ async fn member_action(
     kind: crate::oci::ArtifactKind,
     name: &str,
     ledger: &mut SettingsLedger,
+    hooks: &mut HookNote,
 ) -> Option<String> {
     let result = match op {
         BatchOp::Install | BatchOp::Update => {
@@ -7017,7 +7226,10 @@ async fn member_action(
             // A member has no index in `state.rows`, and `TuiAction::ForceRetry`
             // addresses a row by index, so the Overwrite dialog cannot open here:
             // the line names the remedy instead.
-            .map(|s| member_done_line(repo, &s, &ctx.invocation))
+            .map(|s| {
+                hooks.extend(&s.hooks);
+                member_done_line(repo, &s, &ctx.invocation)
+            })
         }
         // The bundle badge flips to `stale` on recompute.
         BatchOp::Uninstall => perform_member_uninstall(ctx, repo.to_string(), kind, name.to_string(), ledger)
@@ -7035,9 +7247,12 @@ async fn member_action(
             // saved before the failure stay moved, so the line names them, and
             // it leads with any hook the Install consented to before failing.
             let moved = moved_ahead(&e).map(moved_note).unwrap_or_default();
-            let hooks = hooks_ahead(&e).map(HookNote::lead).unwrap_or_default();
+            if let Some(ahead) = hooks_ahead(&e) {
+                hooks.extend(ahead);
+            }
+            let lead = hooks_ahead(&e).map(HookNote::lead).unwrap_or_default();
             let skip = relock_lead(&e).map(|lead| format!("{lead}; ")).unwrap_or_default();
-            state.set_status(format!("{skip}{hooks}{}{moved}", failure_line(repo, &e)));
+            state.set_status(format!("{skip}{lead}{}{moved}", failure_line(repo, &e)));
             None
         }
     }
@@ -7227,6 +7442,52 @@ mod tests {
     use super::*;
     use crate::lock::closure::{bundle_members_lock, single_entry_lock};
 
+    #[test]
+    fn row_mod_reach_is_full_for_install_and_the_closures_for_update() {
+        let closure = BTreeSet::from([(ArtifactKind::Mod, "a".to_string())]);
+        let prune = BTreeSet::from([(ArtifactKind::Mod, "b".to_string())]);
+        assert_eq!(row_mod_reach(BatchOp::Install, &closure, &prune), ModReach::Full);
+        assert_eq!(
+            row_mod_reach(BatchOp::Update, &closure, &prune),
+            ModReach::Closure {
+                install: &closure,
+                prune: &prune
+            }
+        );
+    }
+
+    /// The TUI's consent site records a mod while the mods flag is on, never a
+    /// settings package, and no mod while the flag is off.
+    #[test]
+    fn tui_site_records_a_mod_only_with_the_mods_flag() {
+        use crate::command::hook_consent::add_would_record;
+        let ctx = ctx_with_registries(Vec::new(), "ghcr.io/acme");
+        let key = "band@ghcr.io/acme/mods/band";
+        assert!(add_would_record(
+            &consent_site(&ctx, true, true),
+            ArtifactKind::Mod,
+            key,
+            None
+        ));
+        assert!(!add_would_record(
+            &consent_site(&ctx, true, false),
+            ArtifactKind::Mod,
+            key,
+            None
+        ));
+        let site = consent_site(&ctx, true, true);
+        assert!(!add_would_record(
+            &site,
+            ArtifactKind::Settings,
+            "s@ghcr.io/acme/s",
+            None
+        ));
+        assert!(
+            add_would_record(&site, ArtifactKind::Hook, "guard@ghcr.io/acme/guard", None),
+            "positive control: the same site records a hook"
+        );
+    }
+
     /// The action, for a test that does not read its settings list.
     async fn perform(
         ctx: &TuiContext,
@@ -7384,6 +7645,7 @@ mod tests {
                 version: Some("1.2.3".to_string()),
                 rating: None,
                 downloads: None,
+                serves: None,
                 badge: StatusBadge::NotInstalled,
             }],
         };
@@ -7673,6 +7935,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -7843,6 +8106,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -7998,6 +8262,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
         let registry_entry = locked("a", ArtifactKind::Skill, '1');
         let lock = lock_fixture(vec![path_entry, registry_entry], Vec::new());
@@ -8406,6 +8671,7 @@ mod tests {
                     version: None,
                     rating: None,
                     downloads: None,
+                    serves: None,
                     badge: StatusBadge::NotInstalled,
                 })
                 .collect(),
@@ -12805,6 +13071,7 @@ mod tests {
     static NO_HOOKS: HookNote = HookNote {
         consented: Vec::new(),
         gated: Vec::new(),
+        declined: Vec::new(),
     };
 
     fn delete_tally<'a>(total: usize, notes: &'a [EditNote], pins: &'a PinChanges) -> BatchTally<'a> {
@@ -12818,6 +13085,7 @@ mod tests {
             refused_dependency: None,
             pins,
             hooks: &NO_HOOKS,
+            nothing_written: false,
             kept_edits: &[],
             notes,
             kept: &[],
@@ -13788,6 +14056,7 @@ mod tests {
             ArtifactKind::Skill,
             "m",
             &mut SettingsLedger::default(),
+            &mut HookNote::default(),
         )
         .await
         .unwrap_or_else(|| panic!("the update succeeds: {}", state.status_line));
@@ -15535,6 +15804,7 @@ mod tests {
                 source: crate::lock::locked_source::LockedSource::Registry(PinnedIdentifier::try_from(id).unwrap()),
                 bundles: Vec::new(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }
         }
 
@@ -18629,6 +18899,7 @@ mod tests {
             source: crate::lock::locked_source::LockedSource::Registry(pin),
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }];
         lock.bundles = vec![LockedBundle {
             name: "pack".to_string(),
@@ -20183,6 +20454,415 @@ mod tests {
             assert!(drawn.contains("hook 'g' consented"), "{drawn:?}");
         }
 
+        const MODS_ON: &str = "[options.experimental]\nmods = true\n";
+        const MOD_DECLARED: &str = "[options.experimental]\nmods = true\n\n[mods]\n\
+                                    status-band = \"localhost:5050/grimoire/mods/status-band:1.0.0\"\n";
+        const MOD_REASON_OFF: &str =
+            "mods are gated; enable them with `grim config set options.experimental.mods true`";
+
+        /// A registry holding mod `status-band` and the bundle `mod-pack` that lists it.
+        async fn registry_with_mod() -> Arc<dyn OciAccess> {
+            use crate::install::mod_validate::tests::{TOML_BOTH, file, tar_of};
+            use crate::oci::bundle::{BundleManifest, BundleMember};
+            use crate::oci::manifest::{Descriptor, OciManifest};
+
+            let reg = MemoryRegistry::new();
+            let blob = tar_of(&[
+                file("status-band/mod.toml", TOML_BOTH.as_bytes()),
+                file("status-band/claude/register.tsx", b"export default 1"),
+                file("status-band/opencode/status-band.ts", b"export default 1"),
+            ]);
+            let id = Identifier::new_registry("grimoire/mods/status-band", "localhost:5050");
+            let layer = reg.push_blob(&id, &blob).await.unwrap();
+            let manifest = OciManifest {
+                media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+                artifact_type: Some(ArtifactKind::Mod.artifact_type().to_string()),
+                config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+                layers: vec![Descriptor {
+                    digest: layer,
+                    media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                    size: blob.len() as u64,
+                    annotations: None,
+                }],
+                annotations: [(
+                    crate::oci::annotations::MOD_CLIENTS_ANNOTATION.to_string(),
+                    "claude,opencode".to_string(),
+                )]
+                .into(),
+            };
+            let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+            reg.put_tag(&id, "1.0.0", &digest).await.unwrap();
+            reg.put_tag(&id, "latest", &digest).await.unwrap();
+            let member = BundleMember {
+                kind: ArtifactKind::Mod,
+                name: "status-band".to_string(),
+                id: "localhost:5050/grimoire/mods/status-band:1.0.0".to_string(),
+            };
+            let pack = String::from_utf8(BundleManifest::new(vec![member]).to_layer_bytes().unwrap()).unwrap();
+            push(&reg, "grimoire/bundles/mod-pack", ArtifactKind::Bundle, &[("", &pack)]).await;
+            Arc::new(reg)
+        }
+
+        fn mod_row(state: ArtifactState) -> TuiRow {
+            let mut row = installed_row("localhost:5050/grimoire/mods/status-band");
+            row.kind = "mod".to_string();
+            row.state = state;
+            row
+        }
+
+        fn mod_written(ctx: &TuiContext) -> bool {
+            ctx.workspace.join(".claude/mods/status-band").is_dir()
+        }
+
+        /// An Install that declares a mod row is `grim add`'s TUI form: it records
+        /// the mod's consent, writes the mod, and says so.
+        #[tokio::test]
+        async fn a_declaring_tui_install_consents_to_a_mod_and_writes_it() {
+            let (_ws, _home, ctx) = hook_ctx(MODS_ON, registry_with_mod().await);
+
+            let summary = perform(
+                &ctx,
+                &mod_row(ArtifactState::NotInstalled),
+                None,
+                BatchOp::Install,
+                &SilentProgress,
+                false,
+            )
+            .await
+            .expect("mod install succeeds");
+
+            assert_eq!(consented(&ctx), names(&["status-band"]), "{summary:?}");
+            assert!(mod_written(&ctx), "{summary:?}");
+            assert_eq!(summary.hooks.lead(), "mod 'status-band' consented; ", "{summary:?}");
+        }
+
+        fn v1_vendors() -> std::collections::BTreeMap<String, crate::config::declaration::VendorOptions> {
+            std::collections::BTreeMap::from([(
+                "opencode".to_string(),
+                crate::config::declaration::VendorOptions {
+                    plugin_api: Some("v1".to_string()),
+                    ..Default::default()
+                },
+            )])
+        }
+
+        /// With `plugin_api` unset a two-client mod reaches both clients and the
+        /// install raises no `Mods` notice.
+        #[tokio::test]
+        async fn a_tui_install_of_a_two_client_mod_writes_both_clients_with_the_key_unset() {
+            let (_ws, _home, mut ctx) = hook_ctx(MODS_ON, registry_with_mod().await);
+            ctx.clients_default = vec!["claude".to_string(), "opencode".to_string()];
+            let mut state = TuiState::new();
+            state.set_rows(vec![mod_row(ArtifactState::NotInstalled)]);
+
+            run_batch(&ctx, &mut state, &[0], BatchOp::Install).await;
+
+            assert!(mod_written(&ctx), "{}", state.status_line);
+            assert!(ctx.workspace.join(".opencode/plugins/status-band").exists());
+            assert!(
+                !state.status_line.contains("not installed for opencode"),
+                "{:?}",
+                state.status_line
+            );
+            assert!(state.settings_result.is_none(), "no Mods notice");
+        }
+
+        /// A mod that serves OpenCode, installed under `plugin_api = "v1"`, reaches
+        /// Claude only. The status line leads with why, on the first install and on a
+        /// repeat that changes nothing, and stops once the key is removed.
+        #[tokio::test]
+        async fn a_tui_install_of_a_two_client_mod_names_the_v1_opt_out() {
+            let clause = format!("{OPENCODE_CLAUSE}; ");
+            let clause = clause.as_str();
+            let config = format!("{MODS_ON}\n[options.vendors.opencode]\nplugin_api = \"v1\"\n");
+            let (_ws, _home, mut ctx) = hook_ctx(&config, registry_with_mod().await);
+            ctx.vendors = v1_vendors();
+            ctx.clients_default = vec!["claude".to_string(), "opencode".to_string()];
+            let mut state = TuiState::new();
+            state.set_rows(vec![mod_row(ArtifactState::NotInstalled)]);
+
+            run_batch(&ctx, &mut state, &[0], BatchOp::Install).await;
+
+            assert!(mod_written(&ctx), "{}", state.status_line);
+            assert!(
+                state.status_line.starts_with(clause),
+                "first install: {:?}",
+                state.status_line
+            );
+            assert_eq!(state.mode, Mode::SettingsResult, "{}", state.status_line);
+            let panel = state.settings_result.as_ref().expect("the full clause opens a notice");
+            assert_eq!(panel.title, "Mods");
+            assert!(
+                panel.detail.contains(clause.trim_end_matches("; ")),
+                "the whole clause, not the cut status: {:?}",
+                panel.detail
+            );
+
+            let again = perform(
+                &ctx,
+                &mod_row(ArtifactState::Installed),
+                None,
+                BatchOp::Install,
+                &SilentProgress,
+                false,
+            )
+            .await
+            .expect("a repeat succeeds");
+            assert!(
+                again.hooks.lead().starts_with(clause),
+                "unchanged repeat: {:?}",
+                again.hooks.lead()
+            );
+
+            std::fs::write(ctx.workspace.join("grimoire.toml"), MODS_ON).unwrap();
+            ctx.vendors.clear();
+            let declared = perform(
+                &ctx,
+                &mod_row(ArtifactState::Installed),
+                None,
+                BatchOp::Install,
+                &SilentProgress,
+                false,
+            )
+            .await
+            .expect("a run without the key succeeds");
+            assert!(
+                !declared.hooks.lead().contains("not installed for opencode"),
+                "{:?}",
+                declared.hooks.lead()
+            );
+        }
+
+        /// A mod written for Claude reads `pending` once the scope also names a
+        /// client it serves, so `i` runs the install instead of answering
+        /// `already installed`; the install writes OpenCode. Under `plugin_api =
+        /// "v1"` the row stays `installed` and the install names the opt-out.
+        #[tokio::test]
+        async fn a_mod_with_an_unwritten_served_client_reads_pending_and_install_writes_it() {
+            let clause =
+                "mod 'status-band' not installed for opencode: this scope sets options.vendors.opencode.plugin_api";
+            let (_ws, _home, mut ctx) = hook_ctx(MODS_ON, registry_with_mod().await);
+            let mut state = TuiState::new();
+            state.set_rows(vec![mod_row(ArtifactState::NotInstalled)]);
+            run_batch(&ctx, &mut state, &[0], BatchOp::Install).await;
+            assert!(mod_written(&ctx), "{}", state.status_line);
+            recompute_states(&ctx, &mut state);
+            assert_eq!(state.rows[0].state, ArtifactState::Installed, "claude only");
+
+            let config = ctx.workspace.join("grimoire.toml");
+            let declared = std::fs::read_to_string(&config).unwrap();
+            let two = format!("{declared}\n[options]\nclients = [\"claude\", \"opencode\"]\n");
+            std::fs::write(&config, &two).unwrap();
+            ctx.clients_default = vec!["claude".to_string(), "opencode".to_string()];
+            recompute_states(&ctx, &mut state);
+            assert_eq!(state.rows[0].state, ArtifactState::Pending, "plugin_api unset");
+
+            std::fs::write(
+                &config,
+                format!("{two}\n[options.vendors.opencode]\nplugin_api = \"v1\"\n"),
+            )
+            .unwrap();
+            ctx.vendors = v1_vendors();
+            recompute_states(&ctx, &mut state);
+            assert_eq!(state.rows[0].state, ArtifactState::Installed, "plugin_api v1 opts out");
+            let row = state.rows[0].clone();
+            let led = perform(&ctx, &row, None, BatchOp::Install, &SilentProgress, false)
+                .await
+                .expect("the opted-out install runs");
+            assert!(led.hooks.lead().starts_with(clause), "{:?}", led.hooks.lead());
+            assert!(!ctx.workspace.join(".opencode/plugins/status-band").exists());
+
+            std::fs::write(&config, &two).unwrap();
+            ctx.vendors.clear();
+            recompute_states(&ctx, &mut state);
+            assert_eq!(state.rows[0].state, ArtifactState::Pending, "key removed");
+            perform(&ctx, &row, None, BatchOp::Install, &SilentProgress, false)
+                .await
+                .expect("the pending install runs");
+            assert!(ctx.workspace.join(".opencode/plugins/status-band").exists());
+            recompute_states(&ctx, &mut state);
+            assert_eq!(state.rows[0].state, ArtifactState::Installed, "written");
+        }
+
+        /// With the mods flag off nothing is recorded or written, and the status
+        /// line names the flag instead of claiming `installed (1 ok)`.
+        #[tokio::test]
+        async fn a_tui_install_of_a_mod_with_the_flag_off_names_the_flag() {
+            let (_ws, _home, ctx) = hook_ctx("[skills]\n", registry_with_mod().await);
+            let mut state = TuiState::new();
+            state.set_rows(vec![mod_row(ArtifactState::NotInstalled)]);
+
+            run_batch(&ctx, &mut state, &[0], BatchOp::Install).await;
+
+            assert_eq!(consented(&ctx), names(&[]));
+            assert!(!mod_written(&ctx));
+            let want = format!("mod 'status-band' not written: {MOD_REASON_OFF}");
+            assert_eq!(state.status_line, want);
+            assert!(
+                !state.status_line.contains("installed (1 ok)"),
+                "{:?}",
+                state.status_line
+            );
+            let panel = state
+                .settings_result
+                .as_ref()
+                .expect("the flag-off reason opens a notice");
+            assert_eq!(panel.title, "Mods");
+            assert!(panel.detail.contains(&want), "{:?}", panel.detail);
+        }
+
+        const OPENCODE_CLAUSE: &str = "mod 'status-band' not installed for opencode: this scope sets \
+             options.vendors.opencode.plugin_api = \"v1\", and a mod needs the OpenCode V2 plugin API; remove \
+             the key if this OpenCode runs V2";
+
+        fn mod_note(declined: &[&str], gated: &[((ArtifactKind, &str), &str)]) -> HookNote {
+            HookNote {
+                consented: Vec::new(),
+                gated: gated
+                    .iter()
+                    .map(|((kind, name), why)| ((*kind, name.to_string()), Unarmed::Skipped(why.to_string())))
+                    .collect(),
+                declined: declined.iter().map(|c| c.to_string()).collect(),
+            }
+        }
+
+        /// The title row cuts the status line, so the notice carries every
+        /// declined clause and every unwritten mod, and never a hook.
+        #[test]
+        fn mod_lines_list_declined_clauses_and_gated_mods_but_no_hook() {
+            let note = mod_note(
+                &[OPENCODE_CLAUSE],
+                &[
+                    ((ArtifactKind::Mod, "status-band"), MOD_REASON_OFF),
+                    ((ArtifactKind::Hook, "guard"), "hooks are gated"),
+                ],
+            );
+
+            assert_eq!(
+                note.mod_lines(),
+                vec![
+                    OPENCODE_CLAUSE.to_string(),
+                    format!("mod 'status-band' not written: {MOD_REASON_OFF}"),
+                ]
+            );
+            assert!(HookNote::default().mod_lines().is_empty());
+        }
+
+        #[test]
+        fn show_mod_notes_opens_a_mods_panel_with_the_whole_clause() {
+            let mut state = TuiState::new();
+
+            show_mod_notes(&mut state, &mod_note(&[OPENCODE_CLAUSE], &[]));
+
+            assert_eq!(state.mode, Mode::SettingsResult);
+            let panel = state.settings_result.as_ref().expect("the notice opens");
+            assert_eq!(panel.title, "Mods");
+            assert!(panel.detail.contains(OPENCODE_CLAUSE), "{:?}", panel.detail);
+            assert!(panel.detail.contains("plugin_api = \"v1\""), "{:?}", panel.detail);
+        }
+
+        #[test]
+        fn show_mod_notes_appends_to_an_open_panel_once() {
+            let mut state = TuiState::new();
+            state.open_settings_result("These settings changed.", "added claude /model");
+            let note = mod_note(&[OPENCODE_CLAUSE], &[]);
+
+            show_mod_notes(&mut state, &note);
+            show_mod_notes(&mut state, &note);
+
+            let panel = state.settings_result.as_ref().unwrap();
+            assert_eq!(panel.title, "Settings");
+            assert_eq!(
+                panel.detail,
+                format!("added claude /model\n{OPENCODE_CLAUSE}"),
+                "one copy, after the settings list"
+            );
+        }
+
+        #[test]
+        fn show_mod_notes_appends_to_an_open_confirm_dialog() {
+            let mut state = TuiState::new();
+            state.open_confirm_force(
+                0,
+                BatchOp::Install,
+                "localhost:5050/acme/x",
+                "refused",
+                PinChanges::default(),
+                BTreeSet::new(),
+            );
+            let note = mod_note(&[OPENCODE_CLAUSE], &[]);
+
+            show_mod_notes(&mut state, &note);
+            show_mod_notes(&mut state, &note);
+
+            let dialog = state.confirm.as_ref().expect("the dialog stays open");
+            assert_eq!(dialog.detail, format!("refused\n{OPENCODE_CLAUSE}"));
+            assert!(state.settings_result.is_none());
+        }
+
+        #[test]
+        fn show_mod_notes_does_nothing_for_an_empty_note() {
+            let mut state = TuiState::new();
+
+            show_mod_notes(&mut state, &HookNote::default());
+            show_mod_notes(
+                &mut state,
+                &mod_note(&[], &[((ArtifactKind::Hook, "guard"), "hooks are gated")]),
+            );
+
+            assert!(state.settings_result.is_none());
+            assert_ne!(state.mode, Mode::SettingsResult);
+        }
+
+        /// A repair Install and an Update declare nothing: they record no consent,
+        /// write no mod, and name the mod as not written with the installer's reason.
+        #[tokio::test]
+        async fn a_non_declaring_tui_action_on_a_mod_records_nothing_and_names_it() {
+            for op in [BatchOp::Install, BatchOp::Update] {
+                let (_ws, _home, ctx) = hook_ctx(MOD_DECLARED, registry_with_mod().await);
+
+                let summary = perform(
+                    &ctx,
+                    &mod_row(ArtifactState::Installed),
+                    None,
+                    op,
+                    &SilentProgress,
+                    false,
+                )
+                .await
+                .expect("the action succeeds");
+
+                assert_eq!(consented(&ctx), names(&[]), "{op:?}: {summary:?}");
+                assert!(!mod_written(&ctx), "{op:?}: {summary:?}");
+                assert!(
+                    summary.hooks.lead().starts_with("mod 'status-band' not written: "),
+                    "{op:?}: {summary:?}"
+                );
+            }
+        }
+
+        /// An Install that declares a bundle consents to the mod the bundle newly
+        /// brings, as it does for a hook, and writes it.
+        #[tokio::test]
+        async fn a_tui_install_bringing_a_mod_through_a_bundle_consents_and_writes_it() {
+            let (_ws, _home, ctx) = hook_ctx(MODS_ON, registry_with_mod().await);
+
+            let summary = perform(
+                &ctx,
+                &bundle_row("mod-pack", ArtifactState::NotInstalled),
+                None,
+                BatchOp::Install,
+                &SilentProgress,
+                false,
+            )
+            .await
+            .expect("bundle install succeeds");
+
+            assert_eq!(consented(&ctx), names(&["status-band"]), "{summary:?}");
+            assert!(mod_written(&ctx), "{summary:?}");
+            assert_eq!(summary.hooks.lead(), "mod 'status-band' consented; ", "{summary:?}");
+        }
+
         /// CWE-636: a failed install keeps the declaration, so it keeps the
         /// consent, and the status line says so beside the failure.
         #[tokio::test]
@@ -20291,6 +20971,7 @@ mod tests {
                 ArtifactKind::Skill,
                 "needs-g",
                 &mut SettingsLedger::default(),
+                &mut HookNote::default(),
             )
             .await;
 
@@ -20410,6 +21091,7 @@ mod tests {
                 source,
                 bundles: Vec::new(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }
         }
 
@@ -21319,6 +22001,7 @@ mod tests {
                 ArtifactKind::Settings,
                 "team",
                 &mut ledger,
+                &mut HookNote::default(),
             )
             .await;
             show_settings_ledger(&mut state, &ledger, BatchOp::Install);

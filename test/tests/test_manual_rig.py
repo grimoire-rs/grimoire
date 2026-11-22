@@ -99,6 +99,9 @@ def _catalog_artifacts() -> list[pytest.param]:
     # rig's bootstrap passes no `--kind` and neither does this.
     hooks = sorted(d for d in _RIG_CATALOG_DIR.glob("hooks/*") if (d / "hook.toml").is_file())
     params += [pytest.param(p, "hook", None, id=f"hook:{p.name}") for p in hooks]
+    # A mod is a directory holding `mod.toml`; like a hook, the kind is inferred.
+    mods = sorted(p.parent for p in _RIG_CATALOG_DIR.glob("mods/*/mod.toml"))
+    params += [pytest.param(p, "mod", None, id=f"mod:{p.name}") for p in mods]
     return params
 
 
@@ -108,6 +111,10 @@ def test_rig_catalog_is_not_empty() -> None:
         "expected at least one artifact per kind under test/manual/catalog"
     )
     kinds = {kind for _, kind, _ in (p.values for p in _catalog_artifacts())}
+    assert "mod" in kinds, (
+        "the rig's mod sample vanished from the parametrization — README § 15 "
+        "publishes it, so it would break with nothing failing"
+    )
     assert "hook" in kinds, (
         "the rig's hook examples vanished from the parametrization — the README's "
         "hook walkthrough publishes them, so it would break with nothing failing"

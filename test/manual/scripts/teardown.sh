@@ -26,7 +26,11 @@ rm -rf \
     "$MANUAL_DIR/project-deps/grimoire.lock" \
     "$MANUAL_DIR/project-settings/.claude" \
     "$MANUAL_DIR/project-settings/.grimoire" \
-    "$MANUAL_DIR/project-settings/grimoire.lock"
+    "$MANUAL_DIR/project-settings/grimoire.lock" \
+    "$MANUAL_DIR/project-mods/.claude" \
+    "$MANUAL_DIR/project-mods/.opencode" \
+    "$MANUAL_DIR/project-mods/.grimoire" \
+    "$MANUAL_DIR/project-mods/grimoire.lock"
 
 log "removing the redirected harness roots from the settings demo"
 rm -rf "$MANUAL_DIR/.settings-roots"

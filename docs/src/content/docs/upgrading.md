@@ -17,6 +17,54 @@ effect and called out as breaking where it appears. Three more are what grim
 0.16.0 packs for a [rule][ref-rule-support-dir] and an [agent][ref-agent-companions],
 and which [logo][ref-logo-svg] a package publishes.
 
+## Consent is asked again once per workspace {#consent-reask}
+
+The workspace consent record moved from `$GRIM_HOME/hooks/consent/` to
+`$GRIM_HOME/consent/`, one record for every gated kind. Its entries lose their
+kind prefix. A hook entry stays `<binding>@<registry>/<repository>`, and a
+settings entry loses its `settings:` prefix.
+
+**What you will see.** The first `grim install` in each workspace after the
+upgrade asks for consent again, because grim never reads the old record. With
+no terminal, hooks and settings read `gated` with the cause
+`workspace-not-consented`.
+
+A persistent machine that runs grim non-interactively loses the grant it held.
+Pass `--trust-workspace` on that run, or run `grim consent allow` once. A fresh
+CI environment held no stored record, so it is unaffected.
+
+On every write and every revoke, grim deletes the old record when its
+`workspace` field names the current workspace. A revoke therefore reaches an
+older grim too. The reverse does not hold: an older grim's `grim hook revoke`
+never removes the new record. Revoke with the grim that granted.
+
+## Mods need grim 0.17.0 {#upgrade-mods}
+
+The experimental [`mod` kind][mods] ships in grim 0.17.0 behind
+`[options.experimental] mods`. A project that declares no mod is unchanged,
+apart from `serves: null` on every `status`, `describe` and `search` item. An
+older grim fails closed on a mod project, as the
+[forward compatibility table][stability-forward-compat] lists.
+
+Two rules keep a mixed team working:
+
+- Add the `[options.vendors.opencode] plugin_api` key to a project
+  config freely. That config already exits `78` on an older grim, because of
+  the `mods` flag beside it.
+- Set `plugin_api` in the global config only once no older grim runs on the
+  machine. On grim 0.15.1 and 0.16.0, project commands ignore an unusable
+  global option and exit `0`, and 0.16.0 warns. Every `--global` command
+  exits `78`.
+
+Where `grimoire.toml` has no `[mods]` table, a mod is reached only through a
+`requires` edge or a stale row. There grim 0.15.1's `lock`, `update` and `add`
+drop every `[[mod]]` row with exit `0`. The mod's files stay and keep loading
+until a newer grim converges.
+
+A skill whose root carries a Claude plugin manifest directory is refused from
+this release. See [the skill note](#skill-plugin-manifest). Client-loaded code
+ships as a mod.
+
 ## Adding a client changes what autodetect targets {#autodetect}
 
 grim installs into every AI client it detects, unless you pin the set with
@@ -1380,6 +1428,14 @@ Two residuals stay until you act. The files remain on that machine until
 the skill `installed`, exits `0` and keeps its JSON as before. It adds one
 line on stderr that names the skill.
 
+**Reach.** The refusal also fires for an installed record whose output sits
+under a client outside `--client`, because every recorded output is checked. A
+dev install (`grim install ./path`) that carries the entry makes `grim install`
+and `grim update` exit `65` with the reason `skill-plugin-manifest`.
+`grim status` keeps exit `0` with its stderr line, and
+`grim uninstall skill <name>` succeeds. A dev install of a different directory
+is not refused by a stale dev record elsewhere.
+
 **Grims before 0.17.0.** They still build and install such a skill, and this
 change cannot reach them. Upgrade every machine and CI job that builds or
 installs skills. Run on a machine where `grim uninstall` removed the files, such
@@ -1789,6 +1845,8 @@ accepts a pipe. See [Non-regular files][json-error-document].
 [entry-readme]: ./publishing.md#description-entry-readme
 [agents-limitations]: ./agents.md#limitations
 [agent-locations]: ./agents.md#locations
+[mods]: ./mods.md
+[stability-forward-compat]: ./stability.md#limitations-forward-compat
 [changelog]: https://github.com/grimoire-rs/grimoire/blob/main/CHANGELOG.md
 [mcp-oauth]: ./mcp-servers.md#server-oauth
 [git-provenance]: ./publishing.md#git-provenance

@@ -500,6 +500,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 

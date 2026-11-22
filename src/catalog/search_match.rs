@@ -6,7 +6,7 @@
 //!
 //! A raw query string is parsed once into a [`SearchQuery`]: Unicode
 //! whitespace splits it into tokens, each lowercased. A bare *kind keyword*
-//! (`skill`, `rule`, `bundle`, `agent`, `mcp`, `hook` or `settings`, singular or
+//! (`skill`, `rule`, `bundle`, `agent`, `mcp`, `hook`, `settings` or `mod`, singular or
 //! plural) is a kind **filter** (never a literal text term); every other token is a text
 //! term. An explicit kind list (`parse_with_kinds`) replaces keyword extraction, so every
 //! token is then text. Matching is an AND across all of them:
@@ -408,7 +408,7 @@ fn without_registry_host(repo: &str) -> &str {
 
 /// Map a lowercased token to a kind filter, accepting both singular and
 /// plural spellings of every kind (`skill`, `rule`, `bundle`, `agent`, `mcp`,
-/// `hook`, `settings`).
+/// `hook`, `settings`, `mod`).
 /// `None` for any other token (it is a text term).
 fn kind_keyword(token: &str) -> Option<ArtifactKind> {
     // One trailing `s` comes off both sides: `settings` is plural on the wire,

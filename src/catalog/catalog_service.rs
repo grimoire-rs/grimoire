@@ -140,6 +140,8 @@ pub struct CatalogRow {
     /// `None` means *unknown* — most registries publish no per-artifact
     /// counter — and never zero.
     pub downloads: Option<DownloadSummary>,
+    /// The harnesses a mod serves; `None` for every other kind.
+    pub serves: Option<Vec<String>>,
     /// How this repository relates to the current scope.
     pub badge: StatusBadge,
 }
@@ -172,6 +174,7 @@ impl CatalogRow {
             version: e.version.clone(),
             rating: e.rating.clone(),
             downloads: e.downloads.clone(),
+            serves: e.serves.clone(),
             badge: badge_of(e, badges),
         }
     }

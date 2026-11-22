@@ -473,7 +473,7 @@ rust-style = "ghcr.io/acme/rust-style:2"
 
 ### Keywords are a string {#metadata-keywords}
 
-`keywords` is always a single comma-separated string, in every kind, because
+`keywords` is always a single comma-separated string, in every kind that has the field (every kind but hooks), because
 an OCI annotation value is itself a string. A YAML or TOML list is **not**
 accepted. Write `keywords: rust,lint`, not `keywords: [rust, lint]`.
 
@@ -685,6 +685,9 @@ grim build ./settings/team-defaults.toml --kind settings
 A [settings][settings-publish] document needs `--kind settings`. The kind is
 experimental, new in grim 0.16.0, and [unstable][stability-unstable] until
 1.0.
+
+A [mod][mods] directory is inferred from its `mod.toml`, and `--kind mod` is
+accepted. A symlink in a mod directory is refused at build.
 
 ## Release
 
@@ -1073,7 +1076,7 @@ releases each entry in a fixed order.
 
 ### The publish.toml format {#batch-publish-manifest}
 
-A manifest has one required top-level field, `registry`, and up to seven
+A manifest has one required top-level field, `registry`, and up to eight
 kind tables. Each table entry is a sub-table keyed by name with a
 `version` field.
 
@@ -1100,6 +1103,9 @@ version = "0.1.0"
 version = "1.0.0"
 
 [settings.team-defaults]           # experimental: settings/team-defaults.toml
+version = "0.1.0"
+
+[mods.status-band]                 # experimental: mods/status-band/
 version = "0.1.0"
 
 [bundles.grim-essentials]
@@ -1484,6 +1490,7 @@ kind, relative to the manifest's directory:
 | mcp | `mcp/{name}.toml` |
 | hook | `hooks/{name}/` (experimental — see [Hooks](./hooks.md)) |
 | settings | `settings/{name}.toml` (experimental, see [Settings][settings-publish]) |
+| mod | `mods/{name}/` (experimental, see [Mods][mods]) |
 | bundle | `bundles/{name}.toml` |
 
 The `path` field overrides this convention for entries whose source lives
@@ -1491,9 +1498,10 @@ elsewhere.
 
 ### Kind ordering {#batch-publish-ordering}
 
-Entries publish in a fixed kind order: skills, then rules, then agents,
-then [MCP servers](./mcp-servers.md), then [hooks](./hooks.md) (experimental),
-then [settings][settings-publish] (experimental), then bundles. Ordering is
+Entries publish in a fixed kind order. Skills come first, then rules, agents,
+[MCP servers](./mcp-servers.md), [hooks](./hooks.md) (experimental),
+[settings][settings-publish] (experimental) and [mods][mods] (experimental).
+Bundles come last. Ordering is
 alphabetical within each kind. An entry that
 [requires](#requires-publish-order) another entry of the same manifest moves
 after it, whatever its kind. Hooks were
@@ -1711,6 +1719,7 @@ example with `docker login` against
 [global-options]: ./commands.md#global-options
 [upgrading-compression]: ./upgrading.md#compressed-layers-need-new-grim
 [settings-publish]: ./settings.md#publish
+[mods]: ./mods.md
 [stability-unstable]: ./stability.md#unstable
 [compression-section]: #compression
 

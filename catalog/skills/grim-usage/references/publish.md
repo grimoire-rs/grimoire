@@ -1,7 +1,7 @@
 # Publishing Workflow
 
 You loaded this file because you are turning a local skill, rule, agent,
-MCP server, hook, settings document, or bundle into a published OCI
+MCP server, hook, settings document, mod, or bundle into a published OCI
 artifact — the build → dry-run → release loop, version tagging, and
 registry authentication.
 (Hook-specific authoring rules live in the `grim-authoring` skill's
@@ -179,7 +179,7 @@ reads a `publish.toml` manifest that declares every package with a `registry`
 and per-entry `version`, validates the whole set before any push, then
 releases each entry in a fixed kind order: skills first, then rules, then
 agents, then MCP servers, then hooks, then settings (experimental), then
-bundles — alphabetical within
+mods (experimental), then bundles — alphabetical within
 each kind. Bundle members always land before the bundles that reference
 them: the kind sequence is fixed so that a bundle's `mcp` and `hooks`
 members are pushed before the bundle that references them.
@@ -209,8 +209,8 @@ announce = false    # publish, but write no index pointer under --announce
 Each kind's table maps to a conventional source path under the manifest
 directory: `skills/<name>/`, `rules/<name>.md`, `agents/<name>.md`,
 `mcp/<name>.toml`, `hooks/<name>/`, `settings/<name>.toml`,
-`bundles/<name>.toml`. Override any entry's source with its own `path`. The
-`[hooks]` and `[settings]` tables are **additive** — a `publish.toml`
+`mods/<name>/` (a directory), `bundles/<name>.toml`. Override any entry's source with its own `path`. The
+`[hooks]`, `[settings]` and `[mods]` tables are **additive** — a `publish.toml`
 written before them parses unchanged.
 
 Key behaviors — confirmed invariants, not subject to minor-release drift:
@@ -406,10 +406,10 @@ falls to manual maintainer review. Full spec: [The Package Index][package-index]
 
 ## Editor schema support {#editor-schema}
 
-`grim schema --kind config|publish|lock|mcp|hook|settings` prints a JSON
+`grim schema --kind config|publish|lock|mcp|hook|settings|mod` prints a JSON
 Schema for `grimoire.toml`, `publish.toml`, `grimoire.lock`, the MCP server
 descriptor (`mcp/<name>.toml`), the hook manifest (`hook.toml`), or a
-settings document (`settings/<name>.toml`) —
+settings document (`settings/<name>.toml`), or the mod descriptor (`mod.toml`) —
 generated from grim's own parser, so it
 accepts exactly what grim accepts. The same schemas are published to the docs site; adding a
 `#:schema` directive on the first line of a TOML file gives a supporting editor
@@ -420,7 +420,7 @@ for the hosted URLs.
 ## Bundles
 
 A bundle is a small `.toml` whose `[skills]` / `[rules]` / `[agents]` / `[mcp]` /
-`[hooks]` / `[settings]` / `[bundles]` tables list members by reference — the
+`[hooks]` / `[settings]` / `[mods]` / `[bundles]` tables list members by reference — the
 same shape as a `grimoire.toml`. A hook or settings member is declared by the
 bundle, never armed or applied by it; consent is recorded per member. Build
 and release it like any artifact:

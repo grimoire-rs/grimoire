@@ -340,7 +340,7 @@ MAIN_UPDATE_ROW_KEYS = {
 }
 MAIN_ADD_KEYS = {"kind", "name", "pinned", "status"}
 # Fields the dependency release added to every report, additively.
-DEPENDENCY_STATUS_KEYS = {"direct", "required_by", "moved_nested_bundles"}
+DEPENDENCY_STATUS_KEYS = {"direct", "required_by", "moved_nested_bundles", "serves"}
 DEPENDENCY_ADD_KEYS = {"dropped", "moved", "pulled_in"}
 # The settings kind's change list, always present and `[]` for every other kind.
 SETTINGS_ADD_KEYS = {"settings_changes"}

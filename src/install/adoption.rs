@@ -384,7 +384,7 @@ fn unknown_client_drift(node: &Node<'_>, record: Option<&InstallRecord>) -> Vec<
         .collect()
 }
 
-/// Whether a node of `kind` is ever proven: hooks, settings and bundles never are.
+/// Whether a node of `kind` is ever proven: hooks, settings, bundles and mods never are.
 fn provable(kind: ArtifactKind) -> bool {
     matches!(
         kind,
@@ -1402,6 +1402,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: Vec::new(),
+            mods: Vec::new(),
         };
         for artifact in artifacts {
             match artifact.kind {
@@ -2109,6 +2110,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         };
         assert_eq!(
             fx.prove(&evidence, Serve::Never).await,

@@ -3613,6 +3613,7 @@ fn undeclare(set: &mut DesiredSet, (kind, name): &NodeKey) {
         Mcp => set.mcp.remove(name),
         Hook => set.hooks.remove(name),
         ArtifactKind::Settings => set.settings.remove(name),
+        ArtifactKind::Mod => set.mods.remove(name),
     };
     set.invalidate_declaration_hash_cache();
 }
@@ -3627,6 +3628,7 @@ fn declare(set: &mut DesiredSet, (kind, name): &NodeKey, source: DeclaredSource)
         Mcp => set.mcp.insert(name, source),
         Hook => set.hooks.insert(name, source),
         ArtifactKind::Settings => set.settings.insert(name, source),
+        ArtifactKind::Mod => set.mods.insert(name, source),
     };
     set.invalidate_declaration_hash_cache();
 }

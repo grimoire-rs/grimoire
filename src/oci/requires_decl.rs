@@ -28,8 +28,10 @@ pub enum RequiresDeclError {
     #[error("requires key '{key}' must be grim.requires.<table>.<name>")]
     MalformedKey { key: String },
 
-    /// The table is not one of the seven requires tables.
-    #[error("requires table '{table}' in '{key}' is not one of skills, rules, agents, mcp, hooks, bundles, settings")]
+    /// The table is not one of the eight requires tables.
+    #[error(
+        "requires table '{table}' in '{key}' is not one of skills, rules, agents, mcp, hooks, bundles, settings, mods"
+    )]
     UnknownTable { key: String, table: String },
 
     /// The binding name fails [`SkillName::parse`].
@@ -303,6 +305,17 @@ mod tests {
 
         let err = from_metadata(&meta(&[("grim.requires.widgets.a", "./a:1")])).unwrap_err();
         assert!(err.to_string().contains("settings"), "{err}");
+    }
+
+    #[test]
+    fn mods_is_a_requires_table_and_the_refusal_names_it() {
+        let got = from_metadata(&meta(&[("grim.requires.mods.band", "./band:1")])).unwrap();
+        assert_eq!((got[0].kind, got[0].name.as_str()), (ArtifactKind::Mod, "band"));
+        let got = from_toml_tables(&toml_of("[requires.mods]\nband = \"./band:1\"\n")).unwrap();
+        assert_eq!(got[0].kind, ArtifactKind::Mod);
+
+        let err = from_metadata(&meta(&[("grim.requires.widgets.a", "./a:1")])).unwrap_err();
+        assert!(err.to_string().contains("mods"), "{err}");
     }
 
     #[test]

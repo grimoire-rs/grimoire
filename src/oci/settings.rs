@@ -23,6 +23,9 @@ pub const SETTINGS_LAYER_MEDIA_TYPE: &str = "application/vnd.grimoire.settings.v
 pub const SETTINGS_LAYER_SIZE_LIMIT: u64 = 64 * 1024;
 
 /// The rows whose values name a marketplace, so a URL there can carry a credential.
+/// The marketplace-name prefix the mod kind owns in Claude's settings.
+const MOD_MARKETPLACE_PREFIX: &str = "grim-mods";
+
 const MARKETPLACE_ROWS: &[&str] = &["/extraKnownMarketplaces/<name>", "/marketplaces/<name>"];
 
 /// What a `codex.rules` entry may decide.
@@ -595,7 +598,25 @@ impl VendorCheck<'_> {
         }
         self.typed(value, row.ty, pointer)?;
         if MARKETPLACE_ROWS.contains(&row.pointer) {
+            self.refuse_mod_namespace(pointer)?;
             return self.marketplace(value, pointer);
+        }
+        Ok(())
+    }
+
+    /// Claude's marketplace names starting with `grim-mods` belong to the mod
+    /// kind, which registers its own marketplace under one; a settings package
+    /// holding the key would fight it for the entry.
+    fn refuse_mod_namespace(&self, pointer: &str) -> Result<(), SettingsError> {
+        let name = pointer.rsplit('/').next().unwrap_or_default();
+        if self.vendor == ClientTarget::Claude.as_str() && name.starts_with(MOD_MARKETPLACE_PREFIX) {
+            return Err(SettingsError::Malformed {
+                detail: format!(
+                    "{} marketplace name '{}' starts with {MOD_MARKETPLACE_PREFIX}, which the mod kind reserves for its own marketplace; choose another name",
+                    self.vendor,
+                    escape_controls(name)
+                ),
+            });
         }
         Ok(())
     }
@@ -1983,6 +2004,22 @@ autoupdate = "notify"
         accepted(
             json!({"claude": {"extraKnownMarketplaces": {"m": {"source": {"source": "github", "repo": "acme/plugins", "ref": "main"}}}}}),
         );
+    }
+
+    #[test]
+    fn a_claude_marketplace_named_in_the_mod_namespace_is_refused_in_both_modes() {
+        let source = json!({"source": {"source": "github", "repo": "acme/plugins"}});
+        // Positive control: another name passes both gates.
+        accepted(json!({"claude": {"extraKnownMarketplaces": {"team-plugins": source.clone()}}}));
+        for name in ["grim-mods", "grim-mods-0123456789ab"] {
+            let (author, consume) = refusals(json!({"claude": {"extraKnownMarketplaces": {name: source.clone()}}}));
+            for refusal in [author, consume] {
+                let SettingsError::Malformed { detail } = &refusal else {
+                    panic!("{refusal:?}");
+                };
+                assert!(detail.contains("mod kind"), "{detail}");
+            }
+        }
     }
 
     #[test]

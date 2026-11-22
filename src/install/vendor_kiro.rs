@@ -145,6 +145,8 @@ impl Vendor for KiroVendor {
         // same `.kiro/agents/` dir as the IDE format (bug #8040).
         match kind {
             ArtifactKind::Agent => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }
