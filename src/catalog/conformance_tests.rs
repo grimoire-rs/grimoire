@@ -438,3 +438,70 @@ async fn a_clamped_wrong_shape_record_is_kept_with_empty_keywords() {
         }
     }
 }
+
+fn raw_element(reference: &str) -> serde_json::Value {
+    flat_elements()
+        .into_iter()
+        .find(|e| e["ref"] == reference)
+        .unwrap_or_else(|| panic!("the tree lacks {reference}"))
+}
+
+#[tokio::test]
+async fn the_mod_row_reads_kind_mod_and_its_serves_in_both_layouts() {
+    let (flat, anchored) = both_layouts().await;
+    for (layout, entries) in [("flat", &flat), ("anchored", &anchored)] {
+        let entry = &entries["ghcr.io/acme/mod-sample"];
+        assert_eq!(entry.kind.as_deref(), Some("mod"), "{layout} layout");
+        assert_eq!(
+            entry.serves.as_deref(),
+            Some(&["claude".to_string(), "opencode".to_string()][..]),
+            "{layout} layout"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_settings_row_reads_kind_settings_without_serves_in_both_layouts() {
+    let (flat, anchored) = both_layouts().await;
+    for (layout, entries) in [("flat", &flat), ("anchored", &anchored)] {
+        let entry = &entries["ghcr.io/acme/settings-sample"];
+        assert_eq!(entry.kind.as_deref(), Some("settings"), "{layout} layout");
+        assert_eq!(entry.serves, None, "{layout} layout");
+    }
+}
+
+#[tokio::test]
+async fn a_record_with_both_successor_spellings_is_kept_in_both_layouts() {
+    let reference = "ghcr.io/acme/successor-both-spellings";
+    let raw = raw_element(reference);
+    assert!(
+        raw.get("replaced_by").is_some() && raw.get("replacedBy").is_some(),
+        "the tree carries both spellings"
+    );
+    let (flat, anchored) = both_layouts().await;
+    for (layout, entries) in [("flat", &flat), ("anchored", &anchored)] {
+        assert_eq!(
+            entries[reference].replaced_by.as_deref(),
+            Some("ghcr.io/acme/successor"),
+            "{layout} layout"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_enrich_only_successor_reads_replaced_by_in_both_layouts() {
+    let reference = "ghcr.io/acme/successor-enrich-only";
+    let raw = raw_element(reference);
+    assert!(
+        raw.get("replacedBy").is_some() && raw.get("replaced_by").is_none(),
+        "the tree carries only the camel spelling"
+    );
+    let (flat, anchored) = both_layouts().await;
+    for (layout, entries) in [("flat", &flat), ("anchored", &anchored)] {
+        assert_eq!(
+            entries[reference].replaced_by.as_deref(),
+            Some("ghcr.io/acme/successor"),
+            "{layout} layout"
+        );
+    }
+}

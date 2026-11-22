@@ -1,0 +1,1 @@
+{"bucket":"f2","entries":{"ghcr.io/acme/settings-sample":{"data":{},"failing_since":null,"failures":0,"files":{"readme.md":{"sha256":"92614c565a0e6eafe442303425c12706222beae830a71a02d640d246b4a944ec","size":38}},"input":"f2f0ff92569e9fb2072a8682905321864d75347fcac120671deb61dfcb1ac4e6","last_failure_at":null}},"plane":"enrich","schema":1}

@@ -168,18 +168,6 @@
   "namespace": "github.com/acme"
  },
  {
-  "schema": 1,
-  "name": "agent-254",
-  "kind": "agent",
-  "ref": "ghcr.io/acme/agent-254",
-  "description": "The agent-254 agent.",
-  "owner": {
-   "id": 1001,
-   "github": "acme"
-  },
-  "namespace": "github.com/acme"
- },
- {
   "version": "1.0.0",
   "schema": 1,
   "name": "bucket-305",
@@ -1611,6 +1599,23 @@
   "namespace": "github.com/acme"
  },
  {
+  "summary": "A sample mod for the conformance tree.",
+  "serves": [
+   "claude",
+   "opencode"
+  ],
+  "schema": 1,
+  "name": "mod-sample",
+  "kind": "mod",
+  "ref": "ghcr.io/acme/mod-sample",
+  "description": "The mod-sample mod.",
+  "owner": {
+   "id": 1001,
+   "github": "acme"
+  },
+  "namespace": "github.com/acme"
+ },
+ {
   "created": "2026-02-01T00:00:00Z",
   "keywords": [
    "rule",
@@ -1919,21 +1924,12 @@
   "namespace": "github.com/acme"
  },
  {
-  "created": "2026-02-01T00:00:00Z",
-  "keywords": [
-   "rule",
-   "group-5"
-  ],
-  "license": "Apache-2.0",
-  "summary": "A sample rule for the conformance tree.",
-  "title": "Sample rule 253",
-  "updated": "2026-09-30T00:00:00Z",
-  "version": "1.1.1",
+  "summary": "A sample settings package for the conformance tree.",
   "schema": 1,
-  "name": "rule-253",
-  "kind": "rule",
-  "ref": "ghcr.io/acme/rule-253",
-  "description": "The rule-253 rule.",
+  "name": "settings-sample",
+  "kind": "settings",
+  "ref": "ghcr.io/acme/settings-sample",
+  "description": "The settings-sample settings.",
   "owner": {
    "id": 1001,
    "github": "acme"
@@ -2249,28 +2245,6 @@
   "namespace": "github.com/acme"
  },
  {
-  "created": "2026-01-01T00:00:00Z",
-  "keywords": [
-   "skill",
-   "group-4"
-  ],
-  "license": "Apache-2.0",
-  "summary": "A sample skill for the conformance tree.",
-  "title": "Sample skill 252",
-  "updated": "2026-09-30T00:00:00Z",
-  "version": "1.0.0",
-  "schema": 1,
-  "name": "skill-252",
-  "kind": "skill",
-  "ref": "ghcr.io/acme/skill-252",
-  "description": "The skill-252 skill.",
-  "owner": {
-   "id": 1001,
-   "github": "acme"
-  },
-  "namespace": "github.com/acme"
- },
- {
   "title": "ab",
   "schema": 1,
   "name": "strip-bidi-isolate",
@@ -2420,6 +2394,35 @@
   "kind": "skill",
   "ref": "ghcr.io/acme/strip-u2060-2064",
   "description": "ab",
+  "owner": {
+   "id": 1001,
+   "github": "acme"
+  },
+  "namespace": "github.com/acme"
+ },
+ {
+  "deprecated": "use the successor",
+  "replaced_by": "ghcr.io/acme/successor",
+  "replacedBy": "ghcr.io/acme/successor",
+  "schema": 1,
+  "name": "successor-both-spellings",
+  "kind": "skill",
+  "ref": "ghcr.io/acme/successor-both-spellings",
+  "description": "The successor-both-spellings skill.",
+  "owner": {
+   "id": 1001,
+   "github": "acme"
+  },
+  "namespace": "github.com/acme"
+ },
+ {
+  "deprecated": "use the successor",
+  "replacedBy": "ghcr.io/acme/successor",
+  "schema": 1,
+  "name": "successor-enrich-only",
+  "kind": "skill",
+  "ref": "ghcr.io/acme/successor-enrich-only",
+  "description": "The successor-enrich-only skill.",
   "owner": {
    "id": 1001,
    "github": "acme"
@@ -4633,18 +4636,6 @@
   "kind": "hook",
   "ref": "ghcr.io/initech/hook-233",
   "description": "The hook-233 hook.",
-  "owner": {
-   "id": 1003,
-   "login": "initech"
-  },
-  "namespace": "gitlab.com/initech"
- },
- {
-  "schema": 1,
-  "name": "hook-251",
-  "kind": "hook",
-  "ref": "ghcr.io/initech/hook-251",
-  "description": "The hook-251 hook.",
   "owner": {
    "id": 1003,
    "login": "initech"
