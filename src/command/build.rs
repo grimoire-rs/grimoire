@@ -19,7 +19,8 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::ArtifactKind;
 use crate::oci::annotations::{
-    annotations_for_agent, annotations_for_hook, annotations_for_rule, annotations_for_settings, annotations_for_skill,
+    annotations_for_agent, annotations_for_hook, annotations_for_mod, annotations_for_rule, annotations_for_settings,
+    annotations_for_skill,
 };
 use crate::oci::bundle::BundleMember;
 use crate::oci::git_provenance::{GitMode, GitProvenance};
@@ -29,6 +30,9 @@ use crate::skill::{
     SkillName, pack_agent_file, pack_rule_file, pack_skill_dir, validate_agent_file, validate_rule_file,
     validate_skill_dir,
 };
+
+/// The descriptor a mod directory carries; its presence makes the kind `mod`.
+const MOD_MANIFEST_FILE: &str = "mod.toml";
 
 /// `grim build` arguments.
 #[derive(Debug, Args)]
@@ -45,7 +49,7 @@ pub struct BuildArgs {
     // hook` reachable at all — before this, `Hook` could only arrive from a
     // registry-controlled string, which is why every pre-hook seam could treat
     // it as unreachable.
-    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings", "mod"])]
     pub kind: Option<String>,
 
     /// Require git provenance and additionally embed the `origin` remote as
@@ -170,6 +174,10 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
         // A hook dir and a bundle `.toml` FILE cannot collide: this arm
         // requires `is_dir()`, the bundle arm requires `is_file()`.
         Ok(ArtifactKind::Hook)
+    } else if path.is_dir() && path.join(MOD_MANIFEST_FILE).is_file() {
+        // After `SKILL.md` and `hook.toml` were both found absent, so a shipped
+        // skill or hook that also carries a `mod.toml` keeps its kind.
+        Ok(ArtifactKind::Mod)
     } else if path.is_file() && path.extension().is_some_and(|e| e == "toml") {
         // A `.toml` source file lists bundle members
         // ([skills]/[rules]/[agents]/[mcp]).
@@ -246,6 +254,184 @@ fn pack_hook_dir(
     })
 }
 
+/// Validate and pack the mod directory at `path`.
+///
+/// Reads `mod.toml` (build mode), walks the tree under the mod caps, checks
+/// the layout ([`resolve_mod_layout`]) and writes the packed `mod.toml` with
+/// every served harness's resolved entry.
+///
+/// # Errors
+///
+/// A data error (65) for an unreadable or invalid `mod.toml`, a refused tree
+/// or a symlink; an I/O error when the directory cannot be read.
+fn pack_mod(
+    path: &Path,
+    version: &str,
+    fallback_source: Option<&str>,
+    git: Option<&GitProvenance>,
+    defaults: &crate::oci::annotations::MetadataDefaults,
+) -> anyhow::Result<PackedArtifact> {
+    use crate::oci::mod_manifest::{MAX_MOD_TOML_BYTES, ModError, ModManifest};
+    let io_error = |p: &Path, e| {
+        anyhow::Error::from(crate::error::Error::from(crate::skill::SkillError::new(
+            p,
+            crate::skill::SkillErrorKind::Io(e),
+        )))
+    };
+    let manifest_path = path.join(MOD_MANIFEST_FILE);
+    let len = std::fs::metadata(&manifest_path)
+        .map_err(|e| io_error(&manifest_path, e))?
+        .len();
+    if len > MAX_MOD_TOML_BYTES as u64 {
+        super::grim(Err::<(), _>(ModError::TooLarge {
+            len: usize::try_from(len).unwrap_or(usize::MAX),
+            max: MAX_MOD_TOML_BYTES,
+        }))?;
+    }
+    let source = std::fs::read_to_string(&manifest_path).map_err(|e| io_error(&manifest_path, e))?;
+    let stem = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let manifest = super::grim(ModManifest::from_build_toml(&source, &stem))?;
+    validate_requires(path, ArtifactKind::Mod, &manifest.name, manifest.declared_requires())?;
+
+    let mut clients = Vec::new();
+    let tar = super::grim(crate::skill::skill_package::pack_mod_dir(path, |rels| {
+        let (entries, served) = resolve_mod_layout(&manifest, rels)?;
+        clients = served;
+        manifest.to_packed_toml(&entries).map_err(|e| e.to_string())
+    }))?;
+    let annotations = annotations_for_mod(&manifest, &clients, version, fallback_source, git, defaults);
+    Ok(PackedArtifact {
+        kind: ArtifactKind::Mod,
+        name: manifest.name,
+        tar,
+        annotations,
+    })
+}
+
+/// Check a mod's file list (`/`-joined paths below the root, `mod.toml`
+/// excluded) against the layer rules and resolve every served harness's entry.
+///
+/// Returns the harness name to entry map and the served harness names, sorted.
+/// The rules mirror what install refuses, so a layer that builds also installs:
+/// only `claude/` and `opencode/` at the top level (one at least), a code
+/// extension on every file, portable path segments, no two paths that differ
+/// only in case, and an entry that names one existing file.
+///
+/// # Errors
+///
+/// The reason the tree is refused.
+fn resolve_mod_layout(
+    manifest: &crate::oci::mod_manifest::ModManifest,
+    rels: &[String],
+) -> Result<(std::collections::BTreeMap<String, String>, Vec<String>), String> {
+    use crate::oci::mod_manifest::{
+        KNOWN_HARNESSES, case_insensitive_collision, code_extension, code_stem, is_opencode_entry, segment_refusal,
+    };
+    let mut served: Vec<String> = Vec::new();
+    for rel in rels {
+        let top = rel.split('/').next().unwrap_or_default();
+        if !rel.contains('/') || !KNOWN_HARNESSES.contains(&top) {
+            return Err(format!(
+                "'{rel}' is outside a harness directory; a mod holds mod.toml and the directories {} only",
+                KNOWN_HARNESSES.join(", ")
+            ));
+        }
+        if !served.iter().any(|s| s == top) {
+            served.push(top.to_string());
+        }
+        for segment in rel.split('/') {
+            if let Some(why) = segment_refusal(segment) {
+                return Err(format!("path '{rel}' is refused: segment '{segment}': {why}"));
+            }
+        }
+        let file = rel.rsplit('/').next().unwrap_or_default();
+        if code_extension(file).is_none() {
+            return Err(format!(
+                "'{rel}' is not a code file; a harness directory holds files ending in .js .mjs .cjs .jsx .ts .mts .cts .tsx only"
+            ));
+        }
+    }
+    served.sort();
+    if served.is_empty() {
+        return Err(format!(
+            "a mod needs at least one harness directory ({}) holding code files",
+            KNOWN_HARNESSES.join(", ")
+        ));
+    }
+    if let Some((a, b)) = case_insensitive_collision(rels.iter().map(String::as_str)) {
+        return Err(format!("paths '{a}' and '{b}' differ only in case"));
+    }
+
+    let tables = [("claude", &manifest.claude), ("opencode", &manifest.opencode)];
+    for (harness, table) in tables {
+        if table.is_some() && !served.iter().any(|s| s == harness) {
+            return Err(format!(
+                "mod.toml has a [{harness}] table but the mod has no {harness}/ directory"
+            ));
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    for (harness, table) in tables {
+        if !served.iter().any(|s| s == harness) {
+            continue;
+        }
+        let prefix = format!("{harness}/");
+        let entry = match table.as_ref().and_then(|t| t.entry.clone()) {
+            Some(entry) => entry,
+            None => {
+                let mut candidates = rels
+                    .iter()
+                    .filter_map(|r| r.strip_prefix(&prefix))
+                    .filter(|f| !f.contains('/') && code_stem(f) == Some(manifest.name.as_str()));
+                match (candidates.next(), candidates.next()) {
+                    (Some(only), None) => only.to_string(),
+                    (None, _) => {
+                        return Err(format!(
+                            "{harness}/ has no entry: set entry in [{harness}] or add one top-level file named {}.<ext>",
+                            manifest.name
+                        ));
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(format!(
+                            "{harness}/ has several files named {}.<ext>; set entry in [{harness}]",
+                            manifest.name
+                        ));
+                    }
+                }
+            }
+        };
+        if !rels.iter().any(|r| *r == format!("{prefix}{entry}")) {
+            return Err(format!("the {harness} entry '{entry}' is not a file under {harness}/"));
+        }
+        if harness == "opencode" {
+            let file = entry.rsplit('/').next().unwrap_or_default();
+            if !is_opencode_entry(file) {
+                return Err(format!("the opencode entry '{entry}' must end in .ts or .js"));
+            }
+            let dir = format!("{prefix}{}", entry.rsplit_once('/').map_or("", |(d, _)| d));
+            let stem = code_stem(file);
+            let same_stem = rels
+                .iter()
+                .filter(|r| {
+                    r.rsplit_once('/').is_some_and(|(d, f)| {
+                        d.trim_end_matches('/') == dir.trim_end_matches('/') && code_stem(f) == stem
+                    })
+                })
+                .count();
+            if same_stem > 1 {
+                return Err(format!(
+                    "the opencode entry '{entry}' shares its stem with another file in its directory"
+                ));
+            }
+        }
+        entries.insert(harness.to_string(), entry);
+    }
+    Ok((entries, served))
+}
+
 /// Validate, pack, and compute annotations for the artifact at `path`.
 ///
 /// `version` is the release version used in the annotations (`build`
@@ -282,6 +468,7 @@ pub fn validate_and_pack(
         ArtifactKind::Mcp => unreachable!("mcp descriptors are packed via the mcp path, not validate_and_pack"),
         // Settings documents ship as a JSON layer too (`read_settings_source`).
         ArtifactKind::Settings => unreachable!("settings are packed via the settings path, not validate_and_pack"),
+        ArtifactKind::Mod => pack_mod(path, version, fallback_source, git, defaults),
         ArtifactKind::Skill => {
             let fm = super::grim(validate_skill_dir(path))?;
             // Publish-time gate for the per-client projection: a known
@@ -620,6 +807,13 @@ pub fn read_bundle_members(
             id: id.to_string(),
         });
     }
+    for (name, id) in &source.mods {
+        members.push(BundleMember {
+            kind: ArtifactKind::Mod,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
 
     let name = path
         .file_stem()
@@ -948,6 +1142,20 @@ mod tests {
         let last = members.last().unwrap();
         assert_eq!(last.kind, ArtifactKind::Settings);
         assert_eq!((last.name.as_str(), last.id.as_str()), ("team", "ghcr.io/acme/team:1"));
+    }
+
+    #[test]
+    fn read_bundle_members_resolves_a_mods_table_and_sorts_it_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("b.toml");
+        write(
+            &src,
+            "[mods]\nband = \"ghcr.io/acme/band:1\"\n\n[settings]\nteam = \"ghcr.io/acme/team:1\"\n\n[skills]\ncr = \"ghcr.io/acme/cr:1\"\n",
+        );
+        let (_, members, _) = read_bundle_members(&src).unwrap();
+        let sorted = crate::oci::bundle::BundleManifest::new(members).members;
+        assert_eq!(sorted.last().unwrap().kind, ArtifactKind::Mod);
+        assert_eq!(sorted.len(), 3);
     }
 
     #[test]
@@ -1317,5 +1525,263 @@ mod tests {
             !looks_like_publish_manifest(content),
             "document without registry key must not be detected as publish manifest"
         );
+    }
+
+    const MOD_TOML: &str = "schema = 1\nname = \"band\"\ndescription = \"d\"\n";
+
+    fn mod_dir(root: &Path, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = root.join("band");
+        write(&dir.join("mod.toml"), MOD_TOML);
+        for (rel, body) in files {
+            write(&dir.join(rel), body);
+        }
+        dir
+    }
+
+    fn layout(
+        toml_tail: &str,
+        rels: &[&str],
+    ) -> Result<(std::collections::BTreeMap<String, String>, Vec<String>), String> {
+        let manifest =
+            crate::oci::mod_manifest::ModManifest::from_build_toml(&format!("{MOD_TOML}{toml_tail}"), "band").unwrap();
+        let rels: Vec<String> = rels.iter().map(ToString::to_string).collect();
+        resolve_mod_layout(&manifest, &rels)
+    }
+
+    #[test]
+    fn default_entry_table() {
+        let one = layout("", &["claude/band.tsx", "claude/lib/x.ts"]).unwrap();
+        assert_eq!(one.0["claude"], "band.tsx");
+        assert_eq!(one.1, ["claude"]);
+        assert!(layout("", &["claude/other.ts"]).unwrap_err().contains("no entry"));
+        assert!(
+            layout("", &["claude/band.ts", "claude/band.tsx"])
+                .unwrap_err()
+                .contains("several")
+        );
+        // A candidate only in a subfolder is not a top-level file.
+        assert!(layout("", &["claude/lib/band.ts"]).unwrap_err().contains("no entry"));
+        // `x.d.ts` and `x.ts` have different stems, so the entry stays unique.
+        let d = layout(
+            "[opencode]\nentry = \"band.ts\"\n",
+            &["opencode/band.ts", "opencode/band.d.ts"],
+        )
+        .unwrap();
+        assert_eq!(d.0["opencode"], "band.ts");
+        // An OpenCode `.mjs` entry, defaulted or named, is refused.
+        assert!(layout("", &["opencode/band.mjs"]).unwrap_err().contains(".ts or .js"));
+        assert!(
+            layout("[opencode]\nentry = \"a.mjs\"\n", &["opencode/a.mjs"])
+                .unwrap_err()
+                .contains(".ts or .js")
+        );
+        // Same stem twice in the OpenCode directory.
+        assert!(
+            layout(
+                "[opencode]\nentry = \"band.ts\"\n",
+                &["opencode/band.ts", "opencode/band.js"]
+            )
+            .unwrap_err()
+            .contains("shares its stem")
+        );
+        // The same `.mjs` entry serves Claude.
+        assert_eq!(
+            layout("[claude]\nentry = \"a.mjs\"\n", &["claude/a.mjs"]).unwrap().0["claude"],
+            "a.mjs"
+        );
+    }
+
+    #[test]
+    fn layout_refuses_what_install_refuses() {
+        for bad in [
+            "claude/+page.ts",
+            "claude/[id].ts",
+            "claude/my file.ts",
+            "claude/con.ts",
+            "claude/.hidden.ts",
+        ] {
+            assert!(layout("", &["claude/band.ts", bad]).is_err(), "{bad}");
+        }
+        assert!(
+            layout("", &["claude/band.ts", "claude/data.json"])
+                .unwrap_err()
+                .contains("not a code file")
+        );
+        assert!(
+            layout("", &["claude/band.ts", "README.ts"])
+                .unwrap_err()
+                .contains("outside a harness")
+        );
+        assert!(
+            layout("", &["claude/band.ts", "amp/x.ts"])
+                .unwrap_err()
+                .contains("outside a harness")
+        );
+        assert!(layout("", &[]).unwrap_err().contains("at least one harness"));
+        assert!(
+            layout("", &["claude/band.ts", "claude/Lib/a.ts", "claude/lib/b.ts"])
+                .unwrap_err()
+                .contains("only in case")
+        );
+        assert!(
+            layout("[opencode]\n", &["claude/band.ts"])
+                .unwrap_err()
+                .contains("no opencode/")
+        );
+        assert!(
+            layout("[claude]\nentry = \"gone.ts\"\n", &["claude/band.ts"])
+                .unwrap_err()
+                .contains("not a file")
+        );
+    }
+
+    #[test]
+    fn detect_kind_infers_a_mod_only_after_skill_and_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mod_dir(tmp.path(), &[("claude/band.ts", "x")]);
+        assert_eq!(detect_kind(&dir, None).unwrap(), ArtifactKind::Mod);
+        write(&dir.join("hook.toml"), "x");
+        assert_eq!(detect_kind(&dir, None).unwrap(), ArtifactKind::Hook);
+        write(&dir.join("SKILL.md"), "x");
+        assert_eq!(detect_kind(&dir, None).unwrap(), ArtifactKind::Skill);
+        assert_eq!(detect_kind(&dir, Some("mod")).unwrap(), ArtifactKind::Mod);
+    }
+
+    fn pack(dir: &Path) -> anyhow::Result<PackedArtifact> {
+        validate_and_pack(
+            dir,
+            ArtifactKind::Mod,
+            "0.0.0",
+            None,
+            None,
+            &crate::oci::annotations::MetadataDefaults::default(),
+        )
+    }
+
+    fn tar_entries(tar: &[u8]) -> Vec<(String, String)> {
+        let mut archive = tar::Archive::new(tar);
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| {
+                let mut e = e.unwrap();
+                let path = e.path().unwrap().to_string_lossy().into_owned();
+                let mut body = String::new();
+                std::io::Read::read_to_string(&mut e, &mut body).unwrap();
+                (path, body)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn packed_mod_toml_is_byte_identical_across_two_builds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mod_dir(
+            tmp.path(),
+            &[
+                ("claude/band.tsx", "a"),
+                ("opencode/band.ts", "b"),
+                ("opencode/lib/h.ts", "c"),
+            ],
+        );
+        let first = pack(&dir).unwrap();
+        let second = pack(&dir).unwrap();
+        assert_eq!(first.tar, second.tar);
+        assert_eq!(first.annotations["com.grimoire.mod.clients"], "claude,opencode");
+        let entries = tar_entries(&first.tar);
+        assert_eq!(entries[0], ("band/claude/band.tsx".to_string(), "a".to_string()));
+        let packed = entries.iter().find(|(p, _)| p == "band/mod.toml").unwrap();
+        assert_eq!(
+            packed.1,
+            "schema = 1\nname = \"band\"\ndescription = \"d\"\n\n[claude]\nentry = \"band.tsx\"\n\n[opencode]\nentry = \"band.ts\"\n"
+        );
+        // The author's file stays as written.
+        assert_eq!(std::fs::read_to_string(dir.join("mod.toml")).unwrap(), MOD_TOML);
+    }
+
+    #[test]
+    fn mod_pack_refuses_a_symlink_and_keeps_mod_toml_through_grimignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mod_dir(tmp.path(), &[("claude/band.ts", "a"), (".grimignore", "*.toml\n")]);
+        assert!(pack(&dir).is_ok(), "positive control: mod.toml survives *.toml");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("claude/band.ts"), dir.join("claude/link.ts")).unwrap();
+            let err = pack(&dir).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{err}");
+        }
+    }
+
+    #[test]
+    fn mod_pack_refuses_a_mod_toml_above_the_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mod_dir(tmp.path(), &[("claude/band.ts", "a")]);
+        let big = format!("{MOD_TOML}# {}\n", "x".repeat(70_000));
+        std::fs::write(dir.join("mod.toml"), big).unwrap();
+        assert!(pack(&dir).unwrap_err().to_string().contains("limit"));
+    }
+
+    /// The layer, run through the validator install applies to it.
+    fn assert_installs(packed: &PackedArtifact) {
+        let clients_annotation = &packed.annotations["com.grimoire.mod.clients"];
+        let clients: std::collections::BTreeSet<String> = clients_annotation.split(',').map(String::from).collect();
+        crate::install::mod_validate::validate_layer(&packed.tar, Some(clients_annotation), &clients)
+            .unwrap_or_else(|e| panic!("a layer that builds must install: {e}"));
+    }
+
+    #[test]
+    fn mod_pack_file_cap_counts_mod_toml_and_the_layer_it_packs_installs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = crate::oci::mod_manifest::MAX_MOD_FILES;
+        let dir = mod_dir(tmp.path(), &[("claude/band.ts", "a")]);
+        // mod.toml and claude/band.ts are two of the cap.
+        for i in 0..cap - 2 {
+            write(&dir.join(format!("claude/f{i}.ts")), "x");
+        }
+        let packed = pack(&dir).expect("exactly the cap, mod.toml included, packs");
+        assert_eq!(tar_entries(&packed.tar).len(), cap);
+        assert_installs(&packed);
+
+        write(&dir.join("claude/over.ts"), "x");
+        let err = pack(&dir).unwrap_err().to_string();
+        assert!(err.contains("file count") && err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn mod_pack_depth_cap_holds_at_the_install_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let max = crate::oci::mod_manifest::MAX_MOD_DEPTH;
+        let dir = mod_dir(tmp.path(), &[("claude/band.ts", "a")]);
+        // `claude/` + (max - 2) directories + the file is `max` segments below the root.
+        let at_cap = format!("claude/{}x.ts", "d/".repeat(max - 2));
+        write(&dir.join(&at_cap), "x");
+        let packed = pack(&dir).expect("`MAX_MOD_DEPTH` segments below the root packs");
+        assert!(tar_entries(&packed.tar).iter().any(|(p, _)| p.ends_with(&at_cap)));
+        assert_installs(&packed);
+
+        write(&dir.join(format!("claude/{}x.ts", "d/".repeat(max - 1))), "x");
+        let err = pack(&dir).unwrap_err().to_string();
+        assert!(err.contains("depth") && err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn mod_pack_byte_cap_is_what_the_install_validator_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = crate::oci::mod_manifest::MAX_MOD_LAYER_BYTES;
+        let dir = mod_dir(tmp.path(), &[("claude/band.ts", "a")]);
+        let body_sum = |p: &PackedArtifact| tar_entries(&p.tar).iter().map(|(_, b)| b.len() as u64).sum::<u64>();
+        // The packed mod.toml replaces the author's, so measure the packed sum, not the source.
+        write(&dir.join("claude/filler.ts"), "x");
+        let overhead = body_sum(&pack(&dir).unwrap()) - 1;
+        let max_filler = usize::try_from(cap - overhead).unwrap();
+
+        write(&dir.join("claude/filler.ts"), &"x".repeat(max_filler));
+        let packed = pack(&dir).expect("the largest tree the install validator accepts builds");
+        assert_eq!(body_sum(&packed), cap);
+        assert_installs(&packed);
+
+        write(&dir.join("claude/filler.ts"), &"x".repeat(max_filler + 1));
+        let err = pack(&dir).unwrap_err().to_string();
+        assert!(err.contains("size") && err.contains("limit"), "{err}");
     }
 }

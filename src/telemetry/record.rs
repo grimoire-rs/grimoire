@@ -112,7 +112,7 @@ pub fn install_events(outcomes: &[ArtifactInstall], declared: &DesiredSet) -> Ve
 }
 
 /// Every registry identifier the scope declares, for [`reference`]'s tag lookup:
-/// skills, rules, agents, bundles, mcp, hooks, settings, each in binding-name order.
+/// skills, rules, agents, bundles, mcp, hooks, settings, mods, each in binding-name order.
 pub fn declared_identifiers(set: &DesiredSet) -> impl Iterator<Item = &Identifier> {
     [
         &set.skills,
@@ -122,6 +122,7 @@ pub fn declared_identifiers(set: &DesiredSet) -> impl Iterator<Item = &Identifie
         &set.mcp,
         &set.hooks,
         &set.settings,
+        &set.mods,
     ]
     .into_iter()
     .flat_map(|section| section.values())
@@ -356,6 +357,16 @@ mod tests {
             .insert("team".into(), DeclaredSource::Registry(id("r.io/acme/team:1")));
         let pinned = id(&format!("r.io/acme/team@sha256:{}", "a".repeat(64)));
         assert_eq!(reference(&pinned, declared_identifiers(&set)), "r.io/acme/team:1");
+    }
+
+    #[test]
+    fn a_mod_binding_supplies_the_tag() {
+        use crate::config::declaration::{DeclaredSource, DesiredSet};
+        let mut set = DesiredSet::default();
+        set.mods
+            .insert("band".into(), DeclaredSource::Registry(id("r.io/acme/band:1")));
+        let pinned = id(&format!("r.io/acme/band@sha256:{}", "a".repeat(64)));
+        assert_eq!(reference(&pinned, declared_identifiers(&set)), "r.io/acme/band:1");
     }
 
     #[test]

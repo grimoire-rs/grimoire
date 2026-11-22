@@ -338,6 +338,18 @@ highest 2.x release that satisfies both. It prints one line on stderr naming
 `skill/a` and `skill/b`. Declare `x` with a tag to choose a version yourself. Two
 requesters that claim different majors of one artifact exit `78`.
 
+## Require a mod {#mods}
+
+A requirement can name a [mod][mods] under the `mods` table, as in
+`grim.requires.mods.status-band` in a skill's frontmatter. The kind is
+experimental. A manifest whose bundle members or `requires` edges name a mod
+carries the `mods` entry in its `com.grimoire.requires-features` annotation.
+A mod carries it only when its own `requires` name a mod. A grim that does not know the feature refuses such an
+artifact with exit `65`.
+
+The mod itself still needs the `mods` flag and workspace consent before grim
+writes it. A requirement never grants either.
+
 ## Next steps {#next-steps}
 
 - [Artifact formats][artifacts-requires] lists every place a requirement is
@@ -368,3 +380,4 @@ requesters that claim different majors of one artifact exit `78`.
 
 <!-- internal -->
 [ref-rule-with-lookup-data]: #rule-with-lookup-data
+[mods]: ../mods.md

@@ -177,6 +177,8 @@ impl Vendor for OpenCodeVendor {
         // Degraded, formalizing the pre-existing de-facto behavior).
         match kind {
             ArtifactKind::Rule => KindSupport::Degraded,
+            // A mod is hosted natively unless `plugin_api` opts out with `v1`;
+            // the mod phase judges that, as it sees the config.
             _ => KindSupport::Native,
         }
     }

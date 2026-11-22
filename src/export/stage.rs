@@ -816,6 +816,8 @@ pub(crate) enum MemberContent {
     /// An MCP descriptor (`fetch_verified_layer` →
     /// `McpDescriptor::from_layer_bytes`, as `install_mcp`).
     Mcp(Box<McpDescriptor>),
+    /// A mod layer that passed the install-time validator.
+    Mod(Box<crate::install::mod_validate::ValidatedMod>),
     /// No selected client admits the kind (always so for rules): never
     /// fetched, only reported as omitted.
     Unfetched,
@@ -851,6 +853,10 @@ pub(crate) struct EmptyOutput {
 pub(crate) struct RenderedPlugin {
     pub members: Vec<ExportMember>,
     pub omitted: Vec<ExportOmission>,
+    /// A staged mod ships `src/types/index.d.ts`, so `plugin.json` names it.
+    pub mod_types: bool,
+    /// Two or more mods were admitted and all were left out.
+    pub many_mods: bool,
 }
 
 /// The result of [`render_members`]: a tree, or the soft-empty outcome
@@ -965,6 +971,9 @@ async fn stage_all_inner(
             clients.push(*pair);
         }
     }
+    if stages_a_mod(req.plugins, &clients) {
+        refuse_client_root(req.output_dir, req.anchor)?;
+    }
     std::fs::create_dir_all(req.output_dir).map_err(|e| io_error(req.output_dir, e))?;
     // Inside <DIR> so every placement is a same-filesystem rename; dropped
     // (with any replaced old tree) on every exit path.
@@ -1042,25 +1051,27 @@ async fn stage_all_inner(
         for (client, fam, root, r) in rendered {
             let omitted: Vec<(ArtifactKind, String)> = r.omitted.iter().map(|o| (o.kind, o.name.clone())).collect();
             let manifest = |version: &str| {
-                write_manifest(
+                write_manifest_typed(
                     &root,
                     (client, fam),
                     (&plugin.name, version, &description),
                     logo_rel.as_deref(),
                     &plugin.profile,
+                    r.mod_types,
                 )
             };
             // C-003: the tree is hashed with every manifest at the base
             // version; the final version is then written into each.
             manifest(&plugin.version_base)?;
             let readme = contained(&root, Path::new("README.md"))?;
-            let readme_bytes = family::plugin_readme(
+            let readme_bytes = family::plugin_readme_noted(
                 &plugin.name,
                 client,
                 base,
                 &omitted,
                 logo_rel.as_deref(),
                 readme_text.as_deref(),
+                r.many_mods.then_some(family::MANY_MODS_NOTE),
             );
             std::fs::write(&readme, readme_bytes).map_err(|e| io_error(&readme, e))?;
             if let Some(changelog) = &changelog_text {
@@ -1308,6 +1319,20 @@ pub(crate) async fn stage_members<'a>(
     (progress, position, plugin): (&dyn InstallProgress, &mut usize, &str),
 ) -> Result<Vec<StagedMember<'a>>, crate::error::Error> {
     let mut staged = Vec::with_capacity(members.len());
+    let admitted_mods = members
+        .iter()
+        .filter(|(l, _)| {
+            l.kind == ArtifactKind::Mod
+                && clients
+                    .iter()
+                    .any(|&(c, f)| family::admits(f, c, ArtifactKind::Mod, &l.clients).is_ok())
+        })
+        .count();
+    if admitted_mods > 1 {
+        tracing::warn!(
+            "plugin '{plugin}': {admitted_mods} mods omitted: a Claude plugin loads one hooks module; put one mod in each plugin"
+        );
+    }
     for (locked, emitted) in members {
         let kind = locked.kind;
         *position += 1;
@@ -1323,9 +1348,13 @@ pub(crate) async fn stage_members<'a>(
                 "settings '{emitted}' omitted from plugin '{plugin}': plugin formats cannot carry harness settings"
             );
         }
-        let admitted = clients.iter().any(|&(c, f)| family::admits(f, c, kind).is_ok());
+        let admitted = clients
+            .iter()
+            .any(|&(c, f)| family::admits(f, c, kind, &locked.clients).is_ok());
         let content = if !admitted {
             MemberContent::Unfetched
+        } else if kind == ArtifactKind::Mod {
+            MemberContent::Mod(Box::new(stage_mod(locked, access).await?))
         } else if kind == ArtifactKind::Mcp {
             // As `install_mcp`: MCP has no canonical tree to stage.
             let blob = fetch_verified_layer(locked, kind, access).await?;
@@ -1347,6 +1376,98 @@ pub(crate) async fn stage_members<'a>(
         });
     }
     Ok(staged)
+}
+
+/// Whether some plugin stages a mod for some client: exactly one admitted mod
+/// in it, since two or more are all left out.
+fn stages_a_mod(plugins: &[PluginInput], clients: &[(ClientTarget, Family)]) -> bool {
+    plugins.iter().any(|plugin| {
+        clients.iter().any(|&(c, f)| {
+            plugin
+                .members
+                .iter()
+                .filter(|(l, _)| l.kind == ArtifactKind::Mod && family::admits(f, c, l.kind, &l.clients).is_ok())
+                .count()
+                == 1
+        })
+    })
+}
+
+/// Refuse an output directory inside a client config root grim knows: a plugin
+/// that carries a mod would land where the client loads it. Both sides are
+/// compared through their resolved prefix, so an alias or a symlinked parent
+/// cannot pass.
+///
+/// # Errors
+///
+/// `Usage` (64) naming the output directory and the root.
+fn refuse_client_root(output_dir: &Path, anchor: &Path) -> Result<(), ExportError> {
+    use crate::install::vendor::{env_dir, home_dir};
+    let landing = |p: &Path| {
+        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        crate::path_safety::resolved_prefix(&abs)
+    };
+    let home = home_dir();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    roots.extend(crate::install::vendor_claude::global_root(
+        env_dir("CLAUDE_CONFIG_DIR"),
+        home.clone(),
+    ));
+    roots.extend(crate::install::opencode_config::global_config_dir(
+        env_dir("OPENCODE_CONFIG"),
+        env_dir("XDG_CONFIG_HOME"),
+        home,
+    ));
+    roots.extend(env_dir("OPENCODE_CONFIG_DIR"));
+    let mut workspaces = vec![anchor.to_path_buf()];
+    workspaces.extend(std::env::current_dir().ok());
+    for ws in workspaces {
+        roots.push(ws.join(".claude"));
+        roots.push(ws.join(".opencode"));
+    }
+    let out = landing(output_dir);
+    for root in roots {
+        if out.starts_with(landing(&root)) {
+            return Err(ExportError::Usage(format!(
+                "a plugin that carries a mod cannot be exported into the client config root {}; choose an output directory outside it",
+                root.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Fetch a registry mod, run the install-time validator on it with the lock
+/// row's `clients` and the manifest's clients annotation.
+///
+/// # Errors
+///
+/// Fetch failures with their classification; a layer the validator refuses is
+/// a 65 naming the rule.
+async fn stage_mod(
+    locked: &LockedArtifact,
+    access: &Arc<dyn OciAccess>,
+) -> Result<crate::install::mod_validate::ValidatedMod, crate::error::Error> {
+    let refuse = |detail: String| {
+        crate::error::Error::from(InstallError::without_reference(InstallErrorKind::MaterializeFailed(
+            detail,
+        )))
+    };
+    let Some(pinned) = locked.source.pinned() else {
+        return Err(refuse(format!(
+            "mod '{}' has a local source, which a plugin cannot carry; publish it first",
+            locked.name
+        )));
+    };
+    let annotation = access.fetch_manifest(pinned).await?.and_then(|m| {
+        m.annotations
+            .get(crate::oci::annotations::MOD_CLIENTS_ANNOTATION)
+            .cloned()
+    });
+    let tar = fetch_verified_layer(locked, ArtifactKind::Mod, access).await?;
+    let clients: BTreeSet<String> = locked.clients.iter().cloned().collect();
+    crate::install::mod_validate::validate_layer(&tar, annotation.as_deref(), &clients)
+        .map_err(|e| crate::error::Error::from(crate::oci::mod_manifest::ModError::from(e)))
 }
 
 /// Render `client`'s plugin tree under `root` (C-016, C-018, C-020): the
@@ -1382,6 +1503,16 @@ pub(crate) fn render_members(
     let mut emitted = Vec::new();
     let mut omitted = Vec::new();
     let mut mcp_entries = Vec::new();
+    let mut mod_types = false;
+    // A Claude plugin loads one hooks module, so two admitted mods ship none.
+    let many_mods = members
+        .iter()
+        .filter(|m| {
+            m.locked.kind == ArtifactKind::Mod
+                && family::admits(family, client, m.locked.kind, &m.locked.clients).is_ok()
+        })
+        .count()
+        > 1;
     for member in members {
         let (kind, name) = (member.locked.kind, member.emitted);
         let omit = |reason| ExportOmission {
@@ -1389,8 +1520,12 @@ pub(crate) fn render_members(
             name: name.to_string(),
             reason,
         };
-        if let Err(reason) = family::admits(family, client, kind) {
+        if let Err(reason) = family::admits(family, client, kind, &member.locked.clients) {
             omitted.push(omit(reason));
+            continue;
+        }
+        if kind == ArtifactKind::Mod && many_mods {
+            omitted.push(omit(OmitReason::NotRepresentable));
             continue;
         }
         // The install-time name gate holds here too: a name the client's
@@ -1416,6 +1551,20 @@ pub(crate) fn render_members(
                 let dest = contained(root, &Path::new("agents").join(format!("{name}.md")))?;
                 let source = rebound_agent(staged, &member.locked.name, name)?;
                 materialize(client, kind, name, &source, &dest, &pinned)?;
+            }
+            (MemberContent::Mod(validated), ArtifactKind::Mod) => {
+                let Some(rendered) = crate::install::mod_render::render_claude(validated, name) else {
+                    omitted.push(omit(OmitReason::ClientDeclined));
+                    continue;
+                };
+                // The plugin's own manifest stays the export's; the author tree and the hooks file are the install bytes.
+                for (rel, bytes) in &rendered.files {
+                    if rel.starts_with("src") || rel == Path::new("hooks/hooks.json") {
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        write_staged(root, &rel, bytes)?;
+                    }
+                }
+                mod_types = validated.claude_types;
             }
             _ => {
                 return Err(
@@ -1452,6 +1601,8 @@ pub(crate) fn render_members(
     Ok(RenderOutcome::Rendered(RenderedPlugin {
         members: emitted,
         omitted,
+        mod_types,
+        many_mods,
     }))
 }
 
@@ -1605,6 +1756,7 @@ pub(crate) fn assemble_mcp_file(entries: &[(String, serde_json::Value)]) -> io::
     Ok(text)
 }
 
+#[cfg(test)]
 /// Write `client`'s `plugin.json` under `root` at [`family::manifest_rel`]
 /// (C-025, C-005), plus Cursor's second manifest `.cursor-plugin/plugin.json`
 /// (C-006): the Claude-format bytes beside the Agent Plugins root manifest.
@@ -1614,10 +1766,22 @@ pub(crate) fn assemble_mcp_file(entries: &[(String, serde_json::Value)]) -> io::
 /// `UnsafeEntry` (65) or `Io` (74 / 77).
 pub(crate) fn write_manifest(
     root: &Path,
+    pair: (ClientTarget, Family),
+    text: (&str, &str, &str),
+    logo: Option<&str>,
+    profile: &PluginProfile,
+) -> Result<(), ExportError> {
+    write_manifest_typed(root, pair, text, logo, profile, false)
+}
+
+/// [`write_manifest`] with the Claude `types` key set when `types`.
+pub(crate) fn write_manifest_typed(
+    root: &Path,
     (client, family): (ClientTarget, Family),
     (name, version, description): (&str, &str, &str),
     logo: Option<&str>,
     profile: &PluginProfile,
+    types: bool,
 ) -> Result<(), ExportError> {
     let mut profile = family::manifest_profile(client, profile);
     // Only Claude's plugin.json defines the directory-listing links.
@@ -1626,7 +1790,7 @@ pub(crate) fn write_manifest(
         profile.support = None;
     }
     let bytes = match family {
-        Family::Claude => family::claude_plugin_json(name, version, description, &profile),
+        Family::Claude => family::claude_plugin_json_typed(name, version, description, &profile, types),
         Family::AgentPlugins => family::agent_plugins_plugin_json(name, version, description, logo, &profile),
     };
     write_staged(root, family::manifest_rel(client), &bytes)?;
@@ -1634,7 +1798,7 @@ pub(crate) fn write_manifest(
         write_staged(
             root,
             CURSOR_MANIFEST,
-            &family::claude_plugin_json(name, version, description, &profile),
+            &family::claude_plugin_json_typed(name, version, description, &profile, types),
         )?;
     }
     Ok(())
@@ -2068,6 +2232,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -2121,6 +2286,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         };
         for m in members {
             match m.kind {
@@ -2130,7 +2296,7 @@ mod tests {
                 ArtifactKind::Mcp => part.mcp.push(m),
                 ArtifactKind::Hook => part.hooks.push(m),
                 ArtifactKind::Settings => part.settings.push(m),
-                ArtifactKind::Bundle => unreachable!("not lock members here"),
+                ArtifactKind::Bundle | ArtifactKind::Mod => unreachable!("not lock members here"),
             }
         }
         part
@@ -4915,6 +5081,7 @@ mod tests {
             },
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -5101,6 +5268,26 @@ mod tests {
                 "{body:?}: {err:?}"
             );
             assert_eq!(exit_of(err), ExitCode::DataError);
+        }
+    }
+
+    #[test]
+    fn output_fence_refuses_a_client_root_and_an_alias_of_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(ws.join(".claude")).unwrap();
+        std::fs::create_dir_all(ws.join("plain")).unwrap();
+        // Positive control: a directory outside every root passes.
+        assert!(refuse_client_root(&ws.join("plain/out"), &ws).is_ok());
+        for inside in [ws.join(".claude/out"), ws.join(".opencode/deep/out")] {
+            let err = refuse_client_root(&inside, &ws).unwrap_err();
+            assert!(matches!(err, ExportError::Usage(_)), "{inside:?}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(ws.join(".claude"), tmp.path().join("alias")).unwrap();
+            let err = refuse_client_root(&tmp.path().join("alias/out"), &ws).unwrap_err();
+            assert!(matches!(err, ExportError::Usage(_)));
         }
     }
 }

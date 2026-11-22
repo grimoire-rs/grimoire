@@ -225,6 +225,24 @@ pub enum HookArmingCause {
     /// A global settings file lies inside the repository the command runs in,
     /// whose own environment can name that directory.
     SettingsRootInWorkspace,
+    /// A path grim wrote for a mod is tracked by git, so a branch can replace
+    /// it on checkout. Advisory: it never moves the row.
+    ModFilesTracked,
+    /// A mod grim did not write, or disarmed, still has files at its expected
+    /// paths. Advisory: it never moves the row.
+    ModFilesPresent,
+    /// The client's recorded plugin-enable value for a mod is `false`, which
+    /// grim keeps. Advisory: it never moves the row.
+    ModDisabledInClient,
+    /// The row serves OpenCode but the scope sets `plugin_api = "v1"`, so grim
+    /// writes the mod for no OpenCode. Advisory: it never moves the row.
+    ModPluginApiUnsupported,
+    /// The row serves a client whose vendor hosts no mod at this scope.
+    /// Advisory: it never moves the row.
+    ModClientUnsupported,
+    /// The row serves Claude but Claude reserves the binding name.
+    /// Advisory: it never moves the row.
+    ModNameReserved,
 }
 
 impl HookArmingCause {
@@ -257,7 +275,13 @@ impl HookArmingCause {
             | Self::ClientHasNoHookSurface
             | Self::NoApplicableSettings
             | Self::ClientConfigAbsent
-            | Self::LocalFileTracked => ArtifactStatus::Gated,
+            | Self::LocalFileTracked
+            | Self::ModFilesTracked
+            | Self::ModFilesPresent
+            | Self::ModDisabledInClient
+            | Self::ModPluginApiUnsupported
+            | Self::ModClientUnsupported
+            | Self::ModNameReserved => ArtifactStatus::Gated,
         }
     }
 
@@ -415,6 +439,43 @@ impl HookArmingCause {
                      run git rm --cached on it, then {grim} install"
                 )
             }
+            Self::ModFilesTracked => {
+                format!(
+                    "a file grim wrote for this mod is tracked by git, so a branch can replace it; run git rm \
+                     --cached on it, then {grim} install"
+                )
+            }
+            Self::ModFilesPresent => {
+                format!(
+                    "files remain at this mod's expected paths and grim does not own them; review and delete \
+                     them, or let {grim} install take them over"
+                )
+            }
+            Self::ModPluginApiUnsupported => {
+                format!(
+                    "the row serves OpenCode but this scope sets options.vendors.opencode.plugin_api = \"v1\", \
+                     which hosts no mod, so no OpenCode plugin is written; remove the key if this OpenCode \
+                     runs V2, then run {grim} install"
+                )
+            }
+            Self::ModClientUnsupported => {
+                format!(
+                    "the row serves a client that does not host a mod at this scope, so nothing is written \
+                     for it; drop that client from [options].clients, then run {grim} install"
+                )
+            }
+            Self::ModNameReserved => {
+                format!(
+                    "Claude reserves this mod's binding name, so nothing is written for Claude; bind the mod \
+                     to another name, then run {grim} install"
+                )
+            }
+            Self::ModDisabledInClient => {
+                format!(
+                    "the client records this mod's plugin as disabled, and grim keeps that choice; enable it \
+                     in the client, or run {grim} install --force to restore it"
+                )
+            }
             // The two root causes arise only at global scope, whose run is `grim --global`.
             Self::SettingsRootRelative => {
                 format!(
@@ -465,7 +526,13 @@ impl HookArmingCause {
             | Self::ClientConfigAbsent
             | Self::LocalFileTracked
             | Self::SettingsRootRelative
-            | Self::SettingsRootInWorkspace => false,
+            | Self::SettingsRootInWorkspace
+            | Self::ModFilesTracked
+            | Self::ModFilesPresent
+            | Self::ModDisabledInClient
+            | Self::ModPluginApiUnsupported
+            | Self::ModClientUnsupported
+            | Self::ModNameReserved => false,
         }
     }
 }
@@ -497,6 +564,12 @@ impl HookArmingCause {
             Self::LocalFileTracked => "local-file-tracked",
             Self::SettingsRootRelative => "settings-root-relative",
             Self::SettingsRootInWorkspace => "settings-root-in-workspace",
+            Self::ModFilesTracked => "mod-files-tracked",
+            Self::ModFilesPresent => "mod-files-present",
+            Self::ModDisabledInClient => "mod-disabled-in-client",
+            Self::ModPluginApiUnsupported => "mod-plugin-api-unsupported",
+            Self::ModClientUnsupported => "mod-client-unsupported",
+            Self::ModNameReserved => "mod-name-reserved",
         }
     }
 }
@@ -618,7 +691,7 @@ impl std::fmt::Display for InitStatus {
 /// match can express.
 #[cfg(test)]
 impl HookArmingCause {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 29] = [
         Self::GrimHomeRelative,
         Self::GrimHomeInWorkspace,
         Self::LauncherPathControlCharacter,
@@ -642,6 +715,12 @@ impl HookArmingCause {
         Self::LocalFileTracked,
         Self::SettingsRootRelative,
         Self::SettingsRootInWorkspace,
+        Self::ModFilesTracked,
+        Self::ModFilesPresent,
+        Self::ModDisabledInClient,
+        Self::ModPluginApiUnsupported,
+        Self::ModClientUnsupported,
+        Self::ModNameReserved,
     ];
 }
 
@@ -784,6 +863,12 @@ mod tests {
             HookArmingCause::NoApplicableSettings,
             HookArmingCause::ClientConfigAbsent,
             HookArmingCause::LocalFileTracked,
+            HookArmingCause::ModFilesTracked,
+            HookArmingCause::ModFilesPresent,
+            HookArmingCause::ModDisabledInClient,
+            HookArmingCause::ModPluginApiUnsupported,
+            HookArmingCause::ModClientUnsupported,
+            HookArmingCause::ModNameReserved,
         ] {
             assert_eq!(cause.state(), ArtifactStatus::Gated, "{cause}");
         }
@@ -813,6 +898,23 @@ mod tests {
         }
     }
 
+    /// The mod causes are frozen spellings, appended after the settings causes.
+    #[test]
+    fn the_mod_cause_tokens_are_spelled_as_documented() {
+        for (cause, token) in [
+            (HookArmingCause::ModFilesTracked, "mod-files-tracked"),
+            (HookArmingCause::ModFilesPresent, "mod-files-present"),
+            (HookArmingCause::ModDisabledInClient, "mod-disabled-in-client"),
+            (HookArmingCause::ModPluginApiUnsupported, "mod-plugin-api-unsupported"),
+            (HookArmingCause::ModClientUnsupported, "mod-client-unsupported"),
+            (HookArmingCause::ModNameReserved, "mod-name-reserved"),
+        ] {
+            assert_eq!(cause.to_string(), token);
+            assert_eq!(serde_json::to_string(&cause).unwrap(), format!("\"{token}\""));
+            assert_eq!(cause.state(), ArtifactStatus::Gated);
+        }
+    }
+
     /// C-020: the five launcher-era tokens are frozen spellings.
     #[test]
     fn the_launcher_era_cause_tokens_are_spelled_as_documented() {
@@ -826,7 +928,7 @@ mod tests {
             assert_eq!(cause.to_string(), token);
             assert_eq!(serde_json::to_string(&cause).unwrap(), format!("\"{token}\""));
         }
-        assert_eq!(HookArmingCause::ALL.len(), 23);
+        assert_eq!(HookArmingCause::ALL.len(), 29);
     }
 
     /// Only the held dispatch lock is transient. Telling a user to retry a

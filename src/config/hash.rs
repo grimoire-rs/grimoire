@@ -49,7 +49,7 @@ pub const MARKETPLACE_HASH_VERSION: u8 = 1;
 /// 4. Return `"sha256:<hex>"`.
 pub fn declaration_hash(set: &DesiredSet) -> String {
     // Top-level keys in JCS (sorted) order:
-    // "agents" < "bundles" < "hooks" < "mcp" < "rules" < "settings" < "skills".
+    // "agents" < "bundles" < "hooks" < "mcp" < "mods" < "rules" < "settings" < "skills".
     // All but "rules" and "skills" are omitted entirely when empty so the
     // canonical form — and thus the hash — matches the earlier algorithm for
     // any config that declares none of them.
@@ -78,6 +78,13 @@ pub fn declaration_hash(set: &DesiredSet) -> String {
     if !set.mcp.is_empty() {
         canonical.push_str("\"mcp\":");
         push_canonical_table(&mut canonical, &set.mcp);
+        canonical.push(',');
+    }
+    // "mcp" < "mods" < "rules": emitted only when declared, so a project
+    // without mods hashes unchanged.
+    if !set.mods.is_empty() {
+        canonical.push_str("\"mods\":");
+        push_canonical_table(&mut canonical, &set.mods);
         canonical.push(',');
     }
     canonical.push_str("\"rules\":");
@@ -292,6 +299,35 @@ mod tests {
         let mut with_empty = set(&[], &[]);
         with_empty.settings = BTreeMap::new();
         assert_eq!(declaration_hash(&with_empty), CASE_EMPTY);
+    }
+
+    #[test]
+    fn empty_mods_table_leaves_the_hash() {
+        let mut with_empty = set(&[], &[]);
+        with_empty.mods = BTreeMap::new();
+        assert_eq!(declaration_hash(&with_empty), CASE_EMPTY);
+    }
+
+    #[test]
+    fn declaring_a_mod_changes_the_hash() {
+        let mut declared = set(&[], &[]);
+        declared.mods.insert("x".to_string(), id("ghcr.io/acme/x:1"));
+        assert_ne!(declaration_hash(&declared), CASE_EMPTY);
+        let as_skill = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        assert_ne!(declaration_hash(&declared), declaration_hash(&as_skill));
+    }
+
+    #[test]
+    fn mods_key_sorts_between_mcp_and_rules() {
+        // Canonical JSON: {"mods":{"x":"ghcr.io/acme/x:1"},"rules":{},"skills":{}}
+        let mut declared = set(&[], &[]);
+        declared.mods.insert("x".to_string(), id("ghcr.io/acme/x:1"));
+        let canonical = r#"{"mods":{"x":"ghcr.io/acme/x:1"},"rules":{},"skills":{}}"#;
+        let expected = match Algorithm::Sha256.hash(canonical.as_bytes()) {
+            crate::oci::Digest::Sha256(hex) => format!("sha256:{hex}"),
+            other => panic!("sha256 expected, got {other:?}"),
+        };
+        assert_eq!(declaration_hash(&declared), expected);
     }
 
     #[test]

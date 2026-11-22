@@ -1,0 +1,16 @@
+# Mod demo project: one sample mod and the experimental flag on, the way a team
+# commits it. See ../README.md § Mod in a logged-in client.
+#
+# Declaring is not consent. A plain `grim install` in a fresh clone of this
+# file writes nothing until this workspace answers the question once. The
+# OpenCode V2 declaration below is what lets grim write the OpenCode plugin.
+
+[options]
+default_registry = "localhost:5050"
+clients = ["claude", "opencode"]
+
+[options.experimental]
+mods = true
+
+[mods]
+hello-mod = "localhost:5050/grimoire/mods/hello-mod:1"

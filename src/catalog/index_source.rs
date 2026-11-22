@@ -1374,4 +1374,38 @@ mod tests {
         }
         assert!(!captured.contains("s3cret"), "{captured}");
     }
+
+    #[test]
+    fn an_invalid_serves_does_not_drop_its_neighbours() {
+        let doc = r#"[
+            {"schema": 1, "name": "a", "kind": "mod", "ref": "ghcr.io/acme/a", "serves": ["claude"]},
+            {"schema": 1, "name": "b", "kind": "mod", "ref": "ghcr.io/acme/b", "serves": {"x": 1}},
+            {"schema": 1, "name": "c", "kind": "mod", "ref": "ghcr.io/acme/c", "serves": ["opencode", "claude"]}
+        ]"#;
+        let parsed = parse_packages(doc.as_bytes(), 10).expect("document parses");
+        assert_eq!(parsed.skipped, 0);
+        let entries = project_entries(parsed.packages, "t");
+        assert_eq!(entries.len(), 3);
+        let serves = |repo: &str| entries.values().find(|e| e.repository == repo).unwrap().serves.clone();
+        assert_eq!(serves("acme/a"), Some(vec!["claude".to_string()]));
+        assert_eq!(serves("acme/b"), None);
+        assert_eq!(
+            serves("acme/c"),
+            Some(vec!["claude".to_string(), "opencode".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_record_with_both_replaced_by_spellings_is_kept_with_the_snake_value() {
+        let doc = r#"[
+            {"schema": 1, "name": "a", "kind": "skill", "ref": "ghcr.io/acme/a"},
+            {"schema": 1, "name": "b", "kind": "skill", "ref": "ghcr.io/acme/b", "replaced_by": "ghcr.io/x/snake", "replacedBy": "ghcr.io/x/camel"},
+            {"schema": 1, "name": "c", "kind": "skill", "ref": "ghcr.io/acme/c"}
+        ]"#;
+        let parsed = parse_packages(doc.as_bytes(), 10).expect("document parses");
+        assert_eq!((parsed.packages.len(), parsed.skipped), (3, 0));
+        let entries = project_entries(parsed.packages, "t");
+        let b = entries.values().find(|e| e.repository == "acme/b").unwrap();
+        assert_eq!(b.replaced_by.as_deref(), Some("ghcr.io/x/snake"));
+    }
 }

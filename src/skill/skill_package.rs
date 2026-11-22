@@ -209,6 +209,66 @@ pub fn pack_hook_payload_dir(dir: &Path) -> Result<Vec<u8>, SkillError> {
     pack_tree_limited(dir, &PackLimits::DEFAULT, crate::oci::ArtifactKind::Hook)
 }
 
+/// Pack a **mod** directory: the walk of [`pack_skill_dir`] under the mod caps,
+/// `mod.toml` never ignored and a symlink refused (65).
+///
+/// `layout` receives the sorted `/`-joined paths below the root (`mod.toml`
+/// and `.grimignore` excluded) and returns the packed `mod.toml` text, or the
+/// reason the tree is refused. The author's `mod.toml` is replaced by that
+/// text in the tar.
+///
+/// # Errors
+///
+/// [`SkillErrorKind::Io`] for a walk/read failure, [`SkillErrorKind::TooLarge`]
+/// past a mod cap, [`SkillErrorKind::ValidationFailed`] for a symlink or a
+/// refused layout.
+pub fn pack_mod_dir(
+    dir: &Path,
+    layout: impl FnOnce(&[String]) -> Result<String, String>,
+) -> Result<Vec<u8>, SkillError> {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            SkillError::new(
+                dir,
+                SkillErrorKind::NameInvalid("mod path has no directory name".to_string()),
+            )
+        })?;
+    let mut state = WalkState::default();
+    let ignore = ignore_set(dir, crate::oci::ArtifactKind::Mod)?;
+    collect_files(dir, dir, &name, &ignore, &mut state, 0, &PackLimits::MOD)?;
+    let prefix = format!("{name}/");
+    let manifest_entry = format!("{prefix}mod.toml");
+    let ignore_entry = format!("{prefix}{}", crate::install::ignore_set::GRIMIGNORE);
+    // `.grimignore` steers the walk; it is not payload.
+    let mut files: Vec<(String, PathBuf)> = state.out.into_iter().filter(|(e, _)| *e != ignore_entry).collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let rels: Vec<String> = files
+        .iter()
+        .filter(|(e, _)| *e != manifest_entry)
+        .map(|(e, _)| e[prefix.len()..].to_string())
+        .collect();
+    let packed_toml = layout(&rels).map_err(|reason| SkillError::new(dir, SkillErrorKind::ValidationFailed(reason)))?;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut read_bytes: u64 = 0;
+    for (entry_path, abs) in &files {
+        let bytes = if *entry_path == manifest_entry {
+            packed_toml.clone().into_bytes()
+        } else {
+            read_capped(abs, PackLimits::MOD.byte_limit.saturating_sub(read_bytes))?
+        };
+        read_bytes = read_bytes.saturating_add(bytes.len() as u64);
+        append_entry(&mut builder, entry_path, &bytes).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
+    }
+    // The walk counted the author's `mod.toml`; the install validator counts the packed one.
+    check_pack_bounds(dir, read_bytes, files.len(), &PackLimits::MOD)?;
+    builder
+        .into_inner()
+        .map_err(|e| SkillError::new(dir, SkillErrorKind::Io(e)))
+}
+
 #[cfg(test)]
 fn pack_skill_dir_limited(dir: &Path, limits: &PackLimits) -> Result<Vec<u8>, SkillError> {
     pack_tree_limited(dir, limits, crate::oci::ArtifactKind::Skill)
@@ -589,6 +649,9 @@ struct PackLimits {
     node_limit: usize,
     /// Maximum directory-recursion depth.
     depth_limit: usize,
+    /// Refuse a symlink instead of skipping it: a dropped file would break a
+    /// mod's module graph at load time.
+    refuse_symlinks: bool,
 }
 
 impl PackLimits {
@@ -598,6 +661,17 @@ impl PackLimits {
         file_limit: PACK_FILE_LIMIT,
         node_limit: PACK_NODE_LIMIT,
         depth_limit: PACK_DEPTH_LIMIT,
+        refuse_symlinks: false,
+    };
+
+    /// The mod caps: 16 MiB, 2,000 files, and `MAX_MOD_DEPTH` path segments
+    /// below the root, so a directory sits at most `MAX_MOD_DEPTH - 1` deep.
+    const MOD: PackLimits = PackLimits {
+        byte_limit: crate::oci::mod_manifest::MAX_MOD_LAYER_BYTES,
+        file_limit: crate::oci::mod_manifest::MAX_MOD_FILES,
+        node_limit: PACK_NODE_LIMIT,
+        depth_limit: crate::oci::mod_manifest::MAX_MOD_DEPTH - 1,
+        refuse_symlinks: true,
     };
 }
 
@@ -741,6 +815,12 @@ fn collect_files(
                 state.pruned_dirs.push(rel.to_path_buf());
             }
             continue;
+        }
+        if limits.refuse_symlinks && meta.file_type().is_symlink() {
+            return Err(SkillError::new(
+                &path,
+                SkillErrorKind::ValidationFailed("a symlink cannot be packed into a mod".to_string()),
+            ));
         }
         if meta.is_dir() {
             collect_files(root, &path, root_name, ignore, state, depth + 1, limits)?;

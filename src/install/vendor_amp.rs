@@ -126,6 +126,8 @@ impl Vendor for AmpVendor {
         // (runtime-spawned, no file format).
         match kind {
             ArtifactKind::Rule | ArtifactKind::Agent => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }

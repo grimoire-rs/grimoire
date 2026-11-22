@@ -55,6 +55,10 @@ const NEVER_IGNORED: &[&str] = &["SKILL.md", GRIMIGNORE];
 /// ships an ignored `hook.toml` must pack, lock and hash exactly as before.
 const HOOK_NEVER_IGNORED: &str = crate::oci::hook::HOOK_MANIFEST_FILE;
 
+/// The one extra never-ignored name for a [`ArtifactKind::Mod`] root: its
+/// descriptor, so a `.grimignore` of `*.toml` cannot drop it.
+const MOD_NEVER_IGNORED: &[&str] = &["mod.toml"];
+
 /// Largest `.grimignore` read; a bigger one is refused before parsing so a
 /// hostile published file cannot blow up matcher compilation.
 pub const MAX_GRIMIGNORE_BYTES: u64 = 64 * 1024;
@@ -163,6 +167,9 @@ impl IgnoreSet {
             return false;
         }
         if self.kind == ArtifactKind::Hook && rel == HOOK_NEVER_IGNORED {
+            return false;
+        }
+        if self.kind == ArtifactKind::Mod && MOD_NEVER_IGNORED.contains(&rel.as_str()) {
             return false;
         }
         // Relative input never has a root, so the crate's

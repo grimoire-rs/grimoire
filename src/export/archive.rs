@@ -9,6 +9,7 @@ use std::io::{self, BufWriter, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 
 use crate::oci::Algorithm;
+use crate::path_safety::unportable_component;
 
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, System, ZipWriter};
@@ -162,15 +163,6 @@ pub struct UnportableName {
     pub reason: String,
 }
 
-/// Device names Windows reserves, with or without an extension.
-const WINDOWS_DEVICES: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
-    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
-
-/// Characters Windows refuses in a file name.
-const WINDOWS_FORBIDDEN: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
-
 /// Refuse a rendered tree a repository cannot carry to every OS (C-015,
 /// marketplace export only — a repo is checked out on Windows and macOS too):
 /// two entries whose names collide when case is folded (`str::to_lowercase`,
@@ -217,20 +209,6 @@ pub fn check_portable_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Res
         }
     }
     Ok(())
-}
-
-/// What is wrong with one path component on Windows, if anything.
-pub(crate) fn unportable_component(part: &str) -> Option<&'static str> {
-    if part.ends_with('.') || part.ends_with(' ') {
-        return Some("ends in a dot or a space, which Windows strips");
-    }
-    if part.contains(WINDOWS_FORBIDDEN) {
-        return Some("holds a character Windows refuses in a name (: * ? \" < > |)");
-    }
-    let device = part.split('.').next().unwrap_or_default().to_ascii_uppercase();
-    WINDOWS_DEVICES
-        .contains(&device.as_str())
-        .then_some("is a reserved Windows device name")
 }
 
 /// The payload of [`entry_name`]'s `InvalidData` error: the refused path,

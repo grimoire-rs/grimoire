@@ -38,9 +38,9 @@ forward and `grim status` to see where you stand.
 canonical way to set a default registry via a `default = true` entry, or
 `grim config registry use <alias>`), an `[options]` table for other defaults
 (`clients`, `[options.tui]` for the interactive browser), and `[skills]` /
-`[rules]` / `[agents]` / `[mcp]` / `[hooks]` / `[settings]` / `[bundles]`
-tables mapping a binding name to a reference (`[mcp]`, `[hooks]` and
-`[settings]` take registry references only).
+`[rules]` / `[agents]` / `[mcp]` / `[hooks]` / `[settings]` / `[mods]` / `[bundles]`
+tables mapping a binding name to a reference (`[mcp]`, `[hooks]`, `[settings]` and
+`[mods]` take registry references only).
 Manage settings and registries with `grim config` rather than by hand — see [registries.md](registries.md#managing-config); it never
 touches the declaration tables, which stay under `grim add` / `grim remove`.
 You may still edit by hand (run `grim lock` afterwards), but note that any
@@ -65,11 +65,11 @@ grim add --kind bundle ghcr.io/acme/python-stack:1
 grim add --no-install ghcr.io/acme/code-review:1   # declare + lock only
 ```
 
-- `--kind` (skill, rule, agent, bundle, mcp, hook, settings) is normally inferred from
+- `--kind` (skill, rule, agent, bundle, mcp, hook, settings, mod) is normally inferred from
   the artifact's kind metadata set at release time (the `com.grimoire.kind`
   annotation; legacy `artifactType` on older artifacts). If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
-  `hook`, then `settings`, are **appended** to that value list, never
+  `hook`, then `settings`, then `mod`, are **appended** to that value list, never
   inserted — the accepted set is a frozen CLI surface, so widening it is the
   only permitted direction. A hook or a settings package may be added with
   its experimental flag off: declaring and locking are not arming (see
@@ -117,11 +117,11 @@ grim add ./skills/my-skill
 grim add --kind agent ../shared/reviewer.md
 ```
 
-An **MCP server**, a **hook** or a **settings package** has no path form: the
-config parser refuses a path value under `[mcp]`, `[hooks]` and `[settings]`,
-and none of the three has a dev-install either (`grim install <path>` takes a
-skill, rule or agent only). All three always come from a registry reference. See
-[Hooks](#hooks) and [Settings](#settings).
+An **MCP server**, a **hook**, a **settings package** or a **mod** has no path form: the
+config parser refuses a path value under `[mcp]`, `[hooks]`, `[settings]` and `[mods]`,
+and none of the four has a dev-install either (`grim install <path>` takes a
+skill, rule or agent only). All four always come from a registry reference. See
+[Hooks](#hooks), [Settings](#settings) and [Mods](#mods).
 
 The kind infers from the path's shape the same way `grim build` does (a
 directory with `SKILL.md` is a skill, a bare `.md` is a rule; pass
@@ -628,7 +628,8 @@ Two read-only companions:
 - `grim fetch <ref> [--vendor …] [--path …]` prints an artifact's
   content without installing (use != install). Plain output is the raw
   payload (pipe-able: `grim fetch skills/x > SKILL.md`); `--format json`
-  adds the digest, kind, and a `files` listing. A binary `--path` file
+  adds the digest, kind, and a `files` listing. A mod fetches as its
+  `mod.toml` plus the file list; `--vendor` is refused for it. A binary `--path` file
   (e.g. `logo.png`) comes back base64 in JSON (an `encoding: "base64"`
   field marks it) while plain output decodes to the raw bytes, so a
   redirect round-trips byte-identical. `--description`
@@ -734,7 +735,7 @@ To stop a hook now, use `uninstall` ([remove and uninstall][hooks-remove]).
 
 A bundle is a curated set of members. Declare it once and it **expands**
 into its members — skills, rules, agents, MCP servers, hooks, settings
-packages and nested bundles — at lock time,
+packages, mods and nested bundles — at lock time,
 each pinned like a direct declaration and tagged with the bundle as its
 provenance:
 
@@ -796,7 +797,7 @@ hook the add does not consent to is drift until `grim hook allow` covers it.
 
 ## Dependencies
 
-A skill, rule, agent, MCP server, hook or settings package can declare the
+A skill, rule, agent, MCP server, hook, settings package or mod can declare the
 artifacts it needs
 (the author's side: see the `grim-authoring` skill). Adding or locking it then
 pulls the dependencies in, transitively, and a bundle can hold other
@@ -860,7 +861,7 @@ rather than folded into one switch:
 | Gate | Question | Where | Default |
 |---|---|---|---|
 | 1 | Is the feature on? | `options.experimental.hooks` in project or global config | `false` |
-| 2 | Has this workspace consented? | a machine-local record under `$GRIM_HOME/hooks/consent/` | absent |
+| 2 | Has this workspace consented? | a machine-local record under `$GRIM_HOME/consent/`, one record for every gated kind | absent |
 | 2 | …or did this one invocation get an explicit pass? | `--trust-workspace` (alias `--trust-hooks`) on `grim install` / `update` / `add` | off |
 | 2 | …or did you answer the prompt? | asked once per workspace, on a TTY only | — |
 
@@ -1030,8 +1031,8 @@ Unstable until 1.0 ([Settings reference][settings-ref]; worked example:
   true (`grim config set options.experimental.settings true`, with `--global`
   for global scope). It is config-only, with no environment variable, and it
   is not consent. At project scope the workspace must also have consented: the
-  hook consent record holds `settings:<binding>@<registry>/<repository>` keys
-  beside the hook keys. `grim hook allow` (alias `grim consent allow`) records
+  workspace consent record holds the settings bindings as unprefixed
+  `<binding>@<registry>/<repository>` entries beside the hook entries. `grim hook allow` (alias `grim consent allow`) records
   both kinds whatever the flags say. `grim add`, and an accepted prompt, record
   a settings package only while the flag is on. An add records the packages it
   brings, under the rule for [hooks](#hooks), ahead of its install. `grim hook revoke`
@@ -1075,6 +1076,38 @@ Unstable until 1.0 ([Settings reference][settings-ref]; worked example:
   named in `abandoned_entries`.
 
 Confirm the flags with `grim install --help` and `grim hook allow --help`.
+
+## Mods {#mods}
+
+A mod is publisher code a client loads into its own process (Claude Code,
+OpenCode). It is experimental pre-1.0 and gated like settings:
+
+- **Two gates, shared with hooks.** `options.experimental.mods` must be true
+  (config-only, off by default), and at project scope the workspace must have
+  consented through the same record hooks and settings use
+  (`$GRIM_HOME/consent/`, unprefixed `<binding>@<registry>/<repository>`
+  entries). `grim consent allow` and the `--trust-workspace` pair answer for
+  every gated kind. Global scope is always consented. With either gate closed
+  the row reads `gated` and nothing is written.
+- **Declaring.** A `[mods]` table, or `grim add --kind mod <ref>`. A mod has
+  no path source and no dev-install.
+- **Where files land.** Claude: `.claude/mods/<binding>/` plus a shared
+  marketplace and entries in `.claude/settings.local.json`. OpenCode:
+  `.opencode/plugins/<binding>/`, unless the scope sets
+  `options.vendors.opencode.plugin_api = "v1"`. Records of what grim wrote
+  live in `$GRIM_HOME/mods/`.
+- **Consent is not what runs.** `installed` means written and registered, not
+  observed running; the client decides what it loads.
+- **Revoking.** `grim consent revoke` leaves written mods reading `installed`
+  until the next converging command disarms them, then `gated`.
+- **A skill is not a mod.** A skill whose root carries a `.claude-plugin`
+  directory is refused (exit 65, `skill-plugin-manifest`); ship client-loaded
+  code as a mod.
+
+Full contract: [Mod reference][mods-ref]. Authoring: `grim-authoring`'s
+`references/mod-spec.md`.
+
+[mods-ref]: https://grimoire.rs/mods.html
 
 ## Further Reading
 

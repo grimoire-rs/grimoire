@@ -471,9 +471,9 @@ artifact, and a skill reaches clients a hook never will.
   ```
 
   Members sort on the wire by kind, in the order skill, rule, agent, mcp,
-  hook, settings, then by name, so a settings member sorts last. Adding the
-  table to an existing bundle places the hooks before any settings member
-  and after every other member, and leaves each other member's entry
+  hook, settings, mod, then by name, so a mod member sorts last. Adding the
+  table to an existing bundle places the hooks before any settings or mod
+  member and after every other member, and leaves each other member's entry
   byte-identical. As with the other member tables, a value
   may be deployment-relative (`./hooks/shell-guard:1`) — that still names
   a registry reference, resolved against the bundle's own directory, not a

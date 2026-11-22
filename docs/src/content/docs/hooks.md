@@ -57,10 +57,9 @@ A repository's `grimoire.toml` is written by whoever committed it, so a
 declaration alone never arms a hook. Consent is a separate, machine-local
 record that a clone never carries.
 
-Since grim 0.16.0 the same record also gates the experimental
-[settings][settings-consent] kind. A settings entry carries a `settings:`
-prefix, as in `settings:<binding>@<registry>/<repository>`. Both kinds are
-[unstable][stability-unstable] until 1.0.
+The same record also gates the experimental [settings][settings-consent] and
+[mod][mods] kinds. Every entry has the form `<binding>@<registry>/<repository>`
+with no kind prefix. The kinds are [unstable][stability-unstable] until 1.0.
 
 Exactly three actions write a consent record:
 
@@ -80,7 +79,7 @@ Install there that declares nothing. `grim hook revoke` removes the record for
 both kinds and leaves every written settings value in place. `grim consent` is
 a visible alias of `grim hook`.
 
-The record lives at `$GRIM_HOME/hooks/consent/<workspace-key>.json`, keyed by
+The record lives at `$GRIM_HOME/consent/<workspace-key>.json`, keyed by
 the workspace path. Consent in one clone grants nothing to another clone, or to
 the same clone on another machine.
 
@@ -416,6 +415,7 @@ marketplace, that applies to each plugin on its own.
 [guide]: ./guides/agent-hooks.md
 [troubleshooting]: ./hooks-troubleshooting.md
 [consent]: #consent
+[mods]: ./mods.md
 [settings-consent]: ./settings.md#consent
 [artifacts-hooks]: ./artifacts.md#hooks
 [json-hook-arming]: ./json-interface.md#hook-arming

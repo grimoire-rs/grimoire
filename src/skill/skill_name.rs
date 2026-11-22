@@ -45,18 +45,43 @@ impl SkillName {
     /// `[a-z0-9.-]`, starts or ends with a separator, or contains two
     /// adjacent separators.
     pub fn parse(raw: &str) -> Result<Self, String> {
+        Self::parse_as(raw, "skill")
+    }
+
+    /// [`Self::parse`], calling a mod a mod in the refusal text; every other
+    /// kind reads exactly as [`Self::parse`] does.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`Self::parse`].
+    pub fn parse_for(raw: &str, kind: crate::oci::ArtifactKind) -> Result<Self, String> {
+        let noun = if kind == crate::oci::ArtifactKind::Mod {
+            "mod"
+        } else {
+            "skill"
+        };
+        Self::parse_as(raw, noun)
+    }
+
+    /// [`Self::parse`] with `noun` in the refusal text in place of `skill`, for
+    /// a kind that shares the grammar but should not be called a skill.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`Self::parse`].
+    pub fn parse_as(raw: &str, noun: &str) -> Result<Self, String> {
         if raw.is_empty() {
-            return Err("skill name is empty".to_string());
+            return Err(format!("{noun} name is empty"));
         }
         if raw.len() > MAX_SKILL_NAME_LEN {
-            return Err(format!("skill name '{raw}' exceeds {MAX_SKILL_NAME_LEN} characters"));
+            return Err(format!("{noun} name '{raw}' exceeds {MAX_SKILL_NAME_LEN} characters"));
         }
         if !raw
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || is_separator(c))
         {
             return Err(format!(
-                "skill name '{raw}' must contain only lowercase letters, digits, hyphens, and periods"
+                "{noun} name '{raw}' must contain only lowercase letters, digits, hyphens, and periods"
             ));
         }
         // Separator edge rules keep every name filesystem-safe (no
@@ -64,7 +89,7 @@ impl SkillName {
         // trailing dot) and a strict subset of the OCI segment grammar.
         if raw.starts_with(is_separator) || raw.ends_with(is_separator) {
             return Err(format!(
-                "skill name '{raw}' must not start or end with a hyphen or period"
+                "{noun} name '{raw}' must not start or end with a hyphen or period"
             ));
         }
         // The charset check above guarantees ASCII, so byte windows are
@@ -75,7 +100,7 @@ impl SkillName {
             .any(|w| matches!(w[0], b'-' | b'.') && matches!(w[1], b'-' | b'.'))
         {
             return Err(format!(
-                "skill name '{raw}' must not contain consecutive hyphens or periods"
+                "{noun} name '{raw}' must not contain consecutive hyphens or periods"
             ));
         }
         Ok(Self(raw.to_string()))
@@ -202,5 +227,20 @@ mod tests {
     #[test]
     fn deserialize_rejects_invalid() {
         assert!(serde_json::from_str::<SkillName>("\"Bad_Name\"").is_err());
+    }
+
+    #[test]
+    fn only_a_mod_changes_the_noun_in_the_refusal() {
+        use crate::oci::ArtifactKind;
+        let skill = SkillName::parse("Upper").unwrap_err();
+        assert!(skill.starts_with("skill name 'Upper' must contain only"), "{skill}");
+        for kind in ArtifactKind::ALL {
+            let said = SkillName::parse_for("Upper", kind).unwrap_err();
+            if kind == ArtifactKind::Mod {
+                assert_eq!(said, skill.replacen("skill", "mod", 1));
+            } else {
+                assert_eq!(said, skill, "{kind} text must stay byte-identical");
+            }
+        }
     }
 }

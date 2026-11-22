@@ -146,6 +146,8 @@ pub enum Mode {
 /// [`Mode::SettingsResult`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsResult {
+    /// The panel's border title.
+    pub title: &'static str,
     /// What the list means.
     pub message: String,
     /// One line per change or refused value.
@@ -2433,8 +2435,15 @@ impl TuiState {
 
     /// Show what a finished action did to settings values.
     pub fn open_settings_result(&mut self, message: &str, detail: &str) {
+        self.open_notice("Settings", message, detail);
+    }
+
+    /// Show a notice panel titled `title`; the title row cuts the status line,
+    /// so a text the user must read whole opens here.
+    pub fn open_notice(&mut self, title: &'static str, message: &str, detail: &str) {
         self.mode = Mode::SettingsResult;
         self.settings_result = Some(SettingsResult {
+            title,
             message: message.to_string(),
             detail: detail.to_string(),
             scroll: 0,
@@ -2608,7 +2617,7 @@ impl TuiState {
     /// search` apply identical semantics: whitespace-split AND-of-terms,
     /// **fuzzy**-matched over the repo leaf name, keywords, and kind, by
     /// **word prefix** over summary / description / namespace, plus bare
-    /// kind keywords (skill, rule, agent, bundle, mcp, hook, settings,
+    /// kind keywords (skill, rule, agent, bundle, mcp, hook, settings, mod,
     /// singular or plural) that filter by kind; with the `f` kind filter set
     /// every query word is text. The query is parsed once, then every row is
     /// scored against it.

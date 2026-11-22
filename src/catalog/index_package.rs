@@ -24,7 +24,7 @@ pub(crate) struct IndexPackage {
     /// git walk fills it from the directory path instead.
     #[serde(default)]
     pub(crate) namespace: Option<String>,
-    /// `skill` / `rule` / `agent` / `bundle`.
+    /// Artifact kind, as `ArtifactKind` spells it.
     kind: String,
     /// OCI reference (`registry/repository`, no tag) grim resolves against.
     r#ref: String,
@@ -51,8 +51,13 @@ pub(crate) struct IndexPackage {
     #[serde(default)]
     deprecated: Option<String>,
     /// Successor reference, mirroring `com.grimoire.replaced-by`.
+    // Both spellings are read and the record is never dropped; `replaced_by`
+    // wins. No alias: one would make a record with both keys fail serde's
+    // duplicate-field check and vanish.
     #[serde(default)]
     replaced_by: Option<String>,
+    #[serde(default, rename = "replacedBy")]
+    replaced_by_camel: Option<String>,
     /// SPDX license expression, mirroring
     /// `org.opencontainers.image.licenses`. Absent in pre-license index files.
     #[serde(default)]
@@ -62,9 +67,26 @@ pub(crate) struct IndexPackage {
     /// Absent in pre-provenance index files.
     #[serde(default)]
     created: Option<String>,
+    /// Harnesses a `mod` serves, mirroring `com.grimoire.mod.clients`. Held
+    /// raw so a wrong-shaped value reads as absent instead of failing the
+    /// record; see [`Self::served_clients`].
+    #[serde(default)]
+    serves: Option<serde_json::Value>,
 }
 
 impl IndexPackage {
+    /// `serves` under the annotation's grammar; any invalid value is absent.
+    fn served_clients(&self) -> Option<Vec<String>> {
+        let names = self.serves.as_ref()?.as_array().and_then(|items| {
+            let strs: Option<Vec<&str>> = items.iter().map(serde_json::Value::as_str).collect();
+            crate::oci::annotations::normalize_mod_clients(strs?)
+        });
+        if names.is_none() {
+            tracing::debug!("index entry '{}': invalid serves dropped", self.r#ref);
+        }
+        names
+    }
+
     /// Project into a [`CatalogEntry`], or `None` when the `ref` carries no
     /// `registry/repository` split or the schema version is unknown.
     pub(crate) fn into_entry(self, fetched_at: &str) -> Option<CatalogEntry> {
@@ -90,6 +112,11 @@ impl IndexPackage {
             }
             path
         });
+        let serves = if self.kind == "mod" {
+            self.served_clients()
+        } else {
+            None
+        };
         Some(CatalogEntry {
             registry: registry.to_string(),
             repository: repository.to_string(),
@@ -110,10 +137,10 @@ impl IndexPackage {
                 .deprecated
                 .as_deref()
                 .and_then(crate::oci::annotations::normalize_deprecated),
-            replaced_by: self
-                .replaced_by
-                .as_deref()
-                .and_then(crate::oci::annotations::normalize_deprecated),
+            // A snake value that normalizes to blank falls back to the camel one.
+            replaced_by: [&self.replaced_by, &self.replaced_by_camel]
+                .into_iter()
+                .find_map(|v| v.as_deref().and_then(crate::oci::annotations::normalize_deprecated)),
             // The index phone book carries no OCI image annotations beyond the
             // license the pointer now mirrors.
             oci: crate::catalog::registry_catalog::OciMeta {
@@ -129,6 +156,7 @@ impl IndexPackage {
             // afterwards.
             rating: None,
             downloads: None,
+            serves,
             fetched_at: fetched_at.to_string(),
         })
     }
@@ -165,4 +193,71 @@ pub(crate) fn index_path(namespace: &str, name: &str) -> Option<String> {
     };
     (namespace.split('/').count() < MAX_SEGMENTS && namespace.split('/').all(valid) && valid(name))
         .then(|| format!("{namespace}/{name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(extra: &str) -> CatalogEntry {
+        let json = format!(r#"{{"schema": 1, "name": "x", "kind": "mod", "ref": "ghcr.io/acme/x"{extra}}}"#);
+        serde_json::from_str::<IndexPackage>(&json)
+            .expect("record parses")
+            .into_entry("t")
+            .expect("record projects")
+    }
+
+    #[test]
+    fn serves_is_sorted_and_deduplicated() {
+        let e = entry(r#", "serves": ["opencode", "claude", "claude"]"#);
+        assert_eq!(e.serves, Some(vec!["claude".to_string(), "opencode".to_string()]));
+    }
+
+    #[test]
+    fn invalid_serves_reads_as_absent() {
+        for bad in [
+            r#"["Claude"]"#,
+            r#"[""]"#,
+            r#""claude""#,
+            "[1]",
+            "null",
+            "[]",
+            "1",
+            r#"{"x": 1}"#,
+            "true",
+        ] {
+            let e = entry(&format!(r#", "serves": {bad}"#));
+            assert_eq!(e.serves, None, "serves {bad}");
+        }
+    }
+
+    #[test]
+    fn replaced_by_reads_both_spellings() {
+        assert_eq!(
+            entry(r#", "replacedBy": "ghcr.io/x/y""#).replaced_by.as_deref(),
+            Some("ghcr.io/x/y")
+        );
+        assert_eq!(
+            entry(r#", "replaced_by": "ghcr.io/x/y""#).replaced_by.as_deref(),
+            Some("ghcr.io/x/y")
+        );
+    }
+
+    #[test]
+    fn replaced_by_wins_when_both_spellings_are_present() {
+        let e = entry(r#", "replaced_by": "ghcr.io/x/snake", "replacedBy": "ghcr.io/x/camel""#);
+        assert_eq!(e.replaced_by.as_deref(), Some("ghcr.io/x/snake"));
+        let e = entry(r#", "replacedBy": "ghcr.io/x/camel", "replaced_by": "ghcr.io/x/snake""#);
+        assert_eq!(e.replaced_by.as_deref(), Some("ghcr.io/x/snake"));
+    }
+
+    #[test]
+    fn non_mod_kind_drops_serves() {
+        let json = r#"{"schema": 1, "name": "x", "kind": "skill", "ref": "ghcr.io/acme/x", "serves": ["claude"]}"#;
+        let e = serde_json::from_str::<IndexPackage>(json)
+            .unwrap()
+            .into_entry("t")
+            .unwrap();
+        assert_eq!(e.serves, None);
+    }
 }

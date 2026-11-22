@@ -91,12 +91,13 @@ Under `--registry`, a config that fails to load falls back to the default
 
 The optional `[options.experimental]` sub-table gates features whose shape
 is not frozen yet (see [Unstable surfaces](./stability.md#unstable)). It
-holds two keys, `hooks` and `settings`:
+holds three keys, `hooks`, `settings` and `mods`:
 
 ```toml
 [options.experimental]
 hooks = true
 settings = true
+mods = true
 ```
 
 `hooks` (boolean, default `false`) turns on the [hook](./hooks.md) artifact
@@ -121,6 +122,11 @@ Declaring and locking a settings package need no flag. With the flag off,
 `grim status` reads `gated` and `grim install` writes and removes no settings.
 Clearing the flag leaves every written value in place. See
 [Turn the kind on][settings-enable].
+
+`mods` (boolean, default `false`) turns on the experimental [mod][mods] kind
+for this scope. Set it with `grim config set options.experimental.mods true`,
+at project or global scope. It is config-only, and turning it on is not
+consent. A path value in the `[mods]` table is refused when the config parses.
 
 ### `[options.tui]` {#options-tui}
 
@@ -171,7 +177,20 @@ shared_skills = true
 |-------|------|---------|-------------|
 | `shared_skills` | boolean | unset (automatic) | `true` installs this client's skills into the cross-vendor `.agents/skills` pool instead of the client's own skills directory. `false` keeps its own directory. Unset, a pool-reading client joins the pool only when another selected client already installs there. |
 
-Unset is the usual answer. A client that reads the pool but has its own
+The `plugin_api` field is read for the `opencode` client only. Any other
+client refuses it when the config loads.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `plugin_api` | string | unset (V2) | The OpenCode plugin API line. Unset or `"v2"`, OpenCode hosts mods. `"v1"` opts out: OpenCode declines every mod with one warning. Only `v1` and `v2` are valid. |
+
+Grim reads `plugin_api` from the resolved scope's own config, with no merge
+across scopes. Set it with
+`grim config set options.vendors.opencode.plugin_api v1`. An older grim exits
+`78` on this key, so set it in the global config only once no older grim runs.
+See [Mods][mods-host].
+
+Unset is the usual answer for `shared_skills`. A client that reads the pool but has its own
 directory then installs natively, unless a pool writer such as `codex` is in
 the set. Beside a writer it joins the pool, so each skill exists once on disk.
 [Shared skills pool visibility](./clients.md#gap-shared-pool) lists the
@@ -973,7 +992,7 @@ unused:
 - `[[<kind>.requires]]` follows an entry of `[[skill]]`, `[[rule]]`,
   `[[agent]]`, `[[mcp]]`, `[[hook]]` or `[[settings]]`. Each table holds the
   `kind`, `name` and `id` of one declared dependency, sorted by kind (skill,
-  rule, agent, bundle, mcp, hook, settings) and then name. The `id` is stored exactly as the
+  rule, agent, bundle, mcp, hook, settings, mod) and then name. The `id` is stored exactly as the
   publisher wrote it, so a relative `./gws-shared:1` stays relative and is
   resolved against the parent's pinned repository each time the lock is read.
   A mirror switch therefore needs no lock rewrite. An entry from a local path
@@ -1406,6 +1425,7 @@ are generated from grim's own parser, so they accept exactly what grim accepts.
 | `grimoire.lock` | `https://grimoire.rs/schemas/grimoire-lock.schema.json` |
 | `mcp/<name>.toml` | `https://grimoire.rs/schemas/grim-mcp.schema.json` |
 | `settings/<name>.toml` | `https://grimoire.rs/schemas/grim-settings.schema.json` |
+| `mod.toml` | `https://grimoire.rs/schemas/grim-mod.schema.json` |
 
 [Taplo](https://taplo.tamasfe.dev/) and the
 [Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
@@ -1609,6 +1629,8 @@ that claims a value as grim's. Global-scope settings records sit in
 [grim-remove]: ./commands.md#remove
 [grim-login]: ./authentication.md#login
 [settings-kind]: ./settings.md
+[mods]: ./mods.md
+[mods-host]: ./mods.md#host-declaration
 [settings-enable]: ./settings.md#enable
 [settings-files]: ./settings.md#files
 [settings-root-fence]: ./settings.md#root-fence

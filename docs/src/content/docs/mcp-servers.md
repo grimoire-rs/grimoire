@@ -403,7 +403,7 @@ On the wire, an MCP descriptor publishes as a single canonical-JSON layer
 (media type `application/vnd.grimoire.mcp.v1+json`, capped at 64 KiB),
 the same OCI empty config every kind uses, and the same
 `com.grimoire.kind: mcp` manifest annotation — see
-[The seven kinds](./artifacts.md#kinds) for why the annotation exists.
+[The eight kinds](./artifacts.md#kinds) for why the annotation exists.
 Conventionally it publishes to `<registry>/<namespace>/mcp/<name>:<version>`,
 the same `{kind-subdir}/{name}` layout every other kind uses by default.
 

@@ -191,6 +191,8 @@ impl Vendor for GeminiVendor {
         // Rules declined — GEMINI.md hierarchy only, no ownable per-file surface.
         match kind {
             ArtifactKind::Rule => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }

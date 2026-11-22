@@ -245,6 +245,7 @@ pub(crate) fn project_lock(lock: &GrimoireLock, nodes: &BTreeSet<NodeKey>) -> Gr
         hooks: lock.hooks.iter().filter(keep).cloned().collect(),
         settings: lock.settings.iter().filter(keep).cloned().collect(),
         bundles: Vec::new(),
+        mods: lock.mods.iter().filter(keep).cloned().collect(),
     }
 }
 
@@ -290,6 +291,7 @@ pub(crate) fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &
         hooks: Vec::new(),
         settings: Vec::new(),
         bundles: Vec::new(),
+        mods: Vec::new(),
     };
     match kind {
         ArtifactKind::Skill => single.skills.push(entry),
@@ -298,6 +300,7 @@ pub(crate) fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &
         ArtifactKind::Mcp => single.mcp.push(entry),
         ArtifactKind::Hook => single.hooks.push(entry),
         ArtifactKind::Settings => single.settings.push(entry),
+        ArtifactKind::Mod => single.mods.push(entry),
         ArtifactKind::Bundle => return None,
     }
     Some(single)
@@ -330,6 +333,7 @@ pub(crate) fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle
         // A projection feeds the installer only — the bundle cache is not
         // consulted there, so it is not carried over.
         bundles: Vec::new(),
+        mods: lock.mods.iter().filter(|a| is_member(a)).cloned().collect(),
     }
 }
 

@@ -23,6 +23,7 @@ use crate::install::installer::{
     ArtifactInstall, InstallIntent, InstallOutcome, InstallRun, SettingsOutcome, SettingsRun, install_and_persist,
 };
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::mod_phase::ModReach;
 use crate::install::settings_phase;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
@@ -100,7 +101,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let target = install_target(&scope, &args.client, &global)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     say_clients(ctx, &target);
     ctx.telemetry()
         .record_install_clients(&target, &scope.workspace, scope.scope);
@@ -138,6 +140,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
             crate::install::vendor::SyncAdds::Every,
             progress.as_ref(),
             SettingsRun::Full(&lock),
+            declared_mod_reach(),
         )
         .await,
     )?;
@@ -145,6 +148,16 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     record_changed(ctx, &run.items, &scope.set);
     let armed = armed_after_convergence(ctx.grim_home(), &scope.workspace, scope.scope);
     finish(run, &armed)
+}
+
+/// The mod reach of a bare `grim install`: the whole lock.
+const fn declared_mod_reach() -> ModReach<'static> {
+    ModReach::Full
+}
+
+/// The mod reach of a dev install: mods have no path source, so none is written or disarmed.
+const fn dev_mod_reach() -> ModReach<'static> {
+    ModReach::Skip
 }
 
 /// The target `grim install` renders into: `--client`, else the project's
@@ -291,7 +304,7 @@ async fn dev_install(
         ArtifactKind::Rule => scope.set.rules.contains_key(&name),
         ArtifactKind::Agent => scope.set.agents.contains_key(&name),
         // Path sources never produce these kinds (shape/--kind gate above).
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings | ArtifactKind::Mod => {
             unreachable!("dev-install is limited to skill/rule/agent")
         }
     };
@@ -367,6 +380,7 @@ async fn dev_install(
         },
         bundles: Vec::new(),
         requires: Vec::new(),
+        clients: Vec::new(),
     };
     let mut synth = crate::lock::grimoire_lock::GrimoireLock {
         hooks: vec![],
@@ -383,6 +397,7 @@ async fn dev_install(
         agents: Vec::new(),
         mcp: Vec::new(),
         bundles: Vec::new(),
+        mods: Vec::new(),
     };
     match kind {
         // Second half of the same decision recorded above (hooks are not
@@ -394,7 +409,7 @@ async fn dev_install(
         ArtifactKind::Rule => synth.rules.push(entry),
         ArtifactKind::Agent => synth.agents.push(entry),
         // Path sources never produce these kinds (shape/--kind gate above).
-        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings => {
+        ArtifactKind::Bundle | ArtifactKind::Mcp | ArtifactKind::Settings | ArtifactKind::Mod => {
             unreachable!("dev-install is limited to skill/rule/agent")
         }
     }
@@ -408,7 +423,8 @@ async fn dev_install(
     let global = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let target = install_target(scope, &args.client, &global)?
         .with_hook_policy(policies.hooks)
-        .with_settings_policy(policies.settings);
+        .with_settings_policy(policies.settings)
+        .with_mod_policy(policies.mods);
     say_clients(ctx, &target);
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(scope_resolution::read_state(scope).map_err(|e| state_io(&scope.state_path, e)))?
@@ -432,6 +448,7 @@ async fn dev_install(
             crate::install::vendor::SyncAdds::Every,
             progress.as_ref(),
             SettingsRun::Skip,
+            dev_mod_reach(),
         )
         .await,
     )?;
@@ -697,6 +714,12 @@ pub(crate) fn refusal_error(reference: ArtifactRef, outcome: InstallOutcome) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_install_reaches_every_mod_and_dev_install_none() {
+        assert_eq!(declared_mod_reach(), ModReach::Full);
+        assert_eq!(dev_mod_reach(), ModReach::Skip);
+    }
     use crate::api::settings_report::{PieceMark, PieceState, RefusedPiece, SettingsChange, SettingsChangeAction};
     use crate::install::install_error::{InstallError, InstallErrorKind};
     use crate::oci::reference::ArtifactRef;
@@ -887,7 +910,7 @@ mod tests {
         assert!(crate::error::settings_outcome(&err).is_none());
     }
 
-    /// One tagged pin per artifact kind, plus a `[[bundle]]`, whose `tag` the
+    /// One tagged pin per artifact kind but bundle, plus a `[[bundle]]`, whose `tag` the
     /// parser re-attaches to its pin.
     fn tagged_lock(declaration_hash: &str) -> String {
         let hex = "a".repeat(64);
@@ -900,6 +923,10 @@ mod tests {
             let pin = format!("r.example/acme/{kind}:1@sha256:{hex}");
             lock.push_str(&format!("\n[[{kind}]]\nname = \"{kind}\"\npinned = \"{pin}\"\n"));
         }
+        // A mod row must name the clients it serves.
+        lock.push_str(&format!(
+            "\n[[mod]]\nname = \"mod\"\npinned = \"r.example/acme/mod:1@sha256:{hex}\"\nclients = [\"claude\"]\n"
+        ));
         lock.push_str(&format!(
             "\n[[bundle]]\nname = \"b\"\nrepo = \"r.example/acme/b\"\ntag = \"2\"\n\
              pinned = \"r.example/acme/b@sha256:{hex}\"\n"
@@ -914,7 +941,7 @@ mod tests {
         let set = crate::config::DesiredSet::default();
         std::fs::write(&path, tagged_lock(set.declaration_hash_cached())).unwrap();
         let on_disk = crate::lock::lock_io::load(&path).unwrap();
-        assert_eq!(on_disk.iter_artifacts().count(), 6);
+        assert_eq!(on_disk.iter_artifacts().count(), 7);
         assert!(
             on_disk
                 .iter_artifacts()
@@ -924,7 +951,7 @@ mod tests {
 
         let lock = fresh_lock(&path, &set, &crate::config::scope::Invocation::WALKED).unwrap();
 
-        assert_eq!(lock.iter_artifacts().count(), 6);
+        assert_eq!(lock.iter_artifacts().count(), 7);
         for artifact in lock.iter_artifacts() {
             assert_eq!(artifact.source.pinned().unwrap().tag(), None, "{}", artifact.name);
         }

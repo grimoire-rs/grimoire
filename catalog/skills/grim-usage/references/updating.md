@@ -59,8 +59,8 @@ need to refresh it against a newer grim release.
 
 ## What Drifts, and How Fast
 
-Tier-1 invariants (the **seven** kinds — skill, rule, agent, mcp, hook,
-settings, bundle, with hook and settings experimental behind their own
+Tier-1 invariants (the **eight** kinds — skill, rule, agent, mcp, hook,
+settings, bundle, mod, with hook, settings and mod experimental behind their own
 flags — reference syntax, exit-code classes, cascade-tag semantics) are
 design commitments and rarely move, but "rarely" is not "never": this line
 said *four* while the skill body said *five*, so re-derive the count from

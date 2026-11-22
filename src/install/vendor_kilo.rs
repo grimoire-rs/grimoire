@@ -200,6 +200,8 @@ impl Vendor for KiloVendor {
     fn kind_support(&self, kind: ArtifactKind) -> KindSupport {
         match kind {
             ArtifactKind::Rule | ArtifactKind::Mcp => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }

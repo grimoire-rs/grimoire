@@ -287,6 +287,9 @@ pub struct StatusEntry {
     /// `--check`. `[]` when none did, `null` when the check did not run or
     /// could not answer. See [`MovedNestedBundle`] for the full contract.
     pub moved_nested_bundles: Option<Vec<MovedNestedBundle>>,
+    /// The harnesses a mod serves, from its manifest. Always present, `null`
+    /// for every kind but a mod and for a mod row that has no answer.
+    pub serves: Option<Vec<String>>,
 }
 
 pub(crate) fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
@@ -378,13 +381,13 @@ impl StatusReport {
 
 impl Printable for StatusReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
-        // The `Note` column appears only when a hook or settings row is
+        // The `Note` column appears only when a hook, settings or mod row is
         // present, so any other table stays byte-identical to what it was
         // before those kinds existed (WP-01 review W4).
         let has_note = self
             .items
             .iter()
-            .any(|e| matches!(e.kind, ArtifactKind::Hook | ArtifactKind::Settings));
+            .any(|e| matches!(e.kind, ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod));
         let rows: Vec<Vec<String>> = self
             .items
             .iter()
@@ -466,6 +469,7 @@ mod tests {
             update_available: None,
             arming: Vec::new(),
             moved_nested_bundles: None,
+            serves: None,
         }
     }
 
@@ -674,6 +678,8 @@ mod tests {
         assert!(item["replaced_by"].is_null());
         assert!(item["update_available"].is_null());
         assert!(item["moved_nested_bundles"].is_null());
+        assert!(item.as_object().unwrap().contains_key("serves"));
+        assert!(item["serves"].is_null());
     }
 
     #[test]
@@ -689,6 +695,7 @@ mod tests {
                 },
                 StatusEntry {
                     moved_nested_bundles: Some(Vec::new()),
+                    serves: None,
                     ..base_entry("stays")
                 },
             ],

@@ -361,6 +361,8 @@ impl ClientTarget {
                 .vendor()
                 .settings_config_path(workspace, scope)
                 .unwrap_or_else(|| workspace.to_path_buf()),
+            // The mod phase writes a mod's files, never this seam; the workspace stands in for a target that is never written.
+            ArtifactKind::Mod => workspace.to_path_buf(),
         }
     }
 
@@ -403,6 +405,8 @@ impl ClientTarget {
             // diverges before the materialization path.
             ArtifactKind::Mcp => unreachable!("mcp descriptors register into client configs, never materialize"),
             ArtifactKind::Settings => unreachable!("settings merge into client configs, never materialize"),
+            // The installer routes a mod to the mod phase, so it never materializes one here.
+            ArtifactKind::Mod => unreachable!("mods are written by the mod phase, never materialized"),
             ArtifactKind::Hook => Self::materialize_hook(artifact_root, dest),
         }
     }
@@ -1009,7 +1013,7 @@ mod tests {
     }
 
     /// Parse the first markdown table of a docs page into `(client, [Skill,
-    /// Rule, Agent, MCP, Hook, Settings])` rows. Cell parsing keys on the
+    /// Rule, Agent, MCP, Hook, Settings, Mod])` rows. Cell parsing keys on the
     /// `✓`/`◐`/`✗` token only, whitespace- and formatting-insensitive; an
     /// unrecognized cell (e.g. a `TODO` placeholder) is a `None` that fails the
     /// caller's assert.
@@ -1017,7 +1021,7 @@ mod tests {
     /// A **missing** column is the same `None` as an unrecognized token: cells
     /// are read through `Vec::get`, so a row that stops short still lands in
     /// the returned set and fails the caller's placeholder assert by name.
-    fn parse_first_matrix(md: &str) -> Vec<(String, [Option<Cell>; 6])> {
+    fn parse_first_matrix(md: &str) -> Vec<(String, [Option<Cell>; 7])> {
         let mut rows = Vec::new();
         let mut in_table = false;
         for line in md.lines() {
@@ -1061,7 +1065,7 @@ mod tests {
                 Some(c) if c.contains('✗') => Some(Cell::No),
                 _ => None,
             };
-            rows.push((name, [cell(1), cell(2), cell(3), cell(4), cell(5), cell(6)]));
+            rows.push((name, [cell(1), cell(2), cell(3), cell(4), cell(5), cell(6), cell(7)]));
         }
         rows
     }
@@ -1134,6 +1138,28 @@ mod tests {
                 settings_matrix_cell(client),
                 "{name} Settings cell must track settings_fields and the project settings file"
             );
+            // Mod column: `kind_support` is its authority, `✓` for the two
+            // hosts and `✗` for the rest (no partial cell exists for a mod).
+            let modcell = cells[6].unwrap_or_else(|| panic!("unparsed Mod cell for '{name}' (TODO placeholder?)"));
+            let expected = match v.kind_support(ArtifactKind::Mod) {
+                KindSupport::Native => Cell::Yes,
+                KindSupport::Degraded => Cell::Partial,
+                KindSupport::Declined => Cell::No,
+            };
+            assert_eq!(modcell, expected, "{name} Mod cell must track kind_support");
+        }
+    }
+
+    /// Only Claude and OpenCode host a mod, and Kilo says so explicitly.
+    #[test]
+    fn mod_is_hosted_by_claude_and_opencode_only() {
+        for client in ClientTarget::ALL {
+            let want = if matches!(client, ClientTarget::Claude | ClientTarget::OpenCode) {
+                KindSupport::Native
+            } else {
+                KindSupport::Declined
+            };
+            assert_eq!(client.vendor().kind_support(ArtifactKind::Mod), want, "{client}");
         }
     }
 

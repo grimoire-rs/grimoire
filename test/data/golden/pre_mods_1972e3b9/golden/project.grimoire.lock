@@ -1,0 +1,73 @@
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:e3f759c0b4a2e93e4f440490fb9cbc9a267c625ba31c45fe52a489e9bd43511d"
+generated_by = "grim 0.16.0"
+generated_at = "2026-11-19T07:21:09Z"
+
+[[skill]]
+name = "local-skill"
+path = "./skills/local-skill"
+hash = "sha256:869a92fabc5e314644b75911a778b88cc82fcb4963dc53d9269f045bf5e0eed5"
+
+[[skill]]
+name = "reg-skill"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-skill:1.0.0@sha256:9f9ab08bc759e57f4b3f98b70ce953819bec42c09a7e195c2bc25df67473c637"
+
+[[rule]]
+name = "bundled-rule"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-rule:1.0.0@sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748"
+bundle = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-bundle"
+bundle_tag = "1.0.0"
+
+[[rule]]
+name = "reg-rule"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-rule:1.0.0@sha256:657ed7566e927d6850b8b993ab883d8f1aef26455f51d3d2e63ae332970fb748"
+
+[[agent]]
+name = "local-bundled-agent"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-agent:1.0.0@sha256:74d332f2c53b1c256df2a6a51814e4faae70a08795b02f4db71d99a92424305a"
+bundle = "./bundles/local-bundle.toml"
+bundle_tag = "sha256:8475b5f0b734"
+
+[[agent]]
+name = "reg-agent"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-agent:1.0.0@sha256:74d332f2c53b1c256df2a6a51814e4faae70a08795b02f4db71d99a92424305a"
+
+[[mcp]]
+name = "reg-mcp"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-mcp:1.0.0@sha256:3499d7c5f5ceaabdfc627c7f336b4bed736f44dd4bebdceda02d33a586b46de1"
+
+[[hook]]
+name = "reg-hook"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-hook:1.0.0@sha256:bfc583ae855cab3edee6ba3cf8d5354d82ac29635691ce3340b3e6958752de38"
+
+[[settings]]
+name = "reg-settings"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-settings:1.0.0@sha256:622bd15f5c3b85badfa79dfe228cc0d80714f4a55c58ef05560b04a3f2ecce46"
+
+[[bundle]]
+name = "local-bundle"
+path = "./bundles/local-bundle.toml"
+hash = "sha256:8475b5f0b734dce0b8c3b8ca6563f17fd53312e184af9d00b6a64be9281566ec"
+
+[[bundle.member]]
+kind = "agent"
+name = "local-bundled-agent"
+id = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-agent:1.0.0"
+
+[[bundle]]
+name = "reg-bundle"
+repo = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-bundle"
+tag = "1.0.0"
+pinned = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-bundle@sha256:02b5d941101f6b677a6f42fb98dc9fffd89005aef0084cf7909c997ab2ee652d"
+
+[[bundle.member]]
+kind = "skill"
+name = "reg-skill"
+id = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-skill:1.0.0"
+
+[[bundle.member]]
+kind = "rule"
+name = "bundled-rule"
+id = "localhost:5000/grim-golden/pre-mods-1972e3b9/reg-rule:1.0.0"

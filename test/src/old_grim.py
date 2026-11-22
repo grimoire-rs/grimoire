@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Grimoire Authors
-"""The grim 0.15.1 binary the old-grim interop modules run against."""
+"""The grim 0.15.1 and 0.16.0 binaries the old-grim interop modules run against."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from src.helpers import write_config
 from src.runner import GrimRunner
 
 OLD_BIN = os.environ.get("GRIM_OLD_BIN")
+OLD_BIN_0_16_0 = os.environ.get("GRIM_OLD_BIN_0_16_0")
 
 # `transitive` arrived after the tag, so 0.15.1 refuses it as an unknown field.
 _LOCK_WITH_A_LATER_FIELD = (
@@ -46,10 +47,41 @@ def checked_old_grim(root: Path) -> Path:
     assert version == "grim 0.15.1", f"GRIM_OLD_BIN is not 0.15.1: {version!r}"
 
     write_config(project, bundles={"b": "localhost:5000/x/b:1"})
-    (project / "grimoire.lock").write_text(_LOCK_WITH_A_LATER_FIELD, encoding="utf-8", newline="\n")
+    (project / "grimoire.lock").write_text(
+        _LOCK_WITH_A_LATER_FIELD, encoding="utf-8", newline="\n"
+    )
     refused = runner.run("status", check=False)
     assert refused.returncode == 78 and "transitive" in refused.stderr, (
         "GRIM_OLD_BIN prints 0.15.1 but accepts a field added after the tag, "
+        f"so it is a dev build: exit {refused.returncode}, {refused.stderr!r}"
+    )
+    return binary
+
+
+def checked_old_grim_0_16_0(root: Path) -> Path:
+    """`GRIM_OLD_BIN_0_16_0`, refused unless it behaves like the 0.16.0 release.
+
+    Same reason as above: a dev build of a later commit still prints 0.16.0.
+    The `mods` option arrived after the tag, and 0.16.0 denies unknown fields,
+    so it refuses a config that sets it with exit 78.
+    """
+    assert OLD_BIN_0_16_0 is not None
+    binary = Path(OLD_BIN_0_16_0)
+    grim_home = root / "grim-home"
+    grim_home.mkdir()
+    project = root / "project"
+    project.mkdir()
+    runner = GrimRunner(binary, grim_home, cwd=project)
+
+    version = runner.run("--version").stdout.strip()
+    assert version == "grim 0.16.0", f"GRIM_OLD_BIN_0_16_0 is not 0.16.0: {version!r}"
+
+    (project / "grimoire.toml").write_text(
+        "[options.experimental]\nmods = true\n", encoding="utf-8", newline="\n"
+    )
+    refused = runner.run("status", check=False)
+    assert refused.returncode == 78 and "mods" in refused.stderr, (
+        "GRIM_OLD_BIN_0_16_0 prints 0.16.0 but accepts the `mods` option, "
         f"so it is a dev build: exit {refused.returncode}, {refused.stderr!r}"
     )
     return binary

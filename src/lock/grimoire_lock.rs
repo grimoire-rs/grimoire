@@ -76,6 +76,9 @@ pub struct GrimoireLock {
     /// Locked settings packages (`[[settings]]` on the wire, plural, emitted
     /// only when non-empty so a lock without the kind stays byte-identical).
     pub settings: Vec<LockedArtifact>,
+    /// Locked mod packages (`[[mod]]` on the wire, emitted only when
+    /// non-empty, between `[[settings]]` and `[[bundle]]`).
+    pub mods: Vec<LockedArtifact>,
     /// Cached expansion result per declared bundle (`[[bundle]]` on the
     /// wire, emitted only when non-empty). Enables offline effective-set
     /// computation for declaration mutations — see
@@ -111,6 +114,9 @@ struct RawLock {
     /// Locked settings packages (`[[settings]]`).
     #[serde(default, rename = "settings")]
     settings: Vec<ScopedEntry>,
+    /// Locked mod packages (`[[mod]]`).
+    #[serde(default, rename = "mod")]
+    mods: Vec<ScopedEntry>,
     /// Cached bundle expansions (`[[bundle]]`).
     #[serde(default, rename = "bundle")]
     bundles: Vec<crate::lock::locked_bundle::LockedBundle>,
@@ -186,7 +192,7 @@ impl RawLock {
 
     /// Every entry, grouped by kind in wire order, with the list selector
     /// its kind lands in.
-    fn into_kind_lists(self) -> [(ArtifactKind, Vec<ScopedEntry>, KindList); 6] {
+    fn into_kind_lists(self) -> [(ArtifactKind, Vec<ScopedEntry>, KindList); 7] {
         [
             (ArtifactKind::Skill, self.skills, |l| &mut l.skills),
             (ArtifactKind::Rule, self.rules, |l| &mut l.rules),
@@ -194,7 +200,38 @@ impl RawLock {
             (ArtifactKind::Mcp, self.mcp, |l| &mut l.mcp),
             (ArtifactKind::Hook, self.hooks, |l| &mut l.hooks),
             (ArtifactKind::Settings, self.settings, |l| &mut l.settings),
+            (ArtifactKind::Mod, self.mods, |l| &mut l.mods),
         ]
+    }
+}
+
+/// A `[[mod]]` row names the clients it serves; no other row may.
+fn clients_refusal(kind: ArtifactKind, a: &LockedArtifact) -> Option<String> {
+    match (kind == ArtifactKind::Mod, a.clients.is_empty()) {
+        (true, true) => Some(format!("mod `{}` has no `clients`", a.name.escape_default())),
+        (false, false) => Some(format!(
+            "{kind} `{}` carries `clients`, which only a mod row has",
+            a.name.escape_default()
+        )),
+        _ => None,
+    }
+}
+
+/// [`clients_refusal`] on read: a lock breaking it is unreadable, as a damaged one is.
+fn check_clients(kind: ArtifactKind, a: &LockedArtifact) -> Result<(), LockError> {
+    match clients_refusal(kind, a) {
+        Some(message) => Err(in_memory(LockErrorKind::TomlParse(serde::de::Error::custom(message)))),
+        None => Ok(()),
+    }
+}
+
+/// [`clients_refusal`] on write: nothing this writes is refused on read.
+fn check_clients_for_write(lock: &GrimoireLock) -> Result<(), LockError> {
+    match lock.iter_artifacts().find_map(|a| clients_refusal(a.kind, a)) {
+        Some(message) => Err(in_memory(LockErrorKind::TomlSerialize(serde::ser::Error::custom(
+            message,
+        )))),
+        None => Ok(()),
     }
 }
 
@@ -240,7 +277,7 @@ fn check_entry_name(kind: ArtifactKind, name: &str) -> Result<(), LockError> {
             )))
         };
     }
-    SkillName::parse(name)
+    SkillName::parse_for(name, kind)
         .map(drop)
         .map_err(|reason| scope_mismatch(format!("invalid {kind} name: {reason}")))
 }
@@ -321,6 +358,7 @@ impl MarketplaceLock {
                     )));
                 };
                 check_entry_name(kind, name)?;
+                check_clients(kind, &entry.artifact)?;
                 let mut artifact = entry.artifact;
                 artifact.kind = kind;
                 list(part).push(artifact);
@@ -352,6 +390,7 @@ impl MarketplaceLock {
             mcp: Vec::new(),
             hook: Vec::new(),
             settings: Vec::new(),
+            r#mod: Vec::new(),
         };
         // `plugins` iterates by name, so appending each part's name-sorted
         // lists yields `(plugin, name)` order.
@@ -373,6 +412,7 @@ impl MarketplaceLock {
                 (ArtifactKind::Mcp, &part.mcp, &mut view.mcp),
                 (ArtifactKind::Hook, &part.hooks, &mut view.hook),
                 (ArtifactKind::Settings, &part.settings, &mut view.settings),
+                (ArtifactKind::Mod, &part.mods, &mut view.r#mod),
             ] {
                 let mut sorted: Vec<&LockedArtifact> = list.iter().collect();
                 sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -421,6 +461,7 @@ impl GrimoireLock {
                 &raw.mcp,
                 &raw.hooks,
                 &raw.settings,
+                &raw.mods,
             ]
             .into_iter()
             .flatten()
@@ -445,6 +486,9 @@ impl GrimoireLock {
                     message: format!("invalid {kind} name `{}`: {reason}", name.escape_default()),
                 }));
             }
+            for e in &entries {
+                check_clients(kind, &e.artifact)?;
+            }
             // Re-stamp the kind that `#[serde(skip)]` left at its default.
             list(&mut lock).extend(entries.into_iter().map(|e| LockedArtifact { kind, ..e.artifact }));
         }
@@ -461,6 +505,7 @@ impl GrimoireLock {
             mcp: Vec::new(),
             hooks: Vec::new(),
             settings: Vec::new(),
+            mods: Vec::new(),
             bundles: Vec::new(),
         }
     }
@@ -480,6 +525,7 @@ impl GrimoireLock {
             .chain(self.mcp.iter())
             .chain(self.hooks.iter())
             .chain(self.settings.iter())
+            .chain(self.mods.iter())
     }
 
     /// [`Self::iter_artifacts`], mutably and in the same order.
@@ -489,7 +535,7 @@ impl GrimoireLock {
 
     /// Every artifact table with the kind its entries carry, in
     /// [`Self::iter_artifacts`]' order, for every mutable walk over them.
-    pub fn tables_mut(&mut self) -> [(ArtifactKind, &mut Vec<LockedArtifact>); 6] {
+    pub fn tables_mut(&mut self) -> [(ArtifactKind, &mut Vec<LockedArtifact>); 7] {
         // Naming every field makes a table a new kind adds a compile error here
         // until it is listed; `..` would let the walk skip it.
         let Self {
@@ -500,6 +546,7 @@ impl GrimoireLock {
             mcp,
             hooks,
             settings,
+            mods,
             bundles: _,
         } = self;
         [
@@ -509,6 +556,7 @@ impl GrimoireLock {
             (ArtifactKind::Mcp, mcp),
             (ArtifactKind::Hook, hooks),
             (ArtifactKind::Settings, settings),
+            (ArtifactKind::Mod, mods),
         ]
     }
 
@@ -553,6 +601,7 @@ impl GrimoireLock {
     ///
     /// [`LockErrorKind::TomlSerialize`] on a serializer failure.
     pub fn to_toml_string(&self) -> Result<String, LockError> {
+        check_clients_for_write(self)?;
         let mut skills: Vec<&LockedArtifact> = self.skills.iter().collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         let mut rules: Vec<&LockedArtifact> = self.rules.iter().collect();
@@ -565,6 +614,8 @@ impl GrimoireLock {
         hooks.sort_by(|a, b| a.name.cmp(&b.name));
         let mut settings: Vec<&LockedArtifact> = self.settings.iter().collect();
         settings.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut mods: Vec<&LockedArtifact> = self.mods.iter().collect();
+        mods.sort_by(|a, b| a.name.cmp(&b.name));
         // Bundles sort by binding name; the advisory tag is stripped from the
         // registry-arm `pinned` inside the `LockedBundle` serialize projection
         // (`From<LockedBundle> for RawLockedBundle`), so output stays
@@ -580,6 +631,7 @@ impl GrimoireLock {
             mcp: &mcp,
             hook: &hooks,
             settings: &settings,
+            r#mod: &mods,
             bundle: &bundles,
         };
         toml::to_string_pretty(&view)
@@ -626,6 +678,14 @@ struct SerializableView<'a> {
         skip_serializing_if = "<[_]>::is_empty"
     )]
     settings: &'a [&'a LockedArtifact],
+    /// Emitted only when non-empty so a lock without mods stays
+    /// byte-identical, between `settings` and `bundle`.
+    #[serde(
+        rename = "mod",
+        serialize_with = "serialize_artifact_views",
+        skip_serializing_if = "<[_]>::is_empty"
+    )]
+    r#mod: &'a [&'a LockedArtifact],
     /// Emitted only when non-empty so a bundle-free lock stays
     /// byte-identical to one written before the cache existed.
     #[serde(rename = "bundle", skip_serializing_if = "<[_]>::is_empty")]
@@ -659,6 +719,9 @@ struct LockedArtifactView<'a> {
     bundle_tag: Option<&'a str>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     bundles: &'a [crate::lock::locked_artifact::BundleProvenance],
+    /// A mod row's served clients; before `requires` so it stays a plain key.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    clients: &'a [String],
     /// Declared edges, sorted by `(kind, name)`; last so the sub-tables
     /// follow the entry's own keys and `[[<kind>.bundles]]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -703,6 +766,7 @@ fn project(a: &LockedArtifact) -> LockedArtifactView<'_> {
         bundle: single.map(|b| b.repo.as_str()),
         bundle_tag: single.map(|b| b.tag.as_str()),
         bundles: if a.bundles.len() > 1 { &a.bundles } else { &[] },
+        clients: &a.clients,
         requires: {
             let mut requires: Vec<_> = a.requires.iter().collect();
             // Enum order, as the bundle members layer sorts.
@@ -735,6 +799,9 @@ struct MarketplaceView<'a> {
     /// Pinned for the same reason as `hook`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     settings: Vec<ScopedArtifactView<'a>>,
+    /// Pinned for the same reason as `hook`.
+    #[serde(rename = "mod", skip_serializing_if = "Vec::is_empty")]
+    r#mod: Vec<ScopedArtifactView<'a>>,
 }
 
 /// One `[[plugin]]` row on the wire.
@@ -762,6 +829,8 @@ struct ScopedArtifactView<'a> {
     bundle_tag: Option<&'a str>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     bundles: &'a [crate::lock::locked_artifact::BundleProvenance],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    clients: &'a [String],
     #[serde(skip_serializing_if = "Vec::is_empty")]
     requires: Vec<&'a crate::oci::bundle::BundleMember>,
 }
@@ -778,6 +847,7 @@ impl<'a> ScopedArtifactView<'a> {
             bundle,
             bundle_tag,
             bundles,
+            clients,
             requires,
         } = v;
         Self {
@@ -789,6 +859,7 @@ impl<'a> ScopedArtifactView<'a> {
             bundle,
             bundle_tag,
             bundles,
+            clients,
             requires,
         }
     }
@@ -877,7 +948,7 @@ pinned = "ghcr.io/acme/rust-style@sha256:{b}"
     /// hand-edited or committed lock naming a traversal is refused on load.
     #[test]
     fn reject_traversal_capable_entry_names() {
-        for table in ["skill", "rule", "agent", "mcp", "hook", "settings"] {
+        for table in ["skill", "rule", "agent", "mcp", "hook", "settings", "mod"] {
             for name in ["../../escaped", "a/../../x", "..", "", "a//b", "/abs"] {
                 let toml = format!(
                     "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
@@ -959,6 +1030,7 @@ generated_at = "2099-01-01T00:00:00Z"
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let out = lock.to_toml_string().expect("serialize");
         let alpha = out.find("name = \"alpha\"").expect("alpha present");
@@ -978,6 +1050,7 @@ generated_at = "2099-01-01T00:00:00Z"
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -1078,6 +1151,7 @@ generated_at = "2099-01-01T00:00:00Z"
             )],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let first = lock.to_toml_string().expect("first");
         let reparsed = GrimoireLock::from_toml_str(&first).expect("reparse");
@@ -1121,6 +1195,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let out = lock.to_toml_string().expect("serialize");
         assert!(!out.contains("[[agent]]"), "no empty agent array on the wire");
@@ -1138,6 +1213,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             mcp: vec![artifact("m", ArtifactKind::Mcp, pinned("acme/m", None, 'd'))],
             settings: vec![artifact("t", ArtifactKind::Settings, pinned("acme/t", None, 'f'))],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let kinds: Vec<ArtifactKind> = lock.iter_artifacts().map(|a| a.kind).collect();
         assert_eq!(
@@ -1166,6 +1242,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let out = without.to_toml_string().expect("serialize");
         assert!(!out.contains("[[mcp]]"), "empty mcp list emits nothing: {out}");
@@ -1215,6 +1292,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let with = GrimoireLock {
             settings: vec![],
@@ -1252,6 +1330,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             hooks: vec![],
             settings,
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -1384,6 +1463,169 @@ member = []
         );
     }
 
+    fn mod_row(name: &str, byte: char, clients: &[&str]) -> LockedArtifact {
+        LockedArtifact {
+            clients: clients.iter().map(|c| (*c).to_string()).collect(),
+            ..artifact(
+                name,
+                ArtifactKind::Mod,
+                pinned(&format!("acme/mods/{name}"), None, byte),
+            )
+        }
+    }
+
+    /// Pins the wire: `[[mod]]` is singular, follows `[[settings]]`, precedes
+    /// `[[bundle]]`, sorts by name, and keeps `clients` ahead of `requires`.
+    #[test]
+    fn mod_array_renders_byte_exact() {
+        use crate::lock::locked_bundle::{LockedBundle, LockedBundleSource};
+        let lock = GrimoireLock {
+            settings: vec![artifact(
+                "team",
+                ArtifactKind::Settings,
+                pinned("acme/settings/team", None, 'b'),
+            )],
+            mods: vec![
+                mod_row("zeta", 'c', &["claude"]),
+                mod_row("alpha", 'd', &["claude", "opencode"]),
+            ],
+            bundles: vec![LockedBundle {
+                name: "stack".to_string(),
+                source: LockedBundleSource::Registry {
+                    repo: "ghcr.io/acme/bundles/stack".to_string(),
+                    tag: "1".to_string(),
+                    pinned: pinned("acme/bundles/stack", Some("1"), 'e'),
+                },
+                members: vec![],
+                transitive: false,
+            }],
+            ..lock_with_settings(vec![])
+        };
+        let expected = format!(
+            r#"rule = []
+agent = []
+
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{d}"
+generated_by = "grim 0.1.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[skill]]
+name = "s"
+pinned = "ghcr.io/acme/s@sha256:{a}"
+
+[[settings]]
+name = "team"
+pinned = "ghcr.io/acme/settings/team@sha256:{b}"
+
+[[mod]]
+name = "alpha"
+pinned = "ghcr.io/acme/mods/alpha@sha256:{d}"
+clients = [
+    "claude",
+    "opencode",
+]
+
+[[mod]]
+name = "zeta"
+pinned = "ghcr.io/acme/mods/zeta@sha256:{c}"
+clients = ["claude"]
+
+[[bundle]]
+name = "stack"
+repo = "ghcr.io/acme/bundles/stack"
+tag = "1"
+pinned = "ghcr.io/acme/bundles/stack@sha256:{e}"
+member = []
+"#,
+            a = sha('a'),
+            b = sha('b'),
+            c = sha('c'),
+            d = sha('d'),
+            e = sha('e'),
+        );
+        let out = lock.to_toml_string().expect("serialize");
+        assert_eq!(out, expected);
+        let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(reparsed.mods.len(), 2);
+        assert!(
+            reparsed.mods.iter().all(|m| m.kind == ArtifactKind::Mod),
+            "kind re-stamped"
+        );
+        assert_eq!(reparsed.mods[0].clients.len() + reparsed.mods[1].clients.len(), 3);
+        assert_eq!(out, reparsed.to_toml_string().expect("second"), "byte-stable");
+    }
+
+    fn lock_toml_with(table: &str, extra: &str) -> String {
+        format!(
+            "[metadata]\nlock_version = 1\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"sha256:{a}\"\ngenerated_by = \"grim 0.1.0\"\n\
+             generated_at = \"2026-04-19T00:00:00Z\"\n\n[[{table}]]\nname = \"x\"\n\
+             pinned = \"ghcr.io/acme/x@sha256:{a}\"\n{extra}",
+            a = sha('a')
+        )
+    }
+
+    #[test]
+    fn mod_row_without_clients_is_unreadable() {
+        for extra in ["", "clients = []\n"] {
+            let err = GrimoireLock::from_toml_str(&lock_toml_with("mod", extra)).expect_err("a mod row needs clients");
+            assert!(matches!(err.kind, LockErrorKind::TomlParse(_)), "{:?}", err.kind);
+        }
+        GrimoireLock::from_toml_str(&lock_toml_with("mod", "clients = [\"claude\"]\n")).expect("positive control");
+    }
+
+    #[test]
+    fn skill_row_with_clients_is_unreadable() {
+        let err = GrimoireLock::from_toml_str(&lock_toml_with("skill", "clients = [\"claude\"]\n"))
+            .expect_err("only a mod row carries clients");
+        assert!(matches!(err.kind, LockErrorKind::TomlParse(_)), "{:?}", err.kind);
+        GrimoireLock::from_toml_str(&lock_toml_with("skill", "")).expect("positive control");
+    }
+
+    #[test]
+    fn unknown_client_name_is_kept() {
+        let lock =
+            GrimoireLock::from_toml_str(&lock_toml_with("mod", "clients = [\"claude\", \"zed9\"]\n")).expect("parse");
+        assert_eq!(lock.mods[0].clients, ["claude", "zed9"]);
+        assert!(lock.to_toml_string().expect("write").contains("\"zed9\""));
+    }
+
+    #[test]
+    fn a_mod_row_without_clients_is_refused_on_write() {
+        let lock = GrimoireLock {
+            mods: vec![mod_row("alpha", 'd', &[])],
+            ..lock_with_settings(vec![])
+        };
+        assert!(matches!(
+            lock.to_toml_string().expect_err("unwritable").kind,
+            LockErrorKind::TomlSerialize(_)
+        ));
+    }
+
+    #[test]
+    fn a_marketplace_lock_carries_mod_rows_with_their_clients() {
+        let plugin_lock = GrimoireLock {
+            mods: vec![mod_row("alpha", 'd', &["claude"])],
+            ..lock_with_settings(vec![])
+        };
+        let mut metadata = metadata();
+        metadata.declaration_hash_version = MARKETPLACE_HASH_VERSION;
+        let lock = MarketplaceLock {
+            metadata,
+            plugins: BTreeMap::from([("p".to_string(), plugin_lock)]),
+        };
+        let out = lock.to_toml_string().expect("serialize");
+        assert!(
+            out.contains("[[mod]]") && out.contains("clients = [\"claude\"]"),
+            "{out}"
+        );
+        let back = MarketplaceLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(back.plugins["p"].mods[0].clients, ["claude"]);
+    }
+
     #[test]
     fn round_trip_preserves_bundle_provenance() {
         use crate::lock::locked_artifact::BundleProvenance;
@@ -1401,11 +1643,13 @@ member = []
                 )),
                 bundles: vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")],
                 requires: Vec::new(),
+                clients: Vec::new(),
             }],
             rules: vec![],
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let out = lock.to_toml_string().expect("serialize");
         // A single provenance keeps the legacy pair shape on the wire.
@@ -1456,6 +1700,7 @@ member = []
                 }],
                 transitive: false,
             }],
+            mods: Vec::new(),
         };
         let out = lock.to_toml_string().expect("serialize");
         assert!(out.contains("[[bundle]]"), "{out}");
@@ -1539,6 +1784,7 @@ member = []
                 )],
                 transitive: true,
             }],
+            mods: Vec::new(),
         };
         let expected = format!(
             r#"rule = []
@@ -1648,11 +1894,13 @@ id = "ghcr.io/acme/skills/gws-sheets:1"
                 )),
                 bundles: provenance.clone(),
                 requires: Vec::new(),
+                clients: Vec::new(),
             }],
             rules: vec![],
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let out = lock.to_toml_string().expect("serialize");
         // Two or more contributors emit the `bundles` sub-table array

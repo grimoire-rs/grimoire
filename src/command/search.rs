@@ -9,7 +9,7 @@
 //! refreshed, filtered with the [`SearchQuery`] matcher (whitespace-split AND
 //! of terms: fuzzy-matched over the repo leaf name, keywords, and kind, by
 //! word prefix over summary / description / namespace, plus bare kind
-//! keywords — `skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings` and plurals — acting as
+//! keywords — `skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`/`mod` and plurals — acting as
 //! kind filters; an empty query lists everything), and badged
 //! against the scope's lock + install-state. An explicit `--registry`
 //! (repeatable / comma-separated) collapses the browse set to exactly those
@@ -53,6 +53,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::install::install_state::{Exempt, InstallState};
+use crate::install::mod_store;
 use crate::install::path_anchor::AnchorRoots;
 use crate::install::status_badge::StatusBadge;
 use crate::install::target::{InstallTarget, active_clients};
@@ -74,7 +75,7 @@ pub struct SearchArgs {
     /// Results are ranked by relevance, best match first, and hits scoring
     /// below `options.search_min_relevance` percent of the best (default 50)
     /// are dropped, with a note on stderr saying how many. A bare kind
-    /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular
+    /// keyword (`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`/`mod`, singular
     /// or plural) filters by kind instead of matching as text, unless `--kind`
     /// is given. Empty ⇒ list the whole catalog, unranked, in registry order.
     /// Results are narrowed further by each source's `include`/`exclude`
@@ -344,6 +345,7 @@ fn search_entry(source: SearchSource, r: CatalogRow) -> SearchEntry {
                 .collect(),
         }),
         status: r.badge,
+        serves: r.serves,
     }
 }
 
@@ -690,9 +692,10 @@ fn resolve_scope(ctx: &Context, args: &SearchArgs) -> anyhow::Result<SearchScope
     };
     let registries = super::registries_for_scope(ctx, &scope)?;
     let lock = lock_io::load(&scope.lock_path).ok();
-    let state = scope_resolution::read_state(&scope)
+    let mut state = scope_resolution::read_state(&scope)
         .map(|read| read.exempt(Exempt::Browse))
         .unwrap_or_else(|_| InstallState::empty(&scope.state_path));
+    mod_store::overlay_records(&mut state, &scope.roots.grim_home, &scope.workspace, scope.scope);
     let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let active = active_clients(&scope.workspace, scope.scope, &global_clients);
     let target = install_target_best_effort(&scope, &global_clients);
@@ -757,9 +760,10 @@ fn load_badges_best_effort(
         }
     };
     let lock = lock_io::load(&scope.lock_path).ok();
-    let state = scope_resolution::read_state(&scope)
+    let mut state = scope_resolution::read_state(&scope)
         .map(|read| read.exempt(Exempt::Browse))
         .unwrap_or_else(|_| InstallState::empty(&scope.state_path));
+    mod_store::overlay_records(&mut state, &scope.roots.grim_home, &scope.workspace, scope.scope);
     let global_clients = super::global_clients(ctx, scope.scope, &scope.options.clients);
     let active = active_clients(&scope.workspace, scope.scope, &global_clients);
     let target = install_target_best_effort(&scope, &global_clients);
@@ -908,10 +912,12 @@ mod tests {
             collapsed.contains("below `options.search_min_relevance` percent of the best (default 50)"),
             "--help must name the setting, not a hard-coded half; got:\n{collapsed}"
         );
-        assert!(
-            collapsed.contains("(`skill`/`rule`/`bundle`/`agent`/`mcp`/`hook`/`settings`, singular or plural)"),
-            "--help must list every kind keyword the parser accepts; got:\n{collapsed}"
-        );
+        for kind in ArtifactKind::ALL {
+            assert!(
+                collapsed.contains(&format!("`{}`", kind.kind_str())),
+                "--help must list kind keyword {kind}; got:\n{collapsed}"
+            );
+        }
     }
 
     #[test]
@@ -1072,6 +1078,7 @@ mod tests {
                 host: None,
             }),
             downloads: None,
+            serves: None,
             badge: StatusBadge::NotInstalled,
         };
         let source = SearchSource {

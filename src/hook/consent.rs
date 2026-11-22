@@ -181,7 +181,7 @@ pub type DeclaredKeys = BTreeMap<ArtifactKind, BTreeSet<String>>;
 /// Whether `kind` is gated by workspace consent.
 pub fn is_gated(kind: ArtifactKind) -> bool {
     match kind {
-        ArtifactKind::Hook | ArtifactKind::Settings => true,
+        ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod => true,
         ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
             false
         }
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn consent_key_for_spells_every_gated_kind_alike() {
         let source = pinned_source("ghcr.io", "acme/fmt");
-        for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
+        for kind in [ArtifactKind::Hook, ArtifactKind::Settings, ArtifactKind::Mod] {
             assert_eq!(
                 consent_key_for(kind, "fmt", &source).as_deref(),
                 Some("fmt@ghcr.io/acme/fmt"),
@@ -501,13 +501,13 @@ mod tests {
         );
     }
 
-    /// Only hooks and settings are gated, and a path source has no publisher
+    /// Only hooks, settings and mods are gated, and a path source has no publisher
     /// identity under either kind.
     #[test]
     fn consent_key_for_answers_none_outside_a_gated_registry_kind() {
         let pinned = pinned_source("ghcr.io", "acme/fmt");
         for kind in ArtifactKind::ALL {
-            let gated = matches!(kind, ArtifactKind::Hook | ArtifactKind::Settings);
+            let gated = matches!(kind, ArtifactKind::Hook | ArtifactKind::Settings | ArtifactKind::Mod);
             assert_eq!(consent_key_for(kind, "fmt", &pinned).is_some(), gated, "{kind}");
         }
 
@@ -515,7 +515,7 @@ mod tests {
             path: crate::config::path_source::PathSource::parse("./local").unwrap(),
             hash: crate::oci::Digest::Sha256("b".repeat(64)),
         };
-        for kind in [ArtifactKind::Hook, ArtifactKind::Settings] {
+        for kind in [ArtifactKind::Hook, ArtifactKind::Settings, ArtifactKind::Mod] {
             assert_eq!(consent_key_for(kind, "fmt", &path), None, "{kind}");
         }
     }

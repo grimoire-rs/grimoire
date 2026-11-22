@@ -17,4 +17,8 @@ project-deps/.mcp.json
 project-settings/.claude/
 project-settings/.grimoire/
 project-settings/grimoire.lock
+project-mods/.claude/
+project-mods/.opencode/
+project-mods/.grimoire/
+project-mods/grimoire.lock
 .settings-roots/

@@ -1113,6 +1113,7 @@ fn drop_rows(
     // Same shape: a surviving `[[settings]]` entry under a FRESH restamp is a
     // package the next `grim install` applies after the user removed it.
     process(&mut lock.settings);
+    process(&mut lock.mods);
 
     // Prune cached snapshots for bundles nothing reaches any more (or retagged).
     lock.bundles.retain_mut(|b| match set_after.bundles.get(&b.name) {
@@ -1278,6 +1279,7 @@ fn rows_mut(lock: &mut GrimoireLock, kind: ArtifactKind) -> Option<&mut Vec<Lock
         ArtifactKind::Mcp => Some(&mut lock.mcp),
         ArtifactKind::Hook => Some(&mut lock.hooks),
         ArtifactKind::Settings => Some(&mut lock.settings),
+        ArtifactKind::Mod => Some(&mut lock.mods),
         ArtifactKind::Bundle => None,
     }
 }
@@ -1488,6 +1490,7 @@ fn evict_bundle_members(
     // re-armed it — the same re-arm hazard as `drop_from_lock` above.
     lock.hooks.retain_mut(&mut evict);
     lock.settings.retain_mut(&mut evict);
+    lock.mods.retain_mut(&mut evict);
 }
 
 #[cfg(test)]
@@ -1565,6 +1568,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 

@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "HarnessTable": {
+      "additionalProperties": false,
+      "description": "One harness table. `entry` is optional in the author's file and always\npresent in the packed one.",
+      "properties": {
+        "entry": {
+          "description": "The entry file, relative to the harness directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://grimoire.rs/schemas/grim-mod.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The author's `mod.toml`.",
+  "properties": {
+    "claude": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HarnessTable"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The `[claude]` table, when present."
+    },
+    "description": {
+      "description": "Catalog-facing description.",
+      "type": "string"
+    },
+    "keywords": {
+      "description": "Comma-separated catalog keywords, for example `\"ci,status\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "Artifact name; equals the directory stem.",
+      "type": "string"
+    },
+    "opencode": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HarnessTable"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The `[opencode]` table, when present."
+    },
+    "requires": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "description": "Artifacts this mod requires: one table per kind (`skills`, `rules`, `agents`, `mcp`, `hooks`, `bundles`, `settings`, `mods`), each mapping a binding name to a member reference. A version-shaped tag is a version claim: `2.1` accepts 2.1.0 and later below 3.0.0, `0.2` accepts 0.2.x, and no tag or `latest` accepts any version; any other tag names one manifest.",
+      "propertyNames": {
+        "enum": [
+          "skills",
+          "rules",
+          "agents",
+          "mcp",
+          "hooks",
+          "bundles",
+          "settings",
+          "mods"
+        ]
+      },
+      "type": "object"
+    },
+    "schema": {
+      "description": "Descriptor schema version; this grim reads and writes `1`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "summary": {
+      "description": "Short single-line blurb for catalog listings.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "name",
+    "description"
+  ],
+  "title": "mod.toml — Grimoire mod descriptor",
+  "type": "object"
+}

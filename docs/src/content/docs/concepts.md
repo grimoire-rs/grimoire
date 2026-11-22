@@ -46,6 +46,12 @@ did not write is never replaced without `--force`. Like a hook, it applies at
 project scope only after the workspace consents. See the
 [settings reference][settings] and [Stability][stability-unstable].
 
+An eighth kind, the **mod**, is experimental pre-1.0 as well. It is publisher
+code that a client loads into its own process, laid out as one directory per
+harness. It sits behind the `[options.experimental] mods` flag, and grim
+writes it only after you consent to the workspace. The
+[mod reference][mods] covers the layout and lifecycle.
+
 ### Rules and support directories {#rule-support-dir}
 
 A rule is a single `.md` file. Before grim 0.16.0 it could also carry a
@@ -136,7 +142,7 @@ Teams end up copying a block of `grimoire.toml` between projects, and when the
 approved set changes someone has to chase down every copy.
 
 A **bundle** is a curated set of members — skills, rules, agents,
-[MCP servers](./mcp-servers.md), hooks, [settings][settings] packages, and
+[MCP servers](./mcp-servers.md), hooks, [settings][settings] packages, mods, and
 other bundles. You
 declare it once in `[bundles]`, and on [`grim lock`](./commands.md#lock) it
 **expands** into its members, which are pinned into the lock exactly like a
@@ -264,7 +270,7 @@ absolute form. See [Publishing](./publishing.md#bundles) for a bundle and
 
 ## Dependencies {#dependencies}
 
-A skill, rule, agent, MCP server, hook, or settings package can declare other
+A skill, rule, agent, MCP server, hook, settings package, or mod can declare other
 artifacts it needs.
 Its publisher writes the declaration, so you never copy it into your own
 `grimoire.toml`. Adding the artifact is enough:
@@ -489,6 +495,7 @@ downloading content, so an `--offline` run after only a lock exits `81`.
 
 <!-- internal -->
 [settings]: ./settings.md
+[mods]: ./mods.md
 [stability-unstable]: ./stability.md#unstable
 
 <!-- external -->

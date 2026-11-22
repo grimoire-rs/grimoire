@@ -70,6 +70,29 @@ pub fn path_segment_refusal(name: &str) -> Option<&'static str> {
     None
 }
 
+/// Device names Windows reserves, with or without an extension.
+const WINDOWS_DEVICES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Characters Windows refuses in a file name.
+const WINDOWS_FORBIDDEN: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
+
+/// What is wrong with one path component on Windows, if anything.
+pub(crate) fn unportable_component(part: &str) -> Option<&'static str> {
+    if part.ends_with('.') || part.ends_with(' ') {
+        return Some("ends in a dot or a space, which Windows strips");
+    }
+    if part.contains(WINDOWS_FORBIDDEN) {
+        return Some("holds a character Windows refuses in a name (: * ? \" < > |)");
+    }
+    let device = part.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    WINDOWS_DEVICES
+        .contains(&device.as_str())
+        .then_some("is a reserved Windows device name")
+}
+
 /// Why a `relative` path failed containment under its base directory.
 #[derive(Debug, thiserror::Error)]
 pub enum ContainmentError {
@@ -269,6 +292,19 @@ pub(crate) fn link_dir(target: &Path, link: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unportable_component_flags_devices_trailing_and_forbidden() {
+        assert!(unportable_component("CON").is_some());
+        assert!(unportable_component("nul.txt").is_some());
+        assert!(unportable_component("com1.tar").is_some());
+        assert!(unportable_component("name.").is_some());
+        assert!(unportable_component("name ").is_some());
+        assert!(unportable_component("a:b").is_some());
+        assert!(unportable_component("a|b").is_some());
+        assert!(unportable_component("console").is_none());
+        assert!(unportable_component("index.ts").is_none());
+    }
 
     /// Under a linked root, a path that does not exist yet resolves to the
     /// spelling an existing one canonicalizes to, so the two compare equal.

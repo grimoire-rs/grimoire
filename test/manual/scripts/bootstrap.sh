@@ -16,6 +16,8 @@
 # be published in ASCENDING order per artifact — the floating :1 the consumer
 # project pins then lands on the highest version. A post-lock bump above the
 # matrix top (scripts/release-update.sh) produces a genuine `↑ outdated` lock.
+# The hooks, settings and mod samples publish at 1.0.0 too: arming each one is
+# the consumer's step, after the experimental flag and workspace consent.
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -178,6 +180,13 @@ HOOK_MATRIX=(
 SETTINGS_MATRIX=(
     "settings|team-defaults|$CATALOG/settings/team-defaults.toml|1.0.0"
 )
+# A mod is a directory containing `mod.toml`, which `grim release` infers without
+# a `--kind`. Publishing needs no flag; a consumer's `grim install` writes nothing
+# until `[options.experimental] mods = true` and the workspace has consented.
+# See README § Mod in a logged-in client.
+MOD_MATRIX=(
+    "mods|hello-mod|$CATALOG/mods/hello-mod|1.0.0"
+)
 
 # 4a. Publish skills.
 for record in "${SKILL_MATRIX[@]}"; do
@@ -207,6 +216,12 @@ done
 for record in "${SETTINGS_MATRIX[@]}"; do
     IFS='|' read -r kind name path versions <<<"$record"
     release_versions "$path" "$kind" "$name" "$versions" settings
+done
+
+# 4d-3. Publish mods (kind inferred from `mod.toml`, no --kind needed).
+for record in "${MOD_MATRIX[@]}"; do
+    IFS='|' read -r kind name path versions <<<"$record"
+    release_versions "$path" "$kind" "$name" "$versions"
 done
 
 # 4e. DEPENDENCY DEMO artifacts (declared `requires`; see README § Dependencies).
@@ -324,6 +339,12 @@ Settings demo (experimental; see README § Settings):
   grim lock
   grim install </dev/null           # gated: nothing is written until this workspace consents
   grim install --trust-workspace    # writes .claude/settings.local.json
+
+Mod demo (experimental, needs a logged-in Claude Code or OpenCode; see README § Mod in a logged-in client):
+  cd test/manual/project-mods
+  grim lock
+  grim install </dev/null           # gated: nothing is written until this workspace consents
+  grim install --trust-workspace    # writes .claude/mods/ and .opencode/plugins/
 
 Dependency demo (see README § Dependencies):
   cd test/manual/project-deps

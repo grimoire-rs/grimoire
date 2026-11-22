@@ -1010,6 +1010,7 @@ async fn build_roots(
         (&set.mcp, ArtifactKind::Mcp),
         (&set.hooks, ArtifactKind::Hook),
         (&set.settings, ArtifactKind::Settings),
+        (&set.mods, ArtifactKind::Mod),
         (&set.bundles, ArtifactKind::Bundle),
     ];
     for (table, kind) in tables {
@@ -1208,7 +1209,7 @@ fn validate_local_members(bundle_ref: &ArtifactRef, members: &[BundleMember]) ->
         ));
     }
     for member in members {
-        SkillName::parse(&member.name).map_err(|e| {
+        SkillName::parse_for(&member.name, member.kind).map_err(|e| {
             ResolveError::new(
                 bundle_ref.clone(),
                 ResolveErrorKind::BundleInvalid(format!("member name '{}' is invalid: {e}", member.name)),
@@ -1247,6 +1248,14 @@ fn build_carry(prior: &Prior<'_>, set: &DesiredSet, refresh: &Refresh, stamps: O
             carry.requires.insert(
                 ((artifact.kind, artifact.name.clone()), pinned.digest()),
                 artifact.requires.clone(),
+            );
+        }
+    }
+    for artifact in previous.mods.iter() {
+        if let Some(pinned) = artifact.source.pinned() {
+            carry.clients.insert(
+                ((artifact.kind, artifact.name.clone()), pinned.digest()),
+                artifact.clients.clone(),
             );
         }
     }
@@ -1324,6 +1333,7 @@ fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: Local
     let mut mcp = Vec::new();
     let mut hooks = Vec::new();
     let mut settings = Vec::new();
+    let mut mods = Vec::new();
     let mut bundles = Vec::new();
     for ((kind, name), node) in nodes {
         if kind == ArtifactKind::Bundle {
@@ -1352,6 +1362,7 @@ fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: Local
             source,
             bundles: node.provenance,
             requires: node.published,
+            clients: node.clients,
         };
         match kind {
             ArtifactKind::Skill => skills.push(artifact),
@@ -1360,6 +1371,7 @@ fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: Local
             ArtifactKind::Mcp => mcp.push(artifact),
             ArtifactKind::Hook => hooks.push(artifact),
             ArtifactKind::Settings => settings.push(artifact),
+            ArtifactKind::Mod => mods.push(artifact),
             ArtifactKind::Bundle => {}
         }
     }
@@ -1381,6 +1393,7 @@ fn build_lock(nodes: BTreeMap<NodeKey, GraphNode>, set: &DesiredSet, pins: Local
         hooks,
         settings,
         bundles,
+        mods,
     }
 }
 
@@ -1484,6 +1497,7 @@ fn stale_reference(set: &DesiredSet, selected: &BTreeSet<Selected>, kind: Resolv
         (&set.mcp, ArtifactKind::Mcp),
         (&set.hooks, ArtifactKind::Hook),
         (&set.settings, ArtifactKind::Settings),
+        (&set.mods, ArtifactKind::Mod),
     ];
     for (table, table_kind) in tables {
         if let Some(DeclaredSource::Registry(id)) = table.get(&first.name)
@@ -1993,6 +2007,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
         let access = arc(mock.clone());
@@ -2052,6 +2067,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
 
         let new_a_digest = Algorithm::Sha256.hash(b"new-a");
@@ -2125,6 +2141,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -2729,6 +2746,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         (set, lock, old_b)
     }
@@ -2820,6 +2838,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
 
         let new_digest = Algorithm::Sha256.hash(b"new-picked");
@@ -2894,6 +2913,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
 
         let refresh = Refresh::from_names(&["x".to_string()]);
@@ -2941,6 +2961,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let mock = MockAccess::new(vec![]);
         let access = arc(mock.clone());
@@ -2970,6 +2991,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         };
         let mock = MockAccess::new(vec![]);
         let access = arc(mock);
@@ -3000,6 +3022,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         };
         let names = Refresh::from_names(&["ghost".to_string()]);
         let err = relock(&previous, &set, &set, &names, &arc(MockAccess::new(vec![])))
@@ -3039,6 +3062,7 @@ mod tests {
             hooks: Vec::new(),
             settings: Vec::new(),
             bundles: vec![],
+            mods: Vec::new(),
         };
         let prior = Prior::checked(&previous, &set);
         let names = Refresh::from_names(&["code-review".to_string()]);
@@ -3085,6 +3109,7 @@ mod tests {
             source,
             bundles: Vec::new(),
             requires: Vec::new(),
+            clients: Vec::new(),
         }
     }
 
@@ -4490,6 +4515,7 @@ mod tests {
                     },
                     bundles: Vec::new(),
                     requires: vec![edge(X2)],
+                    clients: Vec::new(),
                 });
             }
             let previous = lock_of(&before, rows);
@@ -5027,6 +5053,7 @@ mod tests {
                 },
                 bundles: Vec::new(),
                 requires: vec![edge(X2)],
+                clients: Vec::new(),
             };
             let previous = lock_of(
                 &set,
@@ -6281,6 +6308,7 @@ mod tests {
                 },
                 bundles: Vec::new(),
                 requires: vec![edge(X1)],
+                clients: Vec::new(),
             };
             let rows = vec![local, row("q", Q, &q, vec![]), row("x", X1, &old, vec![])];
             let previous = lock_of(&set, rows);

@@ -628,6 +628,12 @@ pub struct PublishManifest {
     #[serde(default)]
     pub settings: BTreeMap<String, PublishEntrySpec>,
 
+    /// Mod entries, keyed by name; the source is a directory holding `mod.toml`
+    /// (conventionally `mods/<name>/`). Additive optional table, ungated like
+    /// `hooks`: publishing applies nothing on this machine.
+    #[serde(default)]
+    pub mods: BTreeMap<String, PublishEntrySpec>,
+
     /// Announcement defaults for `--announce` (target index repository,
     /// namespace, owner id).
     #[serde(default)]
@@ -888,6 +894,7 @@ fn resolve_versions(
         &mut manifest.mcp,
         &mut manifest.hooks,
         &mut manifest.settings,
+        &mut manifest.mods,
     ];
     for table in tables {
         for (name, spec) in table.iter_mut() {
@@ -1634,6 +1641,7 @@ fn kind_str(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Bundle => "bundle",
         ArtifactKind::Mcp => "mcp",
         ArtifactKind::Settings => "settings",
+        ArtifactKind::Mod => "mod",
     }
 }
 
@@ -1829,7 +1837,8 @@ fn validate_manifest(
         + manifest.bundles.len()
         + manifest.mcp.len()
         + manifest.hooks.len()
-        + manifest.settings.len();
+        + manifest.settings.len()
+        + manifest.mods.len();
     if total_entries == 0 {
         return Err(data_error_at(manifest_path, "no packages declared in manifest"));
     }
@@ -1845,6 +1854,7 @@ fn validate_manifest(
         .chain(manifest.mcp.keys())
         .chain(manifest.hooks.keys())
         .chain(manifest.settings.keys())
+        .chain(manifest.mods.keys())
         .map(String::as_str)
         .collect();
 
@@ -1894,6 +1904,9 @@ fn validate_manifest(
     }
     for (name, spec) in &manifest.settings {
         validate_entry(name, spec, ArtifactKind::Settings, manifest_dir, manifest_path)?;
+    }
+    for (name, spec) in &manifest.mods {
+        validate_entry(name, spec, ArtifactKind::Mod, manifest_dir, manifest_path)?;
     }
 
     Ok(())
@@ -2021,6 +2034,8 @@ fn conventional_source_path(name: &str, kind: ArtifactKind, manifest_dir: &std::
         ArtifactKind::Bundle => manifest_dir.join("bundles").join(format!("{name}.toml")),
         ArtifactKind::Mcp => manifest_dir.join("mcp").join(format!("{name}.toml")),
         ArtifactKind::Settings => manifest_dir.join("settings").join(format!("{name}.toml")),
+        // A directory, like a skill: `mod.toml` at its root.
+        ArtifactKind::Mod => manifest_dir.join("mods").join(name),
     }
 }
 
@@ -2180,6 +2195,9 @@ fn plan_entries(
     // After hooks and before bundles: a bundle may name a settings member, and
     // appending here moves no existing kind.
     add_kind!(manifest.settings, ArtifactKind::Settings);
+    // After settings and before bundles: a bundle may name a mod member, and
+    // appending here moves no existing kind.
+    add_kind!(manifest.mods, ArtifactKind::Mod);
     add_kind!(manifest.bundles, ArtifactKind::Bundle);
 
     entries
@@ -2373,6 +2391,7 @@ fn entry_description<'a>(
         ArtifactKind::Bundle => &manifest.bundles,
         ArtifactKind::Mcp => &manifest.mcp,
         ArtifactKind::Settings => &manifest.settings,
+        ArtifactKind::Mod => &manifest.mods,
     };
     table.get(name).and_then(|s| s.description.as_ref())
 }
@@ -2398,6 +2417,7 @@ fn entry_metadata_defaults(
         ArtifactKind::Bundle => &manifest.bundles,
         ArtifactKind::Mcp => &manifest.mcp,
         ArtifactKind::Settings => &manifest.settings,
+        ArtifactKind::Mod => &manifest.mods,
     };
     let flags = args.metadata.defaults();
     let with_entry = match table.get(name).and_then(|s| s.metadata.as_ref()) {
@@ -5621,6 +5641,7 @@ mod tests {
             ArtifactKind::Mcp => "mcp",
             ArtifactKind::Bundle => "bundles",
             ArtifactKind::Settings => "settings",
+            ArtifactKind::Mod => "mods",
         };
         let toml = format!("{ROOT_TOML}{extra}[{table}.{name}]\nversion=\"1.0.0\"\n");
         let planned = plan(&toml, &[entry_at(dir, kind, name, rel)], dir).unwrap();

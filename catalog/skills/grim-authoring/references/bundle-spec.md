@@ -159,7 +159,7 @@ docs-search = "ghcr.io/acme/mcp/docs-search:1"
 | `keywords` as a TOML array | Hard parse error — must be one string |
 | Member ref not fully qualified | Hard error — invalid reference |
 | Nested bundle member | Valid via a `[bundles]` table; consumers need grim 0.16.0 or later |
-| An unknown member table | Hard parse error — `[skills]`, `[rules]`, `[agents]`, `[hooks]`, `[mcp]`, `[settings]` and `[bundles]` are the accepted seven |
+| An unknown member table | Hard parse error — `[skills]`, `[rules]`, `[agents]`, `[hooks]`, `[mcp]`, `[settings]`, `[mods]` and `[bundles]` are the accepted eight |
 | More than 512 members, or members document > 512 KiB | Rejected |
 | `repository` not `https://` | Hard error, exit 65 |
 | Two declared bundles disagreeing on a member | Consumer-side `BundleConflict` at lock time (exit 78, fail-closed) — keep curated sets disjoint |

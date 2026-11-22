@@ -41,11 +41,11 @@ use super::scope_resolution;
 /// `grim remove` arguments.
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, or `settings`.
+    /// `skill`, `rule`, `agent`, `bundle`, `mcp`, `hook`, `settings`, or `mod`.
     //
     // `hook` appended, never inserted — an accepted value set is a frozen CLI
     // surface and widening it is the additive direction (Principle 9).
-    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"])]
+    #[arg(value_parser = ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings", "mod"])]
     pub kind: String,
 
     /// The config binding name to remove.
@@ -99,6 +99,7 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         ArtifactKind::Bundle => set.bundles.remove(&args.name).is_some(),
         ArtifactKind::Mcp => set.mcp.remove(&args.name).is_some(),
         ArtifactKind::Settings => set.settings.remove(&args.name).is_some(),
+        ArtifactKind::Mod => set.mods.remove(&args.name).is_some(),
     };
 
     if !removed {
@@ -153,14 +154,17 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
         .map(|r| &r.lock)
         .or(in_place.as_ref().map(|o| &o.lock));
     let mut stays_armed: Vec<String> = Vec::new();
+    let mut mod_files_stay: Vec<String> = Vec::new();
     if let (Some(previous), Some(edited)) = (&previous, edited) {
         prove_dropped(ctx, &scope, previous, edited).await;
         let kept: BTreeSet<NodeKey> = edited.node_keys().collect();
-        stays_armed = previous
-            .node_keys()
-            .filter(|key| key.0 == ArtifactKind::Hook && !kept.contains(key))
-            .map(|(_, name)| name)
-            .collect();
+        for (key_kind, name) in previous.node_keys().filter(|key| !kept.contains(key)) {
+            match key_kind {
+                ArtifactKind::Hook => stays_armed.push(name),
+                ArtifactKind::Mod => mod_files_stay.push(name),
+                _ => {}
+            }
+        }
     }
 
     let edit = ConfigEdit::write(
@@ -196,6 +200,16 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
     for name in &stays_armed {
         tracing::warn!(
             "hook '{name}' was undeclared but stays armed until `{grim} install` or `{grim} uninstall` runs",
+            grim = scope.invocation
+        );
+    }
+    // A mod the edit dropped from the lock keeps its files the same way.
+    if kind == ArtifactKind::Mod && !mod_files_stay.contains(&args.name) {
+        mod_files_stay.push(args.name.clone());
+    }
+    for name in &mod_files_stay {
+        tracing::warn!(
+            "mod '{name}' was undeclared but its files stay until `{grim} install` runs; `{grim} uninstall mod {name}` removes them now",
             grim = scope.invocation
         );
     }
@@ -582,6 +596,7 @@ mod tests {
             agents: vec![],
             mcp: vec![],
             bundles: vec![],
+            mods: Vec::new(),
         }
     }
 
@@ -909,7 +924,7 @@ mod tests {
     /// is a test failure rather than a wrong-target action.
     #[test]
     fn every_accepted_kind_string_resolves_to_that_kind() {
-        for accepted in ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings"] {
+        for accepted in ["skill", "rule", "agent", "bundle", "mcp", "hook", "settings", "mod"] {
             let kind = ArtifactKind::from_kind_str(accepted)
                 .unwrap_or_else(|| panic!("the `remove` parser accepts '{accepted}' but no kind parses it"));
             assert_eq!(kind.kind_str(), accepted, "'{accepted}' must not resolve to {kind}");

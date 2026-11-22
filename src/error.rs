@@ -99,6 +99,9 @@ pub enum Error {
     /// (`crate::oci::hook::unsupported_kind`).
     #[error(transparent)]
     Hook(#[from] HookError),
+    /// A `mod.toml` refused at build or install time (`crate::oci::mod_manifest`).
+    #[error(transparent)]
+    Mod(#[from] crate::oci::mod_manifest::ModError),
 
     /// A layer the tar read path cannot decode, or whose decoded bytes it refuses.
     #[error(transparent)]
@@ -219,6 +222,9 @@ pub enum ErrorReason {
     /// (`SkillErrorKind::SkillPluginManifest`). Not forceable: the remedy is a
     /// mod, a marketplace, or an ignore entry, never `--force`.
     SkillPluginManifest,
+    /// A mod descriptor or layer refused (`ModError`). Not forceable: the
+    /// remedy is a corrected artifact, never `--force`.
+    InvalidMod,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -235,6 +241,7 @@ impl std::fmt::Display for ErrorReason {
             Self::UnsupportedArtifactFeature => "unsupported-artifact-feature",
             Self::MajorDowngrade => "major-downgrade",
             Self::SkillPluginManifest => "skill-plugin-manifest",
+            Self::InvalidMod => "invalid-mod",
         })
     }
 }
@@ -356,6 +363,10 @@ fn classify_variant(e: &Error) -> Classification {
         // seam that does not implement the kind. Both are DataError,
         // never a panic — see `oci::hook::unsupported_kind`.
         Error::Hook(_) => Classification::new(ExitCode::DataError),
+        Error::Mod(_) => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::InvalidMod),
+        },
         Error::Layer(le) => match le {
             LayerError::UnsupportedMediaType(_) => Classification {
                 exit: ExitCode::DataError,
@@ -616,6 +627,10 @@ fn classify_resolve(err: &ResolveError) -> Classification {
         | ResolveErrorKind::GraphTooLarge { .. } => Classification::new(ExitCode::DataError),
         ResolveErrorKind::LocalSource(se) => classify_local_source(se),
         ResolveErrorKind::UnsupportedFeature(_) => unsupported_feature(),
+        ResolveErrorKind::InvalidMod(_) => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::InvalidMod),
+        },
         // A bundle conflict is a misconfiguration of the user's own
         // declaration (two bundles disagree), not malformed external data.
         ResolveErrorKind::BundleConflict { .. }
@@ -1113,6 +1128,7 @@ mod tests {
         assert!(!ErrorReason::NoLock.retryable());
         assert!(!ErrorReason::MajorDowngrade.retryable());
         assert!(!ErrorReason::SkillPluginManifest.retryable());
+        assert!(!ErrorReason::InvalidMod.retryable());
     }
 
     /// A1: `forceable` is keyed on the reason, and this variant-by-variant
@@ -1137,6 +1153,7 @@ mod tests {
         // `--allow-downgrade` takes the move; `--force` never does.
         assert!(!ErrorReason::MajorDowngrade.forceable());
         assert!(!ErrorReason::SkillPluginManifest.forceable());
+        assert!(!ErrorReason::InvalidMod.forceable());
     }
 
     /// A2: an escaped anchor classifies as bad on-disk state data (65) AND
@@ -1941,7 +1958,7 @@ mod tests {
 
     /// Every `ErrorReason` slug at 520c6540, then each slug added since,
     /// appended in order.
-    const FROZEN_REASON_SLUGS: [&str; 11] = [
+    const FROZEN_REASON_SLUGS: [&str; 12] = [
         "stale-lock",
         "modified",
         "untracked-destination",
@@ -1953,6 +1970,7 @@ mod tests {
         "unsupported-artifact-feature",
         "major-downgrade",
         "skill-plugin-manifest",
+        "invalid-mod",
     ];
 
     #[test]
@@ -2025,6 +2043,27 @@ mod tests {
     }
 
     #[test]
+    fn a_validator_refusal_is_65_invalid_mod() {
+        let refusal = crate::install::mod_validate::ModInvalid {
+            rule: "layout",
+            detail: "the layer is empty".to_string(),
+        };
+        let err = Error::from(crate::oci::mod_manifest::ModError::from(refusal));
+        let c = classify(&anyhow::Error::from(err));
+        assert_eq!((c.exit, c.reason), (ExitCode::DataError, Some(ErrorReason::InvalidMod)));
+    }
+
+    #[test]
+    fn mod_error_is_65_invalid_mod_not_retryable_not_forceable() {
+        let err = Error::from(crate::oci::mod_manifest::ModError::EmptyDescription);
+        let c = classify(&anyhow::Error::from(err));
+        assert_eq!((c.exit, c.reason), (ExitCode::DataError, Some(ErrorReason::InvalidMod)));
+        assert_eq!(ErrorReason::InvalidMod.to_string(), "invalid-mod");
+        assert!(!ErrorReason::InvalidMod.retryable());
+        assert!(!ErrorReason::InvalidMod.forceable());
+    }
+
+    #[test]
     fn c031_4_no_new_error_reason_slug() {
         fn position(r: ErrorReason) -> usize {
             match r {
@@ -2039,6 +2078,7 @@ mod tests {
                 ErrorReason::UnsupportedArtifactFeature => 8,
                 ErrorReason::MajorDowngrade => 9,
                 ErrorReason::SkillPluginManifest => 10,
+                ErrorReason::InvalidMod => 11,
             }
         }
         let every = [
@@ -2053,6 +2093,7 @@ mod tests {
             ErrorReason::UnsupportedArtifactFeature,
             ErrorReason::MajorDowngrade,
             ErrorReason::SkillPluginManifest,
+            ErrorReason::InvalidMod,
         ];
         for (i, r) in every.iter().enumerate() {
             assert_eq!(position(*r), i);

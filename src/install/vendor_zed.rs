@@ -49,6 +49,8 @@ impl Vendor for ZedVendor {
         // Rules declined (no scoping); agents declined (ACP-only, no file format).
         match kind {
             ArtifactKind::Rule | ArtifactKind::Agent => KindSupport::Declined,
+            // Only Claude and OpenCode host a mod.
+            ArtifactKind::Mod => KindSupport::Declined,
             _ => KindSupport::Native,
         }
     }

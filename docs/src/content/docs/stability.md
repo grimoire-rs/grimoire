@@ -22,11 +22,11 @@ each — see [Upgrading](./upgrading.md).
 ## Frozen at 1.0 {#frozen}
 
 Breaking any guarantee below is a major-version change, not a minor one.
-Three exceptions sit inside these rows: the experimental [hook](./hooks.md)
-surface, the experimental [settings][settings] surface, and the
-[telemetry switches][telemetry-enable], [`GRIM_CONFIG`][telemetry-config] and
-`GRIM_TELEMETRY_OTLP_HEADERS` in the environment variables row.
-[Unstable](#unstable) lists all three by name.
+Four exceptions sit inside these rows. Three are the experimental
+[hook](./hooks.md), [settings][settings] and [mod][mods] surfaces. The fourth
+is the [telemetry switches][telemetry-enable], [`GRIM_CONFIG`][telemetry-config]
+and `GRIM_TELEMETRY_OTLP_HEADERS` in the environment variables row.
+[Unstable](#unstable) lists all four by name.
 
 | Area | Guarantee |
 |------|-----------|
@@ -607,6 +607,33 @@ exclusions are what keep 1.x able to move at all:
     rows. It is always present, and `null` for every other kind and for a
     settings value that is not an array element.
 
+- **The experimental [mod][mods] artifact kind.** Mods sit behind the
+  `[options.experimental] mods` key, which is off by default. While that key
+  exists, these may change in any minor release:
+  - the `[mods]` table of `grimoire.toml`, the `[mods]` table of a bundle
+    source manifest, and the `[mods.<name>]` entries of `publish.toml`,
+  - the `[options.experimental] mods` key and the
+    `[options.vendors.opencode] plugin_api` key,
+  - the consent record's path and format, and the mod store format,
+  - the installed layout and the bytes of every generated file,
+  - the marketplace naming scheme, and plain-text output.
+
+  What is **not** exempted: the mod literals that follow the
+  [additive-field policy](#frozen-additive-fields) and freeze at the first
+  release, flag or not:
+  - the `mod` kind token and its position, the layer layout (the root
+    `<name>/`, `mod.toml`, and the harness directory names with the API line
+    each names), `schema = 1` in `mod.toml`, and `grim schema --kind mod`,
+  - the `com.grimoire.mod.clients` annotation name and value grammar, the
+    `mods` feature token, and `--kind mod`,
+  - the `[[mod]]` lock row fields, `clients` included,
+  - `serves` on every kind's `status`, `describe` and `search` items,
+  - the causes `mod-files-tracked`, `mod-files-present`,
+    `mod-disabled-in-client`, `mod-plugin-api-unsupported`,
+    `mod-client-unsupported` and `mod-name-reserved`, the reason `invalid-mod`, and `armed: null` on
+    mod rows,
+  - the exit `64` of an export that stages a mod into a client config root.
+
 - **Vendor render layout.** The exact files and paths grim writes under
   any client's own configuration root, and where an MCP entry lands
   inside a client's own config file, are not a contract. Neither is the
@@ -779,6 +806,14 @@ the entry or `grim uninstall` removes the skill. [`grim status`][status] still
 reads that row `installed` with its JSON unchanged, and names the skill once on
 stderr.
 
+The refusal also fires for an installed record whose output sits under a
+client outside `--client`, because every recorded output is checked. A dev
+install (`grim install ./path`) that carries the refused entry makes `grim
+install` and `grim update` exit `65` with the reason `skill-plugin-manifest`.
+`grim status` keeps exit `0` with its stderr line, and `grim uninstall skill
+<name>` succeeds. One residual remains: a dev install of a different directory
+is not refused by a stale dev record elsewhere.
+
 ## Known limitations {#limitations}
 
 The behaviors below fall outside every guarantee above — not because they
@@ -919,6 +954,44 @@ The `74` row reaches only a user who downgrades after a global settings
 install. A project-scope settings record never enters `.grimoire/state.json`,
 so that file stays readable by 0.15.1. The kind adds nothing to the lock or
 state of a project that declares no settings package.
+
+The experimental [mod][mods] kind meets the same line. This table was run
+against real grim 0.15.1 and 0.16.0 binaries. A row marked "expected" was read
+from code and is not a recorded run:
+
+| What an older grim reads | grim 0.15.1 | grim 0.16.0 |
+|---|---|---|
+| a `[mods]` table, any command | exit `78`, unknown field `mods` | exit `78`, same |
+| `[options.experimental] mods` with no table | exit `78` | exit `78` |
+| a lock with `[[mod]]`: `status`, `install` | exit `78` | exit `78`, restore the lock from git |
+| a lock with `[[mod]]`: `lock`, `update`, `add` | exit `0`, the lock rewritten and `[[mod]]` dropped | exit `78`, lock untouched |
+| `grim add` of a mod | exit `65`, kind not inferred | exit `65` |
+| a bundle with a mod member | exit `65`, nothing changed | exit `65` |
+| a skill that requires a mod, with `requires-features = mods` | exit `65` (feature ignored) | exit `65`, update grim |
+| a consent record only at `$GRIM_HOME/consent/` | hooks skipped | hooks skipped |
+| `[options.vendors.opencode] plugin_api` in a project config | exit `78` | exit `78` |
+| the same key in the global config | project commands exit `0` and ignore it; `--global` commands exit `78` | project commands exit `0` with a warning; `--global` commands exit `78` |
+
+The global `plugin_api` row is pinned by `test_old_grim_mods.py`. Set that key
+in a global config only once no older grim runs on the machine, because every
+`--global` command of an older grim then exits `78`.
+
+Where `grimoire.toml` has no `[mods]` table, a mod is reached only through a
+`requires` edge or a stale row. There grim 0.15.1's `lock`, `update` and `add`
+drop every `[[mod]]` row with exit `0`. The mod's files stay and keep loading
+until a newer grim converges.
+
+The consent record moved to `$GRIM_HOME/consent/<workspace-key>.json`. A grim
+with a mod-aware consent record asks once again for each workspace, and it
+never reads the old record. A persistent machine that runs grim non-interactively
+loses its grant, and its hooks and settings stay gated until you pass
+`--trust-workspace` or run `grim consent allow`. CI is unaffected, because a
+fresh CI environment holds no stored record. `grim consent list` still lists
+hooks only.
+
+Revocation is one-way across versions. An older grim's `grim hook revoke`
+removes only the old path, and a newer grim still arms on the v2 grant. Revoke
+with the grim that granted.
 
 [Declared dependencies](./concepts.md#dependencies) hold the line in both
 places they reach an older grim: the lock and the artifact. A lock that holds
@@ -1164,6 +1237,7 @@ unaffected — they read straight from disk and never touch a manifest.
 [json-shapes-items]: ./json-interface.md#shapes-items
 [json-hook-arming-stability]: ./json-interface.md#hook-arming
 [settings]: ./settings.md
+[mods]: ./mods.md
 [settings-format]: ./settings.md#format
 
 <!-- external -->

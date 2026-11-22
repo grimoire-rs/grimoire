@@ -1,0 +1,11 @@
+schema = 1
+name = "hello-mod"
+description = "A visible hello for a logged-in Claude Code and OpenCode"
+summary = "Status line entry, toast and /grim-hello in Claude Code; /grim-hello and a shell variable in OpenCode"
+keywords = "demo,hello,mod"
+
+[claude]
+entry = "hello-mod.js"
+
+[opencode]
+entry = "hello-mod.ts"
