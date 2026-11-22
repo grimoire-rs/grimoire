@@ -735,6 +735,10 @@ The rule trusts the version annotation the publisher wrote, limited by that
 exact-tag check. A publisher who tags both the annotated version and its exact tag
 keeps the float, so retag with another OCI tool to correct one.
 
+Run releases one at a time (a CI concurrency group per repository), with
+the repair as the safety net, not the plan: tags have no compare-and-set,
+two repairs can cross, and a failed repair only warns.
+
 A release reads each float before it moves it, and the registry has no
 compare-and-set for tags, so two concurrent releases can still leave a float
 on the lower version while they run. After the tags move, grim re-lists the
