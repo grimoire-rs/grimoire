@@ -67,7 +67,7 @@ use crate::oci::access::registry_client::{plain_http_hosts_with, registry_host};
 
 use std::collections::BTreeSet;
 
-use super::consent::{self, Consent, ConsentRecord, consent_key_for, split_by_kind};
+use super::consent::{self, Consent, ConsentRecord, DeclaredKeys, consent_key_for, keys_of};
 use super::trust::{Arming, ArmingQuery, GrantSource, Interactivity, NotArmedReason, is_loopback};
 
 /// The invocation-level hook arming policy: the feature flag, the
@@ -510,12 +510,13 @@ impl ConsentPolicies {
     /// Both policies from one record read, one flag and one interactivity
     /// answer. Each kind answers its own feature flag first.
     ///
-    /// `declared` is the union of the enabled kinds, and each kind evaluates its
-    /// own half: read as one answer, a settings key the record lacks would drift
+    /// `declared` holds each enabled kind's entries, and each kind evaluates its
+    /// own set: read as one answer, a settings entry the record lacks would drift
     /// every consented hook. A record for another workspace reads as no record.
-    pub fn new(inputs: &ConsentInputs<'_>, record: Option<&ConsentRecord>, declared: &BTreeSet<String>) -> Self {
+    pub fn new(inputs: &ConsentInputs<'_>, record: Option<&ConsentRecord>, declared: &DeclaredKeys) -> Self {
         let record = record.filter(|r| r.workspace == inputs.workspace);
-        let (hook_keys, settings_keys) = split_by_kind(declared);
+        let hook_keys = keys_of(declared, ArtifactKind::Hook);
+        let settings_keys = keys_of(declared, ArtifactKind::Settings);
         let hooks = HookPolicy::new(
             inputs.flags.hooks_enabled(),
             inputs.flag,
@@ -525,7 +526,7 @@ impl ConsentPolicies {
             inputs.registries,
             consent::evaluate(record, inputs.workspace, &hook_keys),
         )
-        .with_consented(record.map(|r| r.hooks.clone()).unwrap_or_default())
+        .with_consented(record.map(|r| r.sources.clone()).unwrap_or_default())
         .with_declared(hook_keys);
         let settings = HookPolicy {
             feature_enabled: inputs.flags.settings_enabled(),
@@ -542,15 +543,15 @@ impl ConsentPolicies {
         self.hooks.feature_enabled() || self.settings.feature_enabled()
     }
 
-    /// Fold an accepted answer into the kinds it added a key for: `recorded` is
-    /// the one record. A kind `added` holds no key of stays as this run read it,
+    /// Fold an accepted answer into the kinds it added an entry for: `recorded` is
+    /// the one record. A kind `added` holds no entry of stays as this run read it,
     /// because adding a package vouches for no hook, covered or not.
-    pub fn adopt_consent(&mut self, added: &BTreeSet<String>, recorded: BTreeSet<String>) {
-        let (hooks, settings) = split_by_kind(added);
-        if !settings.is_empty() {
+    pub fn adopt_consent(&mut self, added: &DeclaredKeys, recorded: BTreeSet<String>) {
+        let adds = |kind| added.get(&kind).is_some_and(|keys| !keys.is_empty());
+        if adds(ArtifactKind::Settings) {
             self.settings.adopt_consent(recorded.clone());
         }
-        if !hooks.is_empty() {
+        if adds(ArtifactKind::Hook) {
             self.hooks.adopt_consent(recorded);
         }
     }
@@ -612,8 +613,8 @@ mod tests {
     }
 
     const HOOK: &str = "guard@ghcr.io/acme/guard";
-    const TEAM: &str = "settings:team@ghcr.io/acme/team";
-    const EXTRA: &str = "settings:extra@ghcr.io/acme/extra";
+    const TEAM: &str = "team@ghcr.io/acme/team";
+    const EXTRA: &str = "extra@ghcr.io/acme/extra";
 
     /// One run's two policies: `record` is `None` for no record at all.
     struct Run<'a> {
@@ -623,7 +624,8 @@ mod tests {
         interactivity: Interactivity,
         scope: ConfigScope,
         record: Option<&'a [&'a str]>,
-        declared: &'a [&'a str],
+        declared_hooks: &'a [&'a str],
+        declared_settings: &'a [&'a str],
     }
 
     impl Default for Run<'_> {
@@ -635,7 +637,8 @@ mod tests {
                 interactivity: Interactivity::NonInteractive,
                 scope: ConfigScope::Project,
                 record: None,
-                declared: &[HOOK, TEAM],
+                declared_hooks: &[HOOK],
+                declared_settings: &[TEAM],
             }
         }
     }
@@ -648,9 +651,9 @@ mod tests {
                 settings: self.settings,
             };
             let record = self.record.map(|keys| ConsentRecord {
-                v: consent::ConsentVersion::V1,
+                v: consent::ConsentVersion::V2,
                 workspace: workspace.to_path_buf(),
-                hooks: keys.iter().map(ToString::to_string).collect(),
+                sources: keys.iter().map(ToString::to_string).collect(),
                 consented_at: "2026-11-04T10:00:00Z".to_string(),
             });
             let inputs = ConsentInputs {
@@ -661,7 +664,11 @@ mod tests {
                 workspace,
                 registries: &[],
             };
-            let declared = self.declared.iter().map(ToString::to_string).collect();
+            let of = |keys: &[&str]| keys.iter().map(ToString::to_string).collect();
+            let declared = DeclaredKeys::from([
+                (ArtifactKind::Hook, of(self.declared_hooks)),
+                (ArtifactKind::Settings, of(self.declared_settings)),
+            ]);
             ConsentPolicies::new(&inputs, record.as_ref(), &declared)
         }
     }
@@ -817,7 +824,8 @@ mod tests {
             let policies = Run {
                 interactivity,
                 record: Some(&[TEAM]),
-                declared: &[TEAM, EXTRA],
+                declared_hooks: &[],
+                declared_settings: &[TEAM, EXTRA],
                 ..Run::default()
             }
             .policies();
@@ -834,7 +842,7 @@ mod tests {
         let other = "other@ghcr.io/acme/other";
         let policies = Run {
             record: Some(&[HOOK, TEAM]),
-            declared: &[HOOK, other, TEAM],
+            declared_hooks: &[HOOK, other],
             ..Run::default()
         }
         .policies();
@@ -842,47 +850,85 @@ mod tests {
         assert_eq!(policies.settings.verdict("team", &team()), WORKSPACE_GRANT);
     }
 
-    /// One record holds both kinds, and a hook's key answers for no package of
-    /// that name, nor the reverse.
+    /// A hook entry and a settings entry with one binding and repository are one
+    /// entry: a record holding it covers both kinds, in either declaration.
     #[test]
-    fn a_hook_never_consents_a_package_of_one_name_in_either_direction() {
+    fn one_entry_covers_a_hook_and_a_package_of_one_binding_and_repository() {
         let source = registry_source("ghcr.io", "acme/x");
-        let hook = "x@ghcr.io/acme/x";
-        let package = "settings:x@ghcr.io/acme/x";
-
-        let hook_record = Run {
-            record: Some(&[hook]),
-            declared: &[],
+        let entry = "x@ghcr.io/acme/x";
+        let policies = Run {
+            record: Some(&[entry]),
+            declared_hooks: &[entry],
+            declared_settings: &[entry],
             ..Run::default()
         }
         .policies();
-        assert!(hook_record.hooks.arms("x", &source), "positive control");
-        assert!(!hook_record.settings.arms("x", &source));
+        assert_eq!(policies.hooks.consent(), &Consent::Granted);
+        assert_eq!(policies.settings.consent(), &Consent::Granted);
+        assert!(policies.hooks.arms("x", &source));
+        assert!(policies.settings.arms("x", &source));
 
-        let settings_record = Run {
-            record: Some(&[package]),
-            declared: &[],
-            ..Run::default()
-        }
-        .policies();
-        assert!(settings_record.settings.arms("x", &source), "positive control");
-        assert!(!settings_record.hooks.arms("x", &source));
+        let other = registry_source("ghcr.io", "acme/y");
+        assert!(
+            !policies.hooks.arms("y", &other),
+            "positive control: another binding is not covered"
+        );
     }
 
-    /// The record covers the package a hook key would spell, and a hook bound
-    /// under the prefix must not read that key as its own.
+    /// The truth table over two kinds: a kind drifts only on an entry of its own
+    /// declared set the record lacks.
     #[test]
-    fn a_hook_bound_under_the_settings_prefix_is_not_covered_by_a_package_key() {
-        let source = registry_source("ghcr.io", "acme/x");
-        let policies = Run {
-            record: Some(&["settings:x@ghcr.io/acme/x"]),
-            declared: &[],
-            ..Run::default()
+    fn consent_policies_truth_table_over_two_kinds() {
+        const OTHER: &str = "other@ghcr.io/acme/other";
+        struct Row {
+            record: Option<&'static [&'static str]>,
+            hooks: &'static [&'static str],
+            settings: &'static [&'static str],
+            want_hooks: Consent,
+            want_settings: Consent,
         }
-        .policies();
-
-        assert!(policies.settings.arms("x", &source), "positive control");
-        assert!(!policies.hooks.arms("settings:x", &source));
+        let row = |record, hooks, settings, want_hooks, want_settings| Row {
+            record,
+            hooks,
+            settings,
+            want_hooks,
+            want_settings,
+        };
+        let drift = |key: &str| Consent::Drifted([key.to_string()].into());
+        let cases = [
+            row(None, &[HOOK], &[TEAM], Consent::Absent, Consent::Absent),
+            row(
+                Some(&[HOOK, TEAM]),
+                &[HOOK],
+                &[TEAM],
+                Consent::Granted,
+                Consent::Granted,
+            ),
+            row(Some(&[HOOK]), &[HOOK], &[TEAM], Consent::Granted, drift(TEAM)),
+            row(Some(&[TEAM]), &[HOOK], &[TEAM], drift(HOOK), Consent::Granted),
+            row(Some(&[HOOK, TEAM]), &[HOOK, OTHER], &[], drift(OTHER), Consent::Granted),
+        ];
+        for case in cases {
+            let policies = Run {
+                record: case.record,
+                declared_hooks: case.hooks,
+                declared_settings: case.settings,
+                ..Run::default()
+            }
+            .policies();
+            assert_eq!(
+                policies.hooks.consent(),
+                &case.want_hooks,
+                "hooks over {:?}",
+                case.record
+            );
+            assert_eq!(
+                policies.settings.consent(),
+                &case.want_settings,
+                "settings over {:?}",
+                case.record
+            );
+        }
     }
 
     /// Accepting folds one record into both kinds, so everything it holds arms.
@@ -895,7 +941,11 @@ mod tests {
         .policies();
 
         let keys: BTreeSet<String> = [HOOK.to_string(), TEAM.to_string()].into();
-        policies.adopt_consent(&keys, keys.clone());
+        let added = DeclaredKeys::from([
+            (ArtifactKind::Hook, [HOOK.to_string()].into()),
+            (ArtifactKind::Settings, [TEAM.to_string()].into()),
+        ]);
+        policies.adopt_consent(&added, keys);
 
         let prompted = Some(Arming::Armed(GrantSource::ConsentPrompt));
         assert_eq!(policies.hooks.verdict("guard", &guard()), prompted);
@@ -910,13 +960,16 @@ mod tests {
         let other = "other@ghcr.io/acme/other";
         let mut drifted_hooks = Run {
             record: Some(&[HOOK]),
-            declared: &[HOOK, other, TEAM],
+            declared_hooks: &[HOOK, other],
             ..Run::default()
         }
         .policies();
         assert_eq!(drifted_hooks.hooks.verdict("guard", &guard()), NOT_ARMED_DRIFTED);
 
-        drifted_hooks.adopt_consent(&[TEAM.to_string()].into(), [HOOK.to_string(), TEAM.to_string()].into());
+        drifted_hooks.adopt_consent(
+            &DeclaredKeys::from([(ArtifactKind::Settings, [TEAM.to_string()].into())]),
+            [HOOK.to_string(), TEAM.to_string()].into(),
+        );
 
         assert_eq!(drifted_hooks.hooks.verdict("guard", &guard()), NOT_ARMED_DRIFTED);
         let prompted = Some(Arming::Armed(GrantSource::ConsentPrompt));
@@ -924,12 +977,14 @@ mod tests {
 
         let mut uncovered_package = Run {
             record: Some(&[]),
-            declared: &[HOOK, TEAM],
             ..Run::default()
         }
         .policies();
 
-        uncovered_package.adopt_consent(&[HOOK.to_string()].into(), [HOOK.to_string()].into());
+        uncovered_package.adopt_consent(
+            &DeclaredKeys::from([(ArtifactKind::Hook, [HOOK.to_string()].into())]),
+            [HOOK.to_string()].into(),
+        );
 
         assert_eq!(uncovered_package.hooks.verdict("guard", &guard()), prompted);
         assert_eq!(uncovered_package.settings.verdict("team", &team()), NOT_ARMED_DRIFTED);
@@ -943,7 +998,7 @@ mod tests {
         let mut policies = Run {
             interactivity: Interactivity::Interactive,
             record: Some(&[HOOK, TEAM]),
-            declared: &[HOOK, TEAM, EXTRA],
+            declared_settings: &[TEAM, EXTRA],
             ..Run::default()
         }
         .policies();
@@ -1019,13 +1074,20 @@ mod tests {
             registries: &[],
         };
         let elsewhere = ConsentRecord {
-            v: consent::ConsentVersion::V1,
+            v: consent::ConsentVersion::V2,
             workspace: "/w/other".into(),
-            hooks: [HOOK.to_string(), TEAM.to_string()].into(),
+            sources: [HOOK.to_string(), TEAM.to_string()].into(),
             consented_at: "2026-11-04T10:00:00Z".to_string(),
         };
 
-        let policies = ConsentPolicies::new(&inputs, Some(&elsewhere), &[HOOK.to_string(), TEAM.to_string()].into());
+        let policies = ConsentPolicies::new(
+            &inputs,
+            Some(&elsewhere),
+            &DeclaredKeys::from([
+                (ArtifactKind::Hook, [HOOK.to_string()].into()),
+                (ArtifactKind::Settings, [TEAM.to_string()].into()),
+            ]),
+        );
 
         assert_eq!(policies.hooks.consent(), &Consent::Absent);
         assert_eq!(policies.settings.consent(), &Consent::Absent);

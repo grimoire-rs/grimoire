@@ -118,7 +118,7 @@ def _store_files(runner: GrimRunner) -> list[Path]:
 
 
 def _consent_files(runner: GrimRunner) -> list[Path]:
-    return sorted((Path(runner.grim_home) / "hooks" / "consent").glob("*.json"))
+    return sorted((Path(runner.grim_home) / "consent").glob("*.json"))
 
 
 def _layer_cached(runner: GrimRunner, package: PublishedArtifact) -> bool:
@@ -129,14 +129,14 @@ def _layer_cached(runner: GrimRunner, package: PublishedArtifact) -> bool:
 
 def _seed_record(runner: GrimRunner, workspace: Path, keys: list[str]) -> None:
     key = hashlib.sha256(str(workspace).encode()).hexdigest()
-    path = Path(runner.grim_home) / "hooks" / "consent" / f"{key}.json"
+    path = Path(runner.grim_home) / "consent" / f"{key}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"v": 1, "workspace": str(workspace), "hooks": keys, "consented_at": "2026-08-28T10:00:00Z"}
+    record = {"v": 2, "workspace": str(workspace), "sources": keys, "consented_at": "2026-08-28T10:00:00Z"}
     path.write_text(json.dumps(record), encoding="utf-8", newline="\n")
 
 
 def _key(binding: str, package: PublishedArtifact) -> str:
-    return f"settings:{binding}@{REGISTRY_HOST}/{package.repo}"
+    return f"{binding}@{REGISTRY_HOST}/{package.repo}"
 
 
 def _plant(shape: str, workspace: Path, away: Path) -> Path:
@@ -603,7 +603,7 @@ def test_grim_home_refusal_reads_not_armed(
     home = runner.env["GRIM_HOME"]
     nested = project_dir / ".grim-home"
     shutil.copytree(Path(home) / "settings", nested / "settings")
-    shutil.copytree(Path(home) / "hooks" / "consent", nested / "hooks" / "consent")
+    shutil.copytree(Path(home) / "consent", nested / "consent")
     delivered = sorted((path, path.read_bytes()) for path in nested.rglob("*.json"))
     runner.env["GRIM_HOME"] = ".grim-home" if relative else str(nested)
 

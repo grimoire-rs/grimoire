@@ -179,20 +179,16 @@ pub fn ensure_owned_files_dir(grim_home: &Path) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// `$GRIM_HOME/hooks/consent` — one record per consented workspace.
-///
-/// Under `hooks/` rather than `$GRIM_HOME/state/` deliberately: everything that
-/// decides whether a hook arms lives in one directory, and the reserved-binding
-/// machinery that keeps a hook from colliding with grim's own files already
-/// guards this namespace. [`CONSENT_DIR`] is therefore a
+/// `$GRIM_HOME/consent` — one record per consented workspace, shared by every
+/// gated kind. [`CONSENT_DIR`] stays a
 /// [`RESERVED_ARTIFACT_NAMES`](crate::oci::hook::RESERVED_ARTIFACT_NAMES) entry,
-/// and `every_grim_owned_name_under_hooks_is_a_reserved_binding_name` fails the
-/// build if that is ever undone.
+/// so a hook can never be bound under the name an older grim kept this
+/// directory at.
 pub fn consent_dir(grim_home: &Path) -> PathBuf {
-    hooks_dir(grim_home).join(CONSENT_DIR)
+    grim_home.join(CONSENT_DIR)
 }
 
-/// `$GRIM_HOME/hooks/consent/<workspace-key>.json`.
+/// `$GRIM_HOME/consent/<workspace-key>.json`.
 ///
 /// **One file per workspace, never one shared file.** Decision E records why a
 /// whole-file rewrite is the wrong shape at this layer: a command operates on
@@ -207,12 +203,10 @@ pub fn consent_path(grim_home: &Path, workspace: &Path) -> PathBuf {
     consent_dir(grim_home).join(format!("{}.json", workspace_key(workspace)))
 }
 
-/// Create `$GRIM_HOME/hooks/consent` with owner-only permissions.
+/// Create `$GRIM_HOME/consent` with owner-only permissions.
 ///
-/// Same contract as [`ensure_hooks_dir`], which it delegates to for the parent:
-/// idempotent, and it narrows only a directory it freshly created.
+/// Idempotent, and it narrows only a directory it freshly created.
 pub fn ensure_consent_dir(grim_home: &Path) -> io::Result<PathBuf> {
-    ensure_hooks_dir(grim_home)?;
     let dir = consent_dir(grim_home);
     #[cfg(unix)]
     let existed = dir.exists();

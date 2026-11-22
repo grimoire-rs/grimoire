@@ -73,8 +73,8 @@ _GOLDEN_TESTS = frozenset(
         "test_remove_bundle_drops_what_the_baseline_dropped",
         "test_the_install_state_matches_the_baseline",
         "test_an_offline_install_writes_the_baseline_state",
-        "test_an_old_consent_record_still_arms_its_hook",
-        "test_an_old_consent_record_still_gates_a_grown_declaration",
+        "test_an_old_consent_record_is_not_honoured_and_the_workspace_is_asked_again",
+        "test_an_old_consent_record_never_covers_a_declaration_grown_since",
     }
 )
 
@@ -247,12 +247,13 @@ class _Env:
     def dispatch_table(self) -> Path:
         return self.grim_home / "hooks" / "dispatch.json"
 
-    def seed_consent(self, hooks: list[str] | None = None) -> Path:
+    def seed_old_consent(self, hooks: list[str] | None = None) -> Path:
         """Write the consent record `grim hook allow` wrote at the baseline.
 
         The golden record, with the two per-environment values filled in:
-        `workspace` is the identity `evaluate` compares byte for byte, and the
-        filename is its SHA-256. `hooks` overrides the consented set.
+        `workspace` is the identity the old grim compared byte for byte, and the
+        filename is its SHA-256. `hooks` overrides the consented set. It sits at
+        the path an old grim wrote, which this grim never reads.
         """
         record = json.loads((GOLDEN / "consent.project.json").read_text(encoding="utf-8"))
         record["workspace"] = str(self.project)
@@ -265,6 +266,21 @@ class _Env:
         path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")
         return path
 
+    def seed_consent(self) -> Path:
+        """Write the record this grim reads, covering what the golden record covered."""
+        old = json.loads((GOLDEN / "consent.project.json").read_text(encoding="utf-8"))
+        record = {
+            "v": 2,
+            "workspace": str(self.project),
+            "sources": sorted(old["hooks"]),
+            "consented_at": "2026-01-01T00:00:00Z",
+        }
+        key = hashlib.sha256(str(self.project).encode()).hexdigest()
+        path = self.grim_home / "consent" / f"{key}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")
+        return path
+
     def armed_rows(self) -> list[dict]:
         """Every row in the hook dispatch table, across every root."""
         if not self.dispatch_table.is_file():
@@ -273,9 +289,9 @@ class _Env:
         return [row for root in table["roots"].values() for row in root["hooks"]]
 
     def lock_and_install(self) -> None:
-        # The upgrading user's project had consented through `grim hook allow`;
-        # `--trust-hooks` would answer for this run only and prove nothing about
-        # the record.
+        # The upgrading user's project had consented to these hooks; the record
+        # is seeded in the shape this grim reads, since `--trust-hooks` would
+        # answer for this run only and prove nothing about the record.
         self.seed_consent()
         self.project_runner.run("lock")
         self.project_runner.run("install", "--client", "claude")
@@ -497,40 +513,48 @@ def test_an_offline_install_writes_the_baseline_state(grim_binary, grim_at, tmp_
 
 
 @pytest.mark.usefixtures("registry")
-def test_an_old_consent_record_still_arms_its_hook(grim_binary, grim_at, tmp_path, request):
-    """A record `grim hook allow` wrote, hook keys only, grants as it did.
+def test_an_old_consent_record_is_not_honoured_and_the_workspace_is_asked_again(
+    grim_binary, grim_at, tmp_path, request
+):
+    """A record an old grim wrote at its path no longer arms; the workspace re-asks.
 
-    The control installs the same project with no record: nothing arms. Only
-    then does arming with the record say anything about the record.
+    A non-interactive install reads the hook as gated, `workspace-not-consented`,
+    with nothing armed. The positive control consents through `grim consent
+    allow` in the same environment and the same install then arms the hook, so
+    the gated reading comes from the record move and not from a broken setup.
     """
     _replay_registry()
-    control = _Env(grim_at, tmp_path / "control", seed_locks=True)
-    control.project_runner.run("lock")
-    control.project_runner.run("install", "--client", "claude")
-    assert control.armed_rows() == [], "no record, no arming (positive control)"
-
     env = _Env(grim_at, tmp_path / "old-record", seed_locks=True)
-    record = env.seed_consent()
-    assert all(not key.startswith("settings:") for key in json.loads(record.read_text(encoding="utf-8"))["hooks"])
+    record = env.seed_old_consent()
+    assert all(
+        not key.startswith("settings:")
+        for key in json.loads(record.read_text(encoding="utf-8"))["hooks"]
+    )
     env.project_runner.run("lock")
     env.project_runner.run("install", "--client", "claude")
 
-    assert len(env.armed_rows()) == 1, "the old record arms the hook it names"
+    assert env.armed_rows() == [], "the old record arms nothing"
     status = env.project_runner.json("status")
     hook = [i for i in status["items"] if i["kind"] == "hook"]
-    assert len(hook) == 1 and hook[0]["arming"] == [], hook
-    _assert_identical("state.project.json", GOLDEN / "state.project.json", env.project_state)
+    assert len(hook) == 1 and hook[0]["state"] == "gated", hook
+    assert {a["cause"] for a in hook[0]["arming"]} == {"workspace-not-consented"}, hook
+
+    env.project_runner.run("consent", "allow")
+    env.project_runner.run("install", "--client", "claude")
+    assert len(env.armed_rows()) == 1, (
+        "consenting afresh arms the hook (positive control)"
+    )
     _completed.add(request.node.name)
 
 
 @pytest.mark.usefixtures("registry")
-def test_an_old_consent_record_still_gates_a_grown_declaration(
+def test_an_old_consent_record_never_covers_a_declaration_grown_since(
     grim_binary, grim_at, tmp_path, request
 ):
-    """A record that does not cover the declared hook leaves it gated, as before."""
+    """An old record that names no hook leaves the declared hook gated, as does a full one."""
     _replay_registry()
     env = _Env(grim_at, tmp_path, seed_locks=True)
-    env.seed_consent(hooks=[])
+    env.seed_old_consent(hooks=[])
     env.project_runner.run("lock")
 
     result = env.project_runner.run("install", "--client", "claude")
@@ -540,4 +564,11 @@ def test_an_old_consent_record_still_gates_a_grown_declaration(
     status = env.project_runner.json("status")
     hook = [i for i in status["items"] if i["kind"] == "hook"]
     assert len(hook) == 1 and hook[0]["state"] == "gated", hook
+    assert {a["cause"] for a in hook[0]["arming"]} == {"workspace-not-consented"}, hook
+
+    env.seed_consent()
+    env.project_runner.run("install", "--client", "claude")
+    assert len(env.armed_rows()) == 1, (
+        "a record in the current shape arms it (positive control)"
+    )
     _completed.add(request.node.name)

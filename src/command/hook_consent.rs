@@ -80,9 +80,9 @@ use std::path::Path;
 use crate::config::declaration::{DesiredSet, ExperimentalOptions, RegistryConfig};
 use crate::config::scope::{ConfigScope, Invocation};
 use crate::context::Context;
-use crate::hook::consent::{self, Consent};
+use crate::hook::consent::{self, Consent, DeclaredKeys};
 use crate::hook::policy::{ConsentInputs, ConsentPolicies, HookPolicy, not_armed_message};
-use crate::hook::trust::{self, Arming, ConsentAnswer, ConsentNoun, NotArmedReason};
+use crate::hook::trust::{self, Arming, ConsentAnswer, ConsentNoun, NotArmedReason, PromptEntry};
 use crate::install::hook_dispatch;
 use crate::install::hook_registrar::validate_grim_home;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -90,46 +90,71 @@ use crate::oci::ArtifactKind;
 
 use super::scope_resolution::ResolvedScope;
 
-/// Every consent key `lock` declares, of both gated kinds and whatever the flags
-/// say: what `grim hook allow` reviews, so turning a flag on later asks nothing
-/// about a package already reviewed.
+/// The kinds workspace consent gates. A new gated kind is one entry here and
+/// one arm in [`consent_flag_on`].
+const GATED_KINDS: [ArtifactKind; 2] = [ArtifactKind::Hook, ArtifactKind::Settings];
+
+/// Every consent entry `lock` declares, of every gated kind and whatever the
+/// flags say: what `grim hook allow` reviews, so turning a flag on later asks
+/// nothing about a package already reviewed.
 ///
 /// A path source contributes nothing: it has no registry pin, cannot arm on any
 /// path, and would otherwise make a workspace permanently drifted against a set
 /// it can never satisfy.
-pub fn reviewed_consent_keys(lock: &GrimoireLock) -> BTreeSet<String> {
+pub fn reviewed_consent_keys(lock: &GrimoireLock) -> DeclaredKeys {
     let every_kind = ExperimentalOptions {
         hooks: true,
         settings: true,
     };
-    declared_consent_keys(lock, &every_kind)
+    declared_keys(lock, &every_kind)
 }
 
-/// Every consent key `lock` declares under a flag that is on, spelled as
-/// [`consent::consent_key_for`] does.
-pub fn declared_consent_keys(lock: &GrimoireLock, flags: &ExperimentalOptions) -> BTreeSet<String> {
+/// The entries `lock` declares for `kind`, empty when `kind`'s flag is off,
+/// spelled as [`consent::consent_key_for`] does.
+pub fn declared_consent_keys(kind: ArtifactKind, lock: &GrimoireLock, flags: &ExperimentalOptions) -> BTreeSet<String> {
+    if !consent_flag_on(kind, flags) {
+        return BTreeSet::new();
+    }
     lock.iter_artifacts()
-        .filter(|a| consent_flag_on(a.kind, flags))
+        .filter(|a| a.kind == kind)
         .filter_map(|a| consent::consent_key_for(a.kind, &a.name, &a.source))
         .collect()
 }
 
-/// [`declared_consent_keys`] over the hooks and settings packages `set` declares
-/// directly, which a lock that has not caught up with the config does not list.
-/// A bundle's members are known only from the lock, so they stay out.
-pub fn config_consent_keys(set: &DesiredSet, flags: &ExperimentalOptions) -> BTreeSet<String> {
-    [
-        (ArtifactKind::Hook, &set.hooks),
-        (ArtifactKind::Settings, &set.settings),
-    ]
-    .into_iter()
-    .filter(|(kind, _)| consent_flag_on(*kind, flags))
-    .flat_map(|(kind, table)| {
-        table
-            .iter()
-            .filter_map(move |(binding, source)| consent::declared_consent_key_for(kind, binding, source.identifier()?))
-    })
-    .collect()
+/// [`declared_consent_keys`] for every gated kind.
+pub fn declared_keys(lock: &GrimoireLock, flags: &ExperimentalOptions) -> DeclaredKeys {
+    GATED_KINDS
+        .into_iter()
+        .map(|kind| (kind, declared_consent_keys(kind, lock, flags)))
+        .collect()
+}
+
+/// [`declared_consent_keys`] over the `kind` packages `set` declares directly,
+/// which a lock that has not caught up with the config does not list. A
+/// bundle's members are known only from the lock, so they stay out.
+pub fn config_consent_keys(kind: ArtifactKind, set: &DesiredSet, flags: &ExperimentalOptions) -> BTreeSet<String> {
+    let table = match kind {
+        ArtifactKind::Hook => &set.hooks,
+        ArtifactKind::Settings => &set.settings,
+        ArtifactKind::Skill | ArtifactKind::Rule | ArtifactKind::Agent | ArtifactKind::Bundle | ArtifactKind::Mcp => {
+            return BTreeSet::new();
+        }
+    };
+    if !consent_flag_on(kind, flags) {
+        return BTreeSet::new();
+    }
+    table
+        .iter()
+        .filter_map(|(binding, source)| consent::declared_consent_key_for(kind, binding, source.identifier()?))
+        .collect()
+}
+
+/// [`config_consent_keys`] for every gated kind.
+pub fn config_keys(set: &DesiredSet, flags: &ExperimentalOptions) -> DeclaredKeys {
+    GATED_KINDS
+        .into_iter()
+        .map(|kind| (kind, config_consent_keys(kind, set, flags)))
+        .collect()
 }
 
 /// Whether `kind`'s keys count: each gated kind under its own flag.
@@ -218,7 +243,7 @@ pub fn resolve(
     flag: Option<bool>,
 ) -> anyhow::Result<ConsentPolicies> {
     let lock = &*lock_to_consent(lock, &scope.roots.grim_home, &scope.workspace, scope.scope);
-    let declared = declared_consent_keys(lock, &scope.options.experimental);
+    let declared = declared_keys(lock, &scope.options.experimental);
     // `grim update` resolves before saving its new lock, so the one on disk is
     // not yet the declaration it converges to.
     let mut policies = scope_policies(ctx, scope, flag, &declared)?.with_locked(
@@ -240,10 +265,11 @@ pub fn resolve(
     };
 
     let new = drifted_keys(&policies);
+    let entries = prompt_entries(lock, &scope.options.experimental);
     let record_path = hook_dispatch::consent_path(ctx.grim_home(), &scope.workspace);
-    match trust::prompt_for_workspace(&scope.workspace, &record_path, &new, noun, &scope.invocation) {
+    match trust::prompt_for_workspace(&scope.workspace, &record_path, &new, &entries, &noun, &scope.invocation) {
         Ok(ConsentAnswer::Accepted) => {
-            if let Some(recorded) = record(&ConsentSite::of(ctx, scope), &declared, noun) {
+            if let Some(recorded) = record(&ConsentSite::of(ctx, scope), &consent::all_keys(&declared), &noun) {
                 policies.adopt_consent(&declared, recorded);
             } else {
                 // Consent that could not be recorded must not arm: it would arm
@@ -282,25 +308,36 @@ fn prompt_noun(policies: &ConsentPolicies, lock: &GrimoireLock) -> Option<Consen
                 .iter_artifacts()
                 .any(|a| a.kind == kind && consent::consent_key_for(kind, &a.name, &a.source).is_some())
     };
-    let hooks_ask = asks(ArtifactKind::Hook, &policies.hooks);
-    let settings_ask = asks(ArtifactKind::Settings, &policies.settings);
-    if !hooks_ask && !settings_ask {
+    let per_kind = [
+        (ArtifactKind::Hook, &policies.hooks),
+        (ArtifactKind::Settings, &policies.settings),
+    ];
+    if !per_kind.iter().any(|(kind, policy)| asks(*kind, policy)) {
         return None;
     }
-    Some(noun(
-        hooks_ask || records(ArtifactKind::Hook, &policies.hooks),
-        settings_ask || records(ArtifactKind::Settings, &policies.settings),
+    Some(ConsentNoun::of(
+        per_kind
+            .iter()
+            .filter(|(kind, policy)| asks(*kind, policy) || records(*kind, policy))
+            .map(|(kind, _)| *kind),
     ))
 }
 
-/// The noun for an answer covering hooks, settings or both. Both callers hold
-/// at least one kind, so neither cannot occur.
-fn noun(hooks: bool, settings: bool) -> ConsentNoun {
-    match (hooks, settings) {
-        (true, false) => ConsentNoun::Hooks,
-        (false, _) => ConsentNoun::Settings,
-        (true, true) => ConsentNoun::HooksAndSettings,
-    }
+/// Every gated entry `lock` declares, each under the kind that declares it, with
+/// its kind's flag: the list the question shows beside its wording.
+fn prompt_entries(lock: &GrimoireLock, flags: &ExperimentalOptions) -> Vec<PromptEntry> {
+    GATED_KINDS
+        .into_iter()
+        .flat_map(|kind| {
+            let enabled = consent_flag_on(kind, flags);
+            lock.iter_artifacts()
+                .filter(move |a| a.kind == kind)
+                .filter_map(move |a| {
+                    let key = consent::consent_key_for(kind, &a.name, &a.source)?;
+                    Some(PromptEntry { kind, key, enabled })
+                })
+        })
+        .collect()
 }
 
 /// What the record misses, across both kinds, so the question can say *what
@@ -353,20 +390,16 @@ impl<'a> ConsentSite<'a> {
         self.flags.hooks_enabled() && self.scope != ConfigScope::Global
     }
 
-    /// Whether `key`'s own kind is on here.
-    fn kind_enabled(&self, key: &str) -> bool {
-        if consent::is_settings_key(key) {
-            self.flags.settings_enabled()
-        } else {
-            self.flags.hooks_enabled()
-        }
+    /// Whether `kind`'s own flag is on here.
+    fn kind_enabled(&self, kind: ArtifactKind) -> bool {
+        consent_flag_on(kind, &self.flags)
     }
 }
 
 /// Whether [`gesture`] would add `key` to a record: its kind's feature is on,
 /// this run did not refuse, the scope keeps records and the record lacks it.
-pub fn add_would_record(site: &ConsentSite<'_>, key: &str, flag: Option<bool>) -> bool {
-    site.kind_enabled(key)
+pub fn add_would_record(site: &ConsentSite<'_>, kind: ArtifactKind, key: &str, flag: Option<bool>) -> bool {
+    site.kind_enabled(kind)
         && flag != Some(false)
         && site.scope != ConfigScope::Global
         && !recorded_hooks(site).contains(key)
@@ -397,28 +430,40 @@ pub fn resolve_for_add(
     ctx: &Context,
     scope: &ResolvedScope,
     lock: &GrimoireLock,
-    consentable: &BTreeSet<String>,
+    consentable: &DeclaredKeys,
     flag: Option<bool>,
 ) -> anyhow::Result<ConsentPolicies> {
     let lock = &*lock_to_consent(lock, &scope.roots.grim_home, &scope.workspace, scope.scope);
-    let declared = declared_consent_keys(lock, &scope.options.experimental);
+    let flags = &scope.options.experimental;
+    let declared = declared_keys(lock, flags);
     // The projection `lock` is only what this add installs; the hooks the
     // workspace already declares judge drift as `grim install` will.
-    let flags = &scope.options.experimental;
-    let mut workspace = consent::split_by_kind(&config_consent_keys(&scope.set, flags)).0;
+    let mut workspace = declared.clone();
+    let hooks = workspace.entry(ArtifactKind::Hook).or_default();
+    hooks.extend(config_consent_keys(ArtifactKind::Hook, &scope.set, flags));
     if let Ok(on_disk) = crate::lock::lock_io::load(&scope.lock_path) {
-        workspace.extend(consent::split_by_kind(&declared_consent_keys(&on_disk, flags)).0);
+        hooks.extend(declared_consent_keys(ArtifactKind::Hook, &on_disk, flags));
     }
-    workspace.extend(declared.iter().cloned());
     let policies = scope_policies(ctx, scope, flag, &workspace)?;
-    if !policies.any_feature_enabled() || declared.is_empty() {
+    if !policies.any_feature_enabled() || consent::all_keys(&declared).is_empty() {
         return Ok(policies);
     }
     disclose_transitive(lock, &policies);
     // Only keys `lock` declares under a flag that is on, from a home the
     // settings phase accepts: with the settings flag alone on, recording an
     // added hook would consent to it while its own feature is off.
-    let consentable: BTreeSet<String> = consentable.intersection(&declared).cloned().collect();
+    let consentable: DeclaredKeys = declared
+        .iter()
+        .map(|(kind, keys)| {
+            (
+                *kind,
+                consent::keys_of(consentable, *kind)
+                    .intersection(keys)
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
     Ok(gesture(policies, &ConsentSite::of(ctx, scope), &consentable, flag))
 }
 
@@ -441,25 +486,25 @@ pub fn resolve_for_add(
 pub fn gesture(
     mut policies: ConsentPolicies,
     site: &ConsentSite<'_>,
-    consentable: &BTreeSet<String>,
+    consentable: &DeclaredKeys,
     flag: Option<bool>,
 ) -> ConsentPolicies {
     if flag == Some(false) {
         return policies;
     }
-    let consentable: BTreeSet<String> = consentable
+    let consentable: DeclaredKeys = consentable
         .iter()
-        .filter(|key| site.kind_enabled(key))
-        .cloned()
+        .filter(|(kind, _)| site.kind_enabled(**kind))
+        .map(|(kind, keys)| (*kind, keys.clone()))
         .collect();
     let recorded = recorded_hooks(site);
-    let written = if consentable.is_empty() {
+    let all = consent::all_keys(&consentable);
+    let written = if all.is_empty() {
         None
     } else {
-        record(site, &consentable, noun_for(&consentable))
+        record(site, &all, &noun_for(&consentable))
     };
-    let (_, settings) = consent::split_by_kind(&consentable);
-    if !settings.is_empty()
+    if !consent::keys_of(&consentable, ArtifactKind::Settings).is_empty()
         && let Some(covered) = &written
     {
         policies.settings.adopt_consent(covered.clone());
@@ -504,24 +549,27 @@ pub fn gesture(
 pub fn record_without_install(
     site: &ConsentSite<'_>,
     lock: &GrimoireLock,
-    consentable: &BTreeSet<String>,
+    consentable: &DeclaredKeys,
     flag: Option<bool>,
 ) {
     if !site.records_hooks() || flag == Some(false) {
         return;
     }
     disclose_kind(lock, ArtifactKind::Hook, "hook");
-    let (hooks, _) = consent::split_by_kind(consentable);
+    let hooks = consent::keys_of(consentable, ArtifactKind::Hook);
     if !hooks.is_empty() {
         // A failed write has warned, and no arming here depends on the answer.
-        let _ = record(site, &hooks, ConsentNoun::Hooks);
+        let _ = record(site, &hooks, &ConsentNoun::of([ArtifactKind::Hook]));
     }
 }
 
-/// Which kinds `keys` consents to. `keys` is never empty here.
-fn noun_for(keys: &BTreeSet<String>) -> ConsentNoun {
-    let (hooks, settings) = consent::split_by_kind(keys);
-    noun(!hooks.is_empty(), !settings.is_empty())
+/// Which kinds `keys` consents to. `keys` holds an entry here.
+fn noun_for(keys: &DeclaredKeys) -> ConsentNoun {
+    ConsentNoun::of(
+        GATED_KINDS
+            .into_iter()
+            .filter(|kind| !consent::keys_of(keys, *kind).is_empty()),
+    )
 }
 
 /// The settings half of [`resolve`] over `lock`, with no question and no record:
@@ -537,7 +585,7 @@ pub fn settings_policy(
     lock: &GrimoireLock,
     flag: Option<bool>,
 ) -> anyhow::Result<HookPolicy> {
-    let declared = declared_consent_keys(lock, &scope.options.experimental);
+    let declared = declared_keys(lock, &scope.options.experimental);
     let policies = scope_policies(ctx, scope, flag, &declared)?;
     Ok(policies
         .with_locked(BTreeSet::new(), locked_bindings(lock, ArtifactKind::Settings))
@@ -569,7 +617,7 @@ pub fn resolve_without_consent(
     ctx: &Context,
     scope: &ResolvedScope,
     flag: Option<bool>,
-    declared: &BTreeSet<String>,
+    declared: &DeclaredKeys,
 ) -> anyhow::Result<HookPolicy> {
     let feature_enabled = scope.options.experimental.hooks_enabled();
     let registries = policy_registries(ctx, scope, feature_enabled)?;
@@ -623,7 +671,7 @@ fn scope_policies(
     ctx: &Context,
     scope: &ResolvedScope,
     flag: Option<bool>,
-    declared: &BTreeSet<String>,
+    declared: &DeclaredKeys,
 ) -> anyhow::Result<ConsentPolicies> {
     let flags = &scope.options.experimental;
     let registries = policy_registries(ctx, scope, flags.hooks_enabled() || flags.settings_enabled())?;
@@ -645,7 +693,7 @@ fn scope_policies(
 fn policies_from_record(
     grim_home: &std::path::Path,
     inputs: &ConsentInputs<'_>,
-    declared: &BTreeSet<String>,
+    declared: &DeclaredKeys,
 ) -> ConsentPolicies {
     let record = consent::load(grim_home, inputs.workspace);
     ConsentPolicies::new(inputs, record.as_ref(), declared)
@@ -665,7 +713,7 @@ pub fn policy_without_consent(
     feature_enabled: bool,
     flag: Option<bool>,
     registries: &[RegistryConfig],
-    declared: &BTreeSet<String>,
+    declared: &DeclaredKeys,
 ) -> HookPolicy {
     let flags = ExperimentalOptions {
         hooks: feature_enabled,
@@ -690,7 +738,7 @@ pub fn policies_without_consent(
     workspace: &std::path::Path,
     flags: &ExperimentalOptions,
     registries: &[RegistryConfig],
-    declared: &BTreeSet<String>,
+    declared: &DeclaredKeys,
     lock_path: &std::path::Path,
 ) -> ConsentPolicies {
     let inputs = ConsentInputs {
@@ -765,7 +813,7 @@ fn disclose_kind(lock: &GrimoireLock, kind: ArtifactKind, noun: &str) {
 pub fn recorded_hooks(site: &ConsentSite<'_>) -> BTreeSet<String> {
     consent::load(site.grim_home, site.workspace)
         .filter(|r| r.workspace == site.workspace)
-        .map(|r| r.hooks)
+        .map(|r| r.sources)
         .unwrap_or_default()
 }
 
@@ -786,7 +834,7 @@ pub fn recorded_hooks(site: &ConsentSite<'_>) -> BTreeSet<String> {
 /// the same answer, and the loser's entry is re-added by its own next run.
 ///
 /// `noun` names what the answer covered, so a failed write warns in its words.
-fn record(site: &ConsentSite<'_>, added: &BTreeSet<String>, noun: ConsentNoun) -> Option<BTreeSet<String>> {
+fn record(site: &ConsentSite<'_>, added: &BTreeSet<String>, noun: &ConsentNoun) -> Option<BTreeSet<String>> {
     let mut hooks = recorded_hooks(site);
     hooks.extend(added.iter().cloned());
     match consent::record(site.grim_home, site.scope, site.workspace, &hooks) {
@@ -801,6 +849,18 @@ fn record(site: &ConsentSite<'_>, added: &BTreeSet<String>, noun: ConsentNoun) -
 
 #[cfg(test)]
 mod tests {
+    fn n_h() -> ConsentNoun {
+        ConsentNoun::of([ArtifactKind::Hook])
+    }
+
+    fn n_s() -> ConsentNoun {
+        ConsentNoun::of([ArtifactKind::Settings])
+    }
+
+    fn n_hs() -> ConsentNoun {
+        ConsentNoun::of([ArtifactKind::Hook, ArtifactKind::Settings])
+    }
+
     use super::*;
     use crate::hook::trust::Interactivity;
     use crate::install::install_state::InstallState;
@@ -882,13 +942,17 @@ mod tests {
         names.iter().map(|n| format!("{n}@ghcr.io/acme/{n}")).collect()
     }
 
+    fn hooks(names: &[&str]) -> DeclaredKeys {
+        DeclaredKeys::from([(ArtifactKind::Hook, keys(names))])
+    }
+
     /// A failed install keeps the add's declaration, so the record is written
     /// before the install runs, and the policy arms on it.
     #[test]
     fn an_add_records_its_consent_before_the_install() {
         let project = Project::with_hooks(&["fresh"]);
 
-        let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &keys(&["fresh"]), None).unwrap();
+        let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &hooks(&["fresh"]), None).unwrap();
 
         assert!(project.arms(&policy.hooks, "fresh"));
         assert_eq!(project.recorded(), keys(&["fresh"]));
@@ -900,7 +964,7 @@ mod tests {
         let scope = &project.scope;
         consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["kept"])).unwrap();
 
-        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &keys(&["fresh"]), None).unwrap();
+        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &hooks(&["fresh"]), None).unwrap();
 
         assert_eq!(project.recorded(), keys(&["kept", "fresh"]));
         assert!(project.arms(&policy.hooks, "kept"));
@@ -916,7 +980,7 @@ mod tests {
         consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["a"])).unwrap();
         let capture = crate::catalog::test_hosts::LogCapture::start();
 
-        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &keys(&["b"]), None).unwrap();
+        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &hooks(&["b"]), None).unwrap();
 
         assert_eq!(
             project.recorded(),
@@ -937,7 +1001,7 @@ mod tests {
         let mut project = Project::with_hooks(&["a", "b"]);
         project.scope.scope = ConfigScope::Global;
 
-        let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &keys(&["b"]), None).unwrap();
+        let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &hooks(&["b"]), None).unwrap();
 
         assert!(project.arms(&policy.hooks, "b"));
     }
@@ -949,7 +1013,7 @@ mod tests {
         consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["a"])).unwrap();
         let capture = crate::catalog::test_hosts::LogCapture::start();
 
-        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &keys(&["b"]), None).unwrap();
+        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &hooks(&["b"]), None).unwrap();
 
         assert!(project.arms(&policy.hooks, "a"));
         assert!(project.arms(&policy.hooks, "b"));
@@ -963,11 +1027,11 @@ mod tests {
         let project = Project::with_hooks(&["kept", "fresh"]);
         let scope = &project.scope;
         consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["kept"])).unwrap();
-        let dir = project.home.path().join("hooks/consent");
+        let dir = project.home.path().join("consent");
         let writable = std::fs::metadata(&dir).unwrap().permissions();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &keys(&["fresh"]), None);
+        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &hooks(&["fresh"]), None);
 
         std::fs::set_permissions(&dir, writable).unwrap();
         let policy = policy.unwrap();
@@ -986,9 +1050,9 @@ mod tests {
     fn a_failed_write_in_an_unconsented_workspace_arms_nothing() {
         let project = Project::with_hooks(&["fresh"]);
         std::fs::create_dir_all(project.home.path().join("hooks")).unwrap();
-        std::fs::write(project.home.path().join("hooks/consent"), "").unwrap();
+        std::fs::write(project.home.path().join("consent"), "").unwrap();
 
-        let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &keys(&["fresh"]), None).unwrap();
+        let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &hooks(&["fresh"]), None).unwrap();
 
         assert!(!project.arms(&policy.hooks, "fresh"));
     }
@@ -999,12 +1063,12 @@ mod tests {
     fn a_failed_write_names_the_runs_own_grim_in_its_remedy() {
         let mut project = Project::with_hooks(&["fresh"]);
         std::fs::create_dir_all(project.home.path().join("hooks")).unwrap();
-        std::fs::write(project.home.path().join("hooks/consent"), "").unwrap();
+        std::fs::write(project.home.path().join("consent"), "").unwrap();
         let grim = crate::config::scope::Invocation::config(&project.scope.config_path);
         project.scope.invocation = grim.clone();
         let capture = crate::catalog::test_hosts::LogCapture::start();
 
-        resolve_for_add(&project.ctx, &project.scope, &project.lock, &keys(&["fresh"]), None).unwrap();
+        resolve_for_add(&project.ctx, &project.scope, &project.lock, &hooks(&["fresh"]), None).unwrap();
 
         let logs = capture.text();
         assert!(logs.contains(&format!("then run {grim} hook allow")), "{logs}");
@@ -1014,12 +1078,12 @@ mod tests {
     #[test]
     fn an_add_with_nothing_to_record_writes_nothing() {
         let project = Project::with_hooks(&["fresh"]);
-        let cases = [(BTreeSet::new(), None), (keys(&["fresh"]), Some(false))];
+        let cases = [(DeclaredKeys::new(), None), (hooks(&["fresh"]), Some(false))];
         for (consentable, flag) in cases {
             let policy = resolve_for_add(&project.ctx, &project.scope, &project.lock, &consentable, flag).unwrap();
             assert!(!project.arms(&policy.hooks, "fresh"), "{flag:?}");
         }
-        assert!(!project.home.path().join("hooks/consent").exists());
+        assert!(!project.home.path().join("consent").exists());
     }
 
     /// `--no-install` declares and locks all the same, so it records what the
@@ -1033,7 +1097,7 @@ mod tests {
         record_without_install(
             &ConsentSite::of(&project.ctx, scope),
             &project.lock,
-            &keys(&["fresh"]),
+            &hooks(&["fresh"]),
             None,
         );
 
@@ -1046,7 +1110,7 @@ mod tests {
         record_without_install(
             &ConsentSite::of(&project.ctx, &project.scope),
             &project.lock,
-            &keys(&["fresh"]),
+            &hooks(&["fresh"]),
             Some(false),
         );
         assert_eq!(project.recorded(), BTreeSet::new(), "--no-trust-hooks");
@@ -1055,11 +1119,11 @@ mod tests {
         record_without_install(
             &ConsentSite::of(&project.ctx, &project.scope),
             &project.lock,
-            &keys(&["fresh"]),
+            &hooks(&["fresh"]),
             None,
         );
         assert_eq!(project.recorded(), BTreeSet::new(), "the feature is off");
-        assert!(!project.home.path().join("hooks/consent").exists());
+        assert!(!project.home.path().join("consent").exists());
     }
 
     /// One declared hook the record lacks is drift, and drift disarms every hook
@@ -1070,7 +1134,7 @@ mod tests {
         let scope = &project.scope;
         consent::record(project.home.path(), scope.scope, &scope.workspace, &keys(&["kept"])).unwrap();
 
-        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &BTreeSet::new(), None).unwrap();
+        let policy = resolve_for_add(&project.ctx, scope, &project.lock, &DeclaredKeys::new(), None).unwrap();
 
         assert!(!project.arms(&policy.hooks, "kept"), "the record lacks a declared hook");
         assert!(!project.arms(&policy.hooks, "fresh"), "nothing consented to it");
@@ -1089,7 +1153,12 @@ mod tests {
         )
         .unwrap();
         let would = |project: &Project, key: &str, flag| {
-            add_would_record(&ConsentSite::of(&project.ctx, &project.scope), key, flag)
+            add_would_record(
+                &ConsentSite::of(&project.ctx, &project.scope),
+                ArtifactKind::Hook,
+                key,
+                flag,
+            )
         };
 
         assert!(would(&project, key, None));
@@ -1115,7 +1184,7 @@ mod tests {
             &project.ctx,
             &project.scope,
             &project.lock,
-            &keys(&["fresh"]),
+            &hooks(&["fresh"]),
             Some(true),
         )
         .unwrap();
@@ -1128,19 +1197,20 @@ mod tests {
     #[test]
     fn an_add_would_record_a_key_only_under_its_own_kinds_flag() {
         let mut project = Project::with_hooks(&["fresh"]);
-        let (hook, settings) = ("fresh@ghcr.io/acme/fresh", "settings:team@ghcr.io/acme/team");
-        let would =
-            |project: &Project, key: &str| add_would_record(&ConsentSite::of(&project.ctx, &project.scope), key, None);
+        let (hook, settings) = ("fresh@ghcr.io/acme/fresh", "team@ghcr.io/acme/team");
+        let would = |project: &Project, kind: ArtifactKind, key: &str| {
+            add_would_record(&ConsentSite::of(&project.ctx, &project.scope), kind, key, None)
+        };
         project.scope.options.experimental.hooks = false;
         project.scope.options.experimental.settings = true;
-        assert!(would(&project, settings));
-        assert!(!would(&project, hook));
+        assert!(would(&project, ArtifactKind::Settings, settings));
+        assert!(!would(&project, ArtifactKind::Hook, hook));
 
         // Positive control: the hooks flag alone flips both answers.
         project.scope.options.experimental.hooks = true;
         project.scope.options.experimental.settings = false;
-        assert!(!would(&project, settings));
-        assert!(would(&project, hook));
+        assert!(!would(&project, ArtifactKind::Settings, settings));
+        assert!(would(&project, ArtifactKind::Hook, hook));
     }
 
     /// `--no-install` records hook consent only: a settings package keeps its
@@ -1151,8 +1221,8 @@ mod tests {
         project.scope.options.experimental.settings = true;
         let mut lock = project.lock.clone();
         lock.settings.push(locked("team", ArtifactKind::Settings));
-        let mut consentable = keys(&["fresh"]);
-        consentable.insert("settings:team@ghcr.io/acme/team".to_string());
+        let mut consentable = hooks(&["fresh"]);
+        consentable.insert(ArtifactKind::Settings, keys(&["team"]));
 
         record_without_install(
             &ConsentSite::of(&project.ctx, &project.scope),
@@ -1235,11 +1305,11 @@ mod tests {
             ..ExperimentalOptions::default()
         };
         assert_eq!(
-            declared_consent_keys(&lock, &on),
+            declared_consent_keys(ArtifactKind::Hook, &lock, &on),
             BTreeSet::from(["guard@ghcr.io/acme/guard".to_string()])
         );
         assert_eq!(
-            declared_consent_keys(&lock, &ExperimentalOptions::default()),
+            declared_consent_keys(ArtifactKind::Hook, &lock, &ExperimentalOptions::default()),
             BTreeSet::new()
         );
     }
@@ -1256,18 +1326,15 @@ mod tests {
         for (flags, expected) in [
             ((false, false), vec![]),
             ((true, false), vec!["guard@ghcr.io/acme/guard"]),
-            ((false, true), vec!["settings:team@ghcr.io/acme/team"]),
-            (
-                (true, true),
-                vec!["guard@ghcr.io/acme/guard", "settings:team@ghcr.io/acme/team"],
-            ),
+            ((false, true), vec!["team@ghcr.io/acme/team"]),
+            ((true, true), vec!["guard@ghcr.io/acme/guard", "team@ghcr.io/acme/team"]),
         ] {
             let flags = ExperimentalOptions {
                 hooks: flags.0,
                 settings: flags.1,
             };
             assert_eq!(
-                config_consent_keys(&set, &flags),
+                consent::all_keys(&config_keys(&set, &flags)),
                 expected.into_iter().map(String::from).collect::<BTreeSet<_>>()
             );
         }
@@ -1278,7 +1345,7 @@ mod tests {
     #[test]
     fn declared_consent_keys_is_the_union_of_the_enabled_kinds() {
         let hook = "guard@ghcr.io/acme/guard".to_string();
-        let settings = "settings:team@ghcr.io/acme/team".to_string();
+        let settings = "team@ghcr.io/acme/team".to_string();
         for (flags, expected) in [
             ((false, false), vec![]),
             ((true, false), vec![hook.clone()]),
@@ -1290,7 +1357,7 @@ mod tests {
                 settings: flags.1,
             };
             assert_eq!(
-                declared_consent_keys(&mixed_lock(), &flags),
+                consent::all_keys(&declared_keys(&mixed_lock(), &flags)),
                 expected.into_iter().collect::<BTreeSet<_>>()
             );
         }
@@ -1312,7 +1379,7 @@ mod tests {
             assert_eq!(resolved.hooks.feature_enabled(), hooks);
             assert_eq!(resolved.settings.feature_enabled(), settings);
 
-            let added = resolve_for_add(&ctx, &scope, &lock, &BTreeSet::new(), None).unwrap();
+            let added = resolve_for_add(&ctx, &scope, &lock, &DeclaredKeys::new(), None).unwrap();
             assert_eq!(added.hooks.feature_enabled(), hooks);
             assert_eq!(added.settings.feature_enabled(), settings);
         }
@@ -1327,7 +1394,7 @@ mod tests {
         let ctx = Context::hermetic(home.path().to_path_buf());
         let mut scope = project_scope(ws.path(), home.path(), false);
         scope.options.experimental.settings = true;
-        let added = BTreeSet::from(["guard@ghcr.io/acme/guard".to_string()]);
+        let added = hooks(&["guard"]);
 
         resolve_for_add(&ctx, &scope, &mixed_lock(), &added, None).unwrap();
         assert!(consent::load(home.path(), ws.path()).is_none());
@@ -1336,22 +1403,22 @@ mod tests {
         // ahead of its install.
         scope.options.experimental.hooks = true;
         resolve_for_add(&ctx, &scope, &mixed_lock(), &added, None).unwrap();
-        assert_eq!(consent::load(home.path(), ws.path()).unwrap().hooks, added);
+        assert_eq!(consent::load(home.path(), ws.path()).unwrap().sources, keys(&["guard"]));
     }
 
     /// The prompt asks one question, and only about the kinds that reached it.
     #[test]
     fn the_prompt_names_only_the_kinds_that_need_the_answer() {
         const GUARD: &str = "guard@ghcr.io/acme/guard";
-        const TEAM: &str = "settings:team@ghcr.io/acme/team";
+        const TEAM: &str = "team@ghcr.io/acme/team";
         let workspace = std::path::Path::new("/w/proj");
         let lock = mixed_lock();
         let noun = |hooks: bool, settings: bool, interactivity: Interactivity, keys: Option<&[&str]>| {
             let flags = ExperimentalOptions { hooks, settings };
             let record = keys.map(|keys| consent::ConsentRecord {
-                v: consent::ConsentVersion::V1,
+                v: consent::ConsentVersion::V2,
                 workspace: workspace.to_path_buf(),
-                hooks: keys.iter().map(ToString::to_string).collect(),
+                sources: keys.iter().map(ToString::to_string).collect(),
                 consented_at: "2026-11-04T10:00:00Z".to_string(),
             });
             let inputs = ConsentInputs {
@@ -1362,18 +1429,18 @@ mod tests {
                 workspace,
                 registries: &[],
             };
-            let declared = declared_consent_keys(&lock, &flags);
+            let declared = declared_keys(&lock, &flags);
             prompt_noun(&ConsentPolicies::new(&inputs, record.as_ref(), &declared), &lock)
         };
         let ask = Interactivity::Interactive;
         let cannot_ask = Interactivity::NonInteractive;
 
-        assert_eq!(noun(true, true, ask, None), Some(ConsentNoun::HooksAndSettings));
+        assert_eq!(noun(true, true, ask, None), Some(n_hs()));
         assert_eq!(noun(true, true, ask, Some(&[GUARD, TEAM])), None);
-        assert_eq!(noun(true, true, ask, Some(&[GUARD])), Some(ConsentNoun::Settings));
-        assert_eq!(noun(true, true, ask, Some(&[TEAM])), Some(ConsentNoun::Hooks));
-        assert_eq!(noun(true, false, ask, None), Some(ConsentNoun::Hooks));
-        assert_eq!(noun(false, true, ask, None), Some(ConsentNoun::Settings));
+        assert_eq!(noun(true, true, ask, Some(&[GUARD])), Some(n_s()));
+        assert_eq!(noun(true, true, ask, Some(&[TEAM])), Some(n_h()));
+        assert_eq!(noun(true, false, ask, None), Some(n_h()));
+        assert_eq!(noun(false, true, ask, None), Some(n_s()));
         assert_eq!(noun(false, false, ask, None), None);
         assert_eq!(noun(true, true, cannot_ask, None), None);
     }
@@ -1383,12 +1450,14 @@ mod tests {
     #[test]
     fn a_recorded_set_names_its_own_kinds() {
         const GUARD: &str = "guard@ghcr.io/acme/guard";
-        const TEAM: &str = "settings:team@ghcr.io/acme/team";
-        let keys = |keys: &[&str]| keys.iter().map(ToString::to_string).collect::<BTreeSet<String>>();
+        const TEAM: &str = "team@ghcr.io/acme/team";
+        let of = |kind, entry: &str| (kind, BTreeSet::from([entry.to_string()]));
+        let hook = of(ArtifactKind::Hook, GUARD);
+        let package = of(ArtifactKind::Settings, TEAM);
 
-        assert_eq!(noun_for(&keys(&[GUARD])), ConsentNoun::Hooks);
-        assert_eq!(noun_for(&keys(&[TEAM])), ConsentNoun::Settings);
-        assert_eq!(noun_for(&keys(&[GUARD, TEAM])), ConsentNoun::HooksAndSettings);
+        assert_eq!(noun_for(&DeclaredKeys::from([hook.clone()])), n_h());
+        assert_eq!(noun_for(&DeclaredKeys::from([package.clone()])), n_s());
+        assert_eq!(noun_for(&DeclaredKeys::from([hook, package])), n_hs());
     }
 
     /// A kind the transport gate holds never reaches the question, yet accepting
@@ -1416,9 +1485,9 @@ mod tests {
         let noun = |lock: &GrimoireLock, hooks: bool, keys: Option<&[&str]>| {
             let flags = ExperimentalOptions { hooks, settings: true };
             let record = keys.map(|keys| consent::ConsentRecord {
-                v: consent::ConsentVersion::V1,
+                v: consent::ConsentVersion::V2,
                 workspace: workspace.to_path_buf(),
-                hooks: keys.iter().map(ToString::to_string).collect(),
+                sources: keys.iter().map(ToString::to_string).collect(),
                 consented_at: "2026-11-04T10:00:00Z".to_string(),
             });
             let inputs = ConsentInputs {
@@ -1429,19 +1498,19 @@ mod tests {
                 workspace,
                 registries: &insecure,
             };
-            let declared = declared_consent_keys(lock, &flags);
+            let declared = declared_keys(lock, &flags);
             prompt_noun(&ConsentPolicies::new(&inputs, record.as_ref(), &declared), lock)
         };
 
         let held_hook = lock_of(hook_at(PLAIN), Some(TLS));
-        assert_eq!(noun(&held_hook, true, None), Some(ConsentNoun::HooksAndSettings));
+        assert_eq!(noun(&held_hook, true, None), Some(n_hs()));
         let held_package = lock_of(hook_at(TLS), Some(PLAIN));
-        assert_eq!(noun(&held_package, true, None), Some(ConsentNoun::HooksAndSettings));
+        assert_eq!(noun(&held_package, true, None), Some(n_hs()));
 
         // Nothing else changes what the question names.
-        assert_eq!(noun(&held_hook, true, Some(&[GUARD])), Some(ConsentNoun::Settings));
-        assert_eq!(noun(&held_hook, false, None), Some(ConsentNoun::Settings));
-        assert_eq!(noun(&lock_of(None, Some(TLS)), true, None), Some(ConsentNoun::Settings));
+        assert_eq!(noun(&held_hook, true, Some(&[GUARD])), Some(n_s()));
+        assert_eq!(noun(&held_hook, false, None), Some(n_s()));
+        assert_eq!(noun(&lock_of(None, Some(TLS)), true, None), Some(n_s()));
         let mut path_hook = lock_of(None, Some(TLS));
         path_hook.hooks.push(crate::lock::LockedArtifact {
             source: crate::lock::locked_source::LockedSource::Path {
@@ -1450,25 +1519,24 @@ mod tests {
             },
             ..locked("local", ArtifactKind::Hook)
         });
-        assert_eq!(noun(&path_hook, true, None), Some(ConsentNoun::Settings));
+        assert_eq!(noun(&path_hook, true, None), Some(n_s()));
         // A kind held at the gate does not fire the question by itself.
         assert_eq!(noun(&lock_of(hook_at(PLAIN), Some(PLAIN)), true, None), None);
     }
 
-    /// The review records what the question covers, and a hook bound under the
-    /// settings prefix must not land there as consent for the package.
+    /// The review spells every gated kind's entry alike, so one binding and
+    /// repository is one entry whichever kind declares it.
     #[test]
-    fn a_hook_bound_under_the_settings_prefix_records_no_package_consent() {
+    fn the_review_spells_every_kind_alike() {
         let mut lock = entry_free_lock();
-        lock.hooks
-            .push(locked_at("ghcr.io", "acme/team", "settings:team", ArtifactKind::Hook));
-        lock.hooks
-            .push(locked_at("ghcr.io", "acme/team", "guard", ArtifactKind::Hook));
+        lock.hooks.push(locked("team", ArtifactKind::Hook));
+        lock.settings.push(locked("team", ArtifactKind::Settings));
 
-        assert_eq!(
-            reviewed_consent_keys(&lock),
-            BTreeSet::from(["guard@ghcr.io/acme/team".to_string()])
-        );
+        let reviewed = reviewed_consent_keys(&lock);
+
+        assert_eq!(consent::keys_of(&reviewed, ArtifactKind::Hook), keys(&["team"]));
+        assert_eq!(consent::keys_of(&reviewed, ArtifactKind::Settings), keys(&["team"]));
+        assert_eq!(consent::all_keys(&reviewed), keys(&["team"]));
     }
 
     /// `grim add` vouches for what it brought, so a package added under hook
@@ -1486,7 +1554,7 @@ mod tests {
         crate::lock::lock_io::save(&scope.lock_path, &lock, None).unwrap();
         let covered = BTreeSet::from(["guard@ghcr.io/acme/guard".to_string()]);
         consent::record(home.path(), ConfigScope::Project, ws.path(), &covered).unwrap();
-        let added = BTreeSet::from(["settings:team@ghcr.io/acme/team".to_string()]);
+        let added = DeclaredKeys::from([(ArtifactKind::Settings, keys(&["team"]))]);
 
         let policies = resolve_for_add(&ctx, &scope, &lock, &added, None).unwrap();
 
@@ -1513,11 +1581,17 @@ mod tests {
         crate::lock::lock_io::save(&without_guard, &entry_free_lock(), None).unwrap();
         let guard = locked("guard", ArtifactKind::Hook).source;
         let team = locked("team", ArtifactKind::Settings).source;
-        let keys = BTreeSet::from([
-            "guard@ghcr.io/acme/guard".to_string(),
-            "settings:team@ghcr.io/acme/team".to_string(),
+        let declared = DeclaredKeys::from([
+            (ArtifactKind::Hook, keys(&["guard"])),
+            (ArtifactKind::Settings, keys(&["team"])),
         ]);
-        crate::hook::consent::record(home.path(), ConfigScope::Project, ws.path(), &keys).unwrap();
+        crate::hook::consent::record(
+            home.path(),
+            ConfigScope::Project,
+            ws.path(),
+            &consent::all_keys(&declared),
+        )
+        .unwrap();
 
         let policies = |flags: &ExperimentalOptions, lock_path: &std::path::Path| {
             policies_without_consent(
@@ -1526,7 +1600,7 @@ mod tests {
                 ws.path(),
                 flags,
                 &[],
-                &keys,
+                &declared,
                 lock_path,
             )
         };
@@ -1565,16 +1639,16 @@ mod tests {
 
         let off = project_scope(ws.path(), home.path(), false);
         for flag in [None, Some(true), Some(false)] {
-            let policy = resolve_without_consent(&ctx, &off, flag, &BTreeSet::new())
+            let policy = resolve_without_consent(&ctx, &off, flag, &DeclaredKeys::new())
                 .expect("the flag-off policy must not load the global config");
             assert!(!policy.feature_enabled());
         }
         let hook_free = entry_free_lock();
         resolve(&ctx, &off, &hook_free, None).expect("hook-free install/update");
-        resolve_for_add(&ctx, &off, &hook_free, &BTreeSet::new(), None).expect("hook-free add");
+        resolve_for_add(&ctx, &off, &hook_free, &DeclaredKeys::new(), None).expect("hook-free add");
 
         let on = project_scope(ws.path(), home.path(), true);
-        let err = resolve_without_consent(&ctx, &on, None, &BTreeSet::new())
+        let err = resolve_without_consent(&ctx, &on, None, &DeclaredKeys::new())
             .expect_err("with the feature on the global insecure hosts matter, so a broken file surfaces");
         assert_eq!(
             crate::error::classify_error(&err),
@@ -1586,7 +1660,7 @@ mod tests {
         settings_only.options.experimental.settings = true;
         for err in [
             resolve(&ctx, &settings_only, &hook_free, None).expect_err("the install pass reads it"),
-            resolve_for_add(&ctx, &settings_only, &hook_free, &BTreeSet::new(), None).expect_err("so does add's"),
+            resolve_for_add(&ctx, &settings_only, &hook_free, &DeclaredKeys::new(), None).expect_err("so does add's"),
         ] {
             assert_eq!(
                 crate::error::classify_error(&err),
@@ -1594,7 +1668,7 @@ mod tests {
                 "{err:#}"
             );
         }
-        resolve_without_consent(&ctx, &settings_only, None, &BTreeSet::new())
+        resolve_without_consent(&ctx, &settings_only, None, &DeclaredKeys::new())
             .expect("`grim uninstall` attaches no settings policy, so this flag adds it no way to fail");
     }
 }
