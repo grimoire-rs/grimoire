@@ -248,7 +248,10 @@ grim install
 grim install --client claude,copilot
 ```
 
-Install never deletes anything, and it refuses to overwrite an artifact
+Install removes only an unmodified old output after a layout move, an
+unmodified copy stranded at a moved vendor root, or a stale MCP entry when
+a pin change leaves a recorded client unable to represent the server. It
+never deletes a file you edited. It refuses to overwrite an artifact
 you have modified locally — or any pre-existing same-named file it has
 no record of writing — pass `--force` to overwrite deliberately. The same
 gate holds for a [settings](#settings) value that changed after grim wrote it.

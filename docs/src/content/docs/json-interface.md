@@ -794,7 +794,7 @@ carries an `arming` array beside `state`. Each element is one client's verdict:
 {
   "client": "claude",
   "cause": "workspace-not-consented",
-  "message": "this workspace has not consented to arming hooks; run grim hook allow to record consent for it, then re-run grim install. Consent is per workspace and machine-local — cloning a repository never carries it",
+  "message": "hooks declared by this workspace have not been consented; run grim hook allow here, then re-run grim install. Consent is per checkout and machine-local, so consenting in one clone grants nothing to another",
   "transient": false
 }
 ```
@@ -1144,7 +1144,7 @@ input fix required:
     "exit": 75,
     "reason": "locked",
     "retryable": true,
-    "message": "…: another process holds the advisory lock; try again"
+    "message": "…: config file is locked by another process"
   }
 }
 ```

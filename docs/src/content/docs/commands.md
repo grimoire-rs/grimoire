@@ -1188,8 +1188,11 @@ A [named run](#update-names) never reaps either: a dropped client's outputs wait
 for a bare `grim update`.
 
 Pruning and client-reaping happen only on `update`. `grim install` materializes
-the current lock but never deletes — like [`grim remove`](#remove), it leaves
-files on disk.
+the current lock and deletes only in three narrow reaps: it splices a stale
+entry out of a client's MCP config when a pin change leaves a recorded client
+unable to represent the server, and it removes an unmodified old output after
+a layout move or an unmodified copy stranded at a moved vendor root. A file
+you edited is never deleted.
 
 A bare `update` also refreshes every [local path source](#add-path): a declared
 path dependency and a [dev-installed](#install-dev) record alike are
