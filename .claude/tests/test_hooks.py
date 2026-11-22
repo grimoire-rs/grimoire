@@ -267,6 +267,46 @@ class TestPreCommitVerification:
         """is_git_commit returns True for a git commit command."""
         assert pre_commit_verification.is_git_commit('git commit -m "feat: add feature"') is True
 
+    def test_git_options_before_the_subcommand_do_not_hide_it(self) -> None:
+        for cmd in (
+            "git -C /repo/wt commit -m x",
+            'git -C "/repo/my wt" commit -m x',
+            "git -c user.name=a -C /repo commit -s -m x",
+            "git --no-pager commit -m x",
+        ):
+            assert pre_commit_verification.is_git_commit(cmd) is True, cmd
+
+    def test_other_subcommands_with_options_are_not_a_commit(self) -> None:
+        for cmd in (
+            "git -C /repo log --grep commit",
+            "git -C /repo status",
+            "git -C /repo show commit",
+        ):
+            assert pre_commit_verification.is_git_commit(cmd) is False, cmd
+
+    def test_value_options_and_shell_quoting_do_not_hide_the_subcommand(self) -> None:
+        for cmd in (
+            "git -p commit -m x",
+            'git -c user.name="A B" commit -m x',
+            "git -c core.x='a b' commit -m x",
+            "git --namespace n commit -m x",
+            "git --config-env user.name=X commit",
+            "git --git-dir /repo/elsewhere commit -m x",
+            '"git" commit -m x',
+            'g"i"t commit -m x',
+            "/usr/bin/git -C /repo commit",
+            "env A=1 git -C /repo commit",
+            'bash -c "git -C /repo commit -m x"',
+            "git -C /repo \\\n  commit -m x",
+            "git -C /repo status\ngit -C /repo commit -m x",
+            "git -C /repo commit -m 'unclosed",
+        ):
+            assert pre_commit_verification.is_git_commit(cmd) is True, cmd
+
+    def test_an_option_value_named_like_the_subcommand_is_not_a_commit(self) -> None:
+        for cmd in ("git -C commit status", "git -c x=y log", "git --namespace commit log"):
+            assert pre_commit_verification.is_git_commit(cmd) is False, cmd
+
     def test_detect_project_tools_rust(self, tmp_path: Path) -> None:
         """detect_project_tools returns Rust tools when Cargo.toml exists."""
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "myproject"')
@@ -356,6 +396,185 @@ class TestResolveCommitProjectDir:
             "/fallback",
         )
         assert got == str(wt)
+
+
+class TestTargetsForeignRepository:
+    """The guard covers this repository only: a commit that surely targets a
+    different git common directory passes; any doubt keeps the guard on."""
+
+    @staticmethod
+    def _main(tmp_path: Path, name: str) -> Path:
+        root = tmp_path / name
+        (root / ".git").mkdir(parents=True)
+        return root
+
+    @staticmethod
+    def _linked(tmp_path: Path, main: Path, name: str) -> Path:
+        wt = tmp_path / name
+        wt.mkdir()
+        gitdir = main / ".git" / "worktrees" / name
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n")
+        (wt / ".git").write_text(f"gitdir: {gitdir}\n")
+        return wt
+
+    @staticmethod
+    def _foreign(cmd: str, own: Path) -> bool:
+        return pre_commit_verification.targets_foreign_repository(cmd, str(own))
+
+    def test_git_dash_c_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"git -C {other} commit -m x", own) is True
+
+    def test_cd_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"cd {other} && git commit -m x", own) is True
+
+    def test_cd_after_or_operator_keeps_the_guard(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f"cd {other} && false || cd {own} && git commit -m x"
+        assert self._foreign(cmd, own) is False
+
+    def test_cd_on_a_later_line_keeps_the_guard(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f"cd {other} && ls\ncd {own}\ngit commit -m x"
+        assert self._foreign(cmd, own) is False
+
+    def test_shapes_that_can_land_in_this_repository_keep_the_guard(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        for cmd in (
+            f"git -C {other} -C {own} commit -m x",
+            f"git -C {other} -C ../own commit -m x",
+            f'git -C {other} commit -m a && "git" commit -m b',
+            f'git -C {other} status && g"i"t commit -m x',
+            f"cd {other}/missing && git status || git commit -m x",
+            f"cd {other} && git status; git commit -m x",
+            f"git -C {other} --git-dir {own}/.git commit -m x",
+            f"git -C {other} --work-tree={own} commit -m x",
+            f"git -C {other} -c alias.x=y commit -m x",
+            f"GIT_DIR={own}/.git git -C {other} commit -m x",
+            f"env git -C {other} commit -m x",
+            f'git -C {other} commit -m "$(cd {own} && git commit -m y)"',
+            f"git -C {other} commit -m x | tail -1",
+            f'bash -c "git -C {other} commit -m x"',
+            f"git -C {other}/missing commit -m x",
+        ):
+            assert self._foreign(cmd, own) is False, cmd
+
+    def test_quoted_path_and_message_with_shell_characters_stay_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "my other")
+        cmd = f'git -C "{other}" add a.txt && git -C "{other}" commit -s -m "test(live): a; b && c | d"'
+        assert self._foreign(cmd, own) is True
+
+    def test_subdir_of_foreign_is_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        sub = other / "src" / "deep"
+        sub.mkdir(parents=True)
+        assert self._foreign(f"cd {sub} && git commit -m x", own) is True
+
+    def test_every_git_call_carries_hint_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f"git -C {other} add -A && git -C {other} commit -m x"
+        assert self._foreign(cmd, own) is True
+
+    def test_leading_cd_then_more_git_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f"cd {other} && git add -A && git commit -m x"
+        assert self._foreign(cmd, own) is True
+
+    def test_hint_on_other_command_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"git -C {other} status; git commit -m x", own) is False
+
+    def test_dash_c_foreign_then_dash_c_own_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f"git -C {other} add . && git -C {own} commit -m x"
+        assert self._foreign(cmd, own) is False
+
+    def test_subshell_cd_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"(cd {other} && ls); git commit -m x", own) is False
+
+    def test_git_dir_env_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f"cd {other} && GIT_DIR={own}/.git git commit -m x"
+        assert self._foreign(cmd, own) is False
+
+    def test_git_dir_flag_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f"cd {other} && git --git-dir={own}/.git commit -m x"
+        assert self._foreign(cmd, own) is False
+
+    def test_non_leading_cd_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"ls && cd {other} && git commit -m x", own) is False
+
+    def test_cd_without_and_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"cd {other}; git commit -m x", own) is False
+
+    def test_quoted_parens_and_git_dir_stripped_still_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f'git -C {other} commit -m "fix (x): GIT_DIR note"'
+        assert self._foreign(cmd, own) is True
+
+    def test_different_roots_not_foreign(self, tmp_path: Path) -> None:
+        own = self._main(tmp_path, "own")
+        a, b = self._main(tmp_path, "a"), self._main(tmp_path, "b")
+        cmd = f"git -C {a} add . && git -C {b} commit -m x"
+        assert self._foreign(cmd, own) is False
+
+    def test_linked_worktree_of_same_repo_not_foreign(self, tmp_path: Path) -> None:
+        own = self._main(tmp_path, "own")
+        wt = self._linked(tmp_path, own, "wt1")
+        assert self._foreign(f"git -C {wt} commit -m x", own) is False
+
+    def test_own_linked_project_dir_vs_main_not_foreign(self, tmp_path: Path) -> None:
+        main = self._main(tmp_path, "own")
+        wt = self._linked(tmp_path, main, "wt1")
+        assert self._foreign(f"git -C {main} commit -m x", wt) is False
+
+    def test_no_hint_not_foreign(self, tmp_path: Path) -> None:
+        own = self._main(tmp_path, "own")
+        assert self._foreign("git commit -m x", own) is False
+
+    def test_relative_hint_not_foreign(self, tmp_path: Path) -> None:
+        own = self._main(tmp_path, "own")
+        self._main(tmp_path, "other")
+        assert self._foreign("git -C ../other commit -m x", own) is False
+
+    def test_two_hints_foreign_then_own_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"cd {other} && git -C {own} commit -m x", own) is False
+
+    def test_two_cds_not_foreign(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        assert self._foreign(f"cd {other} && cd {own} && git commit -m x", own) is False
+
+    def test_quoted_hint_cannot_steer(self, tmp_path: Path) -> None:
+        own, other = self._main(tmp_path, "own"), self._main(tmp_path, "other")
+        cmd = f'git commit -m "mention git -C {other} in prose"'
+        assert self._foreign(cmd, own) is False
+
+    def test_hint_outside_any_worktree_not_foreign(self, tmp_path: Path) -> None:
+        own = self._main(tmp_path, "own")
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert self._foreign(f"cd {plain} && git commit -m x", own) is False
+
+    def test_malformed_git_file_not_foreign(self, tmp_path: Path) -> None:
+        own = self._main(tmp_path, "own")
+        bad = tmp_path / "bad"
+        bad.mkdir()
+        (bad / ".git").write_text("garbage\n")
+        assert self._foreign(f"git -C {bad} commit -m x", own) is False
+
+    def test_empty_git_file_not_foreign(self, tmp_path: Path) -> None:
+        own = self._main(tmp_path, "own")
+        bad = tmp_path / "bad"
+        bad.mkdir()
+        (bad / ".git").write_text("")
+        assert self._foreign(f"git -C {bad} commit -m x", own) is False
 
 
 # ---------------------------------------------------------------------------

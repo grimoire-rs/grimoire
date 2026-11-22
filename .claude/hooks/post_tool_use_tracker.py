@@ -38,6 +38,7 @@ CONTEXT_REMINDERS: list[tuple[str, str, str]] = [
     ("src/install/hook_*.rs", "subsystem-install-layout-hooks.md", "Install Layout (hooks)"),
     ("src/hook/**", "subsystem-install-layout-hooks.md", "Install Layout (hooks)"),
     ("src/install/settings_*.rs", "subsystem-install-layout-settings.md", "Install Layout (settings)"),
+    ("src/install/mod_*.rs", "subsystem-install-layout-mods.md", "Install Layout (mods)"),
     ("src/command/**", "subsystem-cli-commands.md", "CLI Commands"),
     ("src/api/**", "subsystem-cli-api.md", "CLI API"),
     ("src/**", "subsystem-cli.md", "CLI"),

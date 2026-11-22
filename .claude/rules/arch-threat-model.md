@@ -34,7 +34,7 @@ surfaces). This file says *whom* we defend against; that one says *how*.
 
 A package manager that fetches artifacts from OCI registries and materializes them into
 AI-agent config on a developer's machine. As of the hook kind it also **arms code that a client
-executes automatically**. So grim sits on a supply chain, and its risk class is the supply
+executes automatically**, and, as of the mod kind, writes publisher code a client loads into its own process. So grim sits on a supply chain, and its risk class is the supply
 chain's.
 
 ## In scope — attackers we defend against
@@ -110,6 +110,11 @@ Design against these directly; they are what the boundary is *for*.
    > hg, Sapling, a `.git` file without `gitdir:`) is not fenced (CWE-15). Both CWE-15 edges are
    > `plan_settings_artifact_kind.md` PD-33. Other kinds do not take the fence.
 
+   > **Mods carry two recorded exceptions.** A Claude mod's payload is repo-resident while its
+   > registration stays in `.claude/settings.local.json`; an OpenCode project mod is repo-resident and
+   > loads on presence. Consent decides what grim writes, never what the client loads (T3). Mod
+   > records live under `$GRIM_HOME/mods/`, and global mod roots take the settings root fence.
+
    This is T3's control, and
    it is why a "portable, committable" form of an executed path is not an acceptable trade: an
    executed path assembled from environment (`$GRIM_HOME`, `$PATH`, `$HOME`) in a committed file
@@ -128,7 +133,7 @@ Design against these directly; they are what the boundary is *for*.
    > exec-time digest re-check (*"a recorded trade against I2, resolved as I5"*), and A2's
    > registry-scoped `trust_hooks` keyed the *authorization* decision on a registry locator — a
    > name. As of **2026-08-28** that registry key is replaced by a **workspace path** key: the
-   > consent record at `$GRIM_HOME/hooks/consent/<workspace-key>.json`
+   > consent record at `$GRIM_HOME/consent/<workspace-key>.json`
    > (`adr_hook_workspace_consent.md`). **This changes which name is keyed on; it does not widen
    > the trade.**
    >
@@ -152,7 +157,7 @@ Design against these directly; they are what the boundary is *for*.
    > evidence, not prevention. State it that way; do not describe consent as preventing it.
    >
    > **The `settings` kind shares this exception on the same terms** (`adr_settings_artifact_kind.md`,
-   > trust ADR decision 2). Its bindings sit in the same consent record under a `settings:` prefix,
+   > trust ADR decision 2). Its bindings sit in the same consent record as unprefixed entries (`adr_mod_artifact_kind.md` D6),
    > so there is **no re-ask on a version bump**, and a new version can change what the agent may
    > do. That is the same T1 residual. Its evidence is the lock diff plus the **change list** every
    > changing run reports, including `grim install` after a teammate's bump: **I5**, not prevention.
@@ -178,7 +183,7 @@ Design against these directly; they are what the boundary is *for*.
 - **Reviewing a design:** check each invariant that the change touches. A change that moves
   something armable into a repository, or that keys trust on a name, is a Block regardless of how
   it is mitigated — **unless** it is the hook-consent exception recorded under I2 above, as extended
-  to the `settings` kind, which is a decided trade with its residual named. Re-deriving it as a fresh Block is the churn this file
+  to the `settings` and `mod` kinds, and the mod exceptions under I1, which is a decided trade with its residual named. Re-deriving it as a fresh Block is the churn this file
   exists to stop; disagreeing with it is an ADR amendment, not a finding.
 - **Writing an ADR:** scope the threat table to this file rather than re-deriving a boundary, and
   record any deliberate deviation with the attacker it exposes you to.

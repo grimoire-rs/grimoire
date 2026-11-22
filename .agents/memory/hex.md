@@ -45,7 +45,7 @@ preferences, not copies. Team-shared — commit it.
   Contract detail: `docs/src/content/docs/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
-  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `stale-outputs-without-state.md` (→ architect, 2026-11-15).
+  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `harness-mods-artifact-kind.md` (→ architect, 2026-11-18).
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -105,6 +105,39 @@ research-axes:
   `nox-review` has no model flag and inherits that global default.
 
 ## Memory
+
+- **Active plan (2026-11-19, hex-plan xhigh, goal loop `.agents/goals/adr-mod-artifact-kind.md`):**
+  `.agents/plans/plan_mod_artifact_kind.md`, State `plan-approved`, Next `/hex-execute .agents/plans/plan_mod_artifact_kind.md`, branch `hex/adr-mod-artifact-kind` in the worktree `.agents/worktrees/adr-mod-artifact-kind` of the duo checkout. Built from `adr_mod_artifact_kind.md` (Proposed; the owner's status flip is human step H-2, needed before `/hex-finalize`).
+  - Eleven pipelines in seven waves: P0 the prerequisite fix to the skill kind (1) → P1 consent move (2) → CW (3) → PA, PV, PC, PG (4) → PB `hard`, PD (5) → PP probe (6) → PZ docs (7). Critical path P0 → P1 → CW → PC → PB → PP → PZ.
+  - The prerequisite fix is recorded by class only; its design came from one architect seat and sits in the plan's P0 section. Two open questions ride with recommendations (refuse at the root only; keep an upgraded machine's files and refuse each install run).
+  - Review: spec, architect and researcher seats plus codex `gpt-6.1-sol` on a copy of the plan alone in a scratch directory (no repository file reached the outside service). Six adversary Blocks fixed, one spec re-validation.
+  **Pitfall:** a branch that adds an ADR without its index row fails `task claude:tests` before any code changes; land the row first.
+  **Pitfall:** two wave-one pipelines that each edit `status.rs` forced a serial start; check hot-file overlap before promising a parallel first wave.
+  **Pitfall:** an upgrade fixture named after a feature-branch commit dies at `/hex-finalize`; generate it from a release binary.
+
+- **ADR drafted (2026-11-18, hex-architect xhigh, dossier fast path; Status `Proposed`, not committed):**
+  `.agents/adr/adr_mod_artifact_kind.md` with system design `.agents/specs/design_mod_artifact_kind.md`. Next: the prerequisite bugfix in its own run, then `/hex-plan "mod artifact kind, per .agents/adr/adr_mod_artifact_kind.md"`.
+  - Review: spec, quality (adversarial), security, a gap researcher and codex (`gpt-6.1-sol`). 12 Blocks in round one, all confirmed fixed by one re-validation; that pass found 1 new Block (an export fence that changed a frozen exit code), fixed and spot-checked, no third round.
+  - Owner rulings after review (2026-11-18): consent entry is `<binding>@<registry>/<repository>` with no kind prefix; both clients install into their own project config folder (two recorded I1 exceptions); the consent record moves with no migration (CI is unaffected, it consents by flag on a fresh machine).
+  - Owner ruling 2026-11-19 on the prerequisite fix to a shipped kind: refuse, at publish and at consume. It is an owner-authorised Principle 9 exception that amends the trust ADR, lands first as its own bugfix, and is recorded by class only until it ships. No open question remains in the ADR.
+  - Cross-repo (ADR rollout item 10, added by the orchestrator, unreviewed): the VS Code extension reuses its settings harness chips for mods; the indexer gains harness badges, a harness filter and a per-harness page switch.
+  - Deferred, in the ADR's Deferred section: committed Claude registration, a `schedule:` trigger for the load probe (new CI spend), per-entry kind in the consent report, keeping a user's `enabledPlugins: false` across revoke.
+  - Unverified until the plan runs them: ten client behaviours (design §10.3 probe list) and three old-binary rows in D12.
+  - Research: `.agents/research/research_mod_kind_*.md` (4 files). Axis hints for a later run: client load paths need a real-client probe, not docs; old-binary behaviour needs the release binaries, not a code read.
+  **Pitfall:** a fix pass adds text, and the new text carried the only Block of round two. Re-validate the delta, not the old findings.
+  **Pitfall:** a design that fences a new kind's output must scope the fence to that kind; a fence on a shared command changes a frozen exit code.
+
+- **Discussion drained (2026-11-18, → architect):**
+  `.agents/discussions/harness-mods-artifact-kind.md`. A new experimental artifact kind `mod` carries native harness extension code (Claude mods, OpenCode V2 plugins).
+  - One layer with one directory per harness. The author ships code files and an optional entry point (default: the mod's name); grim generates the client wrapper, so no artifact carries a Claude plugin manifest.
+  - Consent is one workspace record with a plain source list, no kind prefix, at `$GRIM_HOME/consent/`; the old hook-named record is not migrated.
+  - Project scope installs into the client's project folder, not the Claude skills directory. That is a recorded exception to invariant I1.
+  - Claude-family plugin export is in the first version. OpenCode V1 and Kilo decline.
+  - A prerequisite fix on a shipped kind was ruled "first" in the discussion, then contested in the architect review: it conflicts with the Accepted trust ADR and Principle 9. It is an open owner decision in the ADR, recorded here by class only.
+  Research: `.agents/research/research_harness_mods_*.md` (8 files).
+  **Pitfall:** council seats dispatched while the entry recon was still running read little beyond the recon file; three seats were not independent evidence.
+  **Pitfall:** where a client loads code from decides which kinds can deliver it, so an install location is a consent question, not a layout detail.
+  **Pitfall:** a recommendation that gates or refuses content in a shipped kind must be checked against `adr_artifact_trust_model.md` before it reaches the owner; this one was ruled on first and found in conflict later.
 
 - **Reviewed plan (2026-11-15, hex-plan high; executed 2026-11-16; review call 3 of 3 approved 2026-11-16, State `done`, not yet landed, next `/hex-finalize`; fold target: none, no `## Spec Deltas`):**
   Execution: all eight pipelines merged, integration gate green on `1b9827aa`; decisions and owner residuals under the plan's Notes.
