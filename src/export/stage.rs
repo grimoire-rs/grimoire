@@ -937,6 +937,27 @@ pub(crate) async fn stage_plugins(
 
 /// [`stage_plugins`] between the progress `start` and `finish`.
 async fn stage_all(req: &ExportRequest<'_>, access: &Arc<dyn OciAccess>) -> Result<StagedRun, crate::error::Error> {
+    // The outermost directory this run creates, so a refused run leaves no output path behind.
+    let created = req
+        .output_dir
+        .ancestors()
+        .take_while(|a| !a.exists())
+        .last()
+        .map(Path::to_path_buf);
+    let staged = stage_all_inner(req, access).await;
+    if staged.is_err()
+        && let Some(root) = created
+    {
+        // Best effort: the staging tempdir is already gone; a non-empty directory stays.
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    staged
+}
+
+async fn stage_all_inner(
+    req: &ExportRequest<'_>,
+    access: &Arc<dyn OciAccess>,
+) -> Result<StagedRun, crate::error::Error> {
     let mut position = 0;
     let mut clients: Vec<(ClientTarget, Family)> = Vec::with_capacity(req.clients.len());
     for pair in req.clients {

@@ -862,6 +862,20 @@ pub(crate) async fn run_with<P: InstallProgress + ?Sized>(
         }
     }
 
+    // The row itself stays as it reads, so the note is the only place this shows.
+    for record in state.iter_records() {
+        if let Some(entry) = crate::install::installer::installed_plugin_manifest(record, &scope.roots) {
+            let grim = &scope.invocation;
+            tracing::warn!(
+                "installed skill '{}' carries a Claude plugin manifest entry '{}', which grim no longer installs; run `{}` or `{}`",
+                record.name,
+                crate::oci::text::escape_controls(&entry),
+                grim.update(&record.name),
+                grim.uninstall("", ArtifactKind::Skill, &record.name),
+            );
+        }
+    }
+
     // `--check`: one coordinated catalog load, then populate `deprecated` /
     // `replaced_by` on every registry-sourced row. `checked` is `true` iff the
     // check ran online — a registry whose refresh failed still counts, since

@@ -215,6 +215,10 @@ pub enum ErrorReason {
     /// `requires` range claims ask for. `--allow-downgrade`, not `--force`,
     /// takes the move.
     MajorDowngrade,
+    /// A skill's root carries a Claude plugin manifest entry
+    /// (`SkillErrorKind::SkillPluginManifest`). Not forceable: the remedy is a
+    /// mod, a marketplace, or an ignore entry, never `--force`.
+    SkillPluginManifest,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -230,6 +234,7 @@ impl std::fmt::Display for ErrorReason {
             Self::NoLock => "no-lock",
             Self::UnsupportedArtifactFeature => "unsupported-artifact-feature",
             Self::MajorDowngrade => "major-downgrade",
+            Self::SkillPluginManifest => "skill-plugin-manifest",
         })
     }
 }
@@ -300,7 +305,7 @@ fn classify_variant(e: &Error) -> Classification {
         Error::Resolve(re) => classify_resolve(re),
         Error::Install(ie) => classify_install(ie),
         Error::Anchor(ae) => classify_anchor(ae),
-        Error::Skill(se) => Classification::new(classify_skill(se)),
+        Error::Skill(se) => classify_skill_error(se),
         Error::Release(re) => Classification::new(classify_release(re)),
         Error::Catalog(ce) => Classification::new(classify_catalog(ce)),
         Error::Auth(ae) => Classification::new(classify_auth(ae)),
@@ -606,10 +611,10 @@ fn classify_resolve(err: &ResolveError) -> Classification {
         },
         ResolveErrorKind::BundleInvalid(_)
         | ResolveErrorKind::LocalBundleInvalid(_)
-        | ResolveErrorKind::LocalSource(_)
         | ResolveErrorKind::KindMismatch { .. }
         | ResolveErrorKind::DependencyCycle { .. }
         | ResolveErrorKind::GraphTooLarge { .. } => Classification::new(ExitCode::DataError),
+        ResolveErrorKind::LocalSource(se) => classify_local_source(se),
         ResolveErrorKind::UnsupportedFeature(_) => unsupported_feature(),
         // A bundle conflict is a misconfiguration of the user's own
         // declaration (two bundles disagree), not malformed external data.
@@ -648,8 +653,12 @@ fn classify_install(err: &InstallError) -> Classification {
         | InstallErrorKind::MaterializeFailed(_)
         | InstallErrorKind::SettingsUnparseable { .. }
         | InstallErrorKind::SettingsBecameUnparseable { .. }
-        | InstallErrorKind::SettingsDocument(_)
-        | InstallErrorKind::LocalSource(_) => Classification::new(ExitCode::DataError),
+        | InstallErrorKind::SettingsDocument(_) => Classification::new(ExitCode::DataError),
+        InstallErrorKind::LocalSource(se) => classify_local_source(se),
+        InstallErrorKind::SkillPluginManifest { .. } => Classification {
+            exit: ExitCode::DataError,
+            reason: Some(ErrorReason::SkillPluginManifest),
+        },
         // One recorded piece makes the whole refusal a local edit: a mixed
         // list must not tell the user nothing of theirs is at stake.
         InstallErrorKind::SettingsRefused { pieces } => Classification {
@@ -712,6 +721,24 @@ fn classify_anchor(err: &AnchorError) -> Classification {
     }
 }
 
+/// A local-source wrapper is bad input data (65) for every inner error; only
+/// the plugin-manifest refusal adds its reason.
+fn classify_local_source(err: &SkillError) -> Classification {
+    Classification {
+        exit: ExitCode::DataError,
+        reason: matches!(err.kind, SkillErrorKind::SkillPluginManifest { .. })
+            .then_some(ErrorReason::SkillPluginManifest),
+    }
+}
+
+fn classify_skill_error(err: &SkillError) -> Classification {
+    Classification {
+        exit: classify_skill(err),
+        reason: matches!(err.kind, SkillErrorKind::SkillPluginManifest { .. })
+            .then_some(ErrorReason::SkillPluginManifest),
+    }
+}
+
 /// Map a skill-standard-tier error to an exit code. A spec/parse/mismatch
 /// failure is bad input data (65); an I/O failure is I/O / NoPermission.
 fn classify_skill(err: &SkillError) -> ExitCode {
@@ -726,6 +753,7 @@ fn classify_skill(err: &SkillError) -> ExitCode {
         | SkillErrorKind::TooLarge(_)
         | SkillErrorKind::GitProvenance(_)
         | SkillErrorKind::RuleSupportDir { .. }
+        | SkillErrorKind::SkillPluginManifest { .. }
         | SkillErrorKind::AgentStrayFiles { .. } => ExitCode::DataError,
         SkillErrorKind::Io(io) => classify_io(io),
     }
@@ -1084,6 +1112,7 @@ mod tests {
         assert!(!ErrorReason::UnsupportedLayerMediaType.retryable());
         assert!(!ErrorReason::NoLock.retryable());
         assert!(!ErrorReason::MajorDowngrade.retryable());
+        assert!(!ErrorReason::SkillPluginManifest.retryable());
     }
 
     /// A1: `forceable` is keyed on the reason, and this variant-by-variant
@@ -1107,6 +1136,7 @@ mod tests {
         assert!(!ErrorReason::NoLock.forceable());
         // `--allow-downgrade` takes the move; `--force` never does.
         assert!(!ErrorReason::MajorDowngrade.forceable());
+        assert!(!ErrorReason::SkillPluginManifest.forceable());
     }
 
     /// A2: an escaped anchor classifies as bad on-disk state data (65) AND
@@ -1314,6 +1344,103 @@ mod tests {
         ] {
             let err: anyhow::Error = Error::from(SkillError::new("/w/r.md", kind)).into();
             assert_eq!(classify_error(&err), ExitCode::DataError);
+        }
+    }
+
+    #[test]
+    fn skill_plugin_manifest_is_65_with_its_reason_everywhere() {
+        use crate::resolve::ResolveError;
+        let kind = || SkillErrorKind::SkillPluginManifest {
+            dir: "/w/s".into(),
+            entry: ".claude-plugin".into(),
+        };
+        let skill: anyhow::Error = Error::from(SkillError::new("/w/s", kind())).into();
+        let c = classify(&skill);
+        assert_eq!(
+            (c.exit, c.reason),
+            (ExitCode::DataError, Some(ErrorReason::SkillPluginManifest))
+        );
+        let resolve: anyhow::Error = Error::from(ResolveError::unidentified(
+            crate::oci::ArtifactKind::Skill,
+            "s",
+            ResolveErrorKind::LocalSource(Box::new(SkillError::new("/w/s", kind()))),
+        ))
+        .into();
+        let c = classify(&resolve);
+        assert_eq!(
+            (c.exit, c.reason),
+            (ExitCode::DataError, Some(ErrorReason::SkillPluginManifest))
+        );
+        assert_eq!(ErrorReason::SkillPluginManifest.to_string(), "skill-plugin-manifest");
+    }
+
+    #[test]
+    fn classify_skill_plugin_manifest_everywhere() {
+        use crate::install::install_error::{InstallError, InstallErrorKind};
+        use crate::resolve::ResolveError;
+        let kind = || SkillErrorKind::SkillPluginManifest {
+            dir: "/w/s".into(),
+            entry: ".claude-plugin".into(),
+        };
+        let cases: Vec<anyhow::Error> = vec![
+            Error::from(SkillError::new("/w/s", kind())).into(),
+            Error::from(InstallError::without_reference(InstallErrorKind::SkillPluginManifest {
+                name: "s".into(),
+                entry: ".claude-plugin".into(),
+                installed: false,
+            }))
+            .into(),
+            Error::from(InstallError::without_reference(InstallErrorKind::LocalSource(
+                Box::new(SkillError::new("/w/s", kind())),
+            )))
+            .into(),
+            Error::from(ResolveError::unidentified(
+                crate::oci::ArtifactKind::Skill,
+                "s",
+                ResolveErrorKind::LocalSource(Box::new(SkillError::new("/w/s", kind()))),
+            ))
+            .into(),
+        ];
+        for e in &cases {
+            let c = classify(e);
+            assert_eq!(
+                (c.exit, c.reason),
+                (ExitCode::DataError, Some(ErrorReason::SkillPluginManifest)),
+                "{e:#}"
+            );
+            let reason = c.reason.unwrap();
+            assert!(!reason.forceable() && !reason.retryable());
+        }
+    }
+
+    #[test]
+    fn local_source_wrapper_keeps_data_error_for_io() {
+        use crate::install::install_error::{InstallError, InstallErrorKind};
+        use crate::resolve::ResolveError;
+        let io = || {
+            SkillError::new(
+                "/w/s",
+                SkillErrorKind::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "local source does not exist",
+                )),
+            )
+        };
+        let cases: Vec<anyhow::Error> = vec![
+            Error::from(InstallError::without_reference(InstallErrorKind::LocalSource(
+                Box::new(io()),
+            )))
+            .into(),
+            Error::from(ResolveError::unidentified(
+                crate::oci::ArtifactKind::Skill,
+                "s",
+                ResolveErrorKind::LocalSource(Box::new(io())),
+            ))
+            .into(),
+        ];
+        for e in &cases {
+            let c = classify(e);
+            assert_eq!((c.exit, c.reason), (ExitCode::DataError, None), "{e:#}");
         }
     }
 
@@ -1814,7 +1941,7 @@ mod tests {
 
     /// Every `ErrorReason` slug at 520c6540, then each slug added since,
     /// appended in order.
-    const FROZEN_REASON_SLUGS: [&str; 10] = [
+    const FROZEN_REASON_SLUGS: [&str; 11] = [
         "stale-lock",
         "modified",
         "untracked-destination",
@@ -1825,6 +1952,7 @@ mod tests {
         "no-lock",
         "unsupported-artifact-feature",
         "major-downgrade",
+        "skill-plugin-manifest",
     ];
 
     #[test]
@@ -1910,6 +2038,7 @@ mod tests {
                 ErrorReason::NoLock => 7,
                 ErrorReason::UnsupportedArtifactFeature => 8,
                 ErrorReason::MajorDowngrade => 9,
+                ErrorReason::SkillPluginManifest => 10,
             }
         }
         let every = [
@@ -1923,6 +2052,7 @@ mod tests {
             ErrorReason::NoLock,
             ErrorReason::UnsupportedArtifactFeature,
             ErrorReason::MajorDowngrade,
+            ErrorReason::SkillPluginManifest,
         ];
         for (i, r) in every.iter().enumerate() {
             assert_eq!(position(*r), i);

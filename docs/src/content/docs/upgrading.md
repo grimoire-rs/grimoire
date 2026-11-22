@@ -1320,6 +1320,71 @@ instead.
 the agent needs at run time belong in a skill it requires, which
 [`requires`][requires] declares the same way as for a rule.
 
+## A skill can no longer carry a Claude plugin manifest {#skill-plugin-manifest}
+
+**Breaking.** From grim 0.17.0 a skill whose root holds a Claude plugin
+manifest directory, `.claude-plugin`, is refused. Name matching is
+case-insensitive and also catches the spellings a filesystem folds onto that
+name, such as a trailing dot or space. Any entry type at the skill root counts,
+a directory or a file. The same name below the root is still allowed.
+
+This covers `grim build`, `grim release` and `grim publish`. The check runs on
+the files that would ship, so an entry [`.grimignore`](./artifacts.md#grimignore)
+excludes is not refused. A batch `grim publish` checks every skill before its
+first push, so a refused skill leaves nothing published, `--dry-run` included.
+
+A skill declared by local path is refused the same way by `grim lock`,
+`grim update`, `grim add <path>` and `grim install <path>`. `grim install`,
+`grim add` and `grim update` refuse a registry skill that carries the entry, as
+do the [TUI][tui] and `grim export plugin` and `grim export marketplace`. The
+MCP `grim_render` tool returns a tool error for it. Every refusal exits `65`
+with the reason `skill-plugin-manifest`, and the message reads:
+
+```text
+a skill can no longer ship a Claude plugin manifest (since grim 0.17.0)
+  found in <dir>/: <entry>
+  why: a skill package must not carry code a client loads; that code ships as the consent-gated `mod` kind
+  fix: publish it as a mod, ship the plugin through a marketplace, or list <entry> in .grimignore
+  see https://grimoire.rs/upgrading.html#skill-plugin-manifest
+```
+
+**Why.** A skill package carries instructions, not code a client loads. Code a
+client loads belongs to the `mod` kind, which asks for your consent first.
+
+**Who is affected.** A publisher whose skill root holds the entry, and anyone
+who installs such a skill, from a registry or from a local path. A skill with
+no such entry at its root builds to the same digest and installs the same bytes
+as before.
+
+**The fix.** As a publisher, pick one:
+
+- ship the client-loaded code as the consent-gated `mod` kind,
+- ship the plugin through a marketplace, with
+  [`grim export marketplace`][export-marketplace],
+- list the entry in `.grimignore`, when it was never meant to ship.
+
+As a consumer, install a version without the entry, or run
+`grim remove skill <name>` to drop the declaration. A fresh refusal writes
+nothing for any client, and every other declared row still installs.
+`--force` does not lift it.
+
+**Already installed.** grim does not delete what an earlier version wrote.
+Every install-type run fails with exit `65` for a skill whose installed
+files hold the entry. That covers `grim install`, `grim add <other>`,
+`grim update` with no clean version, and the TUI. The run leaves its files, `state.json` and `grimoire.lock`
+byte-unchanged. `--offline` and `--force` give the same result.
+
+Two residuals stay until you act. The files remain on that machine until
+`grim update` moves the skill to a version without the entry, or
+`grim uninstall skill <name>` removes it. [`grim status`][status] still reads
+the skill `installed`, exits `0` and keeps its JSON as before. It adds one
+line on stderr that names the skill.
+
+**Grims before 0.17.0.** They still build and install such a skill, and this
+change cannot reach them. Upgrade every machine and CI job that builds or
+installs skills. Run on a machine where `grim uninstall` removed the files, such
+a grim reinstalls the skill.
+
 ## Each package's own README and logo become its description {#package-readme-companion}
 
 `grim publish` used to give every entry the repository-level README and logo.

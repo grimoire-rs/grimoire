@@ -235,6 +235,9 @@ fn pack_tree_limited(dir: &Path, limits: &PackLimits, kind: crate::oci::Artifact
     }
     let mut files = state.out;
     files.sort_by(|a, b| a.0.cmp(&b.0));
+    if kind == crate::oci::ArtifactKind::Skill {
+        refuse_packed_plugin_manifest(dir, &files)?;
+    }
 
     let mut builder = tar::Builder::new(Vec::new());
     let mut read_bytes: u64 = 0;
@@ -246,6 +249,66 @@ fn pack_tree_limited(dir: &Path, limits: &PackLimits, kind: crate::oci::Artifact
     builder
         .into_inner()
         .map_err(|e| SkillError::new(dir, SkillErrorKind::Io(e)))
+}
+
+/// Whether `name` is a Claude plugin manifest entry name: cut at the first `:`
+/// (an NTFS stream suffix), trailing ASCII dots and spaces dropped, then equal
+/// to `.CLAUDE-PLUGIN` in Unicode uppercase. A case-insensitive or
+/// Windows-normalising filesystem resolves every such spelling to the
+/// directory a client reads, so an exact-name test would let them through.
+#[must_use]
+pub fn is_skill_plugin_manifest_name(name: &str) -> bool {
+    let stem = name.split(':').next().unwrap_or("");
+    stem.trim_end_matches(['.', ' ']).to_uppercase() == ".CLAUDE-PLUGIN"
+}
+
+/// The first manifest-named entry among a skill root's immediate child names,
+/// in the spelling given. Callers pass names as the filesystem stored them.
+pub fn skill_plugin_manifest_entry<'a>(root_names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    root_names.into_iter().find(|n| is_skill_plugin_manifest_name(n))
+}
+
+/// Refuse a skill whose packed entries (`<name>/<rel>`, post-ignore) include a
+/// root-level manifest-named entry, file or directory. Deeper levels stay allowed.
+fn refuse_packed_plugin_manifest(dir: &Path, files: &[(String, PathBuf)]) -> Result<(), SkillError> {
+    let root_children = files.iter().filter_map(|(entry, _)| {
+        let mut parts = entry.splitn(3, '/');
+        parts.next();
+        parts.next()
+    });
+    match skill_plugin_manifest_entry(root_children) {
+        Some(entry) => Err(SkillError::new(
+            dir,
+            SkillErrorKind::SkillPluginManifest {
+                dir: dir.to_path_buf(),
+                entry: entry.to_string(),
+            },
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `grim publish` pre-pass: refuse a skill that `pack_skill_dir` would refuse,
+/// before any entry of the batch is pushed.
+///
+/// # Errors
+///
+/// [`SkillErrorKind::SkillPluginManifest`]; [`SkillErrorKind::Io`] and the
+/// packing bounds for a walk failure.
+pub fn refuse_skill_plugin_manifest(dir: &Path) -> Result<(), SkillError> {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            SkillError::new(
+                dir,
+                SkillErrorKind::NameInvalid("skill path has no directory name".to_string()),
+            )
+        })?;
+    let mut state = WalkState::default();
+    let ignore = ignore_set(dir, crate::oci::ArtifactKind::Skill)?;
+    collect_files(dir, dir, &name, &ignore, &mut state, 0, &PackLimits::DEFAULT)?;
+    refuse_packed_plugin_manifest(dir, &state.out)
 }
 
 /// A hook handler runs from its installed payload, so an ignored dependency
@@ -1216,6 +1279,93 @@ mod tests {
     }
 
     // ── .grimignore ─────────────────────────────────────────────────────
+
+    fn plain_skill(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join(name);
+        write(
+            &dir.join("SKILL.md"),
+            &format!("---\nname: {name}\ndescription: d\n---\nbody\n"),
+        );
+        dir
+    }
+
+    #[test]
+    fn skill_plugin_manifest_name_rule() {
+        for name in [
+            ".claude-plugin",
+            ".Claude-Plugin",
+            ".CLAUDE-PLUGIN",
+            ".claude-plugin.",
+            ".claude-plugin ",
+            ".claude-plugin::$INDEX_ALLOCATION",
+            ".claude-plugin\u{131}".trim_end_matches('\u{131}'),
+            ".claude-plug\u{131}n",
+        ] {
+            assert!(is_skill_plugin_manifest_name(name), "{name:?}");
+        }
+        for name in [
+            "claude-plugin",
+            ".claude-plugins",
+            ".claude-plugin-x",
+            ".claude",
+            "",
+            ":.claude-plugin",
+        ] {
+            assert!(!is_skill_plugin_manifest_name(name), "{name:?}");
+        }
+        assert_eq!(
+            skill_plugin_manifest_entry(["SKILL.md", ".Claude-Plugin"]),
+            Some(".Claude-Plugin")
+        );
+        // A regular file of that name at the root is refused like a directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = plain_skill(tmp.path(), "s");
+        write(&dir.join(".claude-plugin"), "x");
+        let err = pack_skill_dir(&dir).expect_err("file entry");
+        assert!(matches!(err.kind, SkillErrorKind::SkillPluginManifest { .. }), "{err}");
+    }
+
+    #[test]
+    fn pack_refuses_root_manifest_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = plain_skill(tmp.path(), "s");
+        write(&dir.join(".Claude-Plugin/plugin.json"), "{}");
+        let err = pack_skill_dir(&dir).expect_err("manifest dir");
+        let SkillErrorKind::SkillPluginManifest { entry, .. } = &err.kind else {
+            panic!("wrong kind: {err}");
+        };
+        assert_eq!(entry, ".Claude-Plugin", "the entry keeps its spelling");
+        let text = err.to_string();
+        assert!(text.contains("since grim 0.17.0"), "{text}");
+        assert!(text.contains("upgrading.html#skill-plugin-manifest"), "{text}");
+        assert!(refuse_skill_plugin_manifest(&dir).is_err());
+    }
+
+    #[test]
+    fn pack_keeps_nested_ignored_and_symlinked_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = plain_skill(tmp.path(), "nested");
+        write(&nested.join("templates/.claude-plugin/plugin.json"), "{}");
+        assert!(pack_skill_dir(&nested).is_ok());
+
+        let ignored = plain_skill(tmp.path(), "ignored");
+        write(&ignored.join(".claude-plugin/plugin.json"), "{}");
+        write(&ignored.join(".grimignore"), ".claude-plugin\n");
+        let packed = pack_skill_dir(&ignored).expect("ignored entry is not shipped");
+        assert!(tar_names(&packed).iter().all(|n| !n.contains("claude-plugin")));
+
+        let empty = plain_skill(tmp.path(), "empty");
+        std::fs::create_dir_all(empty.join(".claude-plugin")).unwrap();
+        assert!(pack_skill_dir(&empty).is_ok(), "an empty directory packs no entry");
+
+        #[cfg(unix)]
+        {
+            let linked = plain_skill(tmp.path(), "linked");
+            std::fs::create_dir_all(tmp.path().join("elsewhere")).unwrap();
+            std::os::unix::fs::symlink(tmp.path().join("elsewhere"), linked.join(".claude-plugin")).unwrap();
+            assert!(pack_skill_dir(&linked).is_ok(), "the walk drops a symlink");
+        }
+    }
 
     fn tar_names(tar: &[u8]) -> Vec<String> {
         tar::Archive::new(tar)

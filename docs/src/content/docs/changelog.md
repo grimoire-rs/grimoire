@@ -12,6 +12,32 @@ new client, or a behavior worth knowing about. It links to the page that
 shows how. [`CHANGELOG.md`][changelog] has every change at commit
 granularity, including the refactors and internal work this page leaves out.
 
+## 0.17 — a skill refuses a plugin manifest {#v0-17}
+
+0.17 closes one route for client-loaded code. A skill whose root carries a
+Claude plugin manifest directory is [refused](#v0-17-0-skill-plugin-manifest)
+at build, publish and install.
+
+### 0.17.0 — unreleased {#v0-17-0}
+
+0.17.0 has one change, and it is [breaking](#v0-17-0-skill-plugin-manifest).
+
+#### A skill can no longer carry a Claude plugin manifest (breaking) {#v0-17-0-skill-plugin-manifest}
+
+A skill package carries instructions, not code a client loads. A skill whose
+root holds a `.claude-plugin` entry now exits `65` with the reason
+`skill-plugin-manifest`. That covers `grim build`, `grim release`,
+`grim publish`, `grim install`, `grim add`, `grim update`, `grim lock`,
+`grim export` and the MCP `grim_render` tool. Nothing is pushed, and nothing is
+written for any client.
+
+As a publisher, ship client-loaded code as the consent-gated `mod` kind, ship
+the plugin through a marketplace, or list the entry in `.grimignore`. A skill
+already installed keeps its files, but every install-type run fails with `65`
+until `grim update` reaches a clean version or `grim uninstall` removes it. A
+grim before 0.17.0 still builds and installs such a skill. See [the upgrade
+note][up-skill-plugin-manifest].
+
 ## 0.16 — dependencies, harness settings, and a lock that holds still {#v0-16}
 
 0.16 lets an artifact [declare the artifacts it needs](#v0-16-0-dependencies),
@@ -1092,6 +1118,7 @@ the full commit-level record back to the first tagged release.
 [telemetry-config-keys]: ./telemetry.md#config-file-keys
 [vendor-claude-agent]: ./vendor-metadata.md#claude-agent-registry
 [vendor-copilot-agent]: ./vendor-metadata.md#copilot-agent-registry
+[up-skill-plugin-manifest]: ./upgrading.md#skill-plugin-manifest
 [up-dependencies]: ./upgrading.md#dependencies-need-new-grim
 [up-lock-pins]: ./upgrading.md#lock-keeps-pins
 [up-records]: ./upgrading.md#records-follow-disk
