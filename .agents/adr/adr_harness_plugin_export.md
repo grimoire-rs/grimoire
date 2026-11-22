@@ -270,6 +270,12 @@ Reversibility: one-way (CLI, frozen at 1.0).
   install path declines MCP (`agents`) still carries it. `kind_surface` is *not*
   consulted — it answers "does the native directory exist at this scope",
   which a plugin tree does not use (this is why OpenClaw skills export).
+  - ⛔ **AMENDED (2026-11-19, `adr_mod_artifact_kind.md`):** a mod is admitted for
+    `claude` when the artifact serves it; other Claude-family clients
+    `client-declined`; Agent Plugins `no-format-surface`; a plugin with two or
+    more mods carries none of them (`not-representable`); an export that stages
+    a mod refuses an output inside a client config root (64), and every other
+    export is unchanged.
   Otherwise the member is omitted with a reason: `no-format-surface`,
   `client-declined`, `not-representable` (`mcp_entry` → `None` or a pointer
   outside `/mcpServers/`, or C-036 declining ws / oauth / an unexpandable
@@ -640,3 +646,4 @@ the existing manifest error. See `adr_harness_marketplace_export.md`
 | 2026-09-27 | owner review | Amendment: `--project`, `[plugin]` in `grimoire.toml`, marketplace `project` plugins |
 | 2026-09-28 | review round 1 (R1-19) | Amendment: MCP plugin placeholders renamed per family (claude export reverses the Agent Plugins rename, export-only); other `${VAR}` in args/env values/cwd warn instead of decline; D5 bullet and Negative consequence point to it |
 | 2026-10-17 | owner review | Amendment: plugin author, links, license and keywords |
+| 2026-11-19 | Claude (records pass) | Member admission amended by `adr_mod_artifact_kind.md` (amendment 10): one admitted kind, `mod` |

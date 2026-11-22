@@ -36,6 +36,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Documentation work | [docs-style.md](./rules/docs-style.md) (Grimoire voice), [docs-quality.md](./rules/docs-quality.md) (vendored — page declarations, the 18 blocking rules, runnable checks under `rules/docs-quality/checks/`), skill `docs` |
 | Security-sensitive change | [adr_artifact_trust_model.md](../.agents/adr/adr_artifact_trust_model.md) **first** — the trust boundary and what is out of scope; then [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | Deciding whether a security finding is a defect or a non-goal | [arch-threat-model.md](./rules/arch-threat-model.md) — attackers T1–T5 are in scope, N1–N5 are explicit non-goals (notably **insiders with commit access**); invariants I1–I6, and the recorded hook exception under **I2** ([adr_hook_workspace_consent.md](../.agents/adr/adr_hook_workspace_consent.md)), which the `settings` kind shares ([adr_settings_artifact_kind.md](../.agents/adr/adr_settings_artifact_kind.md)) — re-deriving a decided trade as a fresh Block is the churn that file exists to stop |
+| Adding or changing an artifact kind, or a field every kind carries (annotations, search, describe, fetch, status, install report) | [subsystem-artifact-kinds.md](./rules/subsystem-artifact-kinds.md) — interfaces x kinds matrix, consumer repos (indexer, extension), site checklist, append-last rule |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Vendor renderer declines / upstream capability gaps | [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) — re-verify upstream before patching a decline; the date-stamped rows live in `.agents/upstream-watchlist.md` (outside `.claude/rules/`, which loads every `.md`) |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
@@ -73,11 +74,13 @@ Catalog = single source of truth — `AGENTS.md` may summarize or reference by p
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
+| Artifact kinds: interfaces, consumers, site checklist | [subsystem-artifact-kinds.md](./rules/subsystem-artifact-kinds.md) | `src/oci/{artifact_kind,annotations}.rs`, `src/catalog/index_package.rs`, `src/api/search_report.rs`, `src/fetch.rs`, `test/tests/test_kind_interfaces.py` |
 | Storage / file structure (core and index) | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `src/**`, `crates/**` |
 | Install layout: skills, rules | [subsystem-install-layout-skills-rules.md](./rules/subsystem-install-layout-skills-rules.md) | `src/install/{materializer,expected_outputs,render,installer}.rs` |
 | Install layout: MCP servers, agents | [subsystem-install-layout-agents-mcp.md](./rules/subsystem-install-layout-agents-mcp.md) | `src/install/{mcp_config,json_splice,toml_splice,cline_lock,vendor_agents}.rs` |
 | Install layout: hooks | [subsystem-install-layout-hooks.md](./rules/subsystem-install-layout-hooks.md) | `src/hook/**`, `src/install/hook_*.rs`, `src/install/launcher.rs`, `crates/grim-hook/**`, `crates/grimoire-hook-core/**` |
 | Install layout: settings | [subsystem-install-layout-settings.md](./rules/subsystem-install-layout-settings.md) | `src/install/settings_*.rs` |
+| Install layout: mods | [subsystem-install-layout-mods.md](./rules/subsystem-install-layout-mods.md) | `src/install/mod_*.rs` |
 | Vendor paths (global-scope roots, env overrides) | [subsystem-vendor-paths.md](./rules/subsystem-vendor-paths.md) | `src/install/vendor.rs`, `src/install/vendor_*.rs`, `src/install/{prune,claude_config,opencode_config,managed_config}.rs` |
 | Client detection | [subsystem-client-detection.md](./rules/subsystem-client-detection.md) | `src/install/target.rs`, `src/install/client_target.rs` |
 | Install state and path containment | [subsystem-install-state.md](./rules/subsystem-install-state.md) | `src/install/install_state.rs`, `src/path_safety.rs` |
@@ -95,7 +98,7 @@ The four `src/**`+`crates/**`-scoped subsystem rules (`subsystem-cli.md`,
 `subsystem-file-structure.md`) co-fire while the workspace's crates are
 provisional; the coupling is intended (declared below).
 `subsystem-file-structure.md` is the core and index of the file-structure family;
-the eight parts above carry narrower globs, so each loads only with the code it
+the ten parts above carry narrower globs, so each loads only with the code it
 describes. One part shares a glob string: `subsystem-vendor-paths.md` and
 `vendor-capability-watchlist.md` both list `src/install/vendor_*.rs`, a declared
 group below. No other part needs one.
@@ -107,10 +110,12 @@ group below. No other part needs one.
 | `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) [rust-quality.md](./rules/rust-quality.md) (vendored) (+ [arch-principles.md](./rules/arch-principles.md) under `src/**`, `crates/**`, `external/**`) |
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) (+ [rust-cargo.md](./rules/rust-cargo.md) on `**/Cargo.toml`, `**/clippy.toml`, `**/rustfmt.toml`, `**/deny.toml`, `**/rust-toolchain.toml`) |
 | `src/**`, `crates/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
+| `src/oci/{artifact_kind,annotations}.rs`, `src/catalog/index_package.rs`, `src/api/search_report.rs`, `src/fetch.rs`, `test/tests/test_kind_interfaces.py` | + [subsystem-artifact-kinds.md](./rules/subsystem-artifact-kinds.md) |
 | `src/hook/**`, `src/install/hook_*.rs`, `src/install/launcher.rs`, `crates/grim-hook/**`, `crates/grimoire-hook-core/**` | + [subsystem-install-layout-hooks.md](./rules/subsystem-install-layout-hooks.md) |
 | `src/install/{materializer,expected_outputs,render,installer}.rs` | + [subsystem-install-layout-skills-rules.md](./rules/subsystem-install-layout-skills-rules.md) |
 | `src/install/{mcp_config,json_splice,toml_splice,cline_lock,vendor_agents}.rs` | + [subsystem-install-layout-agents-mcp.md](./rules/subsystem-install-layout-agents-mcp.md) |
 | `src/install/settings_*.rs` | + [subsystem-install-layout-settings.md](./rules/subsystem-install-layout-settings.md) |
+| `src/install/mod_*.rs` | + [subsystem-install-layout-mods.md](./rules/subsystem-install-layout-mods.md) |
 | `src/install/vendor.rs`, `src/install/vendor_*.rs`, `src/install/{prune,claude_config,opencode_config,managed_config}.rs` | + [subsystem-vendor-paths.md](./rules/subsystem-vendor-paths.md) |
 | `src/install/target.rs`, `src/install/client_target.rs` | + [subsystem-client-detection.md](./rules/subsystem-client-detection.md) |
 | `src/install/install_state.rs`, `src/path_safety.rs` | + [subsystem-install-state.md](./rules/subsystem-install-state.md) |

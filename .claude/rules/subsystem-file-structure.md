@@ -36,6 +36,7 @@ is open. Anchors (`{#...}`) moved with their sections.
 | [subsystem-install-layout-agents-mcp.md](./subsystem-install-layout-agents-mcp.md) | Install Layout: MCP servers, Agents | `install-layout-mcp`, `install-layout-agents` |
 | [subsystem-install-layout-hooks.md](./subsystem-install-layout-hooks.md) | Install Layout: Hooks | `install-layout-hooks` |
 | [subsystem-install-layout-settings.md](./subsystem-install-layout-settings.md) | Install Layout: Settings | `install-layout-settings` |
+| [subsystem-install-layout-mods.md](./subsystem-install-layout-mods.md) | Install Layout: Mods | `install-layout-mods` |
 | [subsystem-vendor-paths.md](./subsystem-vendor-paths.md) | Global-scope paths and vendor environment overrides | `global-scope-paths` |
 | [subsystem-client-detection.md](./subsystem-client-detection.md) | Client Detection (default install targets) | `client-detection` |
 | [subsystem-install-state.md](./subsystem-install-state.md) | Install State (project, global) and the path containment guard | `install-state`, `install-state-project`, `install-state-global`, `path-containment-guard` |

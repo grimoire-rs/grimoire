@@ -343,6 +343,8 @@ for dependencies: shipped grim ignores it, and every reader release knows
 the name. The name is reserved so a third-party producer that lists it is
 not refused.
 
+> ⛔ **AMENDED (2026-11-19, `adr_mod_artifact_kind.md`):** `KNOWN_FEATURES` gains `mods`: `["dependencies", "mods"]`, with the writer rule of `adr_mod_artifact_kind.md` D12 (`requires-features = mods` goes on every manifest whose bundle members or `requires` edges name a mod, a mod included, and never on a manifest that only coexists with mods).
+
 **Where the gate fires:**
 
 - resolve (every node's manifest);
@@ -1581,3 +1583,4 @@ decomposing (PD-1, PD-2).
 | 2026-11-08 | Claude (lock pin stability, RF7) | Review 7's record findings folded, no decision changed. Decision 3's untrusted-cache bullet no longer says the recorded `requires` never influences an online resolve. A relock counts a listed edge only where the previous row records it, and the lock edit reads only recorded edges (lock-pin plan RD6-B1, RD6-G2). The offline bullet states where the edit and the offline relock part, past a stored requires layer, and the note's narrower naming (RD7-n1). Decision 4's condition 2 is marked Proposed, awaiting the owner (RD-3) |
 | 2026-11-08 | Claude (lock pin stability, RF7 fix round 1) | Decision 4's consent heading no longer says no trust decision is reopened: condition 2 is a proposed trust narrowing, as the block under it says. No decision changed |
 | 2026-11-08 | Claude (lock pin stability, RF8) | Decision 3's marketplace clause gains one sentence: a bundle the part's stamps record carries at that digest wherever the relock meets it, through any parent, unless the run selects it. No decision changed |
+| 2026-11-19 | Claude (records pass) | Decision 2 amended by `adr_mod_artifact_kind.md` (amendment 9): `KNOWN_FEATURES` gains `mods` |
