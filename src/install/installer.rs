@@ -2920,7 +2920,9 @@ pub(crate) async fn fetch_verified_layer(
 /// [`fetch_verified_layer`] charging a tar layer's decode to `budget` when one
 /// is given: success charges the tar, a failure what it decoded first. A
 /// layer the run failed to decode before, or one stored larger than what is
-/// left, is not read; a decode is capped at what is left.
+/// left, is not read; a decode is capped at what is left. A layer the run
+/// already decoded is returned from the run's cache without a fetch, a decode
+/// or a charge, so two pins sharing one good layer cost one decode.
 ///
 /// # Errors
 ///
@@ -2998,6 +3000,12 @@ pub(crate) async fn fetch_verified_layer_within(
             let earlier = std::io::Error::other("the layer failed to decode earlier in this run");
             return Err(crate::oci::layer::LayerError::Corrupt(earlier).into());
         }
+        // A layer the run already decoded is reused without a fetch, a
+        // decode or a charge: two pins sharing one good layer prove from
+        // the same bytes (#368).
+        if let Some(decoded) = budget.cached(&layer_digest) {
+            return Ok((*decoded).clone());
+        }
         if layer.size > budget.remaining() {
             return Err(decode_refused(Refusal::FetchBudget(Limit::DecodedBytes)));
         }
@@ -3030,10 +3038,12 @@ pub(crate) async fn fetch_verified_layer_within(
     // time, as a status proof does. A decode cut at the remainder counts one byte
     // past it, so this charge spends the rest and refuses.
     budget.charge(len).map_err(decode_refused)?;
-    decoded.map_err(|e| {
-        budget.note_failed(layer_digest);
-        e.into()
-    })
+    let decoded = decoded.map_err(|e| {
+        budget.note_failed(layer_digest.clone());
+        crate::error::Error::from(e)
+    })?;
+    budget.cache(layer_digest, decoded.clone());
+    Ok(decoded)
 }
 
 /// A decode budget's refusal, classified as the bounded reader's refusals are.
@@ -10077,6 +10087,101 @@ mod tests {
         std::fs::remove_dir_all(&skill).unwrap();
         let err = stage(&artifact, tmp.path(), &budget).await;
         assert!(spent(&err), "{err:?}");
+    }
+
+    /// Mock serving two manifests (two pins) over the one layer blob, counting blob fetches.
+    struct SharedLayerMock {
+        manifests: std::collections::HashMap<Digest, OciManifest>,
+        blob: Vec<u8>,
+        fetches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl OciAccess for SharedLayerMock {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Ok(self.manifests.get(&id.digest()).cloned())
+        }
+        async fn fetch_blob(
+            &self,
+            _repo: &Identifier,
+            digest: &Digest,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, AccessError> {
+            self.fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((Algorithm::Sha256.hash(&self.blob) == *digest).then(|| self.blob.clone()))
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<crate::oci::access::CatalogListing, AccessError> {
+            Ok(Vec::new().into())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
+    }
+
+    /// Two candidate pins share one good layer (#368): the second fetch
+    /// decodes nothing and charges nothing.
+    #[tokio::test]
+    async fn a_shared_good_layer_is_fetched_and_decoded_once() {
+        let tar = skill_tar("shared", SKILL_DOC);
+        // Two manifests, two pins, the one layer descriptor: the second
+        // manifest differs only by annotation, so its pin differs.
+        let manifest_one = manifest_for(&tar);
+        let mut manifest_two = manifest_for(&tar);
+        manifest_two.annotations = std::collections::BTreeMap::from([("origin".to_string(), "two".to_string())]);
+        let pin = |tag: &str| {
+            let id = Identifier::new_registry(tag, "localhost:5000");
+            PinnedIdentifier::try_from(
+                id.clone_with_digest(Algorithm::Sha256.hash(format!("manifest-{tag}").as_bytes())),
+            )
+            .unwrap()
+        };
+        let pin_one = pin("one");
+        let pin_two = pin("two");
+        let manifests =
+            std::collections::HashMap::from([(pin_one.digest(), manifest_one), (pin_two.digest(), manifest_two)]);
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let access = arc(SharedLayerMock {
+            manifests,
+            blob: tar.clone(),
+            fetches: fetches.clone(),
+        });
+        let budget = DecodeBudget::with_limit(10_000);
+        let one = LockedArtifact::direct("one".to_string(), ArtifactKind::Skill, pin_one);
+        let two = LockedArtifact::direct("two".to_string(), ArtifactKind::Skill, pin_two);
+
+        let first = fetch_verified_layer_within(&one, ArtifactKind::Skill, &access, Some(&budget))
+            .await
+            .expect("the first pin decodes its layer");
+        let after_first = budget.remaining();
+        assert!(after_first < 10_000, "the first decode is charged");
+        assert_eq!(first, tar, "a plain tar layer decodes to its bytes");
+
+        let second = fetch_verified_layer_within(&two, ArtifactKind::Skill, &access, Some(&budget))
+            .await
+            .expect("the second pin reuses the layer");
+        assert_eq!(second, first, "both pins read the same layer");
+        assert_eq!(
+            fetches.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the shared layer is fetched once"
+        );
+        assert_eq!(
+            budget.remaining(),
+            after_first,
+            "the shared layer is charged once, not once per pin"
+        );
     }
 
     #[tokio::test]

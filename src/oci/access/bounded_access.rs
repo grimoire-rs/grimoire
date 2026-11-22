@@ -10,7 +10,7 @@
 //! cost no budget, and keep a clone to read the run's report. Decoded layer
 //! bytes are a [`DecodeBudget`]'s, charged where a layer is decoded, store or registry.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -39,7 +39,9 @@ pub const MANIFEST_BODY_LIMIT: usize = 4 * 1024 * 1024;
 pub const DECODED_LAYER_LIMIT: u64 = 512 * 1024 * 1024;
 
 /// The decoded layer bytes one status run, MCP call or TUI task may spend,
-/// from the store and the registry alike. Clones share one budget.
+/// from the store and the registry alike. Clones share one budget. It also
+/// remembers the layers the run already decoded, so a second pin sharing a
+/// layer reuses the decoded bytes without a fetch, a decode or a charge.
 #[derive(Clone)]
 pub struct DecodeBudget(Arc<Mutex<Decoded>>);
 
@@ -48,6 +50,9 @@ struct Decoded {
     used: u64,
     /// Layers whose decode failed in this run.
     failed: BTreeSet<Digest>,
+    /// Layers this run already decoded, by digest: the decoded tar bytes.
+    /// Bounded by the budget itself, since a stored layer was charged once.
+    layers: BTreeMap<Digest, Arc<Vec<u8>>>,
 }
 
 impl DecodeBudget {
@@ -61,6 +66,7 @@ impl DecodeBudget {
             limit,
             used: 0,
             failed: BTreeSet::new(),
+            layers: BTreeMap::new(),
         })))
     }
 
@@ -94,6 +100,17 @@ impl DecodeBudget {
     /// Notes that the layer `digest` failed to decode, so the run does not decode it again.
     pub fn note_failed(&self, digest: Digest) {
         self.decoded().failed.insert(digest);
+    }
+
+    /// The decoded tar bytes of the layer `digest`, when this run already decoded it.
+    pub fn cached(&self, digest: &Digest) -> Option<Arc<Vec<u8>>> {
+        self.decoded().layers.get(digest).cloned()
+    }
+
+    /// Remembers the decoded tar bytes of the layer `digest`, so a second
+    /// pin sharing the layer reuses them without a fetch, a decode or a charge.
+    pub fn cache(&self, digest: Digest, bytes: Vec<u8>) {
+        self.decoded().layers.insert(digest, Arc::new(bytes));
     }
 
     fn decoded(&self) -> MutexGuard<'_, Decoded> {
