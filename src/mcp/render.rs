@@ -157,6 +157,20 @@ pub async fn render(ctx: &Context, args: &RenderToolArgs) -> anyhow::Result<Rend
         ));
     }
 
+    if kind == ArtifactKind::Skill
+        && let Some(entry) = crate::command::grim(crate::install::installer::staged_plugin_manifest(&canonical))?
+    {
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            crate::install::install_error::InstallError::without_reference(
+                crate::install::install_error::InstallErrorKind::SkillPluginManifest {
+                    name: fetched.name.clone(),
+                    entry,
+                    installed: false,
+                },
+            ),
+        )));
+    }
+
     // A rule may stage a sibling support directory beside its index.
     let staged_support: Option<PathBuf> = match kind {
         ArtifactKind::Rule => {
@@ -294,6 +308,53 @@ mod tests {
         assert!(dest_dir.join("demo/scripts/run.sh").is_file());
         assert!(report.files.iter().all(|p| p.is_absolute()));
         assert!(report.files.iter().any(|p| p.ends_with("demo/SKILL.md")));
+    }
+
+    #[tokio::test]
+    async fn render_refuses_root_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = MemoryRegistry::new();
+        let bad = tar_of(&[
+            ("bad/SKILL.md", b"---\nname: bad\ndescription: d\n---\n"),
+            ("bad/.claude-plugin/plugin.json", b"{}"),
+        ]);
+        publish(&reg, "test.registry/acme/skills/bad:latest", "skill", &bad).await;
+        let good = tar_of(&[("good/SKILL.md", b"---\nname: good\ndescription: d\n---\n")]);
+        publish(&reg, "test.registry/acme/skills/good:latest", "skill", &good).await;
+        let ctx = Context::with_access(tmp.path().to_path_buf(), reg);
+
+        let dest_dir = tmp.path().join("out");
+        let err = render(
+            &ctx,
+            &args(
+                "test.registry/acme/skills/bad:latest",
+                "claude",
+                dest_dir.clone(),
+                tmp.path(),
+            ),
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError,
+            "{err:#}"
+        );
+        assert!(!dest_dir.join("bad").exists(), "no skill directory written");
+
+        // Positive control: a clean skill renders into the same destination.
+        render(
+            &ctx,
+            &args(
+                "test.registry/acme/skills/good:latest",
+                "claude",
+                dest_dir.clone(),
+                tmp.path(),
+            ),
+        )
+        .await
+        .expect("clean skill renders");
+        assert!(dest_dir.join("good/SKILL.md").is_file());
     }
 
     #[tokio::test]

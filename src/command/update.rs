@@ -209,6 +209,15 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let mut state = scope_resolution::read_state(&scope)
         .map_err(|e| state_io(&scope.state_path, e))?
         .adopt();
+    // Before the lock is saved: a refusal leaves lock and state as found.
+    super::grim(
+        crate::install::installer::refuse_installed_dev_plugin_manifest(
+            &state,
+            &scope.roots,
+            named.as_ref().map(|n| &n.install),
+        )
+        .map_err(|e| e.naming(target.grim())),
+    )?;
     let prepass = match &previous {
         Some(evidence) => Some(prove_previous(&mut state, evidence, named.as_ref(), &target, &scope, &access).await?),
         None => None,

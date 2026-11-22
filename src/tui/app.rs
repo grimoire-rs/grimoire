@@ -10583,6 +10583,52 @@ mod tests {
         }
     }
 
+    /// A catalog row whose skill carries the refused manifest entry reaches the
+    /// installer's refusal, as `grim install` does, and writes nothing.
+    #[tokio::test]
+    async fn tui_install_of_a_skill_with_a_plugin_manifest_is_refused() {
+        use crate::oci::manifest::{Descriptor, OciManifest};
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let reg = crate::oci::access::memory_registry::MemoryRegistry::new();
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, body) in [
+            ("m/SKILL.md", "---\nname: m\ndescription: d\n---\n"),
+            ("m/.claude-plugin/plugin.json", "{}\n"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, body.as_bytes()).unwrap();
+        }
+        let tar_blob = builder.into_inner().unwrap();
+        let id = Identifier::new_registry("acme/m".to_string(), "localhost:5050");
+        let layer = Descriptor {
+            digest: reg.push_blob(&id, &tar_blob).await.unwrap(),
+            media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+            size: tar_blob.len() as u64,
+            annotations: None,
+        };
+        let manifest = OciManifest {
+            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers: vec![layer],
+            annotations: Default::default(),
+        };
+        let digest = reg.push_manifest(&id, &manifest).await.unwrap();
+        reg.put_tag(&id, "1", &digest).await.unwrap();
+        let ctx = test_ctx(tmp.path(), Arc::new(reg.clone()));
+
+        let err = perform(&ctx, &skill_row("m"), None, BatchOp::Install, &SilentProgress, false)
+            .await
+            .expect_err("the refused skill is not installed");
+        assert!(format!("{err:#}").contains("plugin manifest"), "{err:#}");
+        assert!(!ctx.workspace.join(".claude/skills/m").exists(), "nothing is written");
+    }
+
     /// The fields split at the namespace, a parsed reference at the host.
     #[tokio::test]
     async fn tui_install_finds_a_declared_row_of_a_namespaced_registry() {
@@ -11100,6 +11146,34 @@ mod tests {
                 "{key}, member: {member}"
             );
         }
+    }
+
+    /// An intact installed skill whose output root holds a plugin manifest entry
+    /// (written by an older grim) refuses a TUI install; the files and lock stay.
+    #[tokio::test]
+    async fn tui_install_refuses_intact_installed_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_reg, ctx) = project_with_a_dependency_and_a_member(tmp.path()).await;
+        // Positive control: the intact row installs again as a no-op.
+        install_on(&ctx, "c", "c", "1", false).await.expect("clean re-install");
+
+        let skill = ctx.workspace.join(".claude/skills/c");
+        std::fs::create_dir(skill.join(".claude-plugin")).unwrap();
+        let (config, lock) = (
+            std::fs::read(&ctx.config_path).unwrap(),
+            std::fs::read(&ctx.lock_path).unwrap(),
+        );
+
+        let err = install_on(&ctx, "c", "c", "1", false).await.expect_err("refused");
+        assert_eq!(
+            crate::error::classify_error(&err),
+            crate::cli::exit_code::ExitCode::DataError,
+            "{err:#}"
+        );
+        assert!(err.to_string().contains("grim uninstall skill c"), "{err:#}");
+        assert!(skill.join(".claude-plugin").is_dir(), "files stay");
+        assert_eq!(std::fs::read(&ctx.config_path).unwrap(), config);
+        assert_eq!(std::fs::read(&ctx.lock_path).unwrap(), lock);
     }
 
     /// A fresh checkout has no install record, so the row reads not installed.

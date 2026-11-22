@@ -1176,6 +1176,14 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         }
     }
 
+    // A skill carrying a plugin manifest entry is refused at pack time; check
+    // every skill here so no earlier entry is pushed before the refusal.
+    for planned in &entries {
+        if planned.kind == ArtifactKind::Skill {
+            super::grim(crate::skill::skill_package::refuse_skill_plugin_manifest(&planned.path))?;
+        }
+    }
+
     // Resolve the description companions before any push: an explicit companion
     // path that does not exist is a data error (65) surfaced here, not partway
     // through the batch. Conventional-probe misses stay silent.
@@ -4626,6 +4634,47 @@ mod tests {
             format!("{err:#}").contains("cascade"),
             "error must mention --cascade, got: {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn publish_prepass_refuses_before_push() {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+
+        for dry_run in [false, true] {
+            // The refused skill sorts both before and after the clean one.
+            for refused in ["a-refused", "z-refused"] {
+                let tmp = tempfile::tempdir().unwrap();
+                let dir = tmp.path();
+                make_test_manifest_sources(dir);
+                write(
+                    &dir.join(format!("skills/{refused}/SKILL.md")),
+                    &format!("---\nname: {refused}\ndescription: d\n---\nbody\n"),
+                );
+                write(&dir.join(format!("skills/{refused}/.claude-plugin/plugin.json")), "{}");
+                let manifest_path = dir.join("publish.toml");
+                std::fs::write(
+                    &manifest_path,
+                    format!(
+                        "registry = \"localhost:5000\"\n\n[skills.test-skill]\nversion = \"0.1.0\"\n\n[skills.{refused}]\nversion = \"0.1.0\"\n"
+                    ),
+                )
+                .unwrap();
+                let registry = MemoryRegistry::new();
+                let ctx = Context::with_access(dir.to_path_buf(), registry.clone());
+                let args = make_publish_args(manifest_path.clone(), vec![], None, dry_run, false);
+                let err = run(&ctx, &args).await.expect_err("refused skill");
+                let c = crate::error::classify(&err);
+                assert_eq!(c.exit, crate::cli::exit_code::ExitCode::DataError);
+                assert_eq!(c.reason, Some(crate::error::ErrorReason::SkillPluginManifest));
+
+                // Positive control: without the entry the same batch pushes.
+                std::fs::remove_dir_all(dir.join(format!("skills/{refused}/.claude-plugin"))).unwrap();
+                let (report, _) = run(&ctx, &make_publish_args(manifest_path, vec![], None, dry_run, false))
+                    .await
+                    .expect("clean batch");
+                assert_eq!(report.items().len(), 2);
+            }
+        }
     }
 
     #[tokio::test]
