@@ -30,7 +30,15 @@ import pytest
 import tomllib
 
 from src.helpers import make_artifact, mod_sandbox, settings_sandbox
-from src.index_fixture import package, search_envelope, serve, write_all_json
+from src.index_fixture import (
+    IndexHandler,
+    conformance_tree,
+    index_config,
+    package,
+    search_envelope,
+    serve,
+    write_all_json,
+)
 from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
 from src.stdio_drivers import drive_until_answered, initialize
@@ -460,6 +468,34 @@ def test_search_from_an_index(
     rows, hits = index_search
     assert kind in rows, f"{kind} missing from index search: {sorted(rows)}"
     _assert_search_row(kind, rows[kind], hits)
+
+
+@pytest.fixture(scope="module")
+def indexer_tree_rows(
+    grim_binary: Path, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[list[dict]]:
+    """Search rows read from the checked-in indexer tree, no registry needed."""
+    base = tmp_path_factory.mktemp("indexer-tree")
+    root = conformance_tree(base / "dist", "c-plus-legacy")
+    project, home = base / "project", base / "home"
+    project.mkdir()
+    home.mkdir()
+    with serve(root, IndexHandler.new()) as url:
+        index_config(project, url)
+        runner = GrimRunner(grim_binary, home, cwd=project)
+        yield search_envelope(runner, "--show-deprecated")["items"]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_search_from_the_indexer_tree(kind: str, indexer_tree_rows: list[dict]) -> None:
+    # Unlike the hand-built index column, these records come from the indexer.
+    rows = [row for row in indexer_tree_rows if row["kind"] == kind]
+    assert rows, f"no {kind} row in the indexer tree"
+    if kind == "mod":
+        by_repo = {row["repo"]: row for row in rows}
+        assert by_repo["ghcr.io/acme/mod-sample"]["serves"] == CLIENTS
+    else:
+        assert all(row["serves"] is None for row in rows)
 
 
 @pytest.mark.usefixtures("index_search")

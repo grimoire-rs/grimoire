@@ -1,0 +1,1 @@
+{"bucket":"9b","entries":{"ghcr.io/acme/successor-enrich-only":{"data":{},"failing_since":null,"failures":0,"files":{"readme.md":{"sha256":"2b6b58168d4a67a6a2e9ba315848c4f125c6354d7c7f44340b1032ef748d6a55","size":44}},"input":"9bf3fe9ac6f4d1f3d0a41ecb5ad124ac71164475147f65cc81d4122193962dd2","last_failure_at":null}},"plane":"enrich","schema":1}
