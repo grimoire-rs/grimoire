@@ -1569,9 +1569,10 @@ The decoded-bytes bound is one budget for each `grim status` run, each TUI
 adoption task and each `grim_status` call, `--check` included. Every layer
 decode such a run performs, from the local store or the registry, is charged
 where it happens, a failed decode included. A layer whose decode failed is not
-decoded again in that run. A layer larger than what is left is not read, and
-its artifact stays unproven with the fetch-budget reason. `install` and the
-other commands have no such budget.
+decoded again in that run. A layer the run already decoded is reused without
+a second fetch or charge, so two pins sharing one layer cost one decode. A
+layer larger than what is left is not read, and its artifact stays unproven
+with the fetch-budget reason. `install` and the other commands have no such budget.
 A run that passes a bound leaves the rest unproven, and the next run takes
 them. A host that failed is skipped for 10 minutes, and a pin a registry
 answered `404` for is skipped for 24 hours. Both are remembered in
@@ -1594,6 +1595,12 @@ A single artifact reads `1 artifact` in both lines, and the offline line ends
 state-file lock, or the state file cannot be read or written. The state
 directory may be read-only, or the state path may be a link or lie outside its
 root.
+
+The `adopted` line is the run's outcome, not a change report: it prints on
+every run that leaves nodes unproven beyond offline misses, even one that
+adopted nothing, so a node that stays unproven is named on each run until it
+proves. Once every node is proven the line goes silent, because there is
+nothing left to adopt.
 
 A row whose pin the store lacks can stay `modified` for that reason. It gets
 one more warning naming `grim install`. That command fetches the pin and checks

@@ -3971,7 +3971,11 @@ async fn adopt_proven<P: InstallProgress + ?Sized>(
         ) {
             Ok(adopted) => {
                 let left = nodes.len() - adopted;
-                // Offline misses already have their own line.
+                // Offline misses already have their own line. The adopted
+                // line is the run's outcome, not a change report: it prints
+                // on every run that leaves nodes unproven beyond offline
+                // misses, even one that adopted nothing, so a node that
+                // stays unproven is named on each run until it proves (#368).
                 if adopted > 0 || left > misses {
                     tracing::warn!("{}", adopted_text(adopted, left));
                 }
