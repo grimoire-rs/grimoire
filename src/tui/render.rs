@@ -129,6 +129,55 @@ pub(super) fn ellipsize(s: &str, width: usize) -> String {
     out
 }
 
+/// `s` cut to `width` display columns with a `…` in the middle; unchanged when
+/// it fits. The head takes the extra column of an uneven split.
+fn fit_middle(s: &str, width: usize) -> String {
+    if s.width() <= width {
+        return s.to_string();
+    }
+    let Some(budget) = width.checked_sub(1) else {
+        return String::new();
+    };
+    let take = |chars: &mut dyn Iterator<Item = char>, room: usize| {
+        let mut used = 0;
+        let mut out = Vec::new();
+        for c in chars {
+            let w = c.width().unwrap_or(0);
+            if used + w > room {
+                break;
+            }
+            used += w;
+            out.push(c);
+        }
+        out
+    };
+    let head: String = take(&mut s.chars(), budget.div_ceil(2)).into_iter().collect();
+    let tail: String = take(&mut s.chars().rev(), budget / 2).into_iter().rev().collect();
+    format!("{head}…{tail}")
+}
+
+/// The flat Name cell as `(name, namespace)`: the leaf leads and the namespace
+/// follows, middle-cut to what is left. Together they fill `width` columns so
+/// no other column moves.
+fn name_cell(text: &str, width: usize) -> (String, String) {
+    let (namespace, leaf) = text.rsplit_once('/').unwrap_or(("", text));
+    let name = if leaf.width() > width {
+        ellipsize(leaf, width)
+    } else {
+        leaf.to_string()
+    };
+    let remaining = width.saturating_sub(name.width());
+    // Under 6 columns the namespace would be little more than an ellipsis.
+    let rest = if namespace.is_empty() || remaining < 6 {
+        " ".repeat(remaining)
+    } else {
+        let body = format!("  {}", fit_middle(namespace, remaining - 2));
+        let pad = remaining.saturating_sub(body.width());
+        format!("{body}{}", " ".repeat(pad))
+    };
+    (name, rest)
+}
+
 /// [`fit_tail`] for a tree row's Repo cell: `prefix` (indent and arrow) stays
 /// put and only `label` is cut, so a long label cannot swallow the structure
 /// that places the row under its parent. Falls back to cutting the whole text
@@ -305,7 +354,7 @@ pub struct GroupRow {
 /// One table row in the render model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderRow {
-    /// The visible columns, already formatted (repo, kind, tag, status).
+    /// The visible columns, already formatted (name, kind, tag, status).
     /// In tree mode, `columns[0]` carries the indent prefix (two spaces per
     /// depth level) and the arrow glyph for groups — the single canonical
     /// representation of tree position.
@@ -330,6 +379,8 @@ pub struct RenderRow {
     /// install-status glyph. Leaf and flat rows carry it; group and member
     /// rows are always `false`.
     pub deprecated: bool,
+    /// The dimmed namespace that follows the name in a flat row; empty in tree rows.
+    pub namespace: String,
 }
 
 /// The modal version-picker overlay, projected for display.
@@ -520,9 +571,10 @@ fn render_leaf(
     // Deprecation is flagged by a dedicated trailing `†` column (rendered in
     // `draw`), not a Repo-cell prefix — so the Repo cell stays clean and
     // left-aligned with every other row.
+    let (name, namespace) = name_cell(repo_text, W_REPO);
     RenderRow {
         columns: [
-            fit_tail(repo_text, W_REPO),
+            name,
             fit(&r.kind, W_KIND),
             fit(&tag_cell, W_TAG),
             count_cell(r.rating.map(u64::from), W_RATING),
@@ -535,6 +587,7 @@ fn render_leaf(
         group: None,
         registry,
         deprecated: r.deprecated.is_some(),
+        namespace,
     }
 }
 
@@ -619,6 +672,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     registry: None,
                     // Group rollups don't carry a deprecation indicator.
                     deprecated: false,
+                    namespace: String::new(),
                 }
             }
             super::tree::DisplayRow::Leaf {
@@ -669,6 +723,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     group: None,
                     registry: None,
                     deprecated: leaf_deprecated,
+                    namespace: String::new(),
                 }
             }
             super::tree::DisplayRow::Member {
@@ -717,6 +772,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     registry: None,
                     // Bundle-member rows don't carry a deprecation indicator.
                     deprecated: false,
+                    namespace: String::new(),
                 }
             }
         })
@@ -956,6 +1012,42 @@ fn extend_with_dependencies(lines: &mut Vec<DetailLine>, mut deps: Vec<DetailLin
     lines.extend(deps);
 }
 
+/// Byte length of the longest `/`-terminated prefix shared by every path's
+/// namespace (all segments but the last); 0 when there is none or no path.
+fn common_namespace_len<'a>(paths: impl IntoIterator<Item = &'a str>) -> usize {
+    let mut prefix: Option<&str> = None;
+    for path in paths {
+        let ns = path.rfind('/').map_or("", |i| &path[..=i]);
+        prefix = Some(match prefix {
+            None => ns,
+            Some(p) => {
+                let mut len = 0;
+                for (a, b) in p.split_inclusive('/').zip(ns.split_inclusive('/')) {
+                    if a != b {
+                        break;
+                    }
+                    len += a.len();
+                }
+                &p[..len]
+            }
+        });
+    }
+    prefix.map_or(0, str::len)
+}
+
+/// The flat list's `(root key, name text)` for one row, before prefix stripping.
+fn display_path(state: &TuiState, r: &super::state::TuiRow, configured: &[&str], multi: bool) -> (String, String) {
+    let (root, path) = super::tree::display_split(r, configured);
+    let text = match &r.index_path {
+        Some(p) if r.source != RowSource::Local => p.clone(),
+        // D-ELIDE by root-key equality, as `tree::segments` does; a literal
+        // `strip_prefix` on `repo` can never match a root key.
+        _ if multi || Some(root.as_str()) == state.default_registry.as_deref() => path,
+        _ => r.repo.clone(),
+    };
+    (root, text)
+}
+
 /// Project `state` into a [`RenderModel`]. Pure — no I/O, no ratatui.
 pub fn frame(state: &TuiState) -> RenderModel {
     let title = if state.offline {
@@ -1004,6 +1096,22 @@ pub fn frame(state: &TuiState) -> RenderModel {
         // passes to the same `display_split` (E-15.1 — `default_registry` is a
         // root key, so chaining it in here would be inert).
         let configured: Vec<&str> = state.registry_locators.iter().map(String::as_str).collect();
+        // The namespace every row of a group shares is noise in a flat list.
+        // Groups are per source only with a Registry column to tell them apart,
+        // else one group, so two roots never collapse to one leaf. Computed over
+        // all rows, not `filtered`, so a query never changes how a row reads.
+        let mut by_root: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for r in state.rows.iter().filter(|r| r.source != RowSource::Local) {
+            let (root, text) = display_path(state, r, &configured, multi);
+            by_root
+                .entry(if multi { root } else { String::new() })
+                .or_default()
+                .push(text);
+        }
+        let strip: std::collections::BTreeMap<String, usize> = by_root
+            .iter()
+            .map(|(root, texts)| (root.clone(), common_namespace_len(texts.iter().map(String::as_str))))
+            .collect();
         state
             .filtered
             .iter()
@@ -1014,20 +1122,20 @@ pub fn frame(state: &TuiState) -> RenderModel {
                 // so the Registry column and the shortened Repo cell attribute
                 // identically to it. Using `r.registry` directly would show the
                 // bare host and an un-shortened repo.
-                let (root, path) = super::tree::display_split(r, &configured);
-                let (repo_text, registry): (std::borrow::Cow<str>, Option<String>) = if multi {
-                    (std::borrow::Cow::Owned(path), Some(state.registry_cell_label(&root)))
-                } else if Some(root.as_str()) == state.default_registry.as_deref() {
-                    // D-ELIDE, by the same root-key equality `tree::segments`
-                    // applies. It must NOT be a `strip_prefix` on `repo`:
-                    // `default_registry` is a ROOT KEY (`"locator:ghcr.io/acme"`),
-                    // which can never prefix a reference, so a literal strip
-                    // would leave every Repo cell rendering its full reference.
-                    (std::borrow::Cow::Owned(path), None)
+                let (root, text) = display_path(state, r, &configured, multi);
+                let skip = if r.source == RowSource::Local {
+                    0
                 } else {
-                    (std::borrow::Cow::Borrowed(r.repo.as_str()), None)
+                    strip.get(if multi { root.as_str() } else { "" }).copied().unwrap_or(0)
                 };
-                render_leaf(r, &repo_text, pos == state.selected, state.is_row_marked(i), registry)
+                let registry = multi.then(|| state.registry_cell_label(&root));
+                render_leaf(
+                    r,
+                    &text[skip..],
+                    pos == state.selected,
+                    state.is_row_marked(i),
+                    registry,
+                )
             })
             .collect()
     };
@@ -1219,7 +1327,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         search_placeholder,
         scope: state.scope_label.clone(),
         clients,
-        headers: ["Repo", "Kind", "Tag", "Rating", "Downloads", "Status"],
+        headers: ["Name", "Kind", "Tag", "Rating", "Downloads", "Status"],
         rows,
         detail,
         detail_scroll,
@@ -1546,7 +1654,10 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             spans.push(Span::styled(format!("{reg_label}  "), t.column_registry));
         }
         spans.extend([
-            Span::styled(format!("{}  ", r.columns[0]), t.text),
+            Span::styled(r.columns[0].clone(), t.text),
+            // On the selection bar the name's own style keeps the highlight
+            // continuous; `muted` (DIM) would break it.
+            Span::styled(format!("{}  ", r.namespace), if r.selected { t.text } else { t.muted }),
             Span::styled(format!("{}  ", r.columns[1]), t.column_kind),
             Span::styled(format!("{}  ", r.columns[2]), t.column_version),
             Span::styled(format!("{}  ", r.columns[3]), t.column_rating),
@@ -2318,6 +2429,159 @@ mod tests {
     }
 
     #[test]
+    fn common_namespace_len_stops_at_segment_boundaries() {
+        assert_eq!(common_namespace_len(std::iter::empty()), 0);
+        assert_eq!(common_namespace_len(["a/bc/x", "a/bd/y"]), 2);
+        assert_eq!(common_namespace_len(["a/b/c"]), 4);
+        assert_eq!(common_namespace_len(["c"]), 0);
+        assert_eq!(common_namespace_len(["a/b", "a/b"]), 2);
+        assert_eq!(common_namespace_len(["x/a", "y/a"]), 0);
+        assert_eq!(
+            common_namespace_len(["reg/bu-x/team/a", "reg/bu-x/other/b"]),
+            "reg/bu-x/".len()
+        );
+    }
+
+    fn flat_state(rows: Vec<TuiRow>) -> TuiState {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_rows(rows);
+        s
+    }
+
+    #[test]
+    fn flat_row_shows_index_placement_not_oci_reference() {
+        let mut a = row("registry.example.com/bu-x/skills/alpha", ArtifactState::NotInstalled);
+        a.index_path = Some("github.com/acme/tools/alpha".to_string());
+        let mut b = row("registry.example.com/bu-x/skills/beta", ArtifactState::NotInstalled);
+        b.index_path = Some("github.com/acme/beta".to_string());
+        let m = frame(&flat_state(vec![a, b]));
+        assert_eq!(m.rows[0].columns[0], "alpha");
+        assert_eq!(m.rows[0].namespace, format!("{:<w$}", "  tools", w = W_REPO - 5));
+        assert_eq!(m.rows[1].columns[0], "beta");
+        assert_eq!(m.rows[1].namespace, " ".repeat(W_REPO - 4));
+    }
+
+    #[test]
+    fn flat_rows_drop_the_prefix_their_source_shares() {
+        let m = frame(&flat_state(vec![
+            row("registry.example.com/bu-x/team/alpha", ArtifactState::NotInstalled),
+            row("registry.example.com/bu-x/other/beta", ArtifactState::NotInstalled),
+        ]));
+        assert_eq!(m.rows[0].columns[0], "alpha");
+        assert_eq!(m.rows[0].namespace, format!("{:<w$}", "  team", w = W_REPO - 5));
+        assert_eq!(m.rows[1].columns[0], "beta");
+        assert_eq!(m.rows[1].namespace, format!("{:<w$}", "  other", w = W_REPO - 4));
+    }
+
+    #[test]
+    fn a_search_query_does_not_change_a_flat_row_name() {
+        let mut s = flat_state(vec![
+            row("registry.example.com/bu-x/team/alpha", ArtifactState::NotInstalled),
+            row("registry.example.com/bu-x/other/beta", ArtifactState::NotInstalled),
+        ]);
+        let before = frame(&s).rows[0].columns[0].clone();
+        s.filtered = vec![0];
+        let m = frame(&s);
+        assert_eq!(m.rows.len(), 1);
+        assert_eq!(m.rows[0].columns[0], before);
+    }
+
+    #[test]
+    fn fit_middle_keeps_both_ends() {
+        assert_eq!(fit_middle("abc", 5), "abc");
+        assert_eq!(fit_middle("abcde", 5), "abcde");
+        assert_eq!(fit_middle("abcdefghij", 5), "ab…ij");
+        assert_eq!(fit_middle("abcdefghij", 6), "abc…ij");
+        assert_eq!(fit_middle("abcdefghij", 0), "");
+        assert_eq!(fit_middle("abcdefghij", 1), "…");
+        for width in 1..12 {
+            let cut = fit_middle("日本語のテキストです", width);
+            assert!(cut.width() <= width, "{cut:?} wider than {width}");
+        }
+    }
+
+    #[test]
+    fn name_cell_always_fills_its_width() {
+        let long_ns = "very/long/namespace/that/is/far/wider/than/the/cell";
+        let cases: [(&str, usize); 7] = [
+            ("alpha", 40),
+            ("team/alpha", 40),
+            (&format!("{long_ns}/alpha"), 40),
+            (&format!("team/{}", "l".repeat(50)), 40),
+            ("xx/yy/abcdefghij", 15),
+            ("xx/yy/abcdefghij", 16),
+            ("xx/yy/abcdefghij", 17),
+        ];
+        for (text, width) in cases {
+            let (name, ns) = name_cell(text, width);
+            assert_eq!(name.width() + ns.width(), width, "{text:?} at {width}: {name:?} {ns:?}");
+        }
+        let (name, ns) = name_cell(&format!("{long_ns}/alpha"), 40);
+        assert_eq!(name, "alpha");
+        assert!(ns.contains('…'), "{ns:?}");
+        let (_, five) = name_cell("xx/yy/abcdefghij", 15);
+        assert_eq!(five, " ".repeat(5), "remaining 5 is too tight for a namespace");
+        let (_, six) = name_cell("xx/yy/abcdefghij", 16);
+        assert_eq!(six, "  xx…y".to_string(), "remaining 6 fits two spaces and 4 columns");
+    }
+
+    #[test]
+    fn flat_row_leads_with_the_name_and_keeps_the_namespace_apart() {
+        let m = frame(&flat_state(vec![
+            row("reg/team/alpha", ArtifactState::NotInstalled),
+            row("reg/other/beta", ArtifactState::NotInstalled),
+        ]));
+        assert_eq!(m.rows[0].columns[0], "alpha");
+        assert_eq!(m.rows[0].namespace, format!("{:<w$}", "  team", w = W_REPO - 5));
+    }
+
+    #[test]
+    fn draw_long_namespace_leaves_the_kind_column_in_place() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let long_ns = "wide-namespace/".repeat(6);
+        let s = flat_state(vec![
+            row(&format!("reg/{long_ns}alpha"), ArtifactState::Installed),
+            row("reg/beta", ArtifactState::Installed),
+        ]);
+        let model = frame(&s);
+        let w = catalog_width(false) + DETAIL_MIN_WIDTH + 4;
+        let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        let cols = buf.area.width as usize;
+        let lines: Vec<String> = buf
+            .content()
+            .chunks(cols)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect();
+        let col = |needle: &str, cell: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .and_then(|l| l.find(cell).map(|b| l[..b].chars().count()))
+                .unwrap_or_else(|| panic!("row {needle} shows {cell}"))
+        };
+        assert_eq!(col("alpha", "skill"), col("beta", "skill"));
+        assert!(col("alpha", "alpha") < col("alpha", "wide-namespace"));
+    }
+
+    #[test]
+    fn tree_rows_carry_no_namespace() {
+        let mut s = flat_state(vec![
+            row("reg/acme/alpha", ArtifactState::Installed),
+            row("reg/acme/beta", ArtifactState::NotInstalled),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        let m = frame(&s);
+        assert!(m.rows.len() >= 3);
+        assert!(m.rows.iter().all(|r| r.namespace.is_empty()));
+    }
+
+    #[test]
     fn render_leaf_flags_deprecated_without_touching_repo_cell() {
         let mut r = row("r/alpha", ArtifactState::NotInstalled);
         r.deprecated = Some("use r/alpha-2".to_string());
@@ -2330,7 +2594,8 @@ mod tests {
             "the Repo cell must stay clean; got {:?}",
             leaf.columns[0]
         );
-        assert!(leaf.columns[0].starts_with("r/alpha"), "repo text is unshifted");
+        assert!(leaf.columns[0].starts_with("alpha"), "name text is unshifted");
+        assert_eq!(leaf.namespace.trim(), "r");
         // A non-deprecated row sets neither the flag nor any marker.
         let plain = row("r/beta", ArtifactState::NotInstalled);
         let leaf2 = render_leaf(&plain, "r/beta", false, false, None);
@@ -2403,7 +2668,7 @@ mod tests {
             .collect();
         let row_line = lines
             .iter()
-            .find(|l| l.contains("r/alpha"))
+            .find(|l| l.contains("alpha"))
             .expect("the catalog row is rendered");
         assert!(
             row_line.contains("installed †"),
@@ -2481,7 +2746,12 @@ mod tests {
             .content()
             .chunks(buf.area.width as usize)
             .map(|r| &r[..catalog as usize])
-            .find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains("r/alpha"))
+            .find(|r| {
+                // The status label ties the match to the list row, not to a
+                // detail-pane line that also names the artifact.
+                let line = r.iter().map(|c| c.symbol()).collect::<String>();
+                line.contains("alpha") && line.contains("not-installed")
+            })
             .expect("the catalog row is rendered");
         let symbols: Vec<&str> = cells.iter().map(|c| c.symbol()).collect();
         let at = |text: &str| {
@@ -2489,7 +2759,7 @@ mod tests {
                 .find(|&i| symbols[i..].iter().take(text.len()).copied().collect::<String>() == text)
                 .unwrap_or_else(|| panic!("{text:?} is on the row: {symbols:?}"))
         };
-        let name = &cells[at("r/alpha")];
+        let name = &cells[at("alpha")];
         let status = &cells[at("not-installed")];
         assert!(
             !status.modifier.contains(Modifier::DIM),
@@ -2529,7 +2799,7 @@ mod tests {
         let header_y = (0..buf.area.height as usize)
             .find(|&y| {
                 let line: String = (0..cols).map(|x| cells[y * cols + x].symbol()).collect();
-                line.contains("Repo") && line.contains("Status")
+                line.contains("Name") && line.contains("Status")
             })
             .expect("the header row is rendered");
         // Last column inside the Catalog box's right border.
@@ -2552,7 +2822,7 @@ mod tests {
         s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(
             (0..60)
-                .map(|i| row(&format!("r/row{i:02}"), ArtifactState::Installed))
+                .map(|i| row(&format!("r/datarow{i:02}"), ArtifactState::Installed))
                 .collect(),
         );
         s.selected = selected;
@@ -2583,7 +2853,7 @@ mod tests {
         let lines = screen[top..=bottom].to_vec();
         let header_y = lines
             .iter()
-            .position(|l| l.contains("Repo") && l.contains("Status"))
+            .position(|l| l.contains("Name") && l.contains("Status"))
             .expect("the header row is rendered");
         (lines, header_y)
     }
@@ -2596,12 +2866,12 @@ mod tests {
         let first_row_y = header_y + 1;
         let last_row_y = lines
             .iter()
-            .rposition(|l| l.contains("r/row"))
+            .rposition(|l| l.contains("datarow"))
             .expect("catalog rows are rendered");
         let viewport = last_row_y - first_row_y + 1;
         let selected_y = lines
             .iter()
-            .position(|l| l.contains("r/row30"))
+            .position(|l| l.contains("datarow30"))
             .expect("the selected row is on screen");
         assert!(
             viewport < 60 && (selected_y - first_row_y).abs_diff(viewport / 2) <= 1,
@@ -2620,10 +2890,10 @@ mod tests {
         let (lines, _) = draw_long_catalog(59);
         let last_row_y = lines
             .iter()
-            .rposition(|l| l.contains("r/row"))
+            .rposition(|l| l.contains("datarow"))
             .expect("catalog rows are rendered");
         assert!(
-            lines[last_row_y].contains("r/row59"),
+            lines[last_row_y].contains("datarow59"),
             "the last data row is the last visible row"
         );
         assert!(
@@ -2646,17 +2916,21 @@ mod tests {
         assert_eq!(m.search, "type '/' to search");
         assert!(m.search_placeholder);
         assert_eq!(m.scope, "");
-        assert_eq!(m.headers, ["Repo", "Kind", "Tag", "Rating", "Downloads", "Status"]);
+        assert_eq!(m.headers, ["Name", "Kind", "Tag", "Rating", "Downloads", "Status"]);
         assert_eq!(m.rows.len(), 2);
         // Columns are fixed-width (padded/truncated by `fit`) so the
         // table aligns; status keeps its glyph+label verbatim. Repo is
         // the first column, kind second.
-        assert_eq!(m.rows[0].columns[0], fit("r/alpha", W_REPO));
+        assert_eq!(m.rows[0].columns[0], "alpha");
+        assert_eq!(m.rows[0].namespace, " ".repeat(W_REPO - 5));
         assert_eq!(m.rows[0].columns[1], fit("skill", W_KIND));
         // The Tag column shows the explicit version, not `latest`.
         assert_eq!(m.rows[0].columns[2], fit("2.1.0", W_TAG));
         assert_eq!(m.rows[0].columns[5], "✓ installed");
-        assert_eq!(m.rows[0].columns[0].chars().count(), W_REPO);
+        assert_eq!(
+            m.rows[0].columns[0].chars().count() + m.rows[0].namespace.chars().count(),
+            W_REPO
+        );
         assert_eq!(m.rows[0].status_color, ColorKey::Installed);
         assert_eq!(m.rows[1].status_color, ColorKey::NotInstalled);
         assert!(m.rows[0].selected, "first row selected by default");
@@ -4996,23 +5270,44 @@ mod tests {
         ]);
         let m = frame(&s);
         // Default registry dropped for display…
-        assert_eq!(m.rows[0].columns[0], fit("acme/tool", W_REPO));
+        assert_eq!(m.rows[0].columns[0], "tool");
+        assert_eq!(m.rows[0].namespace, format!("{:<w$}", "  acme", w = W_REPO - 4));
         // …but a non-default registry keeps its host.
-        assert_eq!(m.rows[1].columns[0], fit("ghcr.io/other/tool", W_REPO));
+        assert_eq!(m.rows[1].columns[0], "tool");
+        assert_eq!(
+            m.rows[1].namespace,
+            format!("{:<w$}", "  ghcr.io/other", w = W_REPO - 4)
+        );
     }
 
     #[test]
-    fn frame_flat_view_keeps_full_ref() {
+    fn flat_rows_from_different_roots_keep_what_tells_them_apart() {
+        let mut s = TuiState::new();
+        s.view_mode = crate::tui::state::ViewMode::Flat;
+        s.set_default_registry(Some("localhost:5000".to_string()));
+        s.set_rows(vec![
+            row("localhost:5000/acme/tool", ArtifactState::Installed),
+            row("ghcr.io/other/tool", ArtifactState::Installed),
+        ]);
+        let m = frame(&s);
+        assert_ne!(
+            (&m.rows[0].columns[0], &m.rows[0].namespace),
+            (&m.rows[1].columns[0], &m.rows[1].namespace)
+        );
+    }
+
+    #[test]
+    fn frame_flat_view_drops_the_shared_namespace() {
         let mut s = TuiState::new();
         s.view_mode = crate::tui::state::ViewMode::Flat;
         s.set_rows(vec![row("reg/acme/tool", ArtifactState::Installed)]);
         let m = frame(&s);
         assert_eq!(m.rows.len(), 1);
         assert_eq!(
-            m.rows[0].columns[0],
-            fit("reg/acme/tool", W_REPO),
-            "flat keeps the full ref"
+            m.rows[0].columns[0], "tool",
+            "a lone row's namespace is shared by definition"
         );
+        assert_eq!(m.rows[0].namespace, " ".repeat(W_REPO - 4));
     }
 
     // ── Step 3.4: tree frame spec tests ──────────────────────────────────────
@@ -6176,13 +6471,13 @@ mod spec_multi_registry_render_tests {
         // Repo cell relative to the configured registry (namespace stripped).
         assert_eq!(
             m.rows[0].columns[0].trim(),
-            fit("skills/a", W_REPO).trim(),
-            "Repo cell must be relative to localhost:5050/grimoire (namespace 'grimoire' stripped)"
+            fit("a", W_REPO).trim(),
+            "Repo cell must be relative to localhost:5050/grimoire, shared namespace dropped"
         );
         assert_eq!(
             m.rows[1].columns[0].trim(),
-            fit("skills/b", W_REPO).trim(),
-            "Repo cell must be relative to localhost:5051/tools (namespace 'tools' stripped)"
+            fit("b", W_REPO).trim(),
+            "Repo cell must be relative to localhost:5051/tools, shared namespace dropped"
         );
         // Registry column shows the configured registry (full url), not bare host.
         assert_eq!(
@@ -6221,8 +6516,8 @@ mod spec_multi_registry_render_tests {
         // Repo cell must be the elided form (no host prefix).
         assert_eq!(
             m.rows[0].columns[0].trim(),
-            fit("acme/skill-a", W_REPO).trim(),
-            "single-registry flat Repo cell must strip the default registry host"
+            fit("skill-a", W_REPO).trim(),
+            "single-registry flat Repo cell must strip the default registry host and shared namespace"
         );
     }
 
