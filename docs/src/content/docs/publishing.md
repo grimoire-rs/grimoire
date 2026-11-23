@@ -1336,8 +1336,8 @@ node in the [TUI tree](./commands.md#tui). That node restates what the
 row's kind column already says. It doubles into a `skill` group holding a
 `skills` group when
 [`options.tui.group_by_type`](./configuration.md#options-tui) is on.
-Browsed through a [package index](./package-index.md), the tree groups by
-the index namespace instead.
+Browsed through a [package index](./package-index.md), the tree, the flat
+list and the detail header use the index namespace instead.
 
 Publish flat by setting `repository_prefix` to your namespace:
 

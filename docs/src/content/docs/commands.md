@@ -3900,8 +3900,13 @@ the collapsible tree view by default and toggling to a flat kind-grouped list
 (press `t`; set [`options.tui.default_view`][options-tui] to `"flat"` to open
 there instead). When
 more than one registry is configured, the flat list adds a leading **Registry**
-column showing `alias (url)` (or the raw URL when no alias was set), and
-the Repo cell is shortened to the registry-relative path so names stay readable.
+column showing the alias (or the raw URL when no alias was set). The
+**Name** column names a row by where the [package index](./package-index.md)
+placed it, or by its OCI path when the index gave no placement. It drops the
+namespace prefix every row of a source shares (per source when the Registry
+column is shown, over all rows otherwise), computed over the whole catalog so
+a search never changes how a row reads. The name stays first. The rest of its
+namespace follows, dimmed, shortened in the middle with `…` when it does not fit.
 It supports multi-select with batch install, update, and delete. Press `?` in the TUI
 for the full key map; highlights are `t` to toggle tree/flat view, `v` to
 pick a version, `o` to open the selected entry's repository URL in the
@@ -4011,7 +4016,9 @@ OCI registry group under that registry (host plus configured namespace).
 Rows from a [package index](./package-index.md) group under the index
 source, by where the index placed them: `<host>/<namespace>`, then the
 package name. An unbranched chain like `github.com/grimoire-rs` renders as one
-joined node. The OCI reference stays in the flat list and the detail pane.
+joined node. The flat list and the detail header use the same index placement.
+The detail pane shows the OCI reference in an `OCI:` row at the top of its
+Metadata section.
 
 Some pointers fall back to their OCI reference in the tree. That happens
 when the index did not place the pointer, or placed it under a bad path.
@@ -4070,7 +4077,9 @@ was never declared).
 An active search (started with `/`) switches the tree to the flat list once
 the query holds a text term. Ranked results then read as one list instead of
 scattering across groups. The list stays flat until the query is cleared, so
-finishing a kind word like `bundle` does not flip the view back.
+finishing a kind word like `bundle` does not flip the view back. The ranked
+list names rows as the flat list does. Matching and sort order still use the
+OCI reference, as `grim search` does.
 
 Clearing the query (`esc`) returns to the tree. Pressing `t` during a search is
 honoured and sticks. Clearing the query then leaves the view as you chose
