@@ -216,7 +216,8 @@ pub fn detail_tab_lines(
 
 /// Build the Detail pane's semantic lines for the selected row.
 ///
-/// Layout: the centered identifier framed by blank lines, an underlined
+/// Layout: the centered identifier (the index placement when the row has one,
+/// else the OCI reference) framed by blank lines, an underlined
 /// `Summary:` section (the short blurb, `-` when absent), an optional
 /// `Description:` section (only when a description exists), then a
 /// `Metadata:` section of `Label: value` rows. Version and status are
@@ -237,10 +238,13 @@ pub fn detail_lines_naming(
         r.keywords.join(", ")
     };
     let summary = if r.summary.is_empty() { "-" } else { r.summary.as_str() };
+    // The header is the whole index placement, never the list's stripped form;
+    // the OCI reference it replaces moves to a labelled Metadata row.
+    let placement = r.index_path.as_ref().filter(|_| !matches!(r.source, RowSource::Local));
 
     let mut lines = vec![
         DetailLine::Blank,
-        DetailLine::Identifier(r.repo.clone()),
+        DetailLine::Identifier(placement.unwrap_or(&r.repo).clone()),
         DetailLine::Blank,
         DetailLine::SectionLabel("Summary:"),
         DetailLine::Blank,
@@ -258,6 +262,14 @@ pub fn detail_lines_naming(
         DetailLine::Blank,
         DetailLine::SectionLabel("Metadata:"),
         DetailLine::Blank,
+    ]);
+    if placement.is_some() {
+        lines.push(DetailLine::MetaEntry {
+            label: "OCI:",
+            value: super::render::sanitize_member_label(&r.repo),
+        });
+    }
+    lines.extend([
         DetailLine::MetaEntry {
             label: "Keywords:",
             value: keywords,
@@ -850,6 +862,77 @@ mod tests {
             state: ArtifactState::NotInstalled,
             source: RowSource::Unattributed,
         }
+    }
+
+    fn placed_row() -> TuiRow {
+        let mut r = tui_row(None);
+        r.repo = "registry.example.com/bu-x/skills/alpha".to_string();
+        r.index_path = Some("github.com/acme/tools/alpha".to_string());
+        r
+    }
+
+    fn identifiers(lines: &[DetailLine]) -> Vec<&str> {
+        lines
+            .iter()
+            .filter_map(|l| match l {
+                DetailLine::Identifier(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_oci_row(lines: &[DetailLine]) -> bool {
+        lines
+            .iter()
+            .any(|l| matches!(l, DetailLine::MetaEntry { label: "OCI:", .. }))
+    }
+
+    #[test]
+    fn detail_header_is_the_index_placement() {
+        let lines = detail_lines(Some(&placed_row()), None);
+        assert_eq!(identifiers(&lines), ["github.com/acme/tools/alpha"]);
+    }
+
+    #[test]
+    fn detail_names_the_oci_reference_below_an_index_header() {
+        let lines = detail_lines(Some(&placed_row()), None);
+        let meta = lines
+            .iter()
+            .position(|l| *l == DetailLine::SectionLabel("Metadata:"))
+            .expect("a Metadata section");
+        let first = lines[meta + 1..]
+            .iter()
+            .find(|l| matches!(l, DetailLine::MetaEntry { .. }))
+            .expect("a metadata entry");
+        assert_eq!(
+            *first,
+            DetailLine::MetaEntry {
+                label: "OCI:",
+                value: "registry.example.com/bu-x/skills/alpha".to_string()
+            }
+        );
+        let next = lines[meta + 1..]
+            .iter()
+            .filter(|l| matches!(l, DetailLine::MetaEntry { .. }))
+            .nth(1);
+        assert!(matches!(next, Some(DetailLine::MetaEntry { label: "Keywords:", .. })));
+    }
+
+    #[test]
+    fn detail_without_a_placement_has_no_oci_row() {
+        let r = tui_row(None);
+        let lines = detail_lines(Some(&r), None);
+        assert_eq!(identifiers(&lines), [r.repo.as_str()]);
+        assert!(!has_oci_row(&lines));
+    }
+
+    #[test]
+    fn detail_of_a_local_row_ignores_a_placement() {
+        let mut r = placed_row();
+        r.source = RowSource::Local;
+        let lines = detail_lines(Some(&r), None);
+        assert_eq!(identifiers(&lines), [r.repo.as_str()]);
+        assert!(!has_oci_row(&lines));
     }
 
     // ── Tabs and the live companion ──────────────────────────────────────

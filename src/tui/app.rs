@@ -9380,17 +9380,26 @@ mod tests {
             s.set_default_registry(elision_registry(&ctx));
             s.set_registry_order(registry_order(&ctx));
             s.set_registry_locators(registry_locators(&ctx));
-            s.set_rows(rows_sourced_at(&only));
+            let mut rows = rows_sourced_at(&only);
+            // A row on another host leaves the first row no prefix to share, so
+            // a lost root elision cannot hide behind the shared-prefix strip.
+            let mut stranger = rows[0].clone();
+            stranger.registry = "other.example".to_string();
+            stranger.repository = "tools/skill-x".to_string();
+            stranger.repo = "other.example/tools/skill-x".to_string();
+            stranger.source = crate::config::registry_resolve::RowSource::Unattributed;
+            rows.push(stranger);
+            s.set_rows(rows);
 
-            let cell = crate::tui::render::frame(&s).rows[0].columns[0].clone();
+            let row = &crate::tui::render::frame(&s).rows[0];
             assert_eq!(
-                cell.trim_end(),
-                "platform/skill-0",
+                row.columns[0], "skill-0",
                 "the single registry's root must be elided from the Repo cell ({only:?})"
             );
+            assert_eq!(row.namespace.trim(), "platform", "({only:?})");
             assert!(
-                !cell.contains("ghcr.io"),
-                "and no part of the locator may survive in it ({only:?}): {cell:?}"
+                !row.columns[0].contains("ghcr.io") && !row.namespace.contains("ghcr.io"),
+                "and no part of the locator may survive in it ({only:?}): {row:?}"
             );
         }
     }
