@@ -2921,8 +2921,9 @@ pub(crate) async fn fetch_verified_layer(
 /// is given: success charges the tar, a failure what it decoded first. A
 /// layer the run failed to decode before, or one stored larger than what is
 /// left, is not read; a decode is capped at what is left. A layer the run
-/// already decoded is returned from the run's cache without a fetch, a decode
-/// or a charge, so two pins sharing one good layer cost one decode.
+/// already decoded under the same descriptor is returned from the run's
+/// cache without a fetch, a decode or a charge, so two pins sharing one
+/// good layer descriptor cost one decode.
 ///
 /// # Errors
 ///
@@ -2996,14 +2997,16 @@ pub(crate) async fn fetch_verified_layer_within(
     // MCP, settings and requires layers are parsed, never expanded, and are capped before the read.
     let budget = budget.filter(|_| tar_layer);
     if let Some(budget) = budget {
-        if budget.failed(&layer_digest) {
+        if budget.failed(layer) {
             let earlier = std::io::Error::other("the layer failed to decode earlier in this run");
             return Err(crate::oci::layer::LayerError::Corrupt(earlier).into());
         }
-        // A layer the run already decoded is reused without a fetch, a
-        // decode or a charge: two pins sharing one good layer prove from
-        // the same bytes (#368).
-        if let Some(decoded) = budget.cached(&layer_digest) {
+        // A layer the run already decoded under this descriptor is reused
+        // without a fetch, a decode or a charge: two pins sharing one good
+        // layer descriptor prove from the same bytes (#368). The descriptor
+        // is the key, not the digest alone, so the same bytes under another
+        // media type decode again instead of reusing the first decode (#393).
+        if let Some(decoded) = budget.cached(layer) {
             return Ok((*decoded).clone());
         }
         if layer.size > budget.remaining() {
@@ -3039,10 +3042,10 @@ pub(crate) async fn fetch_verified_layer_within(
     // past it, so this charge spends the rest and refuses.
     budget.charge(len).map_err(decode_refused)?;
     let decoded = decoded.map_err(|e| {
-        budget.note_failed(layer_digest.clone());
+        budget.note_failed(layer.clone());
         crate::error::Error::from(e)
     })?;
-    budget.cache(layer_digest, decoded.clone());
+    budget.cache(layer.clone(), decoded.clone());
     Ok(decoded)
 }
 
@@ -10181,6 +10184,54 @@ mod tests {
             budget.remaining(),
             after_first,
             "the shared layer is charged once, not once per pin"
+        );
+    }
+
+    /// Two pins name the same layer digest under different media types
+    /// (#393 review): the second pin must not reuse the first pin's decode.
+    #[tokio::test]
+    async fn a_layer_shared_by_digest_but_not_by_media_type_is_decoded_again() {
+        let tar = skill_tar("shared", SKILL_DOC);
+        // Two manifests, two pins, the one layer digest: the second manifest
+        // names the same bytes as gzip, so its descriptor differs.
+        let manifest_one = manifest_for(&tar);
+        let mut manifest_two = manifest_for(&tar);
+        manifest_two.layers[0].media_type = crate::oci::layer::TAR_GZIP_LAYER_MEDIA_TYPE.to_string();
+        manifest_two.annotations = std::collections::BTreeMap::from([("origin".to_string(), "two".to_string())]);
+        let pin = |tag: &str| {
+            let id = Identifier::new_registry(tag, "localhost:5000");
+            PinnedIdentifier::try_from(
+                id.clone_with_digest(Algorithm::Sha256.hash(format!("manifest-{tag}").as_bytes())),
+            )
+            .unwrap()
+        };
+        let pin_one = pin("one");
+        let pin_two = pin("two");
+        let manifests =
+            std::collections::HashMap::from([(pin_one.digest(), manifest_one), (pin_two.digest(), manifest_two)]);
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let access = arc(SharedLayerMock {
+            manifests,
+            blob: tar.clone(),
+            fetches: fetches.clone(),
+        });
+        let budget = DecodeBudget::with_limit(10_000);
+        let one = LockedArtifact::direct("one".to_string(), ArtifactKind::Skill, pin_one);
+        let two = LockedArtifact::direct("two".to_string(), ArtifactKind::Skill, pin_two);
+
+        let first = fetch_verified_layer_within(&one, ArtifactKind::Skill, &access, Some(&budget))
+            .await
+            .expect("the first pin decodes its layer");
+        assert_eq!(first, tar, "a plain tar layer decodes to its bytes");
+
+        // The gzip pin names the same digest, but its bytes were decoded as
+        // tar: reusing them would prove a pin `grim install` cannot unpack.
+        let second = fetch_verified_layer_within(&two, ArtifactKind::Skill, &access, Some(&budget)).await;
+        assert!(second.is_err(), "the gzip pin decodes its own layer, {second:?}");
+        assert_eq!(
+            fetches.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the shared digest is fetched again under the new media type"
         );
     }
 

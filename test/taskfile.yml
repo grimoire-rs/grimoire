@@ -122,14 +122,7 @@ tasks:
       REPORT: results/old-grim/junit.xml
     preconditions:
       - sh: test -n "$GRIM_OLD_BIN"
-        msg: >-
-          GRIM_OLD_BIN must name the grim binary from the v0.15.1 release.
-          Download https://github.com/grimoire-rs/grimoire/releases/download/v0.15.1/grimoire-<target>.tar.gz
-          (for example grimoire-x86_64-unknown-linux-gnu.tar.gz), check it against the release's
-          own .sha256 asset (the x86_64 Linux asset's pinned SHA-256 is
-          eec30a069ce12239058b54a9e986340cc2a3db9662504ab5ca467f8167d802c0), extract grim and
-          export GRIM_OLD_BIN=<path>/grim. The deep CI job (.github/workflows/verify-deep.yml,
-          "Fetch grim 0.15.1") does exactly this; a dev build that prints 0.15.1 is refused.
+        msg: GRIM_OLD_BIN must name the grim binary from the v0.15.1 release (grimoire-<target>.tar.gz)
     cmds:
       - task: build
         vars:

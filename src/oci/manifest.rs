@@ -34,7 +34,7 @@ pub const OCI_EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json
 /// The OCI `size` field is an `i64` on the wire; a negative size is
 /// nonsensical for content and is clamped to `0` at conversion so the
 /// rest of the system can treat it as a `u64`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Descriptor {
     /// The content digest of the described blob.
     pub digest: Digest,
