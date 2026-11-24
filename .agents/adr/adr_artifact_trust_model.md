@@ -146,6 +146,16 @@ the rule that no artifact may carry a literal credential (`${VAR}`
 references only; the descriptor's OAuth block deliberately has no
 `client_secret` field).
 
+> **Proposed — applies on acceptance of [`adr_artifact_mirroring.md`](./adr_artifact_mirroring.md)
+> (amendment 1, D18).** **Mirrored artifacts.** An artifact carrying
+> `com.grimoire.mirror.source` was republished by the operator who pushed it,
+> who is its publisher of record; decisions 1-4 apply to it unchanged.
+> Integrity covers the mirror's bytes, not upstream authorship. The mirror's
+> refusal of hook, MCP, settings and mod content is the mirror's product
+> policy, not a gate on a kind (`adr_artifact_mirroring.md` D8). Mirrored
+> content is authored upstream and vouched for by the operator, who is T1 to
+> a consumer.
+
 ### In scope — grim must defend against these
 
 | Threat | Mechanism |
@@ -206,3 +216,4 @@ above holds.
 | 2026-11-06 | Claude (/hex-execute RF5) | Decision 1 and the settings box restored to the owner's accepted text. The narrowing moved to a block under decision 1 marked Proposed, awaiting the owner (goal-loop decisions RD-3, RD3-6 and RB-4). The shipped code follows the block |
 | 2026-11-19 | Claude (owner ruling, via `adr_mod_artifact_kind.md` D15) | Decision 2 gains one owner-authorised exception: a shipped kind refuses content that reaches client-loaded code, at build, publish and install. The owner ruled "refuse, at publish and consume" and authorised the Principle 9 exception on 2026-11-19. The two "stays prohibited" statements and the Consequences line carry the matching clause |
 | 2026-11-19 | Claude (/hex-execute) | Decision 2 gains the mods box, the third scoped exception, on the owner ruling of 2026-11-18 (consent option B, one record for every gated kind); `adr_mod_artifact_kind.md` D6 |
+| 2026-11-24 | Claude (/hex-execute, PZ) | Block under decision 4 for mirrored artifacts, marked Proposed: applies on acceptance of `adr_artifact_mirroring.md` (amendment 1). No decision text changed |

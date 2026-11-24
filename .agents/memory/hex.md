@@ -45,7 +45,7 @@ preferences, not copies. Team-shared — commit it.
   Contract detail: `docs/src/content/docs/stability.md`,
   `.agents/adr/adr_render_layout_stability.md`.
 - Discussions: `.agents/discussions/` (hex default) — `/hex-discuss`
-  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `harness-mods-artifact-kind.md` (→ architect, 2026-11-18).
+  artifacts; `State: active` there arms the hex-state no-edit rule. Most recently drained: `artifact-mirroring.md` (→ loop, 2026-11-24).
 - Worktrees: agent worktrees at the hex default `.agents/worktrees/`
   (gitignored); human feature worktrees are siblings `../grimoire-wt-<topic>`
   (`AGENTS.md` › "Workflow"). Whoever creates one removes it.
@@ -105,6 +105,38 @@ research-axes:
   `nox-review` has no model flag and inherits that global default.
 
 ## Memory
+
+- **Review-fix pass 2 (2026-11-24, hex-execute, cycle 2 of 2, the last):** `.agents/plans/plan_artifact_mirroring.md` State `review`, Next the closing re-review then `/hex-finalize`. RV8 (plugin bundle provenance) and the round's six Warns landed as `fix(mirror)` commits; ED-12–ED-15 in the plan.
+  **Pitfall:** a fix that corrects the provenance of one row kind (units) leaves every other writer of the same fields (bundles, licence notices) on the old value; grep every writer of `source`, `revision`, `path` and `upstream` before closing such a finding.
+  **Pitfall:** a "gone" vs "transient" split for a git fetch can only use the remote's own answer (pin missing, HTTPS 404, not a repository); everything else must stay an infra failure, or a scheduled sync exits 0 with nothing published.
+- **Review-fix pass (2026-11-24, hex-execute, cycle 1 of 2):** `.agents/plans/plan_artifact_mirroring.md` State `review`, Next re-review then `/hex-finalize`. Fixes RV1–RV7 landed as five `fix(...)` commits on `hex/artifact-mirroring`; ED-8–ED-11 and § Deferred review findings in the plan.
+  **Pitfall:** a stage-1 test that asserts only on the mirror's own JSON report passed over four publish defects; write the acceptance test first in the integration tree against the unfixed binaries, asserting on `grim describe` and installed files, so each is red before its fix.
+  **Pitfall:** a green `task verify` leaves about 290 s for commits; have the commit file sets planned before the gate ends, and keep the docs pass for a second, cached `task verify`.
+- **Executed (2026-11-24, hex-execute, goal loop `.agents/goals/artifact-mirroring.md`):**
+  `.agents/plans/plan_artifact_mirroring.md` State `review`, Next run-level `/hex-review` then `/hex-finalize`; all ten pipelines landed on `hex/artifact-mirroring` (uno checkout), one commit per pipeline. Decisions ED-1–ED-7 in the plan.
+  **Pitfall:** under the commit guard workers cannot commit; hand back working-tree diffs, apply them in the integration tree, commit per pipeline inside the 300 s window after one green gate. `git apply --3way` stages what it applies, so the next `git add` + commit sweeps those files in; use plain `git apply`.
+  **Pitfall:** one shared `CARGO_TARGET_DIR` across worktrees clobbers test binaries (path dependencies hash by workspace path), so a worker's test run can execute another worktree's build; give each worktree a private target and serialise cargo with `flock` on one lock file.
+  **Pitfall:** the acceptance suite (`task verify`) was the first place five real mirror defects showed (pathspec magic under `GIT_LITERAL_PATHSPECS`, a skill payload path, bundle rows for refused members); unit-green modules written in parallel against stubs still need an end-to-end suite before the gate.
+- **Planned (2026-11-24, hex-plan xhigh):**
+  `.agents/plans/plan_artifact_mirroring.md`, branch `hex/artifact-mirroring` in `/home/mherwig/.herdr/worktrees/grimoire/uno`. Built from `adr_artifact_mirroring.md` D1–D19 (Proposed; the owner's flip to Accepted is needed before `/hex-finalize`) and `.agents/specs/design_artifact_mirroring.md`.
+  - Ten pipelines in four waves: CW (1) → PD, PP, PC, PMF `hard`, PML `hard`, PMV, PM2 (2) → PT (3) → PZ docs (4). Critical path CW → PMF → PT → PZ.
+  - Repository scope: the mirror is a workspace crate `crates/grim-mirror` (no `grimoire` dependency, source-only, Unstable) because the run holds no grant for a new repository; the split is a follow-up.
+  - Review: spec, architect, researcher seats plus codex `gpt-6.1-sol` on copies in a scratch directory. 12 Blocks fixed (10 design, 2 plan), one re-validation.
+  **Pitfall:** the commit-guard hook fires on any Bash command whose text names cargo tools, even a heredoc that writes a plan; write long text with the Write tool, then join files with a short command.
+  **Pitfall:** `grim describe <repo>:latest` exits 79 when `latest` is absent even if other tags exist; probe exact versions instead.
+
+- **Discussion drained (2026-11-24, → loop):**
+  `.agents/discussions/artifact-mirroring.md`. The feature is a mirror tool that republishes foreign-authored content as grim OCI artifacts:
+  - It lives in a separate repository and binary. Grim gains PATH plugin dispatch so it runs as `grim mirror`, and it publishes through `grim publish`.
+  - The one source is a git repository path at a pinned commit. A harness marketplace file is a second way to list units, and each plugin becomes one bundle.
+  - It mirrors skills, rules, agents and bundles. Hooks, MCP servers and settings are refused, and a partial bundle reports the members it skipped.
+  - A licence that permits redistribution is required: detected where possible, else declared in the mirror entry, and the artifact records which. Neither means refused.
+  - Each entry names its upstream dialect. Vendor top-level fields move under `metadata.<vendor>.*`, the inverse of grim's install-time lift. Bodies are copied verbatim.
+  - The version is the upstream semver tag where one exists, else a snapshot from the commit that last changed the unit's subtree.
+  - Artifacts go under the operator's namespace and never imitate the upstream's. Template-rendered upstreams and operator scripts are refused in the first version.
+  - The loop's first deliverable is an ADR, tier `high` or above. Eleven open questions are carried in the artifact.
+  Research: `.agents/research/research_artifact_mirroring_*.md` (7 files).
+  **Pitfall:** `grim publish` rejects `+build` and non-strict semver, so the snapshot version grammar must be settled before anything publishes. Commit `a174a953` makes grim refuse a skill root that holds `.claude-plugin`.
 
 - **Active plan (2026-11-19, hex-plan xhigh, goal loop `.agents/goals/adr-mod-artifact-kind.md`):**
   `.agents/plans/plan_mod_artifact_kind.md`, State `plan-approved`, Next `/hex-execute .agents/plans/plan_mod_artifact_kind.md`, branch `hex/adr-mod-artifact-kind` in the worktree `.agents/worktrees/adr-mod-artifact-kind` of the duo checkout. Built from `adr_mod_artifact_kind.md` (Proposed; the owner's status flip is human step H-2, needed before `/hex-finalize`).
