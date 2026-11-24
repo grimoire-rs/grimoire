@@ -1101,7 +1101,10 @@ below, and the client reap below that.
 
 Before `update` rewrites the lock, it proves each recorded output against the
 lock it is about to replace. It reads the local store, then the registry for a
-pin the store lacks. A named run proves only its own closure. This catches
+pin the store lacks. Those registry reads run within the same fixed bounds as
+[`grim status`](#status-adoption): 10 s a call, 30 s a run, at most 64 manifest
+and 64 layer fetches, and a host skipped after its first failure. A named run
+proves only its own closure. This catches
 files that a pull or checkout brought without a record. A dropped artifact's
 files are deleted only where that proof holds. A file that stays unproven is
 never deleted, `--force` included, and a stderr line names it:
