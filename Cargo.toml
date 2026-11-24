@@ -2,7 +2,7 @@
 # The root package is a member implicitly. Listing "." would make every path
 # under the root an explicit member and void `exclude`, which `task p9:diff`
 # needs: it builds a main checkout under target/p9/src.
-members = ["crates/grimoire-hook-core", "crates/grim-hook"]
+members = ["crates/grimoire-hook-core", "crates/grim-hook", "crates/grim-mirror"]
 exclude = ["target"]
 resolver = "3"
 

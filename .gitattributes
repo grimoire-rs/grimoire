@@ -16,3 +16,4 @@
 
 # Cross-repo conformance tree: byte-exact, no line-ending or LFS rewriting
 test/data/conformance/** -text
+crates/grim-mirror/tests/licenses/*.crlf.txt -text

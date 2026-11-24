@@ -1,0 +1,46 @@
+# Example mirror file. Run with: grim mirror check (reads ./mirror.toml)
+schema = 1
+
+[mirror]
+# Registry prefix every mirrored repository lands under.
+registry = "ghcr.io/acme/mirror"
+# SPDX ids to admit; leave out to admit every OSI-approved id.
+licenses = ["MIT", "Apache-2.0"]
+# Past releases to mirror on first sight.
+backfill = 3
+
+# A repository listing its units by kind.
+[[upstream]]
+name = "anthropic-skills"
+repo = "https://github.com/anthropics/skills"
+skills = ["skills/*"]
+exclude = ["skills/internal-*"]
+# Used when no licence file or field is found.
+license = "Apache-2.0"
+
+# One unit with its own declared licence.
+[upstream.unit-licenses]
+"skills/pdf" = "MIT"
+
+# A Claude plugin marketplace.
+[[upstream]]
+name = "community-plugins"
+repo = "https://github.com/acme/claude-plugins"
+dialect = "claude"
+marketplace = ".claude-plugin/marketplace.json"
+plugins = ["review-tools"]
+
+# A bundle of mirrored units.
+[[upstream.bundle]]
+name = "review-kit"
+members = ["skills/review-*"]
+
+# A repository that went away: republish its units deprecated.
+[[upstream]]
+name = "old-rules"
+repo = "https://github.com/acme/old-rules"
+rules = ["rules/*.md"]
+
+[upstream.retire]
+reason = "the upstream repository was archived"
+replaced-by = "ghcr.io/acme/mirror/community-plugins"

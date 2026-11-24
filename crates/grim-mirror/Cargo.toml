@@ -1,0 +1,36 @@
+[package]
+name = "grim-mirror"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mirror upstream git repositories and Claude plugin marketplaces as grim artifacts"
+publish = false
+
+[[bin]]
+name = "grim-mirror"
+path = "src/main.rs"
+
+# No dependency on the `grimoire` crate: the mirror drives grim through its CLI
+# and JSON output only, so it can move to its own repository unchanged.
+[dependencies]
+clap = { version = ">=4.5.57, <5", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+toml = "1.2"
+regex = "1"
+globset = "0.4"
+semver = { version = "1", features = ["serde"] }
+sha2 = "0.11"
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "macros"] }
+tempfile = "3"
+tokio = { version = "1", features = ["process", "rt", "macros", "time", "io-util", "fs"] }
+spdx = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+
+[package.metadata.dist]
+dist = false
+
+[lints]
+workspace = true
