@@ -386,6 +386,8 @@ published by older grim are still typed from their legacy `artifactType`). When
 `--name` is omitted, the binding name defaults to the reference's last path
 segment. If the kind cannot be inferred (for example, a non-Grimoire image),
 `add` errors and asks you to supply `--kind` explicitly.
+Offline, an uncached reference exits `81` since 0.17.0, because grim cannot read the manifest.
+It no longer exits `65`. A genuine inference failure still exits `65`.
 
 By default `add` installs what it declares, so a single command is enough to
 start using an artifact. Only the freshly-added artifact (or, for a bundle, its
@@ -679,6 +681,7 @@ A bundle has no local-path form via `add`: `grim add --kind bundle
 | A [lock file grim cannot read](#lock-unreadable) | `78`, `77` or `74` |
 | A tag that does not exist below a release the resolve keeps, a claim no release satisfies, or a [kept pin whose manifest is gone](#lock-exit-codes) | `79` |
 | With [`--locked`](#locked), no lock file (reason `no-lock`) | `79` |
+| Offline, a reference that was never cached (since 0.17.0; `65` before) | `81` |
 
 A resolve that fails restores `grimoire.toml`, and an unreadable lock refuses
 before the config is written, so neither leaves a declaration behind. Every other

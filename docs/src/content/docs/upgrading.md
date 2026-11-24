@@ -16,6 +16,8 @@ enough to look like a bug if you meet it cold. The one exception is
 effect and called out as breaking where it appears. Three more are what grim
 0.16.0 packs for a [rule][ref-rule-support-dir] and an [agent][ref-agent-companions],
 and which [logo][ref-logo-svg] a package publishes.
+Two more arrived in 0.17.0: the [consent record is asked again](#consent-reask),
+and [a skill can no longer carry a Claude plugin manifest](#skill-plugin-manifest).
 
 ## Consent is asked again once per workspace {#consent-reask}
 

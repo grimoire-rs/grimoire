@@ -285,7 +285,7 @@ scripts/                           # (optional) build/validation tooling
 |---|---|---|---|
 | `schema` | integer | yes | Metadata schema version. This document specifies `1`. Consumers MUST skip entries with an unknown `schema` (forward compatibility). |
 | `name` | string | yes | Package name. MUST equal the directory name containing the file. |
-| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)), `settings` (experimental since grim 0.16.0, see [Settings][settings-kind]; index operators: indexer 0.7.0 or newer), `mod` (experimental, see [Mods](./mods.md)). A consumer must list an unknown `kind` rather than drop it. |
+| `kind` | string | yes | One of `skill`, `rule`, `agent`, `mcp`, `bundle`, `hook` (experimental — see [Hooks](./hooks.md)), `settings` (experimental since grim 0.16.0, see [Settings][settings-kind]; index operators: indexer 0.7.0 or newer), `mod` (experimental since grim 0.17.0, see [Mods](./mods.md); index operators: an indexer above 0.7.1). A consumer must list an unknown `kind` rather than drop it. |
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
 | `summary` | string | no | Short single-line blurb, matched by `grim search` alongside `description` (distinct from it — usually shorter). |
@@ -711,6 +711,9 @@ stay valid — nothing in grim requires the toolchain.
 The indexer that validates entries must be 0.7.0 or newer to accept the
 `settings` kind. With an older indexer, the index pull request that
 `grim publish --announce` opens for a settings package fails validation.
+
+The `mod` kind, new in grim 0.17.0, needs an indexer above 0.7.1. With 0.7.1 or below,
+the index pull request that `grim publish --announce` opens for a mod package fails validation.
 
 An index repository can also host a plugin marketplace: commit a
 `marketplace.toml` beside the package pointers and deploy the export to a
