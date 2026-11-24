@@ -921,6 +921,12 @@ is the same gesture), and a prompt you accepted. `grim install`, `update`,
 declares nothing, and the MCP server never write one — that is the whole point
 of the gate.
 
+The record moved from `$GRIM_HOME/hooks/consent/` in grim 0.17.0 and is not
+imported: the first `grim install` per workspace after upgrading asks again,
+and with no terminal hooks and settings read `gated` (cause
+`workspace-not-consented`) until `grim consent allow` or `--trust-workspace`
+([Upgrading][upgrading-consent]).
+
 Because the record lists no tag, a **version bump** of a hook you already
 consented to does not re-ask; the bump is visible in the lock's `git diff`.
 Declaring a **new** hook, binding one under a new name, or pulling one from a
@@ -1133,5 +1139,6 @@ Full contract: [Mod reference][mods-ref]. Authoring: `grim-authoring`'s
 [hooks-remove]: https://grimoire.rs/hooks.html#remove-stays-armed
 [hooks-flag-off]: https://grimoire.rs/hooks.html#flag-off-retention
 [stability-unstable]: https://grimoire.rs/stability.html#unstable
+[upgrading-consent]: https://grimoire.rs/upgrading.html#consent-reask
 [settings-ref]: https://grimoire.rs/settings.html
 [share-settings]: https://grimoire.rs/guides/share-settings.html

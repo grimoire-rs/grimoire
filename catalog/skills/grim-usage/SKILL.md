@@ -2,7 +2,7 @@
 name: grim-usage
 description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, MCP servers, hooks, settings packages, bundles, and mods. Use when installing, updating, searching, rating, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, context, fetch, describe, export, search, rate, tui, mcp, hook, build, release, publish, login, logout, or completions commands; when adding, pinning, or exporting a plugin marketplace (marketplace.toml); when enabling opt-in telemetry; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
-compatibility: grim>=0.16
+compatibility: grim>=0.17
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,hooks,settings,multi-registry

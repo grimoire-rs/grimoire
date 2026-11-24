@@ -900,7 +900,10 @@ tracker, chat, contact, and security links. Those channels are deliberately
 absent from `grim search` and from the cached catalog row — they are
 repository-level and mutable, so only a live read is trustworthy. Press `t` to
 toggle between the flat list and a
-grouped collapsible tree view; the tree's opening mode, opening depth, and
+grouped collapsible tree view. Browsing through a package index, the flat
+list, a search and the detail header name each row by the index placement
+rather than its OCI path (the `OCI:` row of the detail Metadata still shows
+the reference). The tree's opening mode, opening depth, and
 path-splitting characters are configurable via `[options.tui]` in
 `grimoire.toml` (`default_view`, `group_by_type`, `tree_separators`,
 `expand_levels` — how many tree levels open expanded; the `z` key folds

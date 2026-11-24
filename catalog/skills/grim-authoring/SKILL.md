@@ -2,7 +2,7 @@
 name: grim-authoring
 description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, MCP server descriptors, hook manifests, settings documents, bundle TOMLs, and mod directories. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when writing a hook.toml with its events, tiers, matchers, and handlers; when creating or maintaining a plugin marketplace git repository (marketplace.toml, grim export marketplace, regenerate CI) or hosting a package index; when adding a vendor-namespaced metadata key for any client grim supports (claude, opencode, copilot, codex, cursor, kiro, junie, gemini, zed, amp, antigravity, cline, droid, goose, warp, openclaw, kilo, qoder — one namespace per client name); or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.16
+compatibility: grim>=0.17
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, mcp, hook, settings, bundle, and mod artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,mcp,hook,settings,bundle,mod,packaging
@@ -140,6 +140,8 @@ the summary below is a planning aid that the next client can age:
   nested table that fails the build with a hint to quote it. An OpenCode or Kilo key or value holding
   `{env:` or `{file:`, or a Gemini value holding `$NAME` or `${NAME}`, fails
   it too (65), since the harness would expand it.
+  A Claude `extraKnownMarketplaces` key starting `grim-mods` is refused too
+  (65): the mod kind owns that prefix.
 
 A declined kind is an honest refusal, not a silent failure — but it is
 still zero files. The enforced matrix and the upstream reason behind
