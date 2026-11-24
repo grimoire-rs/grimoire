@@ -17,9 +17,12 @@ file as the architecture evolves.
 ## Crate Layout
 
 Grimoire is a **cargo workspace**: one binary crate (`grimoire`, binary
-`grim`, source under `src/`) plus two hook crates
-(`crates/grimoire-hook-core`, `crates/grim-hook`). No lib/CLI split of the
-main crate. Acceptance tests live under `test/`.
+`grim`, source under `src/`), two hook crates
+(`crates/grimoire-hook-core`, `crates/grim-hook`) and `crates/grim-mirror`, a
+separate binary with no dependency on the `grimoire` crate that drives `grim`
+only through its CLI and JSON output (source-only, Unstable; see
+`subsystem-mirror.md`). No lib/CLI split of the main crate. Acceptance tests
+live under `test/`.
 
 ## Design Principles
 
@@ -103,6 +106,7 @@ the relevant ADRs before making decisions in the same domain.
 | [adr_shell_activation.md](../../.agents/adr/adr_shell_activation.md) | **Shell activation (Proposed 2026-11-11).** One profile line, `grim shell init <shell>`, gives completions, a lock-drift notice and update notices; an idle prompt costs no process, write or request. The pasted `grim shell init` spelling and the `options.update_mode` / `options.update_check_hours` keys are the one-way parts, everything else stays internal or Unstable. |
 | [adr_output_ownership_without_state.md](../../.agents/adr/adr_output_ownership_without_state.md) | **Install records as a cache of the disk (Proposed 2026-11-15).** A record is trusted while the files match it; when they do not and the lock names another pin, the files are compared with a render of that pin (`src/install/adoption.rs`), and only a mismatch is a local edit. Ownership is proven by content only, never by a link, and deletion stays record-driven. Part A: the install gate, status precedence, and the `update`, `uninstall`, `remove`, `lock` and `add` pre-passes. Part B: `grim status`, TUI open and MCP `grim_status --allow-writes` write proven records under a state-file lock and, online, fetch within fixed bounds with a miss memo. A loader typestate makes every new caller choose adopt, defer or an exempt reason. Prerequisite: a stored credential never reaches a host only a project file declares insecure |
 | [adr_mod_artifact_kind.md](../../.agents/adr/adr_mod_artifact_kind.md) | **Experimental `mod` artifact kind (Accepted 2026-11-19).** Client-loaded plugin code (Claude Code mods, OpenCode V2 plugins) ships as an eighth kind behind `[options.experimental] mods` and the one workspace consent record, which moves to `$GRIM_HOME/consent/` (v2, unprefixed keys). Harness directories plus a grim-generated wrapper; a separate mod store beside install state; Claude export in the first version. D15 (owner ruling 2026-11-19): a skill whose root carries a Claude plugin manifest directory is refused at build, publish and install (65, `skill-plugin-manifest`), an owner-authorised exception to Principle 9 |
+| [adr_artifact_mirroring.md](../../.agents/adr/adr_artifact_mirroring.md) | **Artifact mirroring (Proposed 2026-11-24).** A separate `grim-mirror` binary (workspace crate `crates/grim-mirror`, no dependency on the `grimoire` crate, source-only, Unstable until its own repository) republishes skills, rules, agents and bundles from git repositories and Claude plugin marketplaces at a pinned commit; hooks, MCP, settings and mods are skipped. grim gains PATH plugin dispatch for an unknown top-level name (`grim-<name>` from absolute PATH entries, built-ins win, `GRIM_BIN` set, not-found byte-identical at 64), a per-entry `publish.toml` `mirror` table emitting `com.grimoire.mirror.{source,path,license-source}` and outranking authored licence, source, revision and deprecation, and an Unstable `grim convert --from claude`. Snapshot versions are `<M>.<m>.<UTC YYYYMMDDHHMMSS>`; a moved upstream tag is refused, never forced |
 
 ## Code Style Conventions
 

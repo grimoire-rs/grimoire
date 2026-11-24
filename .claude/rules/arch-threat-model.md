@@ -37,6 +37,11 @@ AI-agent config on a developer's machine. As of the hook kind it also **arms cod
 executes automatically**, and, as of the mod kind, writes publisher code a client loads into its own process. So grim sits on a supply chain, and its risk class is the supply
 chain's.
 
+> **Applies on acceptance of `adr_artifact_mirroring.md` (amendments 2, D2, D18).** An unknown
+> subcommand may run `grim-<name>` from absolute `PATH` entries (relative and empty entries are
+> skipped; a built-in always wins). A repository cannot set the user's `PATH`, and whoever controls
+> `PATH` already chose which `grim` runs, so plugin dispatch adds no capability (T3 unchanged).
+
 ## In scope — attackers we defend against
 
 | # | Attacker | Why it is in scope |
@@ -185,6 +190,11 @@ Design against these directly; they are what the boundary is *for*.
   it is mitigated — **unless** it is the hook-consent exception recorded under I2 above, as extended
   to the `settings` and `mod` kinds, and the mod exceptions under I1, which is a decided trade with its residual named. Re-deriving it as a fresh Block is the churn this file
   exists to stop; disagreeing with it is an ADR amendment, not a finding.
+- **Mirrored artifacts (applies on acceptance of `adr_artifact_mirroring.md`):** the operator who
+  ran `grim-mirror` is the publisher of record, so to a consumer the operator is T1. Content is
+  authored upstream and vouched for by the operator; grim's integrity claim covers the pushed bytes,
+  not upstream authorship. Upstream T2 is answered by the mirror's recorded `revision`, its
+  moved-tag refusal, and that it runs no upstream code (`subsystem-mirror.md`).
 - **Writing an ADR:** scope the threat table to this file rather than re-deriving a boundary, and
   record any deliberate deviation with the attacker it exposes you to.
 

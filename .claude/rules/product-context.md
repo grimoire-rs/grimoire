@@ -98,14 +98,16 @@ grim uninstall skill code-review     # Full inverse of install
 
 Global flags: `--offline`, `--locked`, `--global`, `--config <path>`,
 `--registry <ref>`, `--format json`. Full surface:
-`subsystem-cli-commands.md` and `docs/src/content/docs/commands.md` (26 subcommands).
+`subsystem-cli-commands.md` and `docs/src/content/docs/commands.md` (27 subcommands).
 
 ## Technical Overview
 
 - **Language**: Rust 2024
 - **Layout**: cargo workspace — one binary crate (`grimoire`, binary `grim`,
-  source under `src/`) plus two hook crates (`crates/grimoire-hook-core`,
-  `crates/grim-hook`). No lib/CLI split of the main crate.
+  source under `src/`), two hook crates (`crates/grimoire-hook-core`,
+  `crates/grim-hook`) and the `crates/grim-mirror` sibling binary (republishes
+  skills, rules, agents and bundles from git repositories and Claude plugin
+  marketplaces; source-only, Unstable). No lib/CLI split of the main crate.
 - **Artifact kinds**: skill, rule, agent, mcp, bundle, plus hook,
   settings and mod, each behind its own `[options.experimental]` flag
 - **Default registry**: configurable via `GRIM_DEFAULT_REGISTRY`
