@@ -190,6 +190,75 @@ def grim_binary() -> Path:
 
 
 @pytest.fixture(scope="session")
+def grim_mirror_binary() -> Path:
+    """The ``grim-mirror`` binary under test: ``GRIM_MIRROR_COMMAND``, else ``test/bin/grim-mirror``.
+
+    Skipped on Windows: no mirror binary is built for that target.
+    """
+    if sys.platform == "win32":
+        pytest.skip("grim-mirror has no Windows build")
+    if env_path := os.environ.get("GRIM_MIRROR_COMMAND"):
+        p = Path(env_path)
+    else:
+        p = _PROJECT_ROOT / "bin" / "grim-mirror"
+    assert p.exists(), f"grim-mirror binary not found at {p}"
+    return p
+
+
+class GrimMirrorRunner:
+    """Runs ``grim-mirror`` with ``GRIM_BIN`` set to the grim under test.
+
+    The environment is the one ``GrimRunner`` builds, so ``HOME`` and
+    ``GRIM_HOME`` are isolated per test. ``run`` calls the binary directly;
+    ``run_via_grim`` goes through ``grim mirror ...`` plugin dispatch with the
+    ``grim-mirror`` directory first on ``PATH``.
+    """
+
+    def __init__(self, mirror: Path, grim: Path, grim_home: Path) -> None:
+        from src.runner import GrimRunner
+
+        self.mirror = mirror
+        self.grim = grim
+        self._grim_runner = GrimRunner(grim, grim_home)
+        self.env = {**self._grim_runner.env, "GRIM_BIN": str(grim)}
+
+    def _exec(self, cmd: list[str], env: dict[str, str], check: bool, stdin: str | None, cwd: Path | None, timeout: float | None):
+        import subprocess
+
+        result = subprocess.run(
+            cmd,
+            input=stdin,
+            stdin=subprocess.DEVNULL if stdin is None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=str(cwd) if cwd else None,
+            timeout=timeout,
+        )
+        if check and result.returncode != 0:
+            raise AssertionError(
+                f"{' '.join(cmd[1:])} failed (rc={result.returncode})\nstderr: {result.stderr.strip()}"
+            )
+        return result
+
+    def run(self, *args: str, check: bool = True, stdin: str | None = None, cwd: Path | None = None, timeout: float | None = None):
+        """Run ``grim-mirror <args>``."""
+        return self._exec([str(self.mirror), *args], self.env, check, stdin, cwd, timeout)
+
+    def run_via_grim(self, *args: str, check: bool = True, stdin: str | None = None, cwd: Path | None = None, timeout: float | None = None):
+        """Run ``grim mirror <args>`` with the grim-mirror directory on PATH."""
+        env = {**self.env, "PATH": f"{self.mirror.parent}{os.pathsep}{self.env['PATH']}"}
+        return self._exec([str(self.grim), "mirror", *args], env, check, stdin, cwd, timeout)
+
+
+@pytest.fixture()
+def grim_mirror(grim_mirror_binary: Path, grim_binary: Path, grim_home: Path) -> GrimMirrorRunner:
+    return GrimMirrorRunner(grim_mirror_binary, grim_binary, grim_home)
+
+
+@pytest.fixture(scope="session")
 def registry() -> str:  # type: ignore[return]
     """The acceptance-suite registry host, resolved by
     ``pytest_load_initial_conftests``.

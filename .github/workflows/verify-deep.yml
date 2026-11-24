@@ -29,6 +29,17 @@ jobs:
         uses: ./.github/actions/build-rust
         with:
           target: ${{ matrix.job.target }}
+      - name: Build grim-mirror
+        run: |
+          cargo build --release --locked -p grim-mirror --target=${{ matrix.job.target }}
+          cp target/${{ matrix.job.target }}/release/grim-mirror grim-mirror-${{ matrix.job.target }}
+      - name: Upload grim-mirror Binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: grim-mirror-${{ matrix.job.target }}
+          path: grim-mirror-${{ matrix.job.target }}
+          compression-level: 0
+          retention-days: 7
       - name: Install nextest
         uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
@@ -186,6 +197,8 @@ jobs:
     with:
       binary-artifact: grim-${{ matrix.job.target }}
       binary-file: grim-${{ matrix.job.target }}
+      mirror-artifact: grim-mirror-${{ matrix.job.target }}
+      mirror-file: grim-mirror-${{ matrix.job.target }}
       runner-os: ${{ matrix.job.os }}
       check-name: Acceptance Test Results (${{ matrix.job.name }})
       # The `deep-` prefix is what test-results downloads.

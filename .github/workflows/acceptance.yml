@@ -21,6 +21,14 @@ on:
         description: File name of the binary inside that artifact.
         type: string
         required: true
+      mirror-artifact:
+        description: Artifact of this run that holds the grim-mirror binary; empty skips it.
+        type: string
+        default: ""
+      mirror-file:
+        description: File name of the grim-mirror binary inside that artifact.
+        type: string
+        default: ""
       runner-os:
         description: Runner label the shards run on, and the label of their reports.
         type: string
@@ -80,6 +88,19 @@ jobs:
         run: |
           [ "$BINARY_FILE" = grim ] || mv -f "test/bin/$BINARY_FILE" test/bin/grim
           chmod +x test/bin/grim
+      - name: Download grim-mirror
+        if: ${{ inputs.mirror-artifact != '' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.mirror-artifact }}
+          path: test/bin
+      - name: Prepare grim-mirror
+        if: ${{ inputs.mirror-artifact != '' }}
+        env:
+          MIRROR_FILE: ${{ inputs.mirror-file }}
+        run: |
+          [ "$MIRROR_FILE" = grim-mirror ] || mv -f "test/bin/$MIRROR_FILE" test/bin/grim-mirror
+          chmod +x test/bin/grim-mirror
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Setup Task

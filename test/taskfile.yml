@@ -5,6 +5,7 @@ version: '3'
 vars:
   BIN_DIR: "{{.ROOT_DIR}}/test/bin"
   GRIM_BINARY: "{{.BIN_DIR}}/grim{{exeExt}}"
+  GRIM_MIRROR_BINARY: "{{.BIN_DIR}}/grim-mirror{{exeExt}}"
   SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
 
 tasks:
@@ -14,6 +15,8 @@ tasks:
       - cargo build --release --locked
       - mkdir -p {{.BIN_DIR}}
       - cp {{.ROOT_DIR}}/target/release/grim{{exeExt}} {{.GRIM_BINARY}}
+      - cargo build --release --locked -p grim-mirror
+      - cp {{.ROOT_DIR}}/target/release/grim-mirror{{exeExt}} {{.GRIM_MIRROR_BINARY}}
     status:
       - '{{eq .SKIP_BUILD "true"}}'
 
@@ -29,6 +32,7 @@ tasks:
       - ocx exec -- uv run pytest -m "not index_e2e and not bench" {{.CLI_ARGS | default "-v"}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_MIRROR_COMMAND: "{{.GRIM_MIRROR_BINARY}}"
 
   scripts:
     desc: Lint (ruff) and test (pytest) the repo-level Python in scripts/
@@ -69,6 +73,7 @@ tasks:
       - ocx exec -- uv run pytest -m index_e2e tests/test_index_e2e.py {{.CLI_ARGS | default "-v"}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_MIRROR_COMMAND: "{{.GRIM_MIRROR_BINARY}}"
       GRIM_G0_COMMAND: "{{.G0_COMMAND}}"
 
   index-matrix:
@@ -91,6 +96,7 @@ tasks:
       - ocx exec -- uv run pytest tests/test_index_matrix.py {{.CLI_ARGS | default "-v -rs"}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_MIRROR_COMMAND: "{{.GRIM_MIRROR_BINARY}}"
       GRIM_G0_COMMAND: "{{.G0_COMMAND}}"
       GRIM_G1_COMMAND: "{{.G1_COMMAND}}"
 
@@ -138,6 +144,7 @@ tasks:
       - python3 tools/require_all_passed.py --junit '{{.REPORT}}' {{.MODULES}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_MIRROR_COMMAND: "{{.GRIM_MIRROR_BINARY}}"
 
   bench:
     desc: Assert the 20,000-entry sync budgets (time, memory, bytes written)
@@ -151,6 +158,7 @@ tasks:
       - ocx exec -- uv run pytest -m bench tests/test_index_bench.py {{.CLI_ARGS | default "-v -s"}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_MIRROR_COMMAND: "{{.GRIM_MIRROR_BINARY}}"
 
   quick:
     desc: Run acceptance tests in parallel without rebuilding the binary
@@ -218,6 +226,7 @@ tasks:
       - ocx exec -- uv run pytest -n auto -m "not index_e2e and not bench" --junit-xml='{{.REPORT}}' {{catLines .MODULES}} {{.CLI_ARGS | default "-v"}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_MIRROR_COMMAND: "{{.GRIM_MIRROR_BINARY}}"
 
   floor:
     desc: Merge the shard reports into results/junit.xml and judge the whole suite (SHARD_COUNT, SHARD_LABEL)
@@ -252,3 +261,4 @@ tasks:
       - ocx exec -- uv run pytest recordings/ -v {{.CLI_ARGS}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_MIRROR_COMMAND: "{{.GRIM_MIRROR_BINARY}}"

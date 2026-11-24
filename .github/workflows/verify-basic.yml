@@ -127,8 +127,17 @@ jobs:
         run: task rust:build
       - name: Validate catalog
         run: task catalog:verify
+      - name: Build grim-mirror
+        run: cargo build --release --locked -p grim-mirror
       - name: Test
         run: task rust:test:unit -- --profile ci
+      - name: Upload grim-mirror Binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: grim-mirror-binary
+          path: target/release/grim-mirror
+          compression-level: 0
+          retention-days: 3
       - name: Upload Binary
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -159,6 +168,8 @@ jobs:
     with:
       binary-artifact: grim-binary
       binary-file: grim
+      mirror-artifact: grim-mirror-binary
+      mirror-file: grim-mirror
       runner-os: ubuntu-latest
       check-name: Acceptance Test Results
       merged-artifact: acceptance-junit
