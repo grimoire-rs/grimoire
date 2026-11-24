@@ -22,30 +22,51 @@ each — see [Upgrading](./upgrading.md).
 ## Frozen at 1.0 {#frozen}
 
 Breaking any guarantee below is a major-version change, not a minor one.
-Four exceptions sit inside these rows. Three are the experimental
+Five exceptions sit inside these rows. Three are the experimental
 [hook](./hooks.md), [settings][settings] and [mod][mods] surfaces. The fourth
 is the [telemetry switches][telemetry-enable], [`GRIM_CONFIG`][telemetry-config]
-and `GRIM_TELEMETRY_OTLP_HEADERS` in the environment variables row.
-[Unstable](#unstable) lists all four by name.
+and `GRIM_TELEMETRY_OTLP_HEADERS` in the environment variables row. The fifth
+is [`grim convert`][convert], a subcommand and a report that stay Unstable
+beside the frozen ones. [Unstable](#unstable) lists all five by name.
 
 | Area | Guarantee |
 |------|-----------|
-| CLI surface | Subcommand names, arguments, flags (`--allow-downgrade` on `add`, `update` and `lock`, and the global `--locked` flag with its `GRIM_LOCKED` variable, joined additively), and the [documented exit codes][exit-codes] (no code was added for dependency version claims) |
+| CLI surface | Subcommand names, arguments, flags (`--allow-downgrade` on `add`, `update` and `lock`, and the global `--locked` flag with its `GRIM_LOCKED` variable, joined additively), and the [documented exit codes][exit-codes] (no code was added for dependency version claims). [Plugin dispatch][plugins] joins the surface additively: an unknown first subcommand runs `grim-<name>` from `PATH` under the [dispatch rule][plugins], the `--offline` and `--locked` forwarding, the refusal of every other global flag before the name, and the `64`, `69` and `77` exits. See [The plugin name space](#frozen-plugin-names) |
 | `--format json` reports | The report shape for every command that offers one, and the [error document][json-interface] — see [Additive fields](#frozen-additive-fields) and the [JSON interface reference][json-interface] |
 | `grimoire.toml` / `grimoire.lock` | The [config and lock schema][configuration], and the rule that [`grim lock`][lock] keeps existing pins. See [Additive fields](#frozen-additive-fields) |
 | `marketplace.toml` / `marketplace.lock` | The [manifest and lock wire shape][marketplace-toml], including the `plugin` field, the `[[plugin]]` table and the [`[marketplace]` table][marketplace-table] and the [plugin metadata keys][plugin-metadata] — under the same additive and pin rules as `grimoire.lock`, and never sharing a file with it (a `plugin`-bearing entry in `grimoire.lock`, or vice versa, is a rejected scope mismatch, not a migration path) |
-| `publish.toml` | The [batch-publish manifest schema][batch-publish], including every spelling a key has ever accepted — see [Additive fields](#frozen-additive-fields) |
+| `publish.toml` | The [batch-publish manifest schema][batch-publish], including every spelling a key has ever accepted, and the optional [`[<kind>.<name>.mirror]` table][publish-mirror] with its five required and two optional keys, their grammars and the precedence they carry — see [Additive fields](#frozen-additive-fields) |
 | [`grim export plugin`][export-plugin] | The `--format json` [export report shape][json-shapes-items], and the `<base>+<12-hex>` [version grammar][export-plugin-output] a rendered `plugin.json`'s `version` follows. Only the grammar is frozen, not what feeds the hash |
 | [`grim export marketplace`][export-marketplace] | The command's flags and [exit codes][export-marketplace-exit]; the `{items, files}` [report shape][export-marketplace-json] and its `action` literals; the [`[marketplace]` keys and grammars][marketplace-table]; the client-to-file table and the `./<client>/<plugin>` [tree paths][export-marketplace-layout]; the default client set (`claude`, `copilot`, `codex`, `qoder`); the [ownership convention][export-marketplace-ownership]; the document guarantees (each plugin entry's `source` is `./`-relative inside the repository, and its `name`, `version`, `description` and any profile field the harness defines equal the tree's manifest); and the version grammar above |
 | Bundle source manifest | The [bundle member declaration schema][bundles], under the same widening rule as the manifests above |
 | [MCP descriptor][mcp-descriptor] (`mcp/<name>.toml`) | The published descriptor schema, including which fields an older grim rejects rather than drops |
 | Install state (`state.json`) | Schema V2, governed by the same additive-field policy as JSON reports |
-| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release] (a cascading release never moves a float off a higher release), the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, the `com.grimoire.uncompressed.digest` layer annotation, the [two-layer layout](./artifacts.md#requires-layer) of an artifact that declares dependencies (a grim convention: one content layer and one `application/vnd.grimoire.bundle.v1+json` requires layer, told apart by media type and written content first), and the `com.grimoire.requires-features` annotation grim reads to refuse a feature it does not know |
+| OCI wire format | [Artifact kinds][artifacts-kinds], the [release/push mechanics][publishing-release] (a cascading release never moves a float off a higher release), the [`com.grimoire.*` manifest annotations][annotations] written onto pushed artifacts, `com.grimoire.mirror.source`, `com.grimoire.mirror.path` and `com.grimoire.mirror.license-source` among them, the [layer media types][artifacts-layers] grim reads (the grimoire and OCI tar and `tar+gzip` types, and the docker rootfs gzip type) and writes (the uncompressed tar type and the `tar+gzip` type), the refusal of any `+zstd` type, the `com.grimoire.uncompressed.digest` layer annotation, the [two-layer layout](./artifacts.md#requires-layer) of an artifact that declares dependencies (a grim convention: one content layer and one `application/vnd.grimoire.bundle.v1+json` requires layer, told apart by media type and written content first), and the `com.grimoire.requires-features` annotation grim reads to refuse a feature it does not know |
 | [Package index][package-index] transport | The locators a published index serves. The client contract is [the root][index-root] at `<base>/c/root.json` and [the gzip blobs][index-blobs] it names at `<base>/c/f/sha256/<hex>.json.gz`, whose digest and size cover the inflated JSON. Both are permanent once an index emits them, and under `schema: 1` they grow only by additive fields. Their *presence* is not promised: a `404` is a normal answer that sends grim to `all.json`. Everything else under `c/` is private to the index pipeline. Also served: HTTP `<base>/all.json` and the optional `<base>/stats.json` [ratings sidecar][stats-sidecar], both while the index's `legacy` setting is true (the default), and the git-transport `index/<host>/<ns>/<pkg>/metadata.json` tree. The sidecar's *presence* is not promised either (most indexes publish none, and a `404` is a normal, non-error answer). Its **path and document shape** are promised, under its own monotonic `schema_version` and the consumer rule stated with it |
 | [MCP server][mcp-server] tool surface | Tool names (`grim_search`, `grim_status`, `grim_fetch`, `grim_describe`, `grim_render`) and their argument names — the payloads are covered by the reports row |
 | Published schema URLs | `https://grimoire.rs/schemas/{grimoire-config,grim-publish,grimoire-lock}.schema.json` keep resolving — [`grim init`][init] writes the first into every generated `grimoire.toml` |
-| Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars], except the [telemetry switches][telemetry-enable], `GRIM_CONFIG` and `GRIM_TELEMETRY_OTLP_HEADERS`, Unstable until 1.0 |
+| Environment variables | The documented [`GRIM_*` set and honored vendor overrides][env-vars], `GRIM_BIN` (set by grim for a plugin, read by plugins and never by grim) among them, except the [telemetry switches][telemetry-enable], `GRIM_CONFIG` and `GRIM_TELEMETRY_OTLP_HEADERS`, Unstable until 1.0 |
 | [`.grimignore`][grimignore] | gitignore syntax, defaults-extend-not-replace semantics, and the three never-ignored names (`SKILL.md`, a rule's index, `.grimignore` itself) — see [Additive fields](#frozen-additive-fields) for what growing the built-in default list does and does not cover. One kind-scoped exception: for a [hook](./hooks.md) root only, `hook.toml` is never ignored even when a `.grimignore` entry names it — its `hook.toml` is still packed and hashed |
+
+### The plugin name space {#frozen-plugin-names}
+
+Plugin dispatch gives every word that matches `^[a-z0-9][a-z0-9-]{0,62}$` a second
+meaning: a program named `grim-<word>` on `PATH`. Built-in commands and their
+aliases always win, because clap matches them before dispatch is tried. That
+makes the name space one-way. A grim command added in a later minor takes
+its name from any plugin that already used it, and the plugin stops
+running under that name.
+
+What grim reserves in return:
+
+- **`mirror`.** grim adds no built-in named `mirror`, so `grim mirror` stays
+  the [`grim-mirror`](./mirroring.md) plugin for the whole 1.x line.
+- **A collision review for every other name.** A new built-in name is checked
+  against the plugins known at that time before it ships. grim promises the
+  review, not that no plugin is ever shadowed.
+
+Nothing else is reserved. `grim-<name>` programs other than `grim-mirror` are
+not grim's, and grim neither lists nor vets them.
 
 ### Additive fields {#frozen-additive-fields}
 
@@ -634,6 +655,18 @@ exclusions are what keep 1.x able to move at all:
     mod rows,
   - the exit `64` of an export that stages a mod into a client config root.
 
+- **[`grim convert`][convert].** The subcommand, its flags, its
+  [report][json-convert] and its exit codes may change in any minor release.
+  It sits inside the CLI-surface and report rows by position only, and is the
+  fifth exception named under [Frozen at 1.0](#frozen).
+- **The [`grim-mirror`](./mirroring.md) plugin.** The program is source-only,
+  installed from a pinned commit, and carries no release. These may change
+  in any minor release: its `mirror.toml` grammar and `schema`, its flags,
+  its [report](./mirroring.md#report) (shape, status and reason words, plain
+  table), its exit codes beyond grim's own, its target repository template, its
+  snapshot and tag version rules and its licence rules. A mirrored artifact
+  published today stays installable by every grim: the frozen parts are the
+  wire keys above, not the tool that writes them.
 - **Vendor render layout.** The exact files and paths grim writes under
   any client's own configuration root, and where an MCP entry lands
   inside a client's own config file, are not a contract. Neither is the
@@ -1172,6 +1205,10 @@ unaffected — they read straight from disk and never touch a manifest.
 
 <!-- internal -->
 [json-interface]: ./json-interface.md
+[convert]: ./commands.md#convert
+[json-convert]: ./json-interface.md#convert-report
+[plugins]: ./commands.md#plugins
+[publish-mirror]: ./publishing.md#batch-publish-mirror
 [status]: ./commands.md#status
 [add]: ./commands.md#add
 [lock]: ./commands.md#lock

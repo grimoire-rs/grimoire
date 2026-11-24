@@ -1477,6 +1477,51 @@ The [replication caveat](#description-replication) still applies. The
 description companion lands on the push registry under the `__grimoire`
 tag, and only a full-repository sync carries it to the pull name.
 
+### Provenance of a mirrored package {#batch-publish-mirror}
+
+A package republished from someone else's repository has to say where it
+came from, and an upstream frontmatter value must not be rewritten to make
+that true. An optional `mirror` sub-table on any entry records the origin
+instead. [`grim-mirror`](./mirroring.md) writes it for every package it
+republishes. You can write it by hand to republish one package yourself.
+
+```toml
+[skills.pdf]
+version = "1.2.0"
+
+[skills.pdf.mirror]
+source = "https://github.com/acme/skills"
+commit = "0123456789abcdef0123456789abcdef01234567"
+path = "skills/pdf"
+license = "MIT"
+license-source = "detected"
+```
+
+The first five keys are required. A missing or malformed key exits `65`
+before any push, and the message names the key path as
+`<kind>.<name>.mirror.<key>` with the kind in the singular, for example
+`skill.pdf.mirror.commit: must be 40 lowercase hex digits`. An unknown key in the
+table is a parse error, as everywhere in the manifest.
+
+| Key | Grammar | Becomes |
+|-----|---------|---------|
+| `source` | Absolute `https://` or `file://` URL, lowercase scheme, at most 2048 bytes. No userinfo, no fragment, no whitespace or control characters. | `com.grimoire.mirror.source`; also `org.opencontainers.image.source` when it is `https://` |
+| `commit` | 40 lowercase hex digits. | `org.opencontainers.image.revision` |
+| `path` | The package's path inside the upstream repository: `.`, or `/`-separated segments with none empty, `.` or `..`. No leading `/`, no `\`. At most 1024 bytes. | `com.grimoire.mirror.path` |
+| `license` | Licence text, at most 256 bytes, no control characters. It is not parsed as SPDX. | `org.opencontainers.image.licenses` |
+| `license-source` | `detected` or `declared`. | `com.grimoire.mirror.license-source` |
+| `deprecated` | Optional. A [deprecation message](#metadata-deprecated). A whitespace-only value leaves the authored one. | `com.grimoire.deprecated` |
+| `replaced-by` | Optional. A [replacement reference](#metadata-replaced-by). | `com.grimoire.replaced-by` |
+
+**Precedence.** With the table present, each annotation it sets wins over every
+authored, flag, `[metadata]` and git-derived value for that one annotation.
+Every other annotation keeps its normal result. A `file://` source never
+becomes `org.opencontainers.image.source`: a local path is not a link
+anyone can follow. Without the table nothing changes, so a manifest that
+parsed before parses and publishes the same bytes. A grim older than the
+table rejects the manifest at parse. The annotations are listed under
+[Mirrored artifacts](./artifacts.md#annotations-mirror).
+
 ### Conventional source layout {#batch-publish-layout}
 
 When `path` is omitted, grim derives the source path from the entry name and

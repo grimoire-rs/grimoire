@@ -952,6 +952,27 @@ of those applies.
 | `com.grimoire.compatibility` | a skill's top-level `compatibility` | when present (skills only) |
 | `com.grimoire.deprecated` | authored `deprecated` | when non-empty |
 | `com.grimoire.replaced-by` | authored `replaced-by` | when non-empty |
+| `com.grimoire.mirror.source` | the `source` of a [`mirror` table](./publishing.md#batch-publish-mirror) | on a mirrored artifact only; its presence is the marker |
+| `com.grimoire.mirror.path` | the table's `path`: the unit's path inside the upstream repository, `.` for its root | on a mirrored artifact only |
+| `com.grimoire.mirror.license-source` | the table's `license-source`: `detected` or `declared` | on a mirrored artifact only |
+
+### Mirrored artifacts {#annotations-mirror}
+
+An artifact republished from an upstream repository by [`grim-mirror`](./mirroring.md)
+carries the three `com.grimoire.mirror.*` keys above. The same
+[`mirror` table](./publishing.md#batch-publish-mirror) also sets three standard keys, and
+for each of them it wins over every authored and derived value:
+
+| Annotation | Holds for a mirrored artifact |
+|------------|-------------------------------|
+| `org.opencontainers.image.revision` | the upstream commit the bytes were read at, 40 lowercase hex digits |
+| `org.opencontainers.image.licenses` | the licence expression the mirror decided, from the upstream files or the operator's declaration |
+| `org.opencontainers.image.source` | the upstream repository URL, only when `source` is `https://`; a `file://` source leaves the normal chain |
+
+The table can also set `com.grimoire.deprecated` and `com.grimoire.replaced-by`. A consumer
+tells a mirrored artifact from a native one by the presence of `com.grimoire.mirror.source`.
+The annotation says who republished the bytes, not who wrote them: see
+[trust](./mirroring.md#trust).
 
 Every authored value can also be supplied by a
 [flag or a `publish.toml` table](./publishing.md#metadata-flags), which fill a

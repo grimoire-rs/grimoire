@@ -193,6 +193,7 @@ export default defineConfig({
               label: 'Catalog layout and naming',
             },
             { slug: 'publishing', label: 'Publishing Skills and Rules' },
+            { slug: 'mirroring', label: 'Mirror upstream repositories' },
             { slug: 'ci', label: 'Release automation' },
             { slug: 'hosting-an-index', label: 'Host Your Own Index' },
             { slug: 'self-hosted-gitlab', label: 'Self-Hosted GitLab Setup' },

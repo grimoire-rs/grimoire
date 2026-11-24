@@ -667,6 +667,7 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `build` | `{kind, name, path, layer_digest, annotation_count, status}` — `layer_digest` is always the uncompressed tar digest; it equals the `com.grimoire.uncompressed.digest` of a [gzip release](./publishing.md#compression) of the same content | `status`: `built` |
 | `release` | `{ref, manifest_digest, tags, pushed, pushed_to, compression, floats_kept, floats_repaired}` — `ref` is the pull name; `pushed_to` is the push-side reference under a [`--push-registry` split](./publishing.md#batch-publish-push-registry), `null` when inactive; `floats_kept` is always present, `[{tag, version}]` for each cascade float left on a newer version and `[]` when none (a kept float is not in `tags`); `floats_repaired` is always present, `[{tag, version}]` for each cascade float moved onward to a higher version after the push and `[]` when none (a repaired float is not in `tags`); `compression` is the layer [compression](./publishing.md#compression) of the manifest the tag now points at (`none` or `gzip`, the vocabulary of [`describe`](./commands.md#describe)), `null` for bundle and mcp; an adopted manifest reports its own, a `--skip-existing` no-op reports the requested value | `pushed`: bool (`false` = dry run) |
 | `rate` | `{ref, action, up, url, provider, host, host_source, viewer_up}` — every field always present. `up` is the count after the mutation (or the sidecar's count under `--dry-run`), `null` when the forge's payload carries no total; `url` is the forge thread link; `provider` is the value the index published, verbatim, so an unrecognised one is still reported; `host` is the host the vote was or would be sent to, `null` when none resolves — under `--dry-run` that is the "grim cannot vote here" answer, delivered *before* a client picks an auth provider; `host_source` says who chose it — see [the `host_source` field](#rate-host-source); `viewer_up` is **tri-state** — see [the `viewer_up` field](#rate-viewer-up); see [grim rate][commands-rate] | `action`: `up`, `remove` |
+| `convert` (Unstable) | `{kind, name, from, input, output, moved, dropped, warnings}` — every key always present; see [the `convert` report](#convert-report) | `from`: `claude` |
 | `login` | `{registry, username, verification}` | `verification`: `verified`, `no-auth-required`, `skipped` |
 | `logout` | `{registry}` | — |
 | `config get` | `{key, value, set, scope}` — see the [config JSON table][commands-config-json] | `scope`: `project`, `global` |
@@ -676,6 +677,42 @@ it is stored as one literal glob. Read the true array from `--format json`.
 | `describe` | `{ref, digest, kind, name, title, description, has_description, summary, version, license, repository, revision, created, authors, vendor, url, documentation, compatibility, support, keywords, deprecated, replaced_by, tags, annotations, compression, requires, serves}` — every field always present; `kind` is `null` for a foreign manifest; `has_description` is a boolean (whether the repository carries a [description companion](./publishing.md#description-companion), derived from the tag listing at zero extra network cost); `support` is an object `{issues, chat, contact, security}` read from that companion's manifest, every field `null` when the repository publishes none ([support channels](./publishing.md#support-channels)); `compatibility` is skill-only and `null` for every other kind; `keywords`/`tags` are `[]` when none; `annotations` is the verbatim manifest map; `compression` is `"none"`, `"gzip"` or `null` — see [below](#describe-compression); `requires` is the artifact's declared dependencies as `[{kind, name, id}]`, sorted by kind (skill, rule, agent, bundle, mcp, hook, settings, mod) then name, each `id` exactly as published (a relative `./x:1` stays relative), `[]` when it declares none (a bundle's members are not listed here), and `null` for a foreign manifest or a layer layout this grim does not read; a present but unreadable requires layer fails the whole call with exit `65` rather than reporting a partial list; see [grim describe][commands-describe] | — |
 | `fetch` | Tri-shaped by flags — content, description bundle, or digest probe — see [the fetch exception](#fetch) | — |
 | [`hook allow`][cmd-hook] / [`hook revoke`][cmd-hook] | `{workspace, action, hooks, record}` (experimental) — `hooks` is the sorted `<binding>@<registry>/<repository>` set consent now covers, `[]` after a revoke and for a workspace declaring none; `record` is the consent file's own path, `null` when none was written or one was removed. A settings or mod package appears in the same `hooks` array as an unprefixed `<binding>@<registry>/<repository>` entry, whatever the flags say. The `consent` alias (`grim consent allow`, `grim consent revoke`) prints the same report | `action`: `consented`, `revoked`, `not-consented` |
+
+### The `convert` report {#convert-report}
+
+> **Unstable.** The shape of `grim convert --format json` may change in any
+> minor release; it is outside the frozen reports.
+
+One object per run. `kind` is `skill`, `rule` or `agent`; `from` is the
+dialect given to `--from`. `input` and `output` are absolute paths: the
+artifact converted and the skill directory or `.md` file written.
+
+```json
+{
+  "kind": "skill",
+  "name": "pdf",
+  "from": "claude",
+  "input": "/work/skills/pdf",
+  "output": "/work/portable/pdf",
+  "moved": [{"field": "user-invocable", "to": "claude.user-invocable"}],
+  "dropped": [{"field": "hooks", "reason": "unknown-field"}],
+  "warnings": [{"file": "SKILL.md", "line": 7, "token": "${CLAUDE_PLUGIN_ROOT}"}]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `moved` | Frontmatter keys moved under `metadata."<to>"`, as `{field, to}`. `to` is the `claude.<field>` key inside `metadata`. |
+| `dropped` | Frontmatter keys removed from the output, as `{field, reason}`. |
+| `dropped[].reason` | `shadowed`: the `metadata."claude.<field>"` slot was already authored, so that value wins. `unrepresentable`: the value has the wrong YAML type for its field. `unknown-field`: no conversion row names the key. |
+| `warnings` | Claude-only body tokens found in the artifact's `.md` files, as `{file, line, token}`. They are reported, never rewritten. |
+
+The plain output is a table of `Field`, `Action` and `Detail`, one row per
+move, drop and warning. The report is the one `grim convert` writes on
+success; a failure is an [error document](#error-document).
+
+The report of the [`grim-mirror`](./mirroring.md#report) plugin is a separate
+document and is documented on the mirroring page. It is Unstable too.
 
 ### The `rate` report's `host_source` field {#rate-host-source}
 
