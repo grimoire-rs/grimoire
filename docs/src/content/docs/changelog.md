@@ -12,17 +12,19 @@ new client, or a behavior worth knowing about. It links to the page that
 shows how. [`CHANGELOG.md`][changelog] has every change at commit
 granularity, including the refactors and internal work this page leaves out.
 
-## 0.17 — mods, and a skill refuses a plugin manifest {#v0-17}
+## 0.17 — mods, shorter TUI names, and a skill refuses a plugin manifest {#v0-17}
 
 0.17 adds the experimental [`mod` kind](#v0-17-0-mods) for client-loaded code.
 It also closes one route for it. A skill whose root carries a Claude plugin
 manifest directory is [refused](#v0-17-0-skill-plugin-manifest) at build,
-publish and install.
+publish and install. The TUI now [names rows by their index placement](#v0-17-0-tui-names).
 
-### 0.17.0 — unreleased {#v0-17-0}
+### 0.17.0 — 2026-11-24 {#v0-17-0}
 
 0.17.0 adds [mods](#v0-17-0-mods) and one [breaking](#v0-17-0-skill-plugin-manifest) change.
-The workspace [consent record](#v0-17-0-consent-moved) also moved.
+The workspace [consent record](#v0-17-0-consent-moved) also moved, and the TUI
+[names rows by index placement](#v0-17-0-tui-names).
+See also the [smaller improvements](#v0-17-0-more) and the [fixes](#v0-17-0-fixes).
 
 #### Mods: publisher code a client loads (experimental) {#v0-17-0-mods}
 
@@ -60,6 +62,38 @@ note][up-skill-plugin-manifest].
 The refusal also covers an installed record whose output sits under a client
 outside `--client`. A dev install that carries the entry makes `grim install`
 and `grim update` exit `65`, while `grim status` keeps exit `0`.
+
+#### The TUI names rows by index placement {#v0-17-0-tui-names}
+
+The flat list and search results used to print each row's full OCI
+reference, 100 characters or more with nested namespaces. A row the package
+index placed is now named by that placement. The shared namespace prefix is
+dropped, the name comes first, and the rest follows dimmed. The detail header
+shows the full placement and an `OCI:` row. Only the display changes: matching
+and command output keep the OCI reference, as [`grim tui`][tui] describes.
+
+#### Smaller improvements {#v0-17-0-more}
+
+- `grim update` bounds the registry fetches it makes before relocking, like
+  `grim status` does: 10 s a call, 30 s a run, and at most 64 manifest and 64
+  layer fetches. A stalled registry leaves files unproven, never deleted. See
+  [`grim update`][update] and [records that follow the disk][status-adoption].
+- `grim status` decodes a layer that two pins share once per run. Fewer rows
+  read unproven when a fetch budget runs short. See
+  [records that follow the disk][status-adoption].
+- The docs now name the three cases in which `grim install` deletes a file.
+  They are an unmodified old output after a layout move, an unmodified copy at
+  a moved vendor root, and a stale MCP entry. A file you edited is never
+  deleted. See [`grim install`][install].
+
+#### Fixes {#v0-17-0-fixes}
+
+- `grim release` repairs a float left below a higher release and lists it in
+  `floats_repaired`. See [`grim release`][release].
+- `grim add` offline on an uncached reference exits `81`, not `65`. The old
+  hint to pass `--kind` could not help. See [`grim add`][add-exit-codes].
+- A `//` comment in a client config with CR-only line endings no longer makes
+  grim refuse the file, for example `opencode.jsonc`.
 
 ## 0.16 — dependencies, harness settings, and a lock that holds still {#v0-16}
 
@@ -1169,3 +1203,4 @@ the full commit-level record back to the first tagged release.
 [json-single]: ./json-interface.md#shapes-single
 [hooks-consent]: ./hooks.md#consent
 [hooks-remove-armed]: ./hooks.md#remove-stays-armed
+[release]: ./commands.md#release

@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-11-24
+
+### Added
+
+- Move workspace consent to one kind-free record *(consent)* **BREAKING**
+- **Migration:** a workspace consented by an earlier grim is asked again once, because the record moved and is not imported. A run with `--trust-workspace` is unaffected. Settings entries in the record and in `grim consent allow --format json` lose their `settings:` prefix. Both surfaces are experimental.
+- Add the experimental mod artifact kind *(mod)*
+- Name flat rows and the detail pane by the index placement *(tui)*
+- Bound the pre-pass registry fetches (#396) *(update)*
+
+### Documentation
+
+- Correct the install delete claim and two json-interface example messages (#390)
+- Flat list and detail pane name rows by the index *(tui)*
+- Align the shipped skills with grim 0.17.0 *(catalog)*
+- Name the offline add exit and the indexer a mod needs
+
+### Fixed
+
+- End line comments at carriage returns as well as line feeds *(jsonc)*
+- Report offline cache miss as offline-blocked, not kind inference *(add)*
+- Bump url to 2.5.9 for RUSTSEC-2026-0592 *(deps)*
+- Repair cascade floats left below a higher release (#391) *(release)*
+- Refuse a skill whose root carries a Claude plugin manifest *(skill)* **BREAKING**
+- **Migration:** a skill whose root carries a `.claude-plugin` entry no longer builds, publishes or installs (exit 65, reason `skill-plugin-manifest`). Ship the plugin through a marketplace, or list the entry in `.grimignore`.
+- Reuse decoded layers within a run, document the adopted line (#393) *(status)*
+
 ## [0.16.1] - 2026-11-19
 
 ### Added
@@ -1152,6 +1179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
 
+[0.17.0]: https://github.com/grimoire-rs/grimoire/compare/v0.16.1..v0.17.0
 [0.16.1]: https://github.com/grimoire-rs/grimoire/compare/v0.16.0..v0.16.1
 [0.16.0]: https://github.com/grimoire-rs/grimoire/compare/v0.15.1..v0.16.0
 [0.15.1]: https://github.com/grimoire-rs/grimoire/compare/v0.15.0..v0.15.1
