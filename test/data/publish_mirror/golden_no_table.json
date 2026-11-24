@@ -1,0 +1,55 @@
+{
+  "rule": {
+    "annotations": {
+      "com.grimoire.kind": "rule",
+      "org.opencontainers.image.description": "rule",
+      "org.opencontainers.image.licenses": "MIT",
+      "org.opencontainers.image.source": "@REG@/@REPO@/demo-rule",
+      "org.opencontainers.image.title": "demo-rule",
+      "org.opencontainers.image.vendor": "grim-test",
+      "org.opencontainers.image.version": "0.1.0"
+    },
+    "config": {
+      "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "mediaType": "application/vnd.oci.empty.v1+json",
+      "size": 2
+    },
+    "layers": [
+      {
+        "digest": "sha256:7309b46c1d9f296125f42e7373e978fd761b496bcb8f2113af47fba9077f5a1c",
+        "mediaType": "application/vnd.grimoire.artifact.layer.v1.tar",
+        "size": 2048
+      }
+    ],
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "schemaVersion": 2
+  },
+  "skill": {
+    "annotations": {
+      "com.grimoire.deprecated": "authored notice",
+      "com.grimoire.kind": "skill",
+      "org.opencontainers.image.description": "Demo skill.",
+      "org.opencontainers.image.documentation": "https://authored.example/demo#readme",
+      "org.opencontainers.image.licenses": "Apache-2.0",
+      "org.opencontainers.image.source": "https://authored.example/demo",
+      "org.opencontainers.image.title": "demo",
+      "org.opencontainers.image.url": "https://authored.example/demo",
+      "org.opencontainers.image.vendor": "grim-test",
+      "org.opencontainers.image.version": "0.1.0"
+    },
+    "config": {
+      "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "mediaType": "application/vnd.oci.empty.v1+json",
+      "size": 2
+    },
+    "layers": [
+      {
+        "digest": "sha256:0d6e1e078d372094fe23bda59b88d802f68bde56a78e599a691e39efb5b91b2b",
+        "mediaType": "application/vnd.grimoire.artifact.layer.v1.tar",
+        "size": 2048
+      }
+    ],
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "schemaVersion": 2
+  }
+}

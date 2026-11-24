@@ -107,6 +107,9 @@ pub struct MetadataDefaults {
     pub homepage: Option<String>,
     /// → `org.opencontainers.image.documentation`.
     pub documentation: Option<String>,
+    /// A `publish.toml` `mirror` table: stamped after the builder, so it wins
+    /// over every other tier for the annotations it sets.
+    pub mirror: Option<MirrorAnnotations>,
 }
 
 impl MetadataDefaults {
@@ -229,6 +232,66 @@ fn insert_git_provenance(a: &mut BTreeMap<String, String>, git: Option<&GitProve
 /// the field. Mirrored onto the manifest so a consumer can read it without
 /// downloading and parsing the layer.
 pub const COMPATIBILITY_ANNOTATION: &str = "com.grimoire.compatibility";
+
+/// Annotation key carrying the upstream source URL of a mirrored artifact.
+pub const MIRROR_SOURCE_ANNOTATION: &str = "com.grimoire.mirror.source";
+
+/// Annotation key carrying the path of a mirrored artifact inside its upstream repository.
+pub const MIRROR_PATH_ANNOTATION: &str = "com.grimoire.mirror.path";
+
+/// Annotation key recording whether a mirrored licence was `detected` or `declared`.
+pub const MIRROR_LICENSE_SOURCE_ANNOTATION: &str = "com.grimoire.mirror.license-source";
+
+/// Validated values of a `publish.toml` `mirror` table, ready to stamp.
+///
+/// [`Self::apply`] runs after a kind builder, so each value set here wins over
+/// every authored, flag, `[metadata]` and git-derived value for that one
+/// annotation; the others keep the builder's result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorAnnotations {
+    pub source: String,
+    pub commit: String,
+    pub path: String,
+    pub license: String,
+    pub license_source: String,
+    pub deprecated: Option<String>,
+    pub replaced_by: Option<String>,
+}
+
+impl MetadataDefaults {
+    /// Finish a builder's map: apply the mirror table, if any.
+    fn apply_mirror(&self, mut a: BTreeMap<String, String>) -> BTreeMap<String, String> {
+        if let Some(m) = &self.mirror {
+            m.apply(&mut a);
+        }
+        a
+    }
+}
+
+impl MirrorAnnotations {
+    /// Overwrite the annotations this table sets. `org.opencontainers.image.source`
+    /// changes only for an `https` source: a `file` URL is a local path that
+    /// must not become a published source link.
+    pub fn apply(&self, a: &mut BTreeMap<String, String>) {
+        let mut put = |key: &str, value: &str| {
+            a.insert(key.to_string(), value.to_string());
+        };
+        put(MIRROR_SOURCE_ANNOTATION, &self.source);
+        put(MIRROR_PATH_ANNOTATION, &self.path);
+        put(MIRROR_LICENSE_SOURCE_ANNOTATION, &self.license_source);
+        put("org.opencontainers.image.revision", &self.commit);
+        put("org.opencontainers.image.licenses", &self.license);
+        if self.source.starts_with("https://") {
+            put("org.opencontainers.image.source", &self.source);
+        }
+        if let Some(d) = self.deprecated.as_deref().and_then(normalize_deprecated) {
+            put(DEPRECATED_ANNOTATION, &d);
+        }
+        if let Some(r) = self.replaced_by.as_deref().and_then(normalize_deprecated) {
+            put(REPLACED_BY_ANNOTATION, &r);
+        }
+    }
+}
 
 /// Annotation key carrying a publisher-authored deprecation notice.
 ///
@@ -527,7 +590,7 @@ pub fn annotations_for_skill(
     if let Some(replaced_by) = fm.metadata.get("replaced-by").and_then(|v| normalize_deprecated(v)) {
         a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Build the manifest annotation map for a rule.
@@ -603,7 +666,7 @@ pub fn annotations_for_rule(
     {
         a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Build the manifest annotation map for an agent.
@@ -690,7 +753,7 @@ pub fn annotations_for_agent(
     if let Some(replaced_by) = fm.metadata.get("replaced-by").and_then(|v| normalize_deprecated(v)) {
         a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Build the manifest annotation map for a bundle.
@@ -757,7 +820,7 @@ pub fn annotations_for_bundle(
     if let Some(replaced_by) = metadata.replaced_by.as_deref().and_then(normalize_deprecated) {
         a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Build the manifest annotation map for an MCP server descriptor.
@@ -822,7 +885,7 @@ pub fn annotations_for_mcp(
     if let Some(replaced_by) = descriptor.replaced_by.as_deref().and_then(normalize_deprecated) {
         a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Build the manifest annotation map for a settings artifact.
@@ -881,7 +944,7 @@ pub fn annotations_for_settings(
     if let Some(replaced_by) = document.replaced_by.as_deref().and_then(normalize_deprecated) {
         a.insert(REPLACED_BY_ANNOTATION.to_string(), replaced_by);
     }
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Build the manifest annotation map for a hook artifact.
@@ -935,7 +998,7 @@ pub fn annotations_for_hook(
         None,
         fallback_source,
     );
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Build the manifest annotation map for a mod artifact: the common
@@ -991,7 +1054,7 @@ pub fn annotations_for_mod(
     if let Some(keywords) = &manifest.keywords {
         a.insert(KEYWORDS_ANNOTATION.to_string(), keywords.clone());
     }
-    a
+    defaults.apply_mirror(a)
 }
 
 /// Extract a scalar string `key` from a rule's forward-compat `extra` map.
@@ -1108,6 +1171,7 @@ mod tests {
             vendor: Some("Acme Inc".into()),
             homepage: Some("https://example.com".into()),
             documentation: Some("https://example.com/docs".into()),
+            mirror: None,
         };
         let a = annotations_for_hook(&manifest, "1.0.0", None, None, &defaults);
         assert_eq!(a["org.opencontainers.image.licenses"], "Apache-2.0");
@@ -2004,6 +2068,7 @@ mod tests {
             vendor: Some("fallback-corp".to_string()),
             homepage: Some("https://fallback.example".to_string()),
             documentation: Some("https://docs.fallback.example".to_string()),
+            mirror: None,
         };
 
         // Nothing authored ⇒ every default lands. (The shared fixture does
@@ -2239,5 +2304,74 @@ mod tests {
             });
             assert_eq!(source.as_deref(), Some(expected), "{raw}");
         }
+    }
+
+    fn mirror(source: &str) -> MirrorAnnotations {
+        MirrorAnnotations {
+            source: source.into(),
+            commit: "a".repeat(40),
+            path: "skills/x".into(),
+            license: "MIT".into(),
+            license_source: "detected".into(),
+            deprecated: Some("gone".into()),
+            replaced_by: None,
+        }
+    }
+
+    /// A skill carrying every competing tier: frontmatter licence, flag
+    /// licence, authored repository, git revision/remote, authored deprecation.
+    fn contested_skill(m: Option<&MirrorAnnotations>) -> BTreeMap<String, String> {
+        let doc = "---\nname: x\ndescription: d.\nlicense: Apache-2.0\nmetadata:\n  repository: https://authored.example/r\n  deprecated: authored\n  replaced-by: ghcr.io/o/new:1\n---\n";
+        let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
+        let git = GitProvenance {
+            revision: Some("f".repeat(40)),
+            created: "2026-01-01T00:00:00Z".into(),
+            source_url: Some("https://git.example/o/r".into()),
+            authors: None,
+        };
+        let defaults = MetadataDefaults {
+            license: Some("BSD-3-Clause".into()),
+            mirror: m.cloned(),
+            ..Default::default()
+        };
+        annotations_for_skill(&fm, "1.0.0", None, Some(&git), &defaults)
+    }
+
+    #[test]
+    fn mirror_values_outrank_every_authored_and_derived_tier() {
+        let a = contested_skill(Some(&mirror("https://up.example/o/r")));
+        assert_eq!(a["org.opencontainers.image.licenses"], "MIT");
+        assert_eq!(a["org.opencontainers.image.revision"], "a".repeat(40));
+        assert_eq!(a["org.opencontainers.image.source"], "https://up.example/o/r");
+        assert_eq!(a[DEPRECATED_ANNOTATION], "gone");
+        assert_eq!(a[MIRROR_SOURCE_ANNOTATION], "https://up.example/o/r");
+        assert_eq!(a[MIRROR_PATH_ANNOTATION], "skills/x");
+        assert_eq!(a[MIRROR_LICENSE_SOURCE_ANNOTATION], "detected");
+    }
+
+    #[test]
+    fn mirror_leaves_unset_annotations_on_the_existing_chain() {
+        let a = contested_skill(Some(&mirror("https://up.example/o/r")));
+        // `replaced-by` is not in the table: the authored value stays.
+        assert_eq!(a[REPLACED_BY_ANNOTATION], "ghcr.io/o/new:1");
+        assert_eq!(a["org.opencontainers.image.title"], "x");
+    }
+
+    #[test]
+    fn mirror_whitespace_only_deprecated_leaves_the_authored_value() {
+        let mut m = mirror("https://up.example/o/r");
+        m.deprecated = Some("  \t ".into());
+        assert_eq!(contested_skill(Some(&m))[DEPRECATED_ANNOTATION], "authored");
+    }
+
+    #[test]
+    fn mirror_file_source_never_touches_image_source() {
+        let plain = contested_skill(None);
+        let a = contested_skill(Some(&mirror("file:///srv/up")));
+        assert_eq!(
+            a["org.opencontainers.image.source"],
+            plain["org.opencontainers.image.source"]
+        );
+        assert_eq!(a[MIRROR_SOURCE_ANNOTATION], "file:///srv/up");
     }
 }
