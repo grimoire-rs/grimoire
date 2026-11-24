@@ -181,6 +181,33 @@ pub fn home_dir_for_ceiling() -> Option<PathBuf> {
     home_dir()
 }
 
+/// The `GRIM_*` keys a dispatched plugin child gets on top of grim's own environment.
+pub fn plugin_child_env(offline: bool, locked: bool) -> std::io::Result<Vec<(OsString, OsString)>> {
+    plugin_child_env_from(std::env::current_exe(), offline, locked)
+}
+
+fn plugin_child_env_from(
+    exe: std::io::Result<PathBuf>,
+    offline: bool,
+    locked: bool,
+) -> std::io::Result<Vec<(OsString, OsString)>> {
+    let unknown = |e: std::io::Error| std::io::Error::other(format!("cannot determine the path of grim: {e}"));
+    let exe = exe.map_err(unknown)?;
+    let exe = std::path::absolute(&exe).map_err(unknown)?;
+    #[cfg(unix)]
+    let exe = exe.canonicalize().unwrap_or(exe);
+    #[cfg(windows)]
+    let exe = dunce::simplified(&exe).to_path_buf();
+    let mut env = vec![(OsString::from("GRIM_BIN"), exe.into_os_string())];
+    if offline {
+        env.push((OsString::from("GRIM_OFFLINE"), OsString::from("1")));
+    }
+    if locked {
+        env.push((OsString::from("GRIM_LOCKED"), OsString::from("1")));
+    }
+    Ok(env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +215,26 @@ mod tests {
     // Env mutation is `unsafe` in edition 2024 and the crate forbids
     // unsafe, so the parse logic is tested via the pure inner helpers
     // rather than by mutating the process environment.
+
+    #[test]
+    fn plugin_child_env_carries_exactly_the_forwarded_keys() {
+        let keys = |o, l| -> Vec<String> {
+            plugin_child_env(o, l)
+                .unwrap()
+                .iter()
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(keys(false, false), ["GRIM_BIN"]);
+        assert_eq!(keys(true, true), ["GRIM_BIN", "GRIM_OFFLINE", "GRIM_LOCKED"]);
+        assert!(std::path::Path::new(&plugin_child_env(false, false).unwrap()[0].1).is_absolute());
+    }
+
+    #[test]
+    fn plugin_child_env_fails_when_the_exe_path_is_unknown() {
+        let err = plugin_child_env_from(Err(std::io::Error::other("gone")), true, true).unwrap_err();
+        assert_eq!(err.to_string(), "cannot determine the path of grim: gone");
+    }
 
     #[test]
     fn is_truthy_recognizes_common_forms() {

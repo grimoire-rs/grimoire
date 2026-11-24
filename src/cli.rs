@@ -6,5 +6,6 @@
 pub mod color;
 pub mod exit_code;
 pub mod options;
+pub mod plugin_dispatch;
 pub mod printer;
 pub mod progress;
