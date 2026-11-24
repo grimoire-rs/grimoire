@@ -407,7 +407,7 @@ def test_consent_alias_reports_hook_telemetry_name(grim_at, project_dir: Path) -
     hook_row = next(line for line in shown.splitlines() if line.startswith("  hook "))
     assert "[alias: consent]" in hook_row, shown
     commands = _top_level_commands(shown)
-    assert len(commands) == 26, commands
+    assert len(commands) == 27, commands
     assert "consent" not in commands, "the alias is a label on `hook`, never a row of its own"
 
     runner.env["GRIM_LOG"] = "debug"

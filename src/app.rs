@@ -97,6 +97,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 render(&r, format)?;
                 c
             }
+            Command::Convert(args) => {
+                let (r, c) = crate::command::convert::run(&ctx, &args).await?;
+                render(&r, format)?;
+                c
+            }
             Command::Release(args) => {
                 let (r, c) = crate::command::release::run(&ctx, &args).await?;
                 render(&r, format)?;

@@ -58,6 +58,7 @@ pub mod vendor_cursor;
 pub mod vendor_droid;
 pub mod vendor_gemini;
 pub mod vendor_goose;
+pub mod vendor_inverse;
 pub mod vendor_junie;
 pub mod vendor_kilo;
 pub mod vendor_kiro;
