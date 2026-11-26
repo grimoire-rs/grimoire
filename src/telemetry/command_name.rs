@@ -78,6 +78,7 @@ pub fn command_name(command: Option<&Command>) -> (&'static str, Option<&'static
         Some(Command::Mcp(_)) => "mcp",
         Some(Command::Login(_)) => "login",
         Some(Command::Logout(_)) => "logout",
+        Some(Command::Convert(_)) => "convert",
     };
     (name, None)
 }
@@ -148,6 +149,7 @@ mod tests {
             (&["consent", "allow"], "hook", Some("allow")),
             (&["login", "r.example"], "login", None),
             (&["logout", "r.example"], "logout", None),
+            (&["convert", ".", "--from", "claude", "--out", "o"], "convert", None),
         ];
         for (argv, name, sub) in table {
             let parsed = crate::telemetry::parsed_command(argv);

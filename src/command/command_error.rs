@@ -111,6 +111,15 @@ pub enum CommandError {
     /// filesystem for a decision; it is a usage error, and it says so.
     #[error("{0}")]
     HookConsentUsage(String),
+
+    /// `convert` found the `--out` directory occupied (exit 65,
+    /// `untracked-destination`): it writes only into an absent or empty one.
+    #[error("output directory {} is not empty; convert writes only into an absent or empty directory", path.display())]
+    ConvertOutputOccupied { path: std::path::PathBuf },
+
+    /// `convert` was given an input path that does not exist (exit 79).
+    #[error("input path {} does not exist", path.display())]
+    ConvertInputNotFound { path: std::path::PathBuf },
 }
 
 #[cfg(test)]

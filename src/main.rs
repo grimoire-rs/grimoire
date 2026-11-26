@@ -52,6 +52,7 @@ use crate::command::build::BuildArgs;
 use crate::command::completions::CompletionsArgs;
 use crate::command::config::ConfigArgs;
 use crate::command::context::ContextArgs;
+use crate::command::convert::ConvertArgs;
 use crate::command::describe::DescribeArgs;
 use crate::command::export::ExportArgs;
 use crate::command::fetch::FetchArgs;
@@ -153,6 +154,8 @@ pub enum Command {
     Login(LoginArgs),
     /// Remove a stored registry credential.
     Logout(LogoutArgs),
+    /// Convert a Claude-authored skill, rule or agent to the portable form (Unstable).
+    Convert(ConvertArgs),
 }
 
 fn main() -> std::process::ExitCode {

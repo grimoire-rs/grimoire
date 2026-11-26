@@ -15,6 +15,7 @@ pub mod completions;
 pub mod config;
 pub mod config_keys;
 pub mod context;
+pub mod convert;
 pub mod describe;
 pub mod export;
 pub mod fetch;
