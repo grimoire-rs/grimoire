@@ -97,6 +97,7 @@ tasks:
     internal: true
     cmds:
       - task: rust:build
+      - task: rust:sdk:accept
       - task: catalog:verify
       - task: rust:test:unit
       - task: test:parallel
