@@ -14,7 +14,7 @@ Lines beginning `@` are Claude Code file imports and are expanded into context a
 Grimoire is a package manager for AI-agent config — a CLI to install,
 maintain, and publish AI-agent configuration (skills, rules, prompts)
 distributed through standard OCI registries. The binary is named `grim`;
-the Rust crate/package is `grimoire`. Shipping: full CLI (26 subcommands),
+the Rust crate/package is `grimoire`. Shipping: full CLI (27 subcommands),
 OCI registry pipeline, catalog publishing, MCP server, TUI, experimental
 hooks and settings. A cargo workspace (see Architecture), subsystem modules under `src/`, no stable *library* API — the binary is the only consumer.
 
@@ -71,8 +71,9 @@ commit. Conventions →
 ## Architecture
 
 **Layout**: a cargo workspace — one binary crate (`grimoire`, binary `grim`,
-source under `src/`) plus two hook crates (`crates/grimoire-hook-core`,
-`crates/grim-hook`). No lib/CLI split of the main crate. Tests under `test/`. Rust edition 2024.
+source under `src/`), two hook crates (`crates/grimoire-hook-core`, `crates/grim-hook`)
+and `crates/grim-sdk` (client library, own version, Unstable, unpublished, no dependency on
+the main crate). No lib/CLI split of the main crate. Tests under `test/`. Rust edition 2024.
 
 **Read the matching subsystem rule before working on code in that area** —
 each carries invariants and design decisions not obvious from the code.
@@ -81,6 +82,7 @@ Claude Code auto-loads them on path match; other agents open them by hand.
 | Path | Subsystem rule |
 |---|---|
 | `src/**`, `crates/**` | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md), [subsystem-cli.md](./.claude/rules/subsystem-cli.md), [subsystem-cli-api.md](./.claude/rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./.claude/rules/subsystem-cli-commands.md) |
+| `crates/grim-sdk/**` | [subsystem-sdk.md](./.claude/rules/subsystem-sdk.md) |
 | `test/**` (pytest, fixtures) | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) |
 | `.github/workflows/**` | [subsystem-ci.md](./.claude/rules/subsystem-ci.md) |
 | `taskfile.yml`, `taskfiles/**` | [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md) |
@@ -102,10 +104,11 @@ surfaces, OWASP/STRIDE checklist) before any security review.
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short-id resolution and the single-registry fallback when no `[[registries]]` is configured. Does **not** collapse or restrict the multi-registry browse set — `[[registries]]` is authoritative for browsing even when this is set; only the `--registry` flag collapses browse to one registry. Short-id precedence: `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project `default_registry` > global `default_registry` > built-in fallback `ghcr.io/grimoire-rs` (browse fallback: the public index `https://index.grimoire.rs`) | (unset) |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated `host[:port]` list contacted over plain HTTP instead of HTTPS, matched exactly. Unions with the always-on loopback forms (`localhost`, `127.0.0.1`, bare and on port 5000) and with every `[[registries]]` entry declaring `insecure = true` — nothing removes a host from the set, and `--registry` never narrows it. Covers hosts no entry declares; it does not widen where `grim login` may send a credential | (unset) |
 | `GRIM_OFFLINE` | Disable all network access (cache-only; default is always-fresh online resolution) | false |
-| `GRIM_LOCKED` | `truthy`-gated twin of `--locked`: a lock-writing command refuses an out-of-sync lock (65; 79 for a missing `grimoire.lock`) instead of relocking. Stricter only, so a repo-carried env cannot abuse it; forwarded nowhere (grim spawns no grim child) | false |
+| `GRIM_LOCKED` | `truthy`-gated twin of `--locked`: a lock-writing command refuses an out-of-sync lock (65; 79 for a missing `grimoire.lock`) instead of relocking. Stricter only, so a repo-carried env cannot abuse it; grim spawns no grim child, and sets it (`=1`) only for a dispatched `grim-<name>` plugin when `--locked` came before the name | false |
 | `GRIM_LOG` | Log filter for stderr diagnostics: a level or `tracing` filter directives; `--log-level` wins. A value that does not parse, or a bare word that is not a level, prints one stderr line and the run continues (exit unchanged). The `grim-hook` launcher reads the same variable on its own, simpler terms | `warn` |
 | `GRIM_TELEMETRY`, `GRIM_TELEMETRY_REPOSITORY`, `GRIM_CONFIG`, `GRIM_TELEMETRY_OTLP_HEADERS` | Opt-in OTLP usage telemetry, `truthy`-gated (`1\|true\|yes\|on`). `GRIM_TELEMETRY` arms it, or so does `enabled = true` in the `[telemetry]` table of a `GRIM_CONFIG` file (a path list of absolute TOML files; `endpoint`, `headers`, `timeout` name a grim-only destination). With a file endpoint grim reads no `OTEL_EXPORTER_OTLP_*`, and `GRIM_TELEMETRY_OTLP_HEADERS` adds a token from the environment. A non-blank non-truthy `GRIM_TELEMETRY` disarms a file, and opt-outs are checked before any file is opened; an unusable file warns once and disarms the run, exit code unchanged. Unarmed, grim makes no telemetry call and writes no `$GRIM_HOME/telemetry/` file even with `OTEL_*` set, and an endpoint is still required, from `OTEL_EXPORTER_OTLP_[LOGS_]ENDPOINT` or a file `endpoint` — there is no default endpoint. `OTEL_SDK_DISABLED`, `DO_NOT_TRACK` and offline mode disarm it; the `grim-hook` launcher carries no telemetry code. `GRIM_TELEMETRY_REPOSITORY` additionally adds the redacted `origin` remote as `vcs.*` (project scope only, never a `$HOME` repository). All four Unstable until 1.0. Contract: `docs/src/content/docs/telemetry.md` | (unset) |
 | `GRIM_ANNOUNCE_TOKEN` | Forge API token for `grim publish --announce` (PR/MR creation, owner-id lookup); always wins over CI-conventional tokens (`GH_TOKEN`/`GITHUB_TOKEN`, `GITLAB_TOKEN`), which apply only when the CI server host matches the announce target host. Never logged. Separately, `CI_JOB_TOKEN` is checked for **presence only** on a host-matched GitLab CI: it enables a fallback git-transport credential for the announce push (value never read into grim, never used for the MR API) | (unset) |
+| `GRIM_BIN` | **Set by grim, never read by it**: the absolute path of the running `grim`, put in the environment of a dispatched `grim-<name>` plugin (unknown top-level name, found on absolute `PATH` entries only; built-ins win), beside `GRIM_OFFLINE`/`GRIM_LOCKED` when those flags came before the name. A caller-supplied value is overwritten; if grim cannot name itself, dispatch exits 69. Plugins such as `grim-mirror`, and `grim-sdk` callers, drive grim through it. Frozen contract | (set per dispatch) |
 | `GRIM_RATE_TOKEN` | Forge API token for `grim rate`, first rung of its **own** credential ladder (env → host-matched CI token → `gh`/`glab` stored credential → refuse with 80). Deliberately not the announce token: narrower scope, separate rotation. Never logged. **Host-agnostic, so it is gated**: against a host the index declared (`providers.rating_host`) it must be paired with `--token-host <host>` or the run exits 80 before the credential is read — same rule as `--token-stdin`, and the reason the two host-matched rungs need no gate. The rating host itself now comes from the index, not from the environment (`adr_index_declared_rating_host.md`) | (unset) |
 | `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |
 | `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill/agent paths | (unset) |
@@ -210,11 +213,8 @@ are committed under `./.agents/`: `adr/`, `specs/`, `plans/` (incl.
 
 ## Skills & Personas
 
-Multi-agent orchestration is the **hex** bundle, installed at project
-scope from the committed `grimoire.toml`/`grimoire.lock`: `/hex-plan`, `/hex-execute`, `/hex-review`,
-`/hex-architect`, `/hex-init`. They read swarm memory from
-`.agents/memory/hex.md` — pointers, the model matrix, always-on review
-perspectives, and the cross-model adversary.
+Multi-agent orchestration is the **hex** bundle, installed at project scope from the
+committed `grimoire.toml`/`grimoire.lock` (commands and swarm memory listed below).
 
 <!-- hex:start -->
 Swarm memory: `.agents/memory/hex.md` (pointers + preferences). Commands: `/hex-init`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`.

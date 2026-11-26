@@ -25,6 +25,8 @@ every tool call, so its dependency set is `serde`, `serde_json` and their
 transitive crates, pinned by an allowlist test over
 `cargo tree -p grim-hook -e normal --target all`. Everything else stays on Tokio. Rationale: `adr_hook_native_dispatcher.md` (C-N8, D1).
 
+**Deviation: `grim-gui`** (separate repository, not in this workspace) uses Tauri 2 and TypeScript. Rationale: `adr_repository_split.md`.
+
 ### Python (Acceptance Tests)
 
 | Component | Choice |

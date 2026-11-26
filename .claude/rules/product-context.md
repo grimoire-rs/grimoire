@@ -98,14 +98,15 @@ grim uninstall skill code-review     # Full inverse of install
 
 Global flags: `--offline`, `--locked`, `--global`, `--config <path>`,
 `--registry <ref>`, `--format json`. Full surface:
-`subsystem-cli-commands.md` and `docs/src/content/docs/commands.md` (26 subcommands).
+`subsystem-cli-commands.md` and `docs/src/content/docs/commands.md` (27 subcommands).
 
 ## Technical Overview
 
 - **Language**: Rust 2024
 - **Layout**: cargo workspace — one binary crate (`grimoire`, binary `grim`,
-  source under `src/`) plus two hook crates (`crates/grimoire-hook-core`,
-  `crates/grim-hook`). No lib/CLI split of the main crate.
+  source under `src/`), two hook crates (`crates/grimoire-hook-core`,
+  `crates/grim-hook`) and the `crates/grim-sdk` client library (drives grim
+  through its CLI and JSON output; own version, unpublished, Unstable). No lib/CLI split of the main crate.
 - **Artifact kinds**: skill, rule, agent, mcp, bundle, plus hook,
   settings and mod, each behind its own `[options.experimental]` flag
 - **Default registry**: configurable via `GRIM_DEFAULT_REGISTRY`
@@ -119,6 +120,8 @@ Global flags: `--offline`, `--locked`, `--global`, `--config <path>`,
 | `grimoire-vscode` | VS Code extension — browses the catalog and drives `grim` through its JSON interface |
 | `grimoire-index` | The public package index served at `index.grimoire.rs` — a phone book of pointers, not a catalog |
 | `grimoire-components` | Reusable CI/CD components for grim-based pipelines |
+| `grim-mirror` | The artifact-mirroring tool (`grimoire-rs/grim-mirror`), a `grim-<name>` plugin that republishes upstream skills, rules and agents; reaches grim only through `crates/grim-sdk`. Moved out of this repository before PR 398 merged |
+| `grim-gui` | The desktop GUI (`grimoire-rs/grim-gui`), a Tauri 2 skeleton whose binary `grim-gui` starts as `grim gui`; reaches grim only through `crates/grim-sdk` |
 | `arcana` | First-party skill/agent bundles published *with* grim (e.g. the `hex` swarm bundle) |
 | `external/rust-oci-client` | OCI transport, `ocx-sh` fork, submodule pinned to `ocx/integration` |
 | `external/docker_credential` | Credential-helper reads, `ocx-sh` fork, submodule pinned to `feat/store-erase-list` |

@@ -37,6 +37,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Security-sensitive change | [adr_artifact_trust_model.md](../.agents/adr/adr_artifact_trust_model.md) **first** — the trust boundary and what is out of scope; then [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | Deciding whether a security finding is a defect or a non-goal | [arch-threat-model.md](./rules/arch-threat-model.md) — attackers T1–T5 are in scope, N1–N5 are explicit non-goals (notably **insiders with commit access**); invariants I1–I6, and the recorded hook exception under **I2** ([adr_hook_workspace_consent.md](../.agents/adr/adr_hook_workspace_consent.md)), which the `settings` kind shares ([adr_settings_artifact_kind.md](../.agents/adr/adr_settings_artifact_kind.md)) — re-deriving a decided trade as a fresh Block is the churn that file exists to stop |
 | Adding or changing an artifact kind, or a field every kind carries (annotations, search, describe, fetch, status, install report) | [subsystem-artifact-kinds.md](./rules/subsystem-artifact-kinds.md) — interfaces x kinds matrix, consumer repos (indexer, extension), site checklist, append-last rule |
+| Changing the `grim-sdk` client crate | [subsystem-sdk.md](./rules/subsystem-sdk.md) |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Vendor renderer declines / upstream capability gaps | [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) — re-verify upstream before patching a decline; the date-stamped rows live in `.agents/upstream-watchlist.md` (outside `.claude/rules/`, which loads every `.md`) |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
@@ -85,6 +86,7 @@ Catalog = single source of truth — `AGENTS.md` may summarize or reference by p
 | Client detection | [subsystem-client-detection.md](./rules/subsystem-client-detection.md) | `src/install/target.rs`, `src/install/client_target.rs` |
 | Install state and path containment | [subsystem-install-state.md](./rules/subsystem-install-state.md) | `src/install/install_state.rs`, `src/path_safety.rs` |
 | Path anchors | [subsystem-path-anchors.md](./rules/subsystem-path-anchors.md) | `src/install/path_anchor.rs` |
+| SDK crate (`grim-sdk`) | [subsystem-sdk.md](./rules/subsystem-sdk.md) | `crates/grim-sdk/**` |
 | CLI shell | [subsystem-cli.md](./rules/subsystem-cli.md) | `src/**`, `crates/**` |
 | CLI API / output formats | [subsystem-cli-api.md](./rules/subsystem-cli-api.md) | `src/**`, `crates/**` |
 | CLI command index | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) | `src/**`, `crates/**` |
@@ -123,6 +125,7 @@ group below. No other part needs one.
 | `src/install/vendor_*.rs`, `src/oci/mcp.rs`, `src/catalog/rating_provider.rs`, `src/install/settings_phase.rs` | + [vendor-capability-watchlist.md](./rules/vendor-capability-watchlist.md) |
 | `src/oci/**`, `src/install/**`, `src/command/hook*`, `src/command/{login,logout}.rs`, `src/command/{publish,release}*`, `catalog/**`, `crates/**` | + [arch-threat-model.md](./rules/arch-threat-model.md) |
 | `src/command/config_keys.rs`, `src/config/declaration.rs` | + [subsystem-config-keys.md](./rules/subsystem-config-keys.md) |
+| `crates/grim-sdk/**` | + [subsystem-sdk.md](./rules/subsystem-sdk.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md), [python-quality.md](./rules/python-quality.md) (vendored) |
 | `**/pyproject.toml`, `**/uv.lock` | [python-packaging.md](./rules/python-packaging.md) (vendored) |
