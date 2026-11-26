@@ -203,6 +203,12 @@ always exist first. A requires cycle exits 65 before any push. Semantics to know
   announce that fails *after* a successful publish exits 69 — the
   packages are pushed, only the announce needs re-running; announce
   misconfiguration exits 64 ([announcing][announcing]).
+- **Mirrored upstream artifacts.** An entry may carry a
+  `[<kind>.<name>.mirror]` table (`source`, `commit`, `path`, `license`,
+  `license-source` = `detected`|`declared`; optional `deprecated`,
+  `replaced-by`) recording where a third-party artifact came from. It is
+  strict and validated before any push; a mirror tool
+  writes these. Confirm with `grim schema --kind publish`.
 - Confirm flags with `grim publish --help`; `--dry-run` prints the full
   plan (including planned description companions) with zero registry
   writes; a cascading run reads the floats.
