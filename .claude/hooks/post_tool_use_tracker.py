@@ -29,6 +29,7 @@ import hook_utils
 
 # (glob_pattern, rule_filename, subsystem_label)
 CONTEXT_REMINDERS: list[tuple[str, str, str]] = [
+    ("crates/grim-sdk/**", "subsystem-sdk.md", "SDK"),
     ("src/store/**", "subsystem-file-structure.md", "File Structure"),
     ("src/install/path_anchor.rs", "subsystem-path-anchors.md", "Path Anchors"),
     ("src/install/install_state.rs", "subsystem-install-state.md", "Install State"),

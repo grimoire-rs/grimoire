@@ -33,6 +33,17 @@ use super::vendor::{
 /// Claude Code.
 pub struct ClaudeVendor;
 
+/// Claude-only substitution tokens `grim convert` reports in a unit's `.md` bodies.
+///
+/// Braced and bare forms are distinct strings, so one spot never reports twice.
+pub(crate) const CLAUDE_BODY_TOKENS: &[&str] = &[
+    "${CLAUDE_PLUGIN_ROOT}",
+    "$CLAUDE_PLUGIN_ROOT",
+    "${CLAUDE_PROJECT_DIR}",
+    "$CLAUDE_PROJECT_DIR",
+    "$ARGUMENTS",
+];
+
 /// `claude.*` skill fields → native Claude Code `SKILL.md` frontmatter.
 ///
 /// `hooks` (an object) is deliberately absent: it cannot be expressed as a

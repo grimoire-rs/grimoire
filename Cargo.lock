@@ -1097,6 +1097,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "grim-sdk"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "grimoire"
 version = "0.17.0"
 dependencies = [

@@ -125,6 +125,8 @@ jobs:
         continue-on-error: true
       - name: Build
         run: task rust:build
+      - name: SDK acceptance
+        run: task rust:sdk:accept
       - name: Validate catalog
         run: task catalog:verify
       - name: Test

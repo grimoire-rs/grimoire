@@ -112,6 +112,10 @@ pub struct MetadataArgs {
     /// Documentation URL. Defaults to `<repository>#readme`.
     #[arg(long, value_name = "URL")]
     pub documentation: Option<String>,
+
+    /// Set by `grim publish` from the entry's `mirror` table; no flag.
+    #[arg(skip)]
+    pub mirror: Option<crate::oci::annotations::MirrorAnnotations>,
 }
 
 impl MetadataArgs {
@@ -126,6 +130,7 @@ impl MetadataArgs {
             vendor: d.vendor,
             url: d.homepage,
             documentation: d.documentation,
+            mirror: d.mirror,
         }
     }
 
@@ -138,6 +143,7 @@ impl MetadataArgs {
             vendor: self.vendor.clone(),
             homepage: self.url.clone(),
             documentation: self.documentation.clone(),
+            mirror: self.mirror.clone(),
         }
     }
 }

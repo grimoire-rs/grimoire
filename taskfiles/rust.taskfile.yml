@@ -58,6 +58,12 @@ tasks:
     method: timestamp
     cmd: cargo build --release --locked
 
+  sdk:accept:
+    desc: Run the grim-sdk acceptance test against the release grim
+    env:
+      GRIM_SDK_TEST_GRIM: "{{.ROOT_DIR}}/target/release/grim"
+    cmd: cargo test --release --locked -p grim-sdk --test against_grim -- --ignored
+
   install:nextest:
     internal: true
     cmds:

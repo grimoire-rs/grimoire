@@ -115,6 +115,7 @@ To verify a pre-built grim release archive's build provenance:
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
 | `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` / `grimoire.lock` / the MCP descriptor / `hook.toml` / a settings document (`settings/<name>.toml`) / `mod.toml` | [publish](references/publish.md) |
+| `grim convert` (Unstable) | Rewrite a Claude-authored skill, rule or agent (`--from claude`) into the portable form in a fresh `--out` directory; confirm with `grim convert --help` | `grim convert --help` |
 | `grim completions <shell>` | Print a shell completion script (bash, elvish, fish, powershell, zsh) to stdout; redirect it into your shell's completion dir | `grim completions --help` |
 
 > **Deprecation:** a publisher can retire a package without
@@ -138,6 +139,11 @@ To verify a pre-built grim release archive's build provenance:
 > `grim install` writes to `$GRIM_HOME/hooks/`; clients run it, a person does
 > not. After upgrading grim, re-run `grim install` in each workspace that uses
 > hooks, or that workspace's hooks stay quiet.
+>
+> **Plugins:** an unknown subcommand `<name>` runs the executable
+> `grim-<name>` found on an absolute `PATH` entry (e.g.
+> `grim-mirror`, a separate repository). Only `--offline` and `--locked` may precede the name and
+> are forwarded; any other global flag before it exits 64.
 >
 > **Global flags** apply to every subcommand — `--format`, `--global` (`-g`),
 > `--config`, `--registry`, `--offline`, `--locked` (or `GRIM_LOCKED=1`: a

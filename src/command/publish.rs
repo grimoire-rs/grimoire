@@ -382,6 +382,7 @@ impl MetadataSpec {
             vendor: over.vendor.or_else(|| self.vendor.clone()),
             homepage: over.homepage.or_else(|| self.url.clone()),
             documentation: over.documentation.or_else(|| self.documentation.clone()),
+            mirror: over.mirror,
         }
     }
 }
@@ -534,6 +535,183 @@ pub struct PublishEntrySpec {
     /// Never removes a pointer an earlier run announced. Default `true`.
     #[serde(default = "default_true")]
     pub announce: bool,
+
+    /// Provenance of a mirrored artifact. Each value it sets wins over every
+    /// authored and derived value for that one annotation. Absent: nothing
+    /// changes.
+    pub mirror: Option<MirrorSpec>,
+}
+
+/// The `[<kind>.<name>.mirror]` table: where a mirrored artifact came from.
+///
+/// The five required keys default to empty so a missing one is reported by
+/// [`validate_mirror`] as `<kind>.<name>.mirror.<key>`, not as a bare serde
+/// error.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[schemars(transform = mirror_schema)]
+pub struct MirrorSpec {
+    /// Absolute upstream URL (`https` or `file`, no userinfo, no fragment,
+    /// at most 2048 bytes). Required.
+    #[serde(default)]
+    pub source: String,
+    /// Upstream commit: 40 lowercase hex digits. Required.
+    #[serde(default)]
+    pub commit: String,
+    /// Artifact path inside the upstream repository: `.` or `/`-separated
+    /// segments, none empty, `.` or `..`, no leading `/` or `\`. Required.
+    #[serde(default)]
+    pub path: String,
+    /// Licence text published as `org.opencontainers.image.licenses` (not
+    /// parsed as SPDX). Required.
+    #[serde(default)]
+    pub license: String,
+    /// How the licence was found: `detected` or `declared`. Required.
+    #[serde(default)]
+    pub license_source: String,
+    /// Deprecation message, as the authored `deprecated` field.
+    pub deprecated: Option<String>,
+    /// Successor reference, as the authored `replaced-by` field.
+    pub replaced_by: Option<String>,
+}
+
+/// The serde defaults only exist for the error message; the schema states the real grammar.
+fn mirror_schema(schema: &mut schemars::Schema) {
+    const REQUIRED: [&str; 5] = ["source", "commit", "path", "license", "license-source"];
+    let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) else {
+        return;
+    };
+    for key in REQUIRED {
+        if let Some(prop) = props.get_mut(key).and_then(|p| p.as_object_mut()) {
+            prop.remove("default");
+            if key == "license-source" {
+                prop.insert("enum".into(), serde_json::json!(["detected", "declared"]));
+            } else {
+                prop.insert("minLength".into(), serde_json::json!(1));
+            }
+        }
+    }
+    schema.insert("required".into(), serde_json::json!(REQUIRED));
+}
+
+impl From<&MirrorSpec> for crate::oci::annotations::MirrorAnnotations {
+    fn from(m: &MirrorSpec) -> Self {
+        Self {
+            source: m.source.clone(),
+            commit: m.commit.clone(),
+            path: m.path.clone(),
+            license: m.license.clone(),
+            license_source: m.license_source.clone(),
+            deprecated: m.deprecated.clone(),
+            replaced_by: m.replaced_by.clone(),
+        }
+    }
+}
+
+/// The entry's validated `mirror` table, as the annotation override release
+/// stamps last.
+fn entry_mirror(
+    manifest: &PublishManifest,
+    kind: ArtifactKind,
+    name: &str,
+) -> Option<crate::oci::annotations::MirrorAnnotations> {
+    let table = match kind {
+        ArtifactKind::Hook => &manifest.hooks,
+        ArtifactKind::Skill => &manifest.skills,
+        ArtifactKind::Rule => &manifest.rules,
+        ArtifactKind::Agent => &manifest.agents,
+        ArtifactKind::Bundle => &manifest.bundles,
+        ArtifactKind::Mcp => &manifest.mcp,
+        ArtifactKind::Settings => &manifest.settings,
+        ArtifactKind::Mod => &manifest.mods,
+    };
+    table.get(name)?.mirror.as_ref().map(Into::into)
+}
+
+const MIRROR_SOURCE_MAX: usize = 2048;
+const MIRROR_PATH_MAX: usize = 1024;
+const MIRROR_LICENSE_MAX: usize = 256;
+
+/// Check one `mirror` table against its grammar; the error names
+/// `<kind>.<name>.mirror.<key>`.
+fn validate_mirror(
+    spec: &MirrorSpec,
+    kind: ArtifactKind,
+    name: &str,
+    manifest_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let fail = |key: &str, why: &str| data_error_at(manifest_path, format!("{kind}.{name}.mirror.{key}: {why}"));
+    if spec.source.is_empty() {
+        return Err(fail("source", "required"));
+    }
+    if spec.source.len() > MIRROR_SOURCE_MAX {
+        return Err(fail("source", "longer than 2048 bytes"));
+    }
+    if spec.source.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(fail("source", "must not contain whitespace or control characters"));
+    }
+    // Url::parse lowercases the scheme and strips `@` from an empty userinfo; the raw string is what gets stamped.
+    let Some(rest) = spec
+        .source
+        .strip_prefix("https://")
+        .or_else(|| spec.source.strip_prefix("file://"))
+    else {
+        return Err(fail("source", "must start with lowercase https:// or file://"));
+    };
+    if rest
+        .split(['/', '?'])
+        .next()
+        .is_some_and(|authority| authority.contains('@'))
+    {
+        return Err(fail("source", "must not carry userinfo"));
+    }
+    let url = reqwest::Url::parse(&spec.source).map_err(|_| fail("source", "not an absolute URL"))?;
+    if !matches!(url.scheme(), "https" | "file") {
+        return Err(fail("source", "scheme must be https or file"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(fail("source", "must not carry userinfo"));
+    }
+    if url.fragment().is_some() || spec.source.contains('#') {
+        return Err(fail("source", "must not carry a fragment"));
+    }
+
+    if spec.commit.is_empty() {
+        return Err(fail("commit", "required"));
+    }
+    if spec.commit.len() != 40 || !spec.commit.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(fail("commit", "must be 40 lowercase hex digits"));
+    }
+
+    if spec.path.is_empty() {
+        return Err(fail("path", "required"));
+    }
+    if spec.path.len() > MIRROR_PATH_MAX {
+        return Err(fail("path", "longer than 1024 bytes"));
+    }
+    if spec.path != "."
+        && (spec.path.contains('\\')
+            || spec.path.starts_with('/')
+            || spec.path.split('/').any(|seg| matches!(seg, "" | "." | "..")))
+    {
+        return Err(fail(
+            "path",
+            "must be '.' or '/'-separated segments with no empty, '.' or '..' segment, no leading '/' and no '\\'",
+        ));
+    }
+
+    if spec.license.trim().is_empty() {
+        return Err(fail("license", "required"));
+    }
+    if spec.license.len() > MIRROR_LICENSE_MAX || spec.license.chars().any(char::is_control) {
+        return Err(fail("license", "at most 256 bytes and no control characters"));
+    }
+
+    match spec.license_source.as_str() {
+        "detected" | "declared" => Ok(()),
+        "" => Err(fail("license-source", "required")),
+        _ => Err(fail("license-source", "must be 'detected' or 'declared'")),
+    }
 }
 
 fn default_true() -> bool {
@@ -1929,6 +2107,10 @@ fn validate_entry(
     // a reference string.
     validate_entry_name(name, manifest_path)?;
 
+    if let Some(mirror) = &spec.mirror {
+        validate_mirror(mirror, kind, name, manifest_path)?;
+    }
+
     // Per-entry repository override charset/shape gate (axis B): a full
     // repository path used verbatim in the pushed reference.
     if let Some(repo) = &spec.repository {
@@ -2424,10 +2606,12 @@ fn entry_metadata_defaults(
         Some(spec) => spec.under(flags),
         None => flags,
     };
-    match &manifest.metadata {
+    let mut merged = match &manifest.metadata {
         Some(spec) => spec.under(with_entry),
         None => with_entry,
-    }
+    };
+    merged.mirror = entry_mirror(manifest, kind, name);
+    merged
 }
 
 /// Resolve a [`DescriptionSpec`] into a sorted, deduplicated
@@ -3278,6 +3462,7 @@ mod tests {
             description: None,
             metadata: None,
             announce: true,
+            mirror: None,
         }
     }
 
@@ -6407,5 +6592,162 @@ mod tests {
             msg.contains("boolean") && msg.contains("table"),
             "error must name the expected shape (boolean or table), got: {msg}"
         );
+    }
+
+    // ── mirror table ──────────────────────────────────────────────────────
+
+    const GOOD_MIRROR: &str = r#"
+        source = "https://github.com/o/r"
+        commit = "0123456789abcdef0123456789abcdef01234567"
+        path = "skills/x"
+        license = "MIT"
+        license-source = "detected"
+    "#;
+
+    fn mirror_err(edit: impl Fn(&str) -> String) -> String {
+        let spec: MirrorSpec = toml::from_str(&edit(GOOD_MIRROR)).expect("parses");
+        let err = validate_mirror(&spec, ArtifactKind::Skill, "x", Path::new("p.toml")).expect_err("must reject");
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        format!("{err:#}")
+    }
+
+    fn with(key: &str, value: &str) -> impl Fn(&str) -> String {
+        let (key, value) = (key.to_string(), value.to_string());
+        move |base| {
+            let kept: Vec<&str> = base
+                .lines()
+                .filter(|l| !l.trim_start().starts_with(&format!("{key} ")))
+                .collect();
+            if value.is_empty() {
+                kept.join("\n")
+            } else {
+                format!("{}\n{key} = {value}", kept.join("\n"))
+            }
+        }
+    }
+
+    #[test]
+    fn mirror_accepts_the_good_table_and_dot_path() {
+        let spec: MirrorSpec = toml::from_str(GOOD_MIRROR).unwrap();
+        validate_mirror(&spec, ArtifactKind::Skill, "x", Path::new("p.toml")).unwrap();
+        let dot: MirrorSpec = toml::from_str(&with("path", "\".\"")(GOOD_MIRROR)).unwrap();
+        validate_mirror(&dot, ArtifactKind::Skill, "x", Path::new("p.toml")).unwrap();
+        let file: MirrorSpec = toml::from_str(&with("source", "\"file:///srv/up\"")(GOOD_MIRROR)).unwrap();
+        validate_mirror(&file, ArtifactKind::Skill, "x", Path::new("p.toml")).unwrap();
+    }
+
+    #[test]
+    fn mirror_rejects_each_bad_value_naming_the_key_path() {
+        let long = format!("\"https://e.example/{}\"", "a".repeat(2048));
+        let cases: Vec<(&str, String, &str)> = vec![
+            ("source", "\"http://e.example/r\"".into(), "skill.x.mirror.source"),
+            ("source", "\"not a url\"".into(), "skill.x.mirror.source"),
+            ("source", "\"https://u:p@e.example/r\"".into(), "skill.x.mirror.source"),
+            ("source", "\"https://e.example/r#frag\"".into(), "skill.x.mirror.source"),
+            ("source", "\"https://e.example/a b\"".into(), "skill.x.mirror.source"),
+            (
+                "source",
+                "\"https://e.example/a\\u0007b\"".into(),
+                "skill.x.mirror.source",
+            ),
+            ("source", "\"HTTPS://e.example/r\"".into(), "skill.x.mirror.source"),
+            ("source", "\"Https://e.example/r\"".into(), "skill.x.mirror.source"),
+            ("source", "\"https://@e.example/r\"".into(), "skill.x.mirror.source"),
+            ("source", "\"file://@host/r\"".into(), "skill.x.mirror.source"),
+            ("source", long, "skill.x.mirror.source"),
+            (
+                "commit",
+                "\"ABCDEF0123456789abcdef0123456789abcdef01\"".into(),
+                "skill.x.mirror.commit",
+            ),
+            ("commit", "\"abc123\"".into(), "skill.x.mirror.commit"),
+            ("path", "\"../x\"".into(), "skill.x.mirror.path"),
+            ("path", "\"a/../x\"".into(), "skill.x.mirror.path"),
+            ("path", "\"a//x\"".into(), "skill.x.mirror.path"),
+            ("path", "\"./x\"".into(), "skill.x.mirror.path"),
+            ("path", "\"/abs\"".into(), "skill.x.mirror.path"),
+            ("path", "\"a\\\\b\"".into(), "skill.x.mirror.path"),
+            ("license", "\"\"".into(), "skill.x.mirror.license"),
+            ("license", "\"M\\u0007IT\"".into(), "skill.x.mirror.license"),
+            ("license", format!("\"{}\"", "L".repeat(257)), "skill.x.mirror.license"),
+            ("license-source", "\"guessed\"".into(), "skill.x.mirror.license-source"),
+        ];
+        for (key, value, expect) in cases {
+            let msg = mirror_err(with(key, &value));
+            assert!(msg.contains(expect), "{key}={value:.40}: {msg}");
+        }
+    }
+
+    #[test]
+    fn mirror_schema_pins_the_five_required_properties() {
+        let schema = serde_json::to_value(schemars::schema_for!(MirrorSpec)).unwrap();
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["source", "commit", "path", "license", "license-source"])
+        );
+        let props = schema["properties"].as_object().unwrap();
+        let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "commit",
+                "deprecated",
+                "license",
+                "license-source",
+                "path",
+                "replaced-by",
+                "source"
+            ]
+        );
+        for key in ["source", "commit", "path", "license", "license-source"] {
+            assert!(props[key].get("default").is_none(), "{key} must not default");
+        }
+        for key in ["source", "commit", "path", "license"] {
+            assert_eq!(props[key]["minLength"], 1, "{key}");
+        }
+        assert_eq!(
+            props["license-source"]["enum"],
+            serde_json::json!(["detected", "declared"])
+        );
+    }
+
+    #[test]
+    fn mirror_reports_each_missing_required_key() {
+        for key in ["source", "commit", "path", "license", "license-source"] {
+            let msg = mirror_err(with(key, ""));
+            assert!(msg.contains(&format!("skill.x.mirror.{key}")), "{key}: {msg}");
+        }
+    }
+
+    #[test]
+    fn mirror_table_parses_under_every_kind_and_rejects_unknown_keys() {
+        for table in [
+            "skills", "rules", "agents", "bundles", "mcp", "hooks", "settings", "mods",
+        ] {
+            let toml = format!(
+                "registry = \"r.example\"\n[{table}.x]\nversion = \"1.0.0\"\n[{table}.x.mirror]\n{GOOD_MIRROR}"
+            );
+            let m: PublishManifest = toml::from_str(&toml).unwrap_or_else(|e| panic!("{table}: {e}"));
+            assert!(
+                m.skills
+                    .values()
+                    .chain(m.rules.values())
+                    .chain(m.agents.values())
+                    .chain(m.bundles.values())
+                    .chain(m.mcp.values())
+                    .chain(m.hooks.values())
+                    .chain(m.settings.values())
+                    .chain(m.mods.values())
+                    .all(|s| s.mirror.is_some())
+            );
+        }
+        let bad = format!(
+            "registry = \"r.example\"\n[skills.x]\nversion = \"1.0.0\"\n[skills.x.mirror]\n{GOOD_MIRROR}\nbogus = 1\n"
+        );
+        let err = toml::from_str::<PublishManifest>(&bad)
+            .expect_err("unknown key")
+            .to_string();
+        assert!(err.contains("bogus"), "{err}");
     }
 }

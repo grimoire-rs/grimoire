@@ -1456,6 +1456,7 @@ applies.
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
 | `GRIM_LOCKED` | Refuse a command that would write a lock when the lock no longer matches its manifest (same as [`--locked`](./commands.md#locked)). Truthy values: `1`, `true`, `yes`, `on`. It can only make a run stricter. | `false` |
+| `GRIM_BIN` | Set by grim for a plugin it dispatches: the path of the grim that dispatched it. Read by plugins, never by grim. See [Plugins](./commands.md#plugins). | unset |
 | `GRIM_LOG` | Tracing filter for the run: a level (`error`, `warn`, `info`, `debug`, `trace`) or `tracing` directives such as `warn,mio=trace`. The [`--log-level`](./commands.md#global-options) flag wins over it. A value that does not parse, or a bare word that is not a level, prints one stderr line. The run continues. | `warn` |
 | `GRIM_TELEMETRY` | Opt in to anonymous usage telemetry, sent to the OpenTelemetry collector named by `OTEL_EXPORTER_OTLP_ENDPOINT` or by a `GRIM_CONFIG` file. Off unless set or enabled by such a file; disarmed by `OTEL_SDK_DISABLED`, `DO_NOT_TRACK` and offline mode. Unstable until 1.0 — see [Telemetry](./telemetry.md#enable). | unset |
 | `GRIM_TELEMETRY_REPOSITORY` | Add the redacted `origin` remote of the project repository to the telemetry resource (`vcs.*`). Needs telemetry armed. Unstable until 1.0 — see [Telemetry](./telemetry.md#enable). | unset |

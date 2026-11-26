@@ -101,11 +101,13 @@ refuse a stale lock, so the flag changes nothing there, and
 | [`grim build`](#build) | Validate and pack a local artifact. |
 | [`grim release`](#release) | Validate, pack, and push an artifact. |
 | [`grim publish`](#publish) | Validate and batch-release all packages from a manifest. |
+| [`grim convert`](#convert) | Rewrite a Claude-authored skill, rule or agent into the portable form (Unstable). |
 | [`grim login`](#login) | Authenticate to a registry and store the credential. |
 | [`grim logout`](#logout) | Remove a stored registry credential. |
 | [`grim schema`](#schema) | Print the JSON Schema for `grimoire.toml` or `publish.toml`. |
 | [`grim completions`](#completions) | Print a shell completion script. |
 | [`grim mcp`](#mcp) | Run a local STDIO MCP server for AI agent integration. |
+| [`grim <name>`](#plugins) | Run the external program `grim-<name>` from `PATH`, for a name grim does not define. |
 
 ## grim init {#init}
 
@@ -4673,6 +4675,47 @@ See [Batch publishing with a manifest](./publishing.md#batch-publish) for
 the manifest schema, source layout conventions, and disambiguation from
 bundle files.
 
+## grim convert {#convert}
+
+> **Unstable.** `grim convert`, its flags and its report may change in any
+> minor release. See [Stability](./stability.md#unstable).
+
+A skill, rule or agent written for Claude Code keeps Claude-only
+frontmatter keys at the top level, where other clients ignore or reject
+them. `grim convert` reads such an artifact and writes a copy in the
+portable form: each key that has a Claude slot moves under
+`metadata."claude.<field>"`, which grim lifts back to the native key when
+it installs for Claude. Nothing is published and the input is never
+modified. [`grim-mirror`](https://github.com/grimoire-rs/grim-mirror) runs it
+on every unit of a `dialect = "claude"` upstream.
+
+```sh
+grim convert ./skills/pdf --from claude --out ./portable
+```
+
+| Argument or flag | Effect |
+|------------------|--------|
+| `<PATH>` | A skill directory (holds `SKILL.md`), or a rule or agent `.md` file. |
+| `--from claude` | The dialect the input is authored in. Required. `claude` is the only value. |
+| `--out <DIR>` | Output directory. It must be absent or empty. A skill lands in `<DIR>/<name>/`, a rule or agent in `<DIR>/<name>.md`. Required. |
+| `--kind <skill\|rule\|agent>` | Force the kind instead of detecting it, as [`grim build`](#build) does. The input must fit the kind. |
+
+The report lists what happened to each frontmatter key and which body
+tokens name Claude alone (`${CLAUDE_PLUGIN_ROOT}` and the like). A token
+is a warning: grim cannot rewrite prose, so the body is copied
+verbatim. Every other file in a skill directory is copied as is, and a
+symlink or special file in it refuses the run. The plain report starts with
+`converted <kind> <name> -> <output>`. The report shape is in the
+[JSON interface](./json-interface.md#convert-report).
+
+| Code | Meaning |
+|------|---------|
+| `0` | Converted. |
+| `64` | Usage error: the input is neither a skill directory nor a `.md` file, or does not fit `--kind`. |
+| `65` | The input cannot be parsed, its name is invalid, a skill directory holds a symlink or special file, or the output directory is not empty. The JSON error document carries no `reason`. |
+| `74` | An I/O error reading the input or writing the output. |
+| `79` | The input path does not exist. |
+
 ## grim login {#login}
 
 `grim login [registry]` authenticates to a registry and stores the credential
@@ -4840,6 +4883,62 @@ published as the [MCP server artifact](./mcp-servers.md) `mcp/grim`, so
 `grim add ghcr.io/grimoire-rs/mcp/grim:1` followed by `grim install`
 registers the same entry — in every detected client, not just Claude Code
 — without hand-editing any config file.
+
+## Plugins {#plugins}
+
+Git runs `git-<name>` for `git <name>`. grim does the same for a name it
+does not define: `grim mirror sync` runs the program `grim-mirror` with
+`sync` as its argument. The first plugin is
+[`grim-mirror`](https://github.com/grimoire-rs/grim-mirror). Plugin dispatch
+is [frozen at 1.0](./stability.md#frozen); a plugin program is not part of grim
+and carries its own stability.
+
+grim dispatches only when all of these hold:
+
+- clap rejected the first subcommand as unknown. A built-in command or alias
+  always wins, so `grim config nosuch` never dispatches.
+- The unknown word is the first positional argument, and matches
+  `^[a-z0-9][a-z0-9-]{0,62}$`.
+- An executable `grim-<name>` (`grim-<name>.exe` on Windows) sits in a
+  directory on `PATH`. Relative and empty `PATH` entries are skipped, and the
+  directory of the running grim is not searched. On Windows only `.exe` counts,
+  never `.bat` or `.cmd`.
+
+If any of them fails, grim prints its ordinary unknown-subcommand error and
+exits `64`, byte for byte as it did before plugins existed.
+
+Everything after the name belongs to the plugin: `grim mirror sync --file x`
+runs `grim-mirror sync --file x`. Dispatch runs before grim reads any
+configuration, so a plugin sees none of grim's resolved state. It receives
+grim's own environment and these keys:
+
+| Variable | Value |
+|----------|-------|
+| `GRIM_BIN` | The absolute path of the grim that dispatched it, so the plugin calls the same grim. |
+| `GRIM_OFFLINE` | `1`, only when `--offline` stood before the name. |
+| `GRIM_LOCKED` | `1`, only when `--locked` stood before the name. |
+
+Those two flags are the only global flags accepted before a plugin name.
+`--format`, `--color`, `--progress`, `--log-level`, `--config`, `--global`/`-g`
+and `--registry` there exit `64` with
+`grim: '<flag>' before a plugin name is not supported; write it after the name: grim <name> <flag>`.
+After the name they are the plugin's own arguments.
+
+On Unix the plugin replaces the grim process, so its exit status and signals
+are the plugin's own. On Windows grim waits and exits with the plugin's code,
+and leaves Ctrl-C to the plugin.
+
+| Code | Meaning |
+|------|---------|
+| `64` | A global flag other than `--offline` and `--locked` stood before the name. |
+| `69` | The plugin could not be started, or grim could not determine its own path. |
+| `77` | The plugin exists but the system refused to run it. |
+| any other | The plugin's own exit code. |
+
+**Reserved names.** Because built-ins win, a future grim command named like a
+plugin would shadow it. grim therefore adds no built-in named `mirror`, and any new
+built-in name is checked against known plugins before it ships. Plugins do not
+appear in `grim --help` or in shell completions.
 
 <!-- internal -->
 [global-options]: #global-options

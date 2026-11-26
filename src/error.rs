@@ -332,8 +332,13 @@ fn classify_variant(e: &Error) -> Classification {
                 CommandError::ConfigUsage(_) => ExitCode::UsageError,
                 CommandError::HookConsentUsage(_) => ExitCode::UsageError,
                 CommandError::ConfigValue(_) => ExitCode::DataError,
+                CommandError::ConvertOutputOccupied { .. } => ExitCode::DataError,
+                CommandError::ConvertInputNotFound { .. } => ExitCode::NotFound,
             },
-            reason: matches!(ce, CommandError::LockMissing { .. }).then_some(ErrorReason::NoLock),
+            reason: match ce {
+                CommandError::LockMissing { .. } => Some(ErrorReason::NoLock),
+                _ => None,
+            },
         },
         // Announce needs remote resources (the index repository, the
         // GitHub API); a local I/O fault classifies as I/O. A failed
