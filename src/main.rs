@@ -162,6 +162,11 @@ fn main() -> std::process::ExitCode {
     let cli = match parse_cli(color_mode) {
         Ok(cli) => cli,
         Err(err) => {
+            if err.kind() == ErrorKind::InvalidSubcommand
+                && let Some(code) = dispatch_plugin(&err)
+            {
+                return code.into();
+            }
             // Help/version are a successful, intentional invocation; every
             // other parse failure is a usage error → EX_USAGE (64), not
             // clap's default 2. `err.print()` colorizes through the styles
@@ -234,6 +239,56 @@ fn main() -> std::process::ExitCode {
             exit.exit.into()
         }
     }
+}
+
+/// Tries `grim-<name>` for an unknown subcommand: `Some(exit)` when the
+/// dispatch ended the run, `None` to fall through to clap's own error.
+fn dispatch_plugin(err: &clap::Error) -> Option<ExitCode> {
+    use crate::cli::plugin_dispatch::{Scan, lookup, run, scan_at};
+    use clap::error::{ContextKind, ContextValue};
+
+    let Some(ContextValue::String(invalid)) = err.get(ContextKind::InvalidSubcommand) else {
+        return None;
+    };
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let Some((
+        Scan::Candidate {
+            name,
+            offline,
+            locked,
+            refused_flag,
+        },
+        at,
+    )) = scan_at(&argv, std::ffi::OsStr::new(invalid))
+    else {
+        return None;
+    };
+    // A built-in name that clap rejected deeper down (`grim config config`) is a usage error, never a plugin.
+    if is_builtin(&name) {
+        return None;
+    }
+    let path = lookup(&name, std::env::var_os("PATH").as_deref())?;
+    if let Some(flag) = refused_flag {
+        let flag = flag.to_string_lossy();
+        let _ = writeln!(
+            io::stderr(),
+            "grim: '{flag}' before a plugin name is not supported; write it after the name: grim {name} {flag}"
+        );
+        return Some(ExitCode::UsageError);
+    }
+    Some(run(
+        &path,
+        &argv[at + 1..],
+        crate::env::plugin_child_env(offline, locked),
+    ))
+}
+
+/// Whether `name` is a top-level command or alias of grim itself, hidden ones included.
+fn is_builtin(name: &str) -> bool {
+    use clap::CommandFactory;
+    Cli::command()
+        .get_subcommands()
+        .any(|c| c.get_name() == name || c.get_all_aliases().any(|a| a == name))
 }
 
 /// Shuts `runtime` down without waiting on a blocking thread that never
@@ -472,6 +527,12 @@ mod build_embed;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirror_is_not_a_builtin_name_so_the_plugin_can_own_it() {
+        assert!(!is_builtin("mirror"));
+        assert!(is_builtin("config") && is_builtin("consent"));
+    }
 
     #[test]
     fn shutting_down_does_not_wait_on_a_blocked_thread() {
