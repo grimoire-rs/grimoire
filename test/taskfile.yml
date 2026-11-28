@@ -98,13 +98,16 @@ tasks:
     desc: Run the older-grim interop modules against GRIM_OLD_BIN and GRIM_OLD_BIN_0_16_0; any skip fails the run
     summary: |
       Runs the modules that hand locks, state and caches between grim 0.15.1
-      (GRIM_OLD_BIN, the v0.15.1 release binary), grim 0.16.0
-      (GRIM_OLD_BIN_0_16_0, its release binary) and the current grim
-      (GRIM_COMMAND, else the built test/bin/grim). A dev build that prints
+      (GRIM_OLD_BIN, the v0.15.1 release binary; resolved from the ocx group
+      g2 when the variable is unset, as the index end-to-end task resolves
+      g0), grim 0.16.0 (GRIM_OLD_BIN_0_16_0, its release binary) and the
+      current grim (GRIM_COMMAND, else the built test/bin/grim). A dev build that prints
       0.15.1 or 0.16.0 fails the run (src/old_grim.py). Writes results/old-grim/junit.xml,
       then fails on any case that did not pass, a skip included, and on a module
       that ran no case.
     vars:
+      G2_COMMAND:
+        sh: ocx exec -g g2 -- sh -c 'command -v grim' 2>/dev/null || true
       MODULES: >-
         tests/test_old_grim_dependencies.py
         tests/test_old_grim_lock_pins.py
@@ -125,7 +128,7 @@ tasks:
       REPORT: results/old-grim/junit.xml
     preconditions:
       - sh: test -n "$GRIM_OLD_BIN"
-        msg: GRIM_OLD_BIN must name the grim binary from the v0.15.1 release (grimoire-<target>.tar.gz)
+        msg: GRIM_OLD_BIN is unset and the ocx group g2 did not resolve (run `ocx pull` or set GRIM_OLD_BIN to the grim binary from the v0.15.1 release)
       - sh: test -n "$GRIM_OLD_BIN_0_16_0"
         msg: GRIM_OLD_BIN_0_16_0 must name the grim binary from the v0.16.0 release (grimoire-<target>.tar.gz)
     cmds:
@@ -138,6 +141,7 @@ tasks:
       - python3 tools/require_all_passed.py --junit '{{.REPORT}}' {{.MODULES}}
     env:
       GRIM_COMMAND: "{{.GRIM_BINARY}}"
+      GRIM_OLD_BIN: "{{.GRIM_OLD_BIN | default .G2_COMMAND}}"
 
   bench:
     desc: Assert the 20,000-entry sync budgets (time, memory, bytes written)
