@@ -12,12 +12,34 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use crate::oci::{Digest, Identifier};
 use crate::store::atomic_write::atomic_write;
+
+/// Serializes every tag-cache write in this process.
+///
+/// `put` and `put_tags` are read-edit-write cycles over one shared file
+/// (`tags.json` per repository). Without this lock, concurrent MCP tool
+/// calls race: two puts read the same file, each inserts its own tag,
+/// and the last write wins, silently losing the other tag. On Windows
+/// the losing side can also fail outright: the replacing rename in
+/// `atomic_write` is refused with os error 5 while another handle has
+/// the target open (issue #397). The lock is process-wide, not per
+/// instance, because two `TagCache` values for the same root share the
+/// file but no state. Reads stay lock-free: the rename makes them see
+/// either the old or the new file, never a torn one.
+static WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// On-disk tag-cache envelope version.
 ///
@@ -106,6 +128,11 @@ impl TagCache {
     /// A digest-addressed identifier carries no mutable tag pointer and is
     /// a no-op (the pin is already immutable).
     ///
+    /// The read-edit-write is serialized with the other tag-cache writers
+    /// in this process (see `WRITE_LOCK`): without it, two concurrent
+    /// puts lose one tag, and on Windows the replacing rename can fail
+    /// with os error 5 (issue #397).
+    ///
     /// # Errors
     ///
     /// Propagates read, serialize, or atomic-write I/O failures.
@@ -113,6 +140,7 @@ impl TagCache {
         if id.digest().is_some() {
             return Ok(());
         }
+        let _guard = write_lock();
         let tag = id.tag_or_latest().to_string();
         let mut file = self.read_file(id)?.unwrap_or_else(|| TagCacheFile {
             version: TagCacheVersion::V1,
@@ -142,10 +170,15 @@ impl TagCache {
     /// discovered; digests fill in lazily via `put` on resolve. Names
     /// already carrying a digest entry are preserved.
     ///
+    /// The read-edit-write is serialized with the other tag-cache writers
+    /// in this process (see `WRITE_LOCK`), for the same race as `put`
+    /// (issue #397).
+    ///
     /// # Errors
     ///
     /// Propagates read, serialize, or atomic-write I/O failures.
     pub fn put_tags(&self, id: &Identifier, tags: &[String]) -> std::io::Result<()> {
+        let _guard = write_lock();
         let mut file = self.read_file(id)?.unwrap_or_else(|| TagCacheFile {
             version: TagCacheVersion::V1,
             registry: id.registry().to_string(),
@@ -215,6 +248,40 @@ mod tests {
         let mut tags = cache.get_tags(&stable).unwrap().unwrap();
         tags.sort();
         assert_eq!(tags, vec!["edge".to_string(), "stable".to_string()]);
+    }
+
+    #[test]
+    fn concurrent_puts_keep_every_tag() {
+        // Issue #397: concurrent `put` calls race on the tag-cache file.
+        // Each `put` reads the file, inserts one tag and rewrites it, so
+        // two puts racing lose one tag (last write wins). Several rounds;
+        // a round fails if any tag is missing afterwards.
+        for _round in 0..25 {
+            let (_d, cache) = cache();
+            let cache = std::sync::Arc::new(cache);
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let mut handles = Vec::new();
+            for i in 0..8 {
+                let cache = std::sync::Arc::clone(&cache);
+                let start = std::sync::Arc::clone(&start);
+                handles.push(std::thread::spawn(move || {
+                    let id = Identifier::parse(&format!("ghcr.io/acme/x:tag{i}")).unwrap();
+                    start.wait();
+                    cache.put(&id, &sha('a')).unwrap();
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap();
+            }
+            for i in 0..8 {
+                let id = Identifier::parse(&format!("ghcr.io/acme/x:tag{i}")).unwrap();
+                assert_eq!(
+                    cache.get(&id).unwrap(),
+                    Some(sha('a')),
+                    "tag{i} lost to the concurrent-put race"
+                );
+            }
+        }
     }
 
     #[test]
