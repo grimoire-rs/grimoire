@@ -271,11 +271,12 @@ jobs:
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       - name: Setup OCX
-        # p9_diff runs its scenarios against the root ocx.toml's zot.
+        # p9_diff runs its scenarios against the root ocx.toml's zot; g2 (grim
+        # 0.15.1) is pulled here so task test:old-grim resolves it.
         uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.8"
-          groups: default
+          groups: default,g2
       - name: Golden fixtures (required)
         working-directory: test
         run: uv run pytest tests/test_golden_pre_hooks.py tests/test_golden_pre_dependencies.py tests/test_golden_pre_settings.py tests/test_golden_pre_mods.py tests/test_dependencies_contract.py -n 0 -v --junit-xml=results/junit.xml
@@ -320,34 +321,6 @@ jobs:
           else
             task p9:diff
           fi
-      # The pinned SHA-256 is the trust anchor: the release's own .sha256 asset
-      # comes from the same place as the archive, so it only cross-checks it.
-      - name: Fetch grim 0.15.1
-        id: old-grim
-        if: ${{ !cancelled() }}
-        env:
-          OLD_GRIM_URL: https://github.com/grimoire-rs/grimoire/releases/download/v0.15.1/grimoire-x86_64-unknown-linux-gnu.tar.gz
-          OLD_GRIM_SHA256: eec30a069ce12239058b54a9e986340cc2a3db9662504ab5ca467f8167d802c0
-          OLD_GRIM_DIR: ${{ runner.temp }}/grim-0.15.1
-        run: |
-          set -euo pipefail
-          download="$(mktemp -d)"
-          for asset in "$OLD_GRIM_URL" "$OLD_GRIM_URL.sha256"; do
-            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-              --retry 3 --retry-delay 5 --retry-all-errors \
-              --output "$download/${asset##*/}" "$asset"
-          done
-          archive="$download/${OLD_GRIM_URL##*/}"
-          echo "$OLD_GRIM_SHA256  $archive" | sha256sum --check --strict
-          read -r published _ < "$archive.sha256"
-          if [[ "$published" != "$OLD_GRIM_SHA256" ]]; then
-            echo "::error::the release's .sha256 asset does not match the pinned SHA-256"
-            exit 1
-          fi
-          mkdir -p "$OLD_GRIM_DIR"
-          tar -xzf "$archive" -C "$OLD_GRIM_DIR" --strip-components=1 grimoire-x86_64-unknown-linux-gnu/grim
-          rm -rf "$download"
-          "$OLD_GRIM_DIR/grim" --version
       - name: Fetch grim 0.16.0
         id: old-grim-0-16-0
         if: ${{ !cancelled() }}
@@ -375,11 +348,10 @@ jobs:
           rm -rf "$download"
           "$OLD_GRIM_DIR/grim" --version
       - name: Old grim interop (required)
-        if: ${{ !cancelled() && steps.old-grim.outcome == 'success' && steps.old-grim-0-16-0.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.old-grim-0-16-0.outcome == 'success' }}
         run: task test:old-grim
         env:
           SKIP_BUILD: "true"
-          GRIM_OLD_BIN: ${{ runner.temp }}/grim-0.15.1/grim
           GRIM_OLD_BIN_0_16_0: ${{ runner.temp }}/grim-0.16.0/grim
       - name: Upload Old Grim Results
         if: ${{ !cancelled() }}

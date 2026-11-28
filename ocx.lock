@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 4
 declaration_hash_version = 1
-declaration_hash = "sha256:ee13c82968f518bfe8fb7838d1aa99ebf3edf968c111204d85cd768bc8a268d5"
+declaration_hash = "sha256:e4e597ca719b45c37516deeb6f84e020ed4948e2b0ffbb718ffcdda8e4b736f0"
 generated_by = "ocx 0.6.8"
-generated_at = "2026-11-19T15:26:22Z"
+generated_at = "2026-11-25T00:33:24Z"
 
 [[tool]]
 name = "cargo-deny"
@@ -157,3 +157,17 @@ declared = "ocx.sh/grimoire/cli:0.14.3"
 "linux/arm64" = "sha256:1831d9efc4af07333783556f6aa2b246149e0d1bc685fcd929137264103f3814"
 "windows/amd64" = "sha256:ec6f779fd9b9a4c429feb1a841d410b210934a2c013cf7eb3732302ef2a9eb4a"
 "windows/arm64" = "sha256:bcfb88fc6063a6b0808b78a1a943a6c2de633f896747e81e1029651d75c70044"
+
+[[tool]]
+name = "grim"
+group = "g2"
+repository = "ocx.sh/grimoire/cli"
+declared = "ocx.sh/grimoire/cli:0.15.1"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:c6a60394fdd19e2b260957d458a74573f6451dcf01eb5500232190e905063ec7"
+"darwin/arm64" = "sha256:f189c707880f1d151d8bcc34ab9dd8517906062d856871b1f4e62bb8773235d8"
+"linux/amd64" = "sha256:a70ec775ea0c180dda985656ec5ba65447772a24670ccd8b3e3cfd355ed3b03c"
+"linux/arm64" = "sha256:a92d7f24d7f0f787ef5361cdeb13efcd949c50a33c993dff943775d0ac4b53b7"
+"windows/amd64" = "sha256:90609db55d9aa98d9b0484fc6209ed726c2336205459cfe363a69817de4d59c8"
+"windows/arm64" = "sha256:dca325f53db2ed15c3e2c9aedca27e96583c04ac82ae5883af5a0ac778f0d2ce"
